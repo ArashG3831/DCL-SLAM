@@ -24,6 +24,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'd500_scan_fix = my_epuck_project.d500_scan_fix:main','twist_stamper = my_epuck_project.twist_stamper:main'],
+            'd500_scan_fix = my_epuck_project.d500_scan_fix:main',
+            'decentralized_map_fusion = '
+            'my_epuck_project.decentralized_map_fusion:main',
+            'twist_stamper = my_epuck_project.twist_stamper:main',
+        ],
     },
 )

@@ -1,0 +1,15 @@
+uint8 UNKNOWN=0
+uint8 REACHABLE=1
+uint64 frontier_id
+geometry_msgs/Point centroid
+geometry_msgs/Point bounding_box_min
+geometry_msgs/Point bounding_box_max
+geometry_msgs/PoseStamped approach_pose
+uint32 cell_count
+float32 frontier_length_m
+float32 information_gain
+float32 euclidean_distance_m
+float32 path_length_m
+float32 heading_change_rad
+float32 score
+uint8 reachability_state

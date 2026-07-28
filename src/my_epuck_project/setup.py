@@ -27,6 +27,9 @@ setup(
             'd500_scan_fix = my_epuck_project.d500_scan_fix:main',
             'decentralized_map_fusion = '
             'my_epuck_project.decentralized_map_fusion:main',
+            'map_exporter = my_epuck_project.map_exporter:main',
+            'source_aware_map_fusion = '
+            'my_epuck_project.source_aware_map_fusion:main',
             'twist_stamper = my_epuck_project.twist_stamper:main',
         ],
     },

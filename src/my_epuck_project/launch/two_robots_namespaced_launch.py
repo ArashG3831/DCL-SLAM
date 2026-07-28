@@ -162,6 +162,19 @@ def generate_launch_description():
             ],
         )
 
+        scan_fix_node = Node(
+            package='my_epuck_project',
+            executable='d500_scan_fix',
+            name=f'{robot_name}_d500_scan_fix',
+            namespace=robot_name,
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'input_topic': 'scan_d500',
+                'output_topic': 'scan_d500_fixed',
+            }],
+        )
+
         waiting_nodes = WaitForControllerConnection(
             target_driver=robot_driver,
             nodes_to_start=[diffdrive_controller_spawner],
@@ -180,6 +193,7 @@ def generate_launch_description():
             robot_state_publisher,
             robot_driver,
             twist_stamper_node,
+            scan_fix_node,
             start_joint_state_broadcaster,
             waiting_nodes,
         ])

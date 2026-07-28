@@ -123,13 +123,13 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'world',
-            default_value='epuck_d500_two_world_robot1_smoke.wbt',
-            description='Two D500 e-pucks world; robot1 external, robot2 void for smoke test.',
+            default_value='epuck_d500_two_world_robot1_active.wbt',
+            description='Two D500 e-pucks world; robot1 external, robot2 void for single-active-robot test.',
         ),
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='false',
-            description='Temporary smoke test without /clock.',
+            description='Temporary robot1 active test without /clock.',
         ),
 
         webots,

@@ -11,7 +11,7 @@ WorldInfo {
   info [
     "Two custom D500 e-pucks for decentralized CSLAM experiments."
   ]
-  title "Two D500 e-pucks CSLAM smoke world"
+  title "Two D500 e-pucks robot1 active test world"
   basicTimeStep 20
 }
 Viewpoint {

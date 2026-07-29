@@ -17,6 +17,7 @@
   </export>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>my_epuck_frontier_candidates</exec_depend>
+  <exec_depend>my_epuck_cooperative_exploration</exec_depend>
   <exec_depend>my_epuck_interfaces</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

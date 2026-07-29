@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -8,11 +9,18 @@ import time
 from my_epuck_project.cooperative_regression import (
     attempt_namespace,
     classify_attempt,
+    hold_open_artifacts_valid,
+    internal_command,
+    manual_rviz_command,
+    mission_timeout_expired,
     parse_log_errors,
+    parser,
     perform_attempt,
     scoped_shutdown,
     update_progress,
+    validate_cli_options,
     validate_existing_attempt,
+    wait_for_attempt_supervisor,
 )
 from my_epuck_project.cooperative_regression_report import analyze_campaign
 from my_epuck_project.occupancy_map_comparison import (
@@ -21,6 +29,7 @@ from my_epuck_project.occupancy_map_comparison import (
     save_map,
 )
 import numpy as np
+import pytest
 
 
 def options(tmp_path, trials=10):
@@ -30,6 +39,8 @@ def options(tmp_path, trials=10):
         webots_port_base=23000,
         fast_mode=True,
         rendering=False,
+        rviz=False,
+        hold_open_after_completion=False,
         startup_timeout=90.0,
         mission_timeout=240.0,
         settling_period=4.0,
@@ -49,6 +60,134 @@ def test_trial_resources_are_unique_and_configurable(tmp_path):
     assert len({item.attempt_dir for item in values}) == 10
     assert all(item.webots_mode == 'fast' for item in values)
     assert all(item.webots_gui is False for item in values)
+    assert all(item.launch_rviz is False for item in values)
+
+
+def test_manual_rviz_uses_installed_cooperative_config():
+    """The supervisor launches RViz with the installed project preset."""
+    command = manual_rviz_command()
+    assert command[0:2] == ['rviz2', '-d']
+    assert command[2].endswith(
+        '/resource/cooperative_manual_exploration.rviz')
+    assert Path(command[2]).is_file()
+
+
+def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(
+        tmp_path):
+    """Normal regression retains automatic completion shutdown."""
+    assert parser().parse_args([]).hold_open_after_completion is False
+    args = options(tmp_path, trials=1)
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    assert '--hold-open-after-completion' in command
+    index = command.index('--hold-open-after-completion')
+    assert command[index + 1] == 'false'
+
+
+@pytest.mark.parametrize('trials,concurrency', [(2, 1), (1, 2)])
+def test_hold_open_requires_one_trial_and_concurrency_one(
+        trials, concurrency):
+    """Hold-open cannot be used by multi-trial or parallel campaigns."""
+    args = parser().parse_args([
+        '--hold-open-after-completion', 'true',
+        '--rendering', 'true',
+        '--trials', str(trials),
+        '--maximum-concurrency', str(concurrency),
+    ])
+    with pytest.raises(SystemExit, match='requires --trials 1'):
+        validate_cli_options(args)
+
+
+def test_hold_open_requires_rendering():
+    """A hidden Webots instance cannot enter manual inspection mode."""
+    args = parser().parse_args([
+        '--hold-open-after-completion', 'true',
+        '--trials', '1', '--maximum-concurrency', '1',
+        '--rendering', 'false',
+    ])
+    with pytest.raises(SystemExit, match='requires --rendering true'):
+        validate_cli_options(args)
+
+
+def test_mission_timeout_stops_after_verified_completion():
+    """The wall deadline applies before completion, never during hold."""
+    assert mission_timeout_expired(11.0, 10.0) is True
+    assert mission_timeout_expired(
+        11.0, 10.0, completion_verified=True) is False
+    assert mission_timeout_expired(
+        1e9, None, completion_verified=True) is False
+
+
+def test_hold_active_does_not_signal_shutdown_immediately(
+        monkeypatch, tmp_path, capsys):
+    """Completion notification alone sends no signal to the trial group."""
+    attempt = tmp_path / 'attempt'
+    attempt.mkdir()
+    (attempt / 'runner_metadata.json').write_text(
+        json.dumps({'hold_open_active': True}))
+
+    class Process:
+        pid = 24680
+        returncode = 0
+        calls = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired('supervisor', 0.2)
+            return self.returncode
+
+    namespace = argparse.Namespace(hold_open_after_completion=True)
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.os.killpg',
+        lambda *unused: pytest.fail(f'unexpected signal: {unused}'))
+    assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
+    assert 'Mission complete.' in capsys.readouterr().out
+
+
+def test_hold_ctrl_c_forwards_one_scoped_sigint_and_finishes(
+        monkeypatch, tmp_path):
+    """One Ctrl+C reaches only the isolated supervisor process group."""
+    attempt = tmp_path / 'attempt'
+
+    class Process:
+        pid = 13579
+        returncode = 0
+        calls = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            return self.returncode
+
+    sent = []
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.os.killpg',
+        lambda pid, signum: sent.append((pid, signum)))
+    namespace = argparse.Namespace(hold_open_after_completion=True)
+    assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
+    assert sent == [(13579, signal.SIGINT)]
+
+
+def test_failure_before_completion_is_not_held(monkeypatch, tmp_path):
+    """A failed supervisor returns immediately without entering a hold."""
+
+    class Process:
+        pid = 97531
+        returncode = 7
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+    namespace = argparse.Namespace(hold_open_after_completion=True)
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.os.killpg',
+        lambda *unused: pytest.fail(f'unexpected signal: {unused}'))
+    assert wait_for_attempt_supervisor(Process(), namespace, tmp_path) == 7
 
 
 def test_infrastructure_failure_retried_once(monkeypatch, tmp_path):
@@ -193,6 +332,17 @@ def create_attempt(campaign, number, classification='PASS', value=0):
     }
     (attempt / 'runner_metadata.json').write_text(json.dumps(runner))
     return trial, attempt
+
+
+def test_hold_open_requires_valid_final_completion_artifacts(tmp_path):
+    """Only settled complete, idle, released robot states may be held."""
+    _, attempt = create_attempt(tmp_path, 1)
+    assert hold_open_artifacts_valid(attempt)
+    final_path = attempt / 'final_state.json'
+    final = json.loads(final_path.read_text())
+    final['robots']['robot2']['claim']['reserving'] = True
+    final_path.write_text(json.dumps(final))
+    assert not hold_open_artifacts_valid(attempt)
 
 
 def test_timeout_classification_is_valid_failure(tmp_path):

@@ -59,6 +59,32 @@ python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --calibration true --isolation-pilot false
 ```
 
+One rendered manual test with the passive RViz view:
+
+```bash
+python3 src/my_epuck_project/tools/run_cooperative_regression.py \
+  --trials 1 --maximum-concurrency 1 \
+  --ros-domain-base 150 --webots-port-base 23100 \
+  --startup-timeout 120 --mission-timeout 240 \
+  --fast-mode false --rendering true --rviz true \
+  --hold-open-after-completion true
+```
+
+The manual RViz preset initially shows both shared maps, the grid, and one pose
+Axes display on each robot's namespaced `base_link`. The complete TF tree
+remains available but starts disabled, as do both LaserScan displays, robot
+models, plans, markers, and both robots' local and global costmaps. The runner
+starts this optional window after stack readiness so it does not compete with
+Webots, SLAM, and Nav2 initialization.
+
+`--hold-open-after-completion true` requires one trial, concurrency one, and
+rendering. After both robots complete and the settled final status, claims,
+and maps are captured, the runner disables the remaining mission deadline and
+keeps Webots, RViz, and the ROS stack open. Press Ctrl+C once to finalize the
+observer, perform scoped graceful shutdown, audit the port/process cleanup,
+and generate the campaign reports. The option defaults to false, so automated
+regression campaigns retain their existing automatic shutdown behavior.
+
 Sequential fallback:
 
 ```bash

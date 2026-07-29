@@ -11,6 +11,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     TimerAction,
 )
+from launch.conditions import IfCondition
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -62,8 +63,26 @@ def generate_launch_description():
             'enable_console_status': LaunchConfiguration('logger_console_status'),
         }],
     )
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='cooperative_manual_rviz',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('launch_rviz')),
+        arguments=[
+            '-d',
+            os.path.join(
+                project,
+                'resource',
+                'cooperative_manual_exploration.rviz',
+            ),
+        ],
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
+        parameters=[{'use_sim_time': False}],
+    )
     timeout = TimerAction(
         period=LaunchConfiguration('mission_timeout_s'),
+        condition=IfCondition(LaunchConfiguration('enable_mission_timeout')),
         actions=[EmitEvent(event=Shutdown(reason='bounded mission timeout'))],
     )
     return LaunchDescription([
@@ -72,8 +91,17 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument(
+            'launch_rviz',
+            default_value='false',
+            description='Open the passive cooperative-exploration RViz view.',
+        ),
+        DeclareLaunchArgument(
             'output_root', default_value='/home/arash/webots_ws/results'),
         DeclareLaunchArgument('mission_timeout_s', default_value='600.0'),
+        DeclareLaunchArgument(
+            'enable_mission_timeout',
+            default_value='true',
+            description='Enable the bounded launch shutdown timer.'),
         DeclareLaunchArgument('coordinator_autostart', default_value='true'),
         DeclareLaunchArgument('cycle_cooldown_s', default_value='2.5'),
         DeclareLaunchArgument('success_region_cooldown_s', default_value='25.0'),
@@ -86,5 +114,6 @@ def generate_launch_description():
         DeclareLaunchArgument('logger_console_status', default_value='true'),
         continuous_stack,
         observer,
+        rviz,
         timeout,
     ])

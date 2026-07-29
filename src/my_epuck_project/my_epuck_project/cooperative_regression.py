@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 
+from ament_index_python.packages import get_package_share_directory
 import psutil
 
 from .cooperative_regression_report import analyze_campaign, atomic_json
@@ -131,6 +132,50 @@ def windows_port_pid(port):
         re.IGNORECASE | re.MULTILINE)
     match = expression.search(result.stdout)
     return int(match.group(1)) if match else None
+
+
+def manual_rviz_command():
+    """Return the installed passive RViz command used by manual trials."""
+    config = Path(get_package_share_directory(
+        'my_epuck_project')) / 'resource' / (
+            'cooperative_manual_exploration.rviz')
+    return ['rviz2', '-d', str(config)]
+
+
+def hold_open_artifacts_valid(attempt):
+    """Validate settled final robot state and lossless maps before hold."""
+    try:
+        final_state = json.loads(
+            (attempt / 'final_state.json').read_text(encoding='utf-8'))
+        robots = final_state['robots']
+        for robot in ('robot1', 'robot2'):
+            state = robots[robot]
+            status = state['status']
+            if status['state'] != 'MISSION_COMPLETE':
+                return False
+            if status.get(
+                    'age_at_collection_s',
+                    status.get('age_at_write_s', 1e9)) > 4.0:
+                return False
+            if state['claim'].get('reserving', True):
+                return False
+            if state.get('navigation_active') is not False:
+                return False
+            item = load_map(attempt / f'{robot}_final_shared_map.npz')
+            if item.metadata.get('validation_errors'):
+                return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
+def mission_timeout_expired(now, deadline, completion_verified=False):
+    """Return whether the pre-completion mission wall timeout has elapsed."""
+    return (
+        not completion_verified
+        and deadline is not None
+        and now >= deadline
+    )
 
 
 def domain_nodes(domain):
@@ -446,8 +491,13 @@ def internal_trial(args):
             'webots_port': args.webots_port,
             'webots_mode': args.webots_mode,
             'webots_gui': str(args.webots_gui).lower(),
+            'launch_rviz': 'false',
+            'enable_mission_timeout':
+                not args.hold_open_after_completion,
             'logger_console_status': False,
         },
+        'rviz_requested': args.launch_rviz,
+        'hold_open_after_completion': args.hold_open_after_completion,
     }
     atomic_json(attempt / 'runner_metadata.json', metadata)
     environment = os.environ.copy()
@@ -469,6 +519,9 @@ def internal_trial(args):
         f'webots_port:={args.webots_port}',
         f'webots_mode:={args.webots_mode}',
         f'webots_gui:={str(args.webots_gui).lower()}',
+        'launch_rviz:=false',
+        f'enable_mission_timeout:='
+        f'{str(not args.hold_open_after_completion).lower()}',
         'logger_console_status:=false',
     ]
     collector_command = [
@@ -504,6 +557,9 @@ def internal_trial(args):
     interrupted = False
     requested_shutdown = False
 
+    holding_open = False
+    collector_finalized_for_hold = False
+
     def stop(signum, frame):
         nonlocal interrupted
         del signum, frame
@@ -512,6 +568,8 @@ def internal_trial(args):
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     ready = False
+    rviz = None
+    rviz_log = None
     timed_out = False
     unexpected_exit = False
     peak_rss = 0
@@ -544,20 +602,72 @@ def internal_trial(args):
                     mission_deadline = now + args.mission_timeout
                     metadata['readiness_elapsed_s'] = now - start
                     metadata['readiness_graph_nodes'] = nodes
+                    if args.launch_rviz:
+                        rviz_command = manual_rviz_command()
+                        rviz_environment = environment.copy()
+                        rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
+                        rviz_log = (attempt / 'rviz.log').open(
+                            'w', encoding='utf-8')
+                        rviz = subprocess.Popen(
+                            rviz_command,
+                            env=rviz_environment,
+                            stdout=rviz_log,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            preexec_fn=lambda: os.setpgid(0, launch.pid),
+                        )
+                        processes.append(rviz)
+                        rviz_process = psutil.Process(rviz.pid)
+                        rviz_process.cpu_percent(None)
+                        ps_processes.append(rviz_process)
+                        metadata['rviz_pid'] = rviz.pid
+                        metadata['rviz_command'] = rviz_command
                     atomic_json(attempt / 'runner_metadata.json', metadata)
-            if ready and status.get('settled'):
+            if (ready and status.get('settled')
+                    and not holding_open):
                 requested_shutdown = True
-                break
+                if args.hold_open_after_completion:
+                    # Finalize the passive collector first so normal settled
+                    # status, claims, and lossless maps are safely on disk
+                    # before the GUI inspection period begins.
+                    signal_process(collector, signal.SIGINT)
+                    wait_processes(
+                        [collector], args.graceful_shutdown_timeout)
+                    collector_finalized_for_hold = (
+                        collector.poll() is not None)
+                    if (not collector_finalized_for_hold
+                            or not hold_open_artifacts_valid(attempt)):
+                        metadata['hold_open_validation_failed'] = True
+                        atomic_json(
+                            attempt / 'runner_metadata.json', metadata)
+                        break
+                    holding_open = True
+                    mission_deadline = None
+                    metadata.update({
+                        'hold_open_active': True,
+                        'hold_open_started_utc': utc_now(),
+                        'settled_observed': True,
+                    })
+                    atomic_json(attempt / 'runner_metadata.json', metadata)
+                    print(
+                        'Mission complete. Webots and RViz are being kept '
+                        'open for inspection.\n'
+                        'Press Ctrl+C to shut down and finalize the campaign.',
+                        flush=True,
+                    )
+                else:
+                    break
             if not ready and now >= readiness_deadline:
                 break
-            if ready and mission_deadline is not None and now >= mission_deadline:
+            if mission_timeout_expired(
+                    now, mission_deadline, holding_open):
                 timed_out = True
                 requested_shutdown = True
                 break
             if launch.poll() is not None:
                 unexpected_exit = not requested_shutdown
                 break
-            if collector.poll() is not None:
+            if collector.poll() is not None and not holding_open:
                 unexpected_exit = True
                 break
             if now - last_sample >= 1.0:
@@ -587,8 +697,11 @@ def internal_trial(args):
             time.sleep(0.2)
     finally:
         # Freeze the newest settled messages while their freshness is intact.
-        signal_process(collector, signal.SIGINT)
-        wait_processes([collector], args.graceful_shutdown_timeout)
+        if not collector_finalized_for_hold:
+            signal_process(collector, signal.SIGINT)
+            wait_processes([collector], args.graceful_shutdown_timeout)
+        if rviz is not None:
+            signal_process(rviz, signal.SIGINT)
         # Then let the launch's passive observer finalize its own outputs.
         signal_process(launch, signal.SIGINT)
         cleanup = scoped_shutdown(
@@ -598,6 +711,8 @@ def internal_trial(args):
         metrics_file.close()
         launch_log.close()
         collector_log.close()
+        if rviz_log is not None:
+            rviz_log.close()
     port_clean = False
     for _ in range(30):
         if (not linux_port_used(args.webots_port)
@@ -613,9 +728,10 @@ def internal_trial(args):
     cleanup['remaining_tracked_pids'] = remaining_pids
     cleanup['all_exited'] = (
         cleanup['all_exited'] and port_clean and not remaining_pids)
+    user_ended_hold = interrupted and holding_open
     classification, details = classify_attempt(
         attempt, args.run_id, ready, timed_out, unexpected_exit,
-        interrupted, cleanup,
+        interrupted and not user_ended_hold, cleanup,
         settled_observed=requested_shutdown and not timed_out)
     metadata.update({
         'utc_end': utc_now(),
@@ -623,7 +739,9 @@ def internal_trial(args):
         'classification': classification,
         'classification_details': details,
         'process_exit_codes': {
-            'launch': launch.poll(), 'collector': collector.poll(),
+            'launch': launch.poll(),
+            'collector': collector.poll(),
+            'rviz': rviz.poll() if rviz is not None else None,
         },
         'cleanup': cleanup,
         'cleanup_complete': cleanup['all_exited'],
@@ -631,7 +749,10 @@ def internal_trial(args):
         'process_tree_peak_cpu_percent': peak_cpu,
         'maximum_process_count': maximum_processes,
         'webots_windows_pid_at_end': windows_port_pid(args.webots_port),
-        'interrupted': interrupted,
+        'interrupted': interrupted and not user_ended_hold,
+        'hold_open_requested': args.hold_open_after_completion,
+        'hold_open_entered': holding_open,
+        'hold_open_user_shutdown': user_ended_hold,
         'settled_observed': requested_shutdown and not timed_out,
     })
     atomic_json(attempt / 'runner_metadata.json', metadata)
@@ -748,6 +869,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         webots_port=args.webots_port_base + trial_number - 1,
         webots_mode='fast' if args.fast_mode else 'realtime',
         webots_gui=args.rendering,
+        launch_rviz=args.rviz,
+        hold_open_after_completion=args.hold_open_after_completion,
         startup_timeout=args.startup_timeout,
         mission_timeout=args.mission_timeout,
         settling_period=args.settling_period,
@@ -772,6 +895,39 @@ def internal_command(namespace):
     return command
 
 
+def wait_for_attempt_supervisor(process, namespace, attempt):
+    """Wait and forward Ctrl+C only to this attempt's process group."""
+    announced = False
+    while True:
+        try:
+            return process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            if (getattr(
+                    namespace, 'hold_open_after_completion', False)
+                    and not announced):
+                try:
+                    metadata = json.loads(
+                        (attempt / 'runner_metadata.json').read_text(
+                            encoding='utf-8'))
+                except (OSError, ValueError):
+                    metadata = {}
+                if metadata.get('hold_open_active'):
+                    print(
+                        'Mission complete. Webots and RViz are being kept '
+                        'open for inspection.\n'
+                        'Press Ctrl+C to shut down and finalize the campaign.',
+                        flush=True,
+                    )
+                    announced = True
+        except KeyboardInterrupt:
+            os.killpg(process.pid, signal.SIGINT)
+            process.wait(timeout=30)
+            if getattr(
+                    namespace, 'hold_open_after_completion', False):
+                return process.returncode
+            raise
+
+
 def execute_attempt(namespace):
     attempt = Path(namespace.attempt_dir)
     attempt.parent.mkdir(parents=True, exist_ok=True)
@@ -780,12 +936,8 @@ def execute_attempt(namespace):
         process = subprocess.Popen(
             internal_command(namespace), stdout=output,
             stderr=subprocess.STDOUT, start_new_session=True, text=True)
-        try:
-            returncode = process.wait()
-        except KeyboardInterrupt:
-            os.killpg(process.pid, signal.SIGINT)
-            process.wait(timeout=30)
-            raise
+        returncode = wait_for_attempt_supervisor(
+            process, namespace, attempt)
     if attempt.exists():
         shutil.move(str(supervisor_log), str(attempt / 'supervisor.log'))
     metadata = json.loads(
@@ -1073,6 +1225,9 @@ def create_manifest(args, campaign, workspace):
             'use_sim_time': False,
             'coordinator_mode': 'continuous',
             'one_goal_only': False,
+            'launch_rviz': args.rviz,
+            'hold_open_after_completion':
+                args.hold_open_after_completion,
         },
         'trial_count_requested': args.trials,
         'ros_domain_id_range': [
@@ -1352,6 +1507,18 @@ def parser():
     result.add_argument(
         '--rendering', type=boolean, default=False, metavar='BOOL')
     result.add_argument(
+        '--hold-open-after-completion',
+        type=boolean,
+        default=False,
+        metavar='BOOL',
+        help=(
+            'After a verified single rendered mission, keep Webots/RViz '
+            'open until Ctrl+C'),
+    )
+    result.add_argument(
+        '--rviz', type=boolean, default=False, metavar='BOOL',
+        help='Open the passive RViz view (single-trial use only)')
+    result.add_argument(
         '--calibration', type=boolean, default=True, metavar='BOOL')
     result.add_argument(
         '--isolation-pilot', type=boolean, default=True, metavar='BOOL')
@@ -1375,15 +1542,34 @@ def parser():
     result.add_argument('--webots-port', type=int, help=argparse.SUPPRESS)
     result.add_argument('--webots-mode', help=argparse.SUPPRESS)
     result.add_argument('--webots-gui', type=boolean, help=argparse.SUPPRESS)
+    result.add_argument('--launch-rviz', type=boolean, help=argparse.SUPPRESS)
     return result
 
 
-def main(argv=None):
-    args = parser().parse_args(argv)
+def validate_cli_options(args):
+    """Validate campaign-level manual GUI constraints."""
     if args.trials < 1:
         raise SystemExit('--trials must be positive')
     if not 1 <= args.maximum_concurrency <= 4:
         raise SystemExit('--maximum-concurrency must be between 1 and 4')
+    if (not args.internal_trial and args.rviz
+            and (args.trials != 1 or args.maximum_concurrency != 1)):
+        raise SystemExit(
+            '--rviz true requires --trials 1 --maximum-concurrency 1')
+    if (not args.internal_trial and args.hold_open_after_completion
+            and (args.trials != 1 or args.maximum_concurrency != 1)):
+        raise SystemExit(
+            '--hold-open-after-completion true requires '
+            '--trials 1 --maximum-concurrency 1')
+    if (not args.internal_trial and args.hold_open_after_completion
+            and not args.rendering):
+        raise SystemExit(
+            '--hold-open-after-completion true requires --rendering true')
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    validate_cli_options(args)
     try:
         if args.internal_trial:
             return internal_trial(args)

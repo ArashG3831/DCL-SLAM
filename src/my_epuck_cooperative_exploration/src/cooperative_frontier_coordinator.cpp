@@ -121,7 +121,16 @@ public:
     P(double, arbitration_loss_cooldown_s, 5.0);
     P(double, require_fresh_candidate_age_s, 5.0);
     P(double, require_fresh_shared_map_age_s, 5.0);
+    // Navigation time is derived from the candidate path and observed metric
+    // progress.  Keep the legacy parameter as an optional hard floor for
+    // existing launch files, but do not use it as the sole deadline.
     P(double, navigation_goal_timeout_s, 90.0);
+    P(double, navigation_base_allowance_s, 30.0);
+    P(double, navigation_effective_speed_mps, 0.025);
+    P(double, navigation_recovery_allowance_s, 30.0);
+    P(double, navigation_progress_extension_s, 30.0);
+    P(double, navigation_maximum_s, 240.0);
+    P(double, navigation_progress_epsilon_m, 0.08);
     P(double, cancellation_ack_timeout_s, 5.0);
     P(double, no_candidate_grace_s, 18.0);
     P(double, map_stability_window_s, 15.0);
@@ -185,7 +194,8 @@ public:
 
     started_ = steady();
     last_heartbeat_ = last_terminal_ = last_status_ = last_diag_ = started_;
-    tick_ = create_wall_timer(50ms, [this]() {step();});
+    // Mission TTLs and cooldowns must pause with the ROS simulation clock.
+    tick_ = create_timer(50ms, [this]() {step();});
     publish_status(Status::STARTING, "waiting_for_inputs");
     RCLCPP_INFO(
       get_logger(),
@@ -212,8 +222,7 @@ public:
 private:
   double steady() const
   {
-    return std::chrono::duration<double>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now().seconds();
   }
 
   static Uuid new_uuid()
@@ -798,15 +807,53 @@ private:
         }
         ++m_.navigation_goals_accepted;
         accepted_at_ = steady();
+        const double path_length = std::max(
+          0.0, static_cast<double>(current_->path_length_m));
+        const double travel_budget = path_length /
+          std::max(0.001, navigation_effective_speed_mps_);
+        navigation_budget_s_ =
+          (navigation_goal_timeout_s_ > 0.0 && navigation_goal_timeout_s_ < 10.0) ?
+          navigation_goal_timeout_s_ :
+          std::clamp(
+            navigation_base_allowance_s_ + travel_budget +
+            navigation_recovery_allowance_s_,
+            navigation_goal_timeout_s_, navigation_maximum_s_);
+        navigation_deadline_ = accepted_at_ + navigation_budget_s_;
+        last_progress_at_ = accepted_at_;
+        last_distance_remaining_ = path_length;
+        meaningful_progress_events_ = 0;
+        recovery_count_ = 0;
         cancel_pending_ = false;
         publish_claim(Claim::NAVIGATING, "goal_accepted");
         transition(InternalState::NAVIGATING);
       };
     options.feedback_callback =
       [this, generation, claim_id](
-      GoalHandle::SharedPtr, const std::shared_ptr<const Nav::Feedback>) {
+      GoalHandle::SharedPtr, const std::shared_ptr<const Nav::Feedback> feedback) {
         if (!active_callback(generation, claim_id, InternalState::NAVIGATING)) {
           ++m_.stale_action_callbacks_ignored;
+          return;
+        }
+        const double remaining = std::max(0.0, static_cast<double>(
+          feedback->distance_remaining));
+        const double now = steady();
+        const bool metric_progress =
+          navigation_goal_timeout_s_ >= 10.0 &&
+          remaining > navigation_progress_epsilon_m_ &&
+          last_distance_remaining_ - remaining >= navigation_progress_epsilon_m_;
+        const auto recoveries = static_cast<uint32_t>(std::max<int16_t>(
+          0, feedback->number_of_recoveries));
+        const bool recovery_progress = recoveries > recovery_count_;
+        if (metric_progress) {
+          last_distance_remaining_ = remaining;
+          last_progress_at_ = now;
+          ++meaningful_progress_events_;
+          navigation_deadline_ = std::min(
+            accepted_at_ + navigation_maximum_s_,
+            std::max(navigation_deadline_, now + navigation_progress_extension_s_));
+        }
+        if (recovery_progress) {
+          recovery_count_ = recoveries;
         }
       };
     options.result_callback =
@@ -1090,7 +1137,7 @@ private:
         publish_claim(Claim::NAVIGATING, "navigating");
         last_heartbeat_ = time;
       }
-      if (!cancel_pending_ && time - accepted_at_ >= navigation_goal_timeout_s_) {
+      if (!cancel_pending_ && time >= navigation_deadline_) {
         ++m_.navigation_timeouts;
         request_cancel("NAVIGATION_TIMEOUT", false);
       }
@@ -1137,12 +1184,16 @@ private:
         get_logger(),
         "COORD_METRICS mode=%s state=%d cycle=%lu claim=%lu peer_claim_age=%.3f "
         "peer_status_age=%.3f goals_sent=%lu accepted=%lu success=%lu fail=%lu "
-        "cancel=%lu suppression=%zu stale_callbacks=%lu",
+        "cancel=%lu suppression=%zu stale_callbacks=%lu path=%.3f remaining=%.3f "
+        "progress_age=%.3f budget=%.3f recoveries=%u progress_events=%u",
         operating_mode_.c_str(), int(core_.state), cycle_number_,
         current_ ? current_->claim_id : 0, peer_claim_->age(time), peer_status_->age(time),
         m_.navigation_goals_sent, m_.navigation_goals_accepted,
         m_.navigation_successes, m_.navigation_failures, m_.navigation_cancellations,
-        suppressions_.size(), m_.stale_action_callbacks_ignored);
+        suppressions_.size(), m_.stale_action_callbacks_ignored,
+        current_ ? current_->path_length_m : 0.0, last_distance_remaining_,
+        current_ ? time - last_progress_at_ : 0.0, navigation_budget_s_,
+        recovery_count_, meaningful_progress_events_);
       last_diag_ = time;
     }
   }
@@ -1195,6 +1246,12 @@ private:
   bool peer_status_was_fresh_{};
   bool cancel_pending_{};
   bool cancel_is_arbitration_{};
+  double navigation_budget_s_{};
+  double navigation_deadline_{};
+  double last_progress_at_{};
+  double last_distance_remaining_{};
+  uint32_t recovery_count_{};
+  uint32_t meaningful_progress_events_{};
   std::string terminal_reason_;
   std::string terminal_claim_reason_;
   std::string cancel_reason_;
@@ -1245,6 +1302,12 @@ private:
   double require_fresh_candidate_age_s_{};
   double require_fresh_shared_map_age_s_{};
   double navigation_goal_timeout_s_{};
+  double navigation_base_allowance_s_{};
+  double navigation_effective_speed_mps_{};
+  double navigation_recovery_allowance_s_{};
+  double navigation_progress_extension_s_{};
+  double navigation_maximum_s_{};
+  double navigation_progress_epsilon_m_{};
   double cancellation_ack_timeout_s_{};
   double no_candidate_grace_s_{};
   double map_stability_window_s_{};

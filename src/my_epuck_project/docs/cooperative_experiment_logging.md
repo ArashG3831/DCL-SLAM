@@ -52,3 +52,11 @@ passive subscriptions, the default single-threaded executor repeatedly rebuilt
 and scanned a large wait set for every incoming message. The event executor
 preserves the same mutually exclusive callback behavior and callback bodies
 while avoiding that measured scheduling overhead.
+
+For continuous runs the observer additionally subscribes, passively, to each
+robot's reliable volatile exploration status and coordinator-event topics.
+Cycle boundaries retain the frozen candidate payload; the observer adds actual
+distance travelled from its odometry trajectory. `summary.json` reports
+per-robot cycles, completed and failed goals, mean cycle duration, suppression
+counts, repeated frontier-ID attempts, maximum attempts, locally exhausted
+duration, mission completion time, and coverage gain per travelled metre.

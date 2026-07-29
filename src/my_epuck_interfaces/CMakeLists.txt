@@ -13,6 +13,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FrontierCandidate.msg"
   "msg/FrontierCandidateArray.msg"
   "msg/ExplorationClaim.msg"
+  "msg/ExplorationStatus.msg"
+  "msg/ExplorationEvent.msg"
   "msg/PeerMap.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs unique_identifier_msgs
 )

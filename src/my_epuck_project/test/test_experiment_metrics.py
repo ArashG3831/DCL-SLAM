@@ -59,7 +59,7 @@ def test_coverage_attribution():
 def test_trajectory_overlap_and_revisit():
     t=TrajectoryOverlap(1,0); t.add('r1',0,0); t.add('r1',1.1,0); t.add('r1',1.2,0); t.add('r2',0,0); t.add('r2',1.1,0); s=t.summary(); assert s['cross_robot_bins']==1 and s['repeated_visit_distance_m']['r1']>0
 def frontier(x): return {'centroid_x':x,'centroid_y':0,'min_x':x-.1,'max_x':x+.1,'min_y':-.1,'max_y':.1}
-def test_frontier_equivalence(): assert equivalent_frontiers(frontier(0),frontier(.1)) and not equivalent_frontiers(frontier(0),frontier(1))
+def test_frontier_equivalence(): assert equivalent_frontiers(frontier(0),frontier(.1)) and not equivalent_frontiers(frontier(0),frontier(.19)) and not equivalent_frontiers(frontier(0),frontier(1))
 def test_goal_duplicates(): assert duplicate_goal((0,0),(.1,0)) and not duplicate_goal((0,0),(1,0))
 def test_event_sequences_strict(): assert list(range(1,5))==sorted(set(range(1,5)))
 def test_summary_reconciliation_fixture():

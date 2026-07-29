@@ -2,13 +2,14 @@
 <package format="3">
   <name>my_epuck_cooperative_exploration</name>
   <version>0.0.0</version>
-  <description>Two-robot decentralized single-round frontier claim arbitration.</description>
+  <description>Decentralized single-goal and continuous cooperative frontier exploration.</description>
   <maintainer email="arash.ganjei92@gmail.com">arash</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>geometry_msgs</depend>
   <depend>my_epuck_interfaces</depend>
   <depend>nav2_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>unique_identifier_msgs</depend>

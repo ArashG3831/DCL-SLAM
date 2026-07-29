@@ -39,6 +39,20 @@ static m::ProtocolConfig config()
   return {"robot1", "robot2", "shared_map", 0.5, 10.0, 0.15, 0.05, 0.02, 2};
 }
 
+static m::Status status(
+  uint8_t session_byte = 2, uint64_t revision = 1,
+  uint8_t state = m::Status::ACTIVE)
+{
+  m::Status s;
+  s.header.frame_id = "shared_map";
+  s.source_robot_id = "robot2";
+  s.source_session_id.uuid[0] = session_byte;
+  s.message_revision = revision;
+  s.state = state;
+  s.status_ttl.sec = 3;
+  return s;
+}
+
 TEST(ClaimValidation, RejectsMalformedWithoutAcceptingIt)
 {
   auto cfg = config();
@@ -146,6 +160,43 @@ TEST(SessionTracker, RevisionsExpiryReplacementAndRetirement)
     m::ValidationCode::RETIRED_SESSION);
 }
 
+TEST(StatusTracker, ExpiryRestartRetirementAndRevisionReset)
+{
+  m::PeerStatusTracker tracker(config());
+  EXPECT_EQ(tracker.accept(status(2, 4), 1.0, false).code, m::ValidationCode::OK);
+  EXPECT_EQ(
+    tracker.accept(status(2, 3), 1.1, true).code,
+    m::ValidationCode::STALE_REVISION);
+  EXPECT_FALSE(tracker.expired(3.9));
+  EXPECT_TRUE(tracker.expired(4.1));
+  auto replacement = tracker.accept(status(7, 1), 4.1, false);
+  EXPECT_EQ(replacement.code, m::ValidationCode::OK);
+  EXPECT_TRUE(replacement.replacement);
+  EXPECT_EQ(
+    tracker.accept(status(2, 99), 4.2, true).code,
+    m::ValidationCode::RETIRED_SESSION);
+  ASSERT_TRUE(tracker.status(4.2));
+  EXPECT_EQ(tracker.status(4.2)->message_revision, 1U);
+}
+
+TEST(StatusValidation, RequiresPeerIdentityFrameStateAndBoundedTtl)
+{
+  EXPECT_EQ(m::validate_status_shape(status(), config()), m::ValidationCode::OK);
+  auto own = status();
+  own.source_robot_id = "robot1";
+  EXPECT_EQ(
+    m::validate_status_shape(own, config()), m::ValidationCode::OWN_SOURCE);
+  auto frame = status();
+  frame.header.frame_id = "map";
+  EXPECT_EQ(
+    m::validate_status_shape(frame, config()), m::ValidationCode::WRONG_FRAME);
+  auto unsupported = status();
+  unsupported.state = 99;
+  EXPECT_EQ(
+    m::validate_status_shape(unsupported, config()),
+    m::ValidationCode::UNSUPPORTED_STATE);
+}
+
 TEST(FrontierEquivalence, IdGeometryToleranceAndInvalidBounds)
 {
   auto a = claim("robot1", 1);
@@ -232,3 +283,69 @@ TEST(RoundCore, ProposalBudgetAndExactlyOneAcceptedGoal)
   EXPECT_EQ(round.state, m::InternalState::IDLE_STOPPED);
 }
 
+TEST(RoundCore, ContinuousResetAllowsSequentialButNeverConcurrentGoals)
+{
+  m::RoundCore core;
+  core.create_proposal();
+  EXPECT_TRUE(core.accept_goal(true));
+  EXPECT_FALSE(core.accept_goal(true));
+  const auto first = core.claim_id;
+  core.reset_cycle();
+  core.create_proposal();
+  EXPECT_GT(core.claim_id, first);
+  EXPECT_TRUE(core.accept_goal(true));
+  EXPECT_EQ(core.goals_accepted, 1U);
+}
+
+TEST(ActionCallbackIsolation, DelayedGoalResponseFromCycleOneIsRejected)
+{
+  EXPECT_FALSE(m::action_callback_matches(
+    1, 10, 2, 11, m::InternalState::ARBITRATING,
+    m::InternalState::ARBITRATING));
+}
+
+TEST(ActionCallbackIsolation, DelayedResultFromCycleOneIsRejected)
+{
+  EXPECT_FALSE(m::action_callback_matches(
+    1, 10, 2, 11, m::InternalState::NAVIGATING,
+    m::InternalState::NAVIGATING));
+}
+
+TEST(ActionCallbackIsolation, DuplicateTerminalCallbackIsRejected)
+{
+  EXPECT_FALSE(m::action_callback_matches(
+    2, 11, 2, 11, m::InternalState::TERMINAL_BROADCAST,
+    m::InternalState::NAVIGATING));
+}
+
+TEST(ActionCallbackIsolation, DelayedCancellationAcknowledgementIsRejected)
+{
+  EXPECT_FALSE(m::action_callback_matches(
+    1, 10, 2, 11, m::InternalState::NAVIGATING,
+    m::InternalState::NAVIGATING));
+}
+
+TEST(ActionCallbackIsolation, FeedbackForInactiveGoalIsRejected)
+{
+  EXPECT_FALSE(m::action_callback_matches(
+    2, 11, 2, 11, m::InternalState::COOLDOWN,
+    m::InternalState::NAVIGATING));
+  EXPECT_TRUE(m::action_callback_matches(
+    2, 11, 2, 11, m::InternalState::NAVIGATING,
+    m::InternalState::NAVIGATING));
+}
+
+TEST(Nav2FailureClassification, UsesStructuredPlannerEvidence)
+{
+  EXPECT_EQ(m::classify_nav2_failure("compute_path planner failed"), "PLANNER_FAILURE");
+}
+
+TEST(Nav2FailureClassification, UsesStructuredControllerEvidence)
+{
+  EXPECT_EQ(m::classify_nav2_failure("follow_path controller failed"), "CONTROLLER_FAILURE");
+}
+
+TEST(Nav2FailureClassification, CodeZeroWithoutEvidenceRemainsUnknown)
+{
+  EXPECT_EQ(m::classify_nav2_failure(""), "UNKNOWN_NAV2_FAILURE");
+}

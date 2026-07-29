@@ -120,5 +120,5 @@ class TrajectoryOverlap:
     def summary(self):
         sets=list(self.bins.values()); shared=set.intersection(*sets) if len(sets)>=2 else set(); union=set.union(*sets) if sets else set(); return {'bins_per_robot':{k:len(v) for k,v in self.bins.items()},'cross_robot_bins':len(shared),'cross_robot_overlap_fraction':len(shared)/len(union) if union else 0.,'repeated_visit_distance_m':dict(self.repeated_distance),'distance_travelled_m':dict(self.total_distance)}
 def equivalent_frontiers(a,b,centroid_tolerance=.15,bbox_margin=.05):
-    centroid=math.hypot(a['centroid_x']-b['centroid_x'],a['centroid_y']-b['centroid_y']); overlap=not(a['max_x']+bbox_margin<b['min_x'] or b['max_x']+bbox_margin<a['min_x'] or a['max_y']+bbox_margin<b['min_y'] or b['max_y']+bbox_margin<a['min_y']); return centroid<=centroid_tolerance or overlap
+    centroid=math.hypot(a['centroid_x']-b['centroid_x'],a['centroid_y']-b['centroid_y']); overlap=not(a['max_x']+bbox_margin<b['min_x'] or b['max_x']+bbox_margin<a['min_x'] or a['max_y']+bbox_margin<b['min_y'] or b['max_y']+bbox_margin<a['min_y']); return centroid<=centroid_tolerance and overlap
 def duplicate_goal(a,b,tolerance=.15): return math.hypot(a[0]-b[0],a[1]-b[1])<=tolerance

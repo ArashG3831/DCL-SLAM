@@ -5,6 +5,7 @@ import pytest
 import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import Log
+from my_epuck_interfaces.msg import ExplorationEvent, ExplorationStatus
 
 from my_epuck_project.cooperative_experiment_logger import CooperativeExperimentLogger
 
@@ -147,3 +148,40 @@ def test_concurrent_updates_and_finalization_do_not_write_closed_files(observer)
         thread.join()
     assert failures == []
     assert read_json(observer.directory / "summary.json")["run"]["clean_shutdown"] is False
+
+
+def test_continuous_cycle_status_and_suppression_are_reconciled(observer):
+    started = ExplorationEvent()
+    started.header.frame_id = "shared_map"
+    started.source_robot_id = "robot1"
+    started.event_type = "EXPLORATION_CYCLE_STARTED"
+    started.cycle_number = 1
+    started.claim_id = 1
+    started.frontier_id = 42
+    observer.coordinator_event("robot1", started)
+    observer.trajectory.total_distance["robot1"] = 0.4
+    ended = ExplorationEvent()
+    ended.header.frame_id = "shared_map"
+    ended.source_robot_id = "robot1"
+    ended.event_type = "EXPLORATION_CYCLE_ENDED"
+    ended.cycle_number = 1
+    ended.claim_id = 1
+    ended.frontier_id = 42
+    ended.terminal_result = "UNKNOWN_NAV2_FAILURE"
+    observer.coordinator_event("robot1", ended)
+    suppression = ExplorationEvent()
+    suppression.event_type = "FAILURE_SUPPRESSION_CREATED"
+    suppression.claim_id = 1
+    suppression.frontier_id = 42
+    suppression.reason = "UNKNOWN_NAV2_FAILURE"
+    observer.coordinator_event("robot1", suppression)
+    exhausted = ExplorationStatus()
+    exhausted.state = ExplorationStatus.NO_ELIGIBLE_CANDIDATES
+    exhausted.reason = "locally_exhausted"
+    observer.status("robot1", exhausted)
+    summary = observer.summary(False)
+    robot = summary["continuous_exploration"]["robot1"]
+    assert robot["exploration_cycles"] == 1
+    assert robot["failed_goals"] == 1
+    assert robot["maximum_equivalent_region_attempt_count"] == 1
+    assert summary["events"]["FAILURE_SUPPRESSION_CREATED"] == 1

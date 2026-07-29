@@ -19,9 +19,15 @@ def coordinator(robot, peer, test_rank, test_frontier_id):
         parameters=[{
             'robot_id': robot,
             'peer_robot_id': peer,
+            'operating_mode': LaunchConfiguration('coordinator_mode'),
+            'one_goal_only': LaunchConfiguration('one_goal_only'),
             'own_candidate_topic': f'/{robot}/frontier_candidates',
+            'own_shared_map_topic': f'/{robot}/shared_map',
             'peer_claim_topic': f'/cslam/{peer}/exploration_claim',
             'own_claim_topic': f'/cslam/{robot}/exploration_claim',
+            'peer_status_topic': f'/cslam/{peer}/exploration_status',
+            'own_status_topic': f'/cslam/{robot}/exploration_status',
+            'own_event_topic': f'/cslam/{robot}/exploration_event',
             'navigate_to_pose_action': f'/{robot}/navigate_to_pose',
             'global_frame': 'shared_map',
             'arbitration_window_s': 1.0,
@@ -41,8 +47,22 @@ def coordinator(robot, peer, test_rank, test_frontier_id):
             'action_server_wait_timeout_s': 10.0,
             'navigation_goal_timeout_s': 90.0,
             'cancellation_ack_timeout_s': 5.0,
-            'autostart': True,
-            'one_goal_only': True,
+            'cycle_cooldown_s': LaunchConfiguration('cycle_cooldown_s'),
+            'success_region_cooldown_s':
+                LaunchConfiguration('success_region_cooldown_s'),
+            'first_failure_suppression_s':
+                LaunchConfiguration('first_failure_suppression_s'),
+            'second_failure_suppression_s':
+                LaunchConfiguration('second_failure_suppression_s'),
+            'maximum_failure_suppression_s':
+                LaunchConfiguration('maximum_failure_suppression_s'),
+            'no_candidate_grace_s':
+                LaunchConfiguration('no_candidate_grace_s'),
+            'map_stability_window_s':
+                LaunchConfiguration('map_stability_window_s'),
+            'completion_consensus_grace_s':
+                LaunchConfiguration('completion_consensus_grace_s'),
+            'autostart': LaunchConfiguration('coordinator_autostart'),
             # Verification-only selector. -1 preserves normal ranked selection.
             'test_candidate_rank': test_rank,
             'test_frontier_id': test_frontier_id,
@@ -59,6 +79,17 @@ def generate_launch_description():
     robot1_frontier = LaunchConfiguration('robot1_test_frontier_id')
     robot2_frontier = LaunchConfiguration('robot2_test_frontier_id')
     return LaunchDescription([
+        DeclareLaunchArgument('coordinator_mode', default_value='single_goal'),
+        DeclareLaunchArgument('one_goal_only', default_value='true'),
+        DeclareLaunchArgument('coordinator_autostart', default_value='true'),
+        DeclareLaunchArgument('cycle_cooldown_s', default_value='2.5'),
+        DeclareLaunchArgument('success_region_cooldown_s', default_value='25.0'),
+        DeclareLaunchArgument('first_failure_suppression_s', default_value='20.0'),
+        DeclareLaunchArgument('second_failure_suppression_s', default_value='60.0'),
+        DeclareLaunchArgument('maximum_failure_suppression_s', default_value='180.0'),
+        DeclareLaunchArgument('no_candidate_grace_s', default_value='18.0'),
+        DeclareLaunchArgument('map_stability_window_s', default_value='15.0'),
+        DeclareLaunchArgument('completion_consensus_grace_s', default_value='8.0'),
         DeclareLaunchArgument('robot1_test_candidate_rank', default_value='-1'),
         DeclareLaunchArgument('robot2_test_candidate_rank', default_value='-1'),
         DeclareLaunchArgument('robot1_test_frontier_id', default_value=''),

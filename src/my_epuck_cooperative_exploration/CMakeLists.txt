@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(my_epuck_interfaces REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(unique_identifier_msgs REQUIRED)
@@ -27,7 +28,7 @@ target_include_directories(cooperative_coordinator PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(cooperative_coordinator cooperative_protocol)
 ament_target_dependencies(cooperative_coordinator
-  my_epuck_interfaces nav2_msgs rclcpp rclcpp_action)
+  my_epuck_interfaces nav2_msgs nav_msgs rclcpp rclcpp_action)
 
 add_executable(cooperative_frontier_coordinator
   src/cooperative_frontier_coordinator_main.cpp)
@@ -49,7 +50,11 @@ if(BUILD_TESTING)
     geometry_msgs my_epuck_interfaces unique_identifier_msgs)
   ament_add_gtest(test_native_harness test/test_native_harness.cpp)
   target_link_libraries(test_native_harness cooperative_protocol cooperative_coordinator)
-  ament_target_dependencies(test_native_harness my_epuck_interfaces nav2_msgs rclcpp rclcpp_action)
+  ament_target_dependencies(test_native_harness my_epuck_interfaces nav2_msgs nav_msgs rclcpp rclcpp_action)
+  ament_add_gtest(test_continuous_harness test/test_continuous_harness.cpp)
+  target_link_libraries(test_continuous_harness cooperative_protocol cooperative_coordinator)
+  ament_target_dependencies(test_continuous_harness
+    my_epuck_interfaces nav2_msgs nav_msgs rclcpp rclcpp_action)
 endif()
 
 ament_export_include_directories(include)

@@ -841,7 +841,16 @@ private:
         ++m_.navigation_failures;
         const std::string error_message =
           result.result ? result.result->error_msg : "missing_result";
-        const std::string category = classify_nav2_failure(error_message);
+        std::string category = classify_nav2_failure(error_message);
+        if (category == "UNKNOWN_NAV2_FAILURE") {
+          if (result.code == rclcpp_action::ResultCode::ABORTED) {
+            category = "ACTION_ABORTED";
+          } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
+            category = "ACTION_CANCELED";
+          } else if (result.code == rclcpp_action::ResultCode::UNKNOWN) {
+            category = "ACTION_UNKNOWN";
+          }
+        }
         std::string reason = category + ":action_status=" +
           std::to_string(static_cast<int>(result.code)) + ":error_code=" +
           std::to_string(result.result ? result.result->error_code : 0) + ":error_msg=" +

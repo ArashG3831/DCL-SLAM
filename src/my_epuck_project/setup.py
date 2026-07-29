@@ -33,6 +33,8 @@ setup(
             'source_aware_map_fusion = '
             'my_epuck_project.source_aware_map_fusion:main',
             'twist_stamper = my_epuck_project.twist_stamper:main',
+            'cooperative_experiment_logger = '
+            'my_epuck_project.cooperative_experiment_logger:main',
         ],
     },
 )

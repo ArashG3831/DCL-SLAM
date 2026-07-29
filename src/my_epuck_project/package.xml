@@ -15,11 +15,16 @@
   <export>
     <build_type>ament_python</build_type>
   </export>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>my_epuck_frontier_candidates</exec_depend>
   <exec_depend>my_epuck_cooperative_exploration</exec_depend>
   <exec_depend>my_epuck_interfaces</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
 </package>

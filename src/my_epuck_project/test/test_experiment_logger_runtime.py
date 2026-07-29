@@ -1,0 +1,149 @@
+import json
+import threading
+
+import pytest
+import rclpy
+from nav_msgs.msg import OccupancyGrid
+from rcl_interfaces.msg import Log
+
+from my_epuck_project.cooperative_experiment_logger import CooperativeExperimentLogger
+
+
+@pytest.fixture
+def observer(tmp_path):
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            f"output_root:={tmp_path}",
+            "-p",
+            "enable_console_status:=false",
+        ]
+    )
+    node = CooperativeExperimentLogger()
+    yield node
+    if not node.finalized:
+        node.finalize(False)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_events(observer):
+    observer.events.flush()
+    return [
+        json.loads(line)
+        for line in (observer.directory / "events.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+
+
+def controller_error():
+    message = Log()
+    message.level = Log.ERROR
+    message.name = "robot2.controller_server"
+    message.msg = "Failed to make progress"
+    return message
+
+
+def test_controller_error_after_info_does_not_change_call_site_severity(observer):
+    observer.event("STACK_READY", "prior info event", console=True)
+    observer.rosout(controller_error())
+    events = read_events(observer)
+    assert events[-1]["event_type"] == "CONTROLLER_WARNING"
+    assert events[-1]["message"] == "Failed to make progress"
+
+
+def test_nonfatal_subsystem_error_is_counted_and_logging_continues(observer):
+    def malformed():
+        raise ValueError("malformed diagnostic")
+
+    assert observer.safe_call("warning_normalization", malformed) is None
+    observer.event("STACK_READY", "continued after malformed input")
+    assert sum(observer.internal_errors.values()) == 1
+    assert [event["event_type"] for event in read_events(observer)][-2:] == [
+        "LOGGER_INTERNAL_ERROR",
+        "STACK_READY",
+    ]
+
+
+def test_double_finalization_and_late_callback_are_safe(observer):
+    assert observer.finalize(False)
+    before = (observer.directory / "events.jsonl").stat().st_size
+    called = []
+    observer.safe_call("late_callback", lambda: called.append(True))
+    assert observer.finalize(False) is False
+    assert called == []
+    assert (observer.directory / "events.jsonl").stat().st_size == before
+    assert read_json(observer.directory / "summary.json")["run"]["clean_shutdown"] is False
+
+
+def test_partial_and_terminal_robot_states_are_retained(observer):
+    observer.latest["robot1"].update(
+        claim_state="SUCCEEDED", claim_id=1, navigation_active=False
+    )
+    observer.latest["robot2"].update(
+        claim_state="NAVIGATING", claim_id=2, navigation_active=True
+    )
+    summary = observer.summary(False)
+    assert summary["robot_terminal_state"]["robot1"]["claim_state"] == "SUCCEEDED"
+    assert summary["robot_terminal_state"]["robot2"]["navigation_active"] is True
+    observer.latest["robot2"].update(claim_state="SUCCEEDED", navigation_active=False)
+    summary = observer.summary(True)
+    assert all(
+        not state["navigation_active"]
+        for state in summary["robot_terminal_state"].values()
+    )
+
+
+def test_clean_finalization_closes_files_after_internal_error(observer):
+    observer.safe_call("optional_metric", lambda: 1 / 0)
+    assert observer.finalize(True)
+    assert observer.events.closed
+    assert all(stream.closed for stream in observer.files)
+    assert read_json(observer.directory / "run_manifest.json")["clean_shutdown"] is True
+    summary = read_json(observer.directory / "summary.json")
+    assert summary["system"]["internal_logger_error_count"] == 1
+
+
+def test_large_occupancy_grid_is_converted_and_counted_once(observer):
+    message = OccupancyGrid()
+    message.info.width = 320
+    message.info.height = 320
+    message.info.resolution = 0.01
+    message.data = [-1] * 10000 + [0] * 90000 + [100] * 2400
+    observer.mark("robot1", "map", message)
+    assert observer.map_counts("robot1", "map") == (92400, 90000, 2400)
+    first = observer._map_cache[("robot1", "map")]
+    assert observer.map_counts("robot1", "map") == (92400, 90000, 2400)
+    assert observer._map_cache[("robot1", "map")] is first
+
+
+def test_concurrent_updates_and_finalization_do_not_write_closed_files(observer):
+    failures = []
+
+    def update(index):
+        try:
+            for sequence in range(100):
+                observer.safe_call(
+                    f"thread_{index}",
+                    observer.event,
+                    "NAVIGATION_PROGRESS",
+                    f"{index}:{sequence}",
+                )
+                observer.safe_call("rosout", observer.rosout, controller_error())
+        except Exception as exc:  # Test must expose errors outside fault boundaries.
+            failures.append(exc)
+
+    threads = [threading.Thread(target=update, args=(index,)) for index in range(3)]
+    for thread in threads:
+        thread.start()
+    observer.finalize(False)
+    for thread in threads:
+        thread.join()
+    assert failures == []
+    assert read_json(observer.directory / "summary.json")["run"]["clean_shutdown"] is False

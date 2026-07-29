@@ -7,3 +7,4 @@ log/
 *.db3
 __pycache__/
 *.pyc
+/results/

@@ -4,8 +4,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml
@@ -77,7 +78,12 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch',
             'two_robots_teammate_filtered_dual_slam_launch.py',
-        ))
+        )),
+        launch_arguments={
+            'webots_port': LaunchConfiguration('webots_port'),
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
+        }.items(),
     )
     alignment = [
         Node(
@@ -138,6 +144,9 @@ def generate_launch_description():
             ),
         ])
     return LaunchDescription([
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
         filtered_slam,
         *alignment,
         *exchange,

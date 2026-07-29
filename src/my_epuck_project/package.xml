@@ -20,6 +20,7 @@
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-psutil</exec_depend>
   <exec_depend>my_epuck_frontier_candidates</exec_depend>
   <exec_depend>my_epuck_cooperative_exploration</exec_depend>
   <exec_depend>my_epuck_interfaces</exec_depend>

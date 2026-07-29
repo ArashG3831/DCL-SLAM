@@ -35,6 +35,10 @@ setup(
             'twist_stamper = my_epuck_project.twist_stamper:main',
             'cooperative_experiment_logger = '
             'my_epuck_project.cooperative_experiment_logger:main',
+            'cooperative_trial_collector = '
+            'my_epuck_project.cooperative_trial_collector:main',
+            'run_cooperative_regression = '
+            'my_epuck_project.cooperative_regression:main',
         ],
     },
 )

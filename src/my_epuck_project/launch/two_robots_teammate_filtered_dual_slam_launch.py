@@ -4,9 +4,16 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+)
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
@@ -62,6 +69,9 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': 'false',
             'world': 'epuck_d500_two_world_teammate_visible.wbt',
+            'webots_port': LaunchConfiguration('webots_port'),
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
         }.items(),
     )
     filters = []
@@ -103,6 +113,9 @@ def generate_launch_description():
             }],
         ))
     return LaunchDescription([
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
         base,
         *filters,
         *slam_actions(package_dir, 'robot1'),

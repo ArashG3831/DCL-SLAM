@@ -73,13 +73,22 @@ def coordinator(robot, peer, test_rank, test_frontier_id):
 def generate_launch_description():
     project = get_package_share_directory('my_epuck_project')
     stack = IncludeLaunchDescription(PythonLaunchDescriptionSource(os.path.join(
-        project, 'launch', 'two_robots_frontier_candidates_launch.py')))
+        project, 'launch', 'two_robots_frontier_candidates_launch.py')),
+        launch_arguments={
+            'webots_port': LaunchConfiguration('webots_port'),
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
+        }.items(),
+    )
     robot1_rank = LaunchConfiguration('robot1_test_candidate_rank')
     robot2_rank = LaunchConfiguration('robot2_test_candidate_rank')
     robot1_frontier = LaunchConfiguration('robot1_test_frontier_id')
     robot2_frontier = LaunchConfiguration('robot2_test_frontier_id')
     return LaunchDescription([
         DeclareLaunchArgument('coordinator_mode', default_value='single_goal'),
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('one_goal_only', default_value='true'),
         DeclareLaunchArgument('coordinator_autostart', default_value='true'),
         DeclareLaunchArgument('cycle_cooldown_s', default_value='2.5'),

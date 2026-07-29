@@ -44,6 +44,9 @@ def generate_launch_description():
                 LaunchConfiguration('map_stability_window_s'),
             'completion_consensus_grace_s':
                 LaunchConfiguration('completion_consensus_grace_s'),
+            'webots_port': LaunchConfiguration('webots_port'),
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
         }.items(),
     )
     observer = Node(
@@ -65,6 +68,9 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument('run_id', default_value=''),
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument(
             'output_root', default_value='/home/arash/webots_ws/results'),
         DeclareLaunchArgument('mission_timeout_s', default_value='600.0'),

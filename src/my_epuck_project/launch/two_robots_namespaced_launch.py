@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 
 import os
+import tempfile
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler
+from launch.actions import (
+    DeclareLaunchArgument,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.actions import Node
@@ -16,15 +21,19 @@ from webots_ros2_driver.webots_controller import WebotsController
 from webots_ros2_driver.wait_for_controller_connection import WaitForControllerConnection
 
 
-def generate_launch_description():
+def launch_setup(context):
     # WSL reaches Windows Webots through this fixed external-controller endpoint.
     webots_controller_module.controller_ip_address = lambda: '127.0.0.1'
     webots_launcher_module.controller_url_prefix = lambda port='1234': f'tcp://127.0.0.1:{port}/'
 
     package_dir = get_package_share_directory('my_epuck_project')
-    world = LaunchConfiguration('world')
+    world = LaunchConfiguration('world').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
-    webots_port = '23000'
+    webots_port = LaunchConfiguration('webots_port').perform(context)
+    webots_mode = LaunchConfiguration('webots_mode').perform(context)
+    webots_gui = (
+        LaunchConfiguration('webots_gui').perform(context).lower() == 'true'
+    )
 
     base_urdf_path = os.path.join(package_dir, 'resource', 'epuck_d500_webots.urdf')
     base_control_path = os.path.join(package_dir, 'resource', 'ros2_control.yml')
@@ -41,6 +50,8 @@ def generate_launch_description():
         ]),
         ros2_supervisor=False,
         port=webots_port,
+        mode=webots_mode,
+        gui=webots_gui,
     )
 
     controller_manager_timeout = ['--controller-manager-timeout', '50']
@@ -53,7 +64,8 @@ def generate_launch_description():
             '<topicName>/scan_d500</topicName>\n'
             f'                <frameName>{robot_name}/d500_lidar</frameName>',
         )
-        robot_urdf_path = f'/tmp/my_epuck_project_{robot_name}.urdf'
+        robot_urdf_path = os.path.join(
+            tempfile.gettempdir(), f'my_epuck_project_{robot_name}.urdf')
         with open(robot_urdf_path, 'w') as f:
             f.write(robot_urdf)
 
@@ -78,7 +90,10 @@ def generate_launch_description():
             '\njoint_state_broadcaster:\n',
             f'\n/{robot_name}/joint_state_broadcaster:\n',
         )
-        robot_control_path = f'/tmp/my_epuck_project_{robot_name}_ros2_control.yml'
+        robot_control_path = os.path.join(
+            tempfile.gettempdir(),
+            f'my_epuck_project_{robot_name}_ros2_control.yml',
+        )
         with open(robot_control_path, 'w') as f:
             f.write(robot_control)
 
@@ -198,6 +213,10 @@ def generate_launch_description():
             waiting_nodes,
         ])
 
+    return [webots] + robot_actions
+
+
+def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'world',
@@ -209,5 +228,22 @@ def generate_launch_description():
             default_value='false',
             description='Run against the external Windows Webots clock behavior.',
         ),
-        webots,
-    ] + robot_actions)
+        DeclareLaunchArgument(
+            'webots_port',
+            default_value='23000',
+            description='Dedicated Webots external-controller TCP port.',
+        ),
+        DeclareLaunchArgument(
+            'webots_mode',
+            default_value='realtime',
+            choices=['pause', 'realtime', 'fast'],
+            description='Webots startup simulation mode.',
+        ),
+        DeclareLaunchArgument(
+            'webots_gui',
+            default_value='true',
+            choices=['true', 'false'],
+            description='Enable Webots rendering and its normal window.',
+        ),
+        OpaqueFunction(function=launch_setup),
+    ])

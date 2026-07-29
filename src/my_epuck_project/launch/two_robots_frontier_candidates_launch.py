@@ -2,8 +2,9 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generator(robot):
@@ -35,6 +36,20 @@ def generator(robot):
 
 def generate_launch_description():
     project = get_package_share_directory('my_epuck_project')
-    stack = IncludeLaunchDescription(PythonLaunchDescriptionSource(os.path.join(
-        project, 'launch', 'two_robots_teammate_filtered_stack_launch.py')))
-    return LaunchDescription([stack, generator('robot1'), generator('robot2')])
+    stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            project, 'launch', 'two_robots_teammate_filtered_stack_launch.py')),
+        launch_arguments={
+            'webots_port': LaunchConfiguration('webots_port'),
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
+        }.items(),
+    )
+    return LaunchDescription([
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
+        stack,
+        generator('robot1'),
+        generator('robot2'),
+    ])

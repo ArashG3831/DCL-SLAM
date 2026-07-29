@@ -40,11 +40,18 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --trials 10 --maximum-concurrency 3 \
+  --execution-profile headless --sensor-profile full \
   --world-profile large \
   --ros-domain-base 100 --webots-port-base 23000 \
   --startup-timeout 180 --mission-timeout 1800 \
   --fast-mode true --rendering false
 ```
+
+`headless` is the validated full-sensor campaign profile: rendering and RViz
+are disabled while the standard sensor, physics, SLAM, Nav2, fusion, and
+cooperative settings remain enabled. The `throughput` profile is retained only
+for explicitly controlled experiments; it selects the reduced-sensor profile
+and is not a recommended benchmark mode.
 
 This is the normal top-level command. It validates prerequisites, builds only
 `my_epuck_project`, runs deterministic package tests, performs calibration and

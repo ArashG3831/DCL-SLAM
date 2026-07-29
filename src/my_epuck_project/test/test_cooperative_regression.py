@@ -21,6 +21,8 @@ from my_epuck_project.cooperative_regression import (
     scoped_shutdown,
     update_progress,
     validate_cli_options,
+    validate_resource_bounds,
+    resolved_trial_resources,
     validate_existing_attempt,
     wait_for_attempt_supervisor,
     windows_port_pid,
@@ -64,6 +66,62 @@ def test_trial_resources_are_unique_and_configurable(tmp_path):
     assert all(item.webots_mode == 'fast' for item in values)
     assert all(item.webots_gui is False for item in values)
     assert all(item.launch_rviz is False for item in values)
+
+
+def test_headless_profile_selects_full_sensors_and_no_gui():
+    args = parser().parse_args([])
+    from my_epuck_project.cooperative_regression import apply_execution_profile
+    apply_execution_profile(args)
+    assert args.execution_profile == 'headless'
+    assert args.rendering is False
+    assert args.rviz is False
+    assert args.sensor_profile == 'full'
+
+
+def test_throughput_profile_is_explicit_reduced_sensor_experiment():
+    args = parser().parse_args(['--execution-profile', 'throughput'])
+    from my_epuck_project.cooperative_regression import apply_execution_profile
+    apply_execution_profile(args)
+    assert args.execution_profile == 'throughput'
+    assert args.rendering is False
+    assert args.rviz is False
+    assert args.sensor_profile == 'throughput'
+
+
+@pytest.mark.parametrize('base', [0, 232])
+def test_ros_domain_boundary_values_are_valid(base):
+    args = parser().parse_args([
+        '--trials', '1', '--ros-domain-base', str(base)])
+    validate_resource_bounds(args)
+    assert resolved_trial_resources(args, 1)[0] == base
+
+
+@pytest.mark.parametrize('option,value', [
+    ('--ros-domain-base', '-1'),
+    ('--ros-domain-base', '233'),
+])
+def test_invalid_ros_domain_is_rejected_before_probe(option, value):
+    args = parser().parse_args([option, value])
+    with pytest.raises(SystemExit, match='ros-domain-base'):
+        validate_resource_bounds(args)
+
+
+def test_ros_domain_range_exhaustion_is_rejected():
+    args = parser().parse_args([
+        '--trials', '2', '--ros-domain-base', '232'])
+    with pytest.raises(SystemExit, match='exceeds supported maximum'):
+        validate_resource_bounds(args)
+
+
+def test_retry_reuses_trial_resource_without_collision(tmp_path):
+    args = options(tmp_path, trials=2)
+    first = attempt_namespace(args, 1, 1, tmp_path)
+    retry = attempt_namespace(args, 1, 2, tmp_path)
+    second = attempt_namespace(args, 2, 1, tmp_path)
+    assert (first.ros_domain_id, first.webots_port) == (
+        retry.ros_domain_id, retry.webots_port)
+    assert (retry.ros_domain_id, retry.webots_port) != (
+        second.ros_domain_id, second.webots_port)
 
 
 def test_supervisor_missing_classification_becomes_infrastructure_failure(

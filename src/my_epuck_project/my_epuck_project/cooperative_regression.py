@@ -65,6 +65,10 @@ EXPECTED_NODE_SUFFIXES = (
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
+ROS_DOMAIN_MIN = 0
+ROS_DOMAIN_MAX = 232
+WEBOTS_PORT_MIN = 1024
+WEBOTS_PORT_MAX = 65535
 PROGRESS_LOCK = threading.RLock()
 
 
@@ -214,6 +218,9 @@ def print_profile_selection(args, selected):
     print(f'execution_profile={args.execution_profile}')
     print(f'rendering={args.rendering}')
     print(f'rviz={args.rviz}')
+    print(f'sensor_profile={args.sensor_profile}')
+    print(f'logging_mode=observer,console_status={args.logger_console_status}')
+    print(f'fast_mode={args.fast_mode}')
     print(f'emergency_wall_runtime_s={args.emergency_wall_runtime}')
     print('expected_clock_publisher=webots_ros2_driver Ros2Supervisor -> /clock')
     print(
@@ -222,6 +229,39 @@ def print_profile_selection(args, selected):
     print(
         f'ros_domain_range={args.ros_domain_base}..'
         f'{args.ros_domain_base + args.trials - 1}')
+
+
+def resolved_trial_resources(args, trial_number):
+    """Return the isolated domain and Webots port for one trial."""
+    if not 1 <= trial_number <= args.trials:
+        raise ValueError(
+            f'trial number {trial_number} is outside 1..{args.trials}')
+    return (
+        args.ros_domain_base + trial_number - 1,
+        args.webots_port_base + trial_number - 1,
+    )
+
+
+def validate_resource_bounds(args):
+    """Validate derived resources before any ROS graph probe is attempted."""
+    if not ROS_DOMAIN_MIN <= args.ros_domain_base <= ROS_DOMAIN_MAX:
+        raise SystemExit(
+            f'--ros-domain-base must be between {ROS_DOMAIN_MIN} and '
+            f'{ROS_DOMAIN_MAX}')
+    last_domain = args.ros_domain_base + args.trials - 1
+    if last_domain > ROS_DOMAIN_MAX:
+        raise SystemExit(
+            f'ROS domain range {args.ros_domain_base}..{last_domain} exceeds '
+            f'supported maximum {ROS_DOMAIN_MAX}')
+    if not WEBOTS_PORT_MIN <= args.webots_port_base <= WEBOTS_PORT_MAX:
+        raise SystemExit(
+            f'--webots-port-base must be between {WEBOTS_PORT_MIN} and '
+            f'{WEBOTS_PORT_MAX}')
+    last_port = args.webots_port_base + args.trials - 1
+    if last_port > WEBOTS_PORT_MAX:
+        raise SystemExit(
+            f'Webots port range {args.webots_port_base}..{last_port} exceeds '
+            f'supported maximum {WEBOTS_PORT_MAX}')
 
 
 def hold_open_artifacts_valid(attempt):
@@ -470,17 +510,13 @@ def tf_readiness(domain, timeout_s=4.0):
 
 
 def validate_resource_range(args, completed_trials=None):
+    validate_resource_bounds(args)
     completed_trials = completed_trials or set()
     failures = []
     for number in range(1, args.trials + 1):
         if number in completed_trials:
             continue
-        domain = args.ros_domain_base + number - 1
-        port = args.webots_port_base + number - 1
-        if not 0 <= domain <= 232:
-            failures.append(f'ROS_DOMAIN_ID {domain} is outside 0..232')
-        if not 1024 <= port <= 65535:
-            failures.append(f'Webots port {port} is outside 1024..65535')
+        domain, port = resolved_trial_resources(args, number)
         if linux_port_used(port) or windows_port_pid(port) is not None:
             failures.append(f'Webots port {port} is already in use')
         nodes = domain_nodes(domain)
@@ -768,6 +804,17 @@ def internal_trial(args):
     (attempt / 'tmp').mkdir()
     shutdown_events = attempt / 'shutdown_events.jsonl'
     start = time.monotonic()
+    startup_timeline = {
+        'runner_process_start': {'wall_elapsed_s': 0.0},
+    }
+
+    def mark_startup_stage(name, **details):
+        startup_timeline[name] = {
+            'wall_elapsed_s': time.monotonic() - start,
+            **details,
+        }
+
+    mark_startup_stage('result_directory_created')
     metadata = {
         'schema_version': '1.0.0',
         'trial_id': args.trial_id,
@@ -804,7 +851,9 @@ def internal_trial(args):
         },
         'rviz_requested': args.launch_rviz,
         'hold_open_after_completion': args.hold_open_after_completion,
+        'startup_timeline': startup_timeline,
     }
+    mark_startup_stage('runtime_parameters_generated')
     atomic_json(attempt / 'runner_metadata.json', metadata)
     environment = os.environ.copy()
     environment.update({
@@ -851,6 +900,8 @@ def internal_trial(args):
         stderr=subprocess.STDOUT, text=True,
         preexec_fn=lambda: os.setpgid(0, launch.pid))
     processes = [launch, collector]
+    mark_startup_stage('launch_process_started', pid=launch.pid)
+    mark_startup_stage('collector_process_started', pid=collector.pid)
     ps_processes = [psutil.Process(process.pid) for process in processes]
     for process in ps_processes:
         try:
@@ -938,6 +989,17 @@ def internal_trial(args):
                 pass
             if args.time_mode == 'sim' and now - last_clock_probe >= 5.0:
                 clock_ok, clock_details = clock_readiness(args.ros_domain_id)
+                if 'first_clock_probe' not in startup_timeline:
+                    mark_startup_stage('first_clock_probe')
+                if clock_details.get('sample_wall_times'):
+                    mark_startup_stage(
+                        'first_clock_sample',
+                        probe_wall_elapsed_s=clock_details[
+                            'sample_wall_times'][0])
+                if len(clock_details.get('samples', [])) >= 2:
+                    mark_startup_stage(
+                        'first_increasing_clock_pair',
+                        samples=clock_details['samples'][:2])
                 metadata['clock_readiness'] = clock_details
                 metadata['clock_error'] = (
                     None if clock_ok else clock_details.get(
@@ -946,12 +1008,19 @@ def internal_trial(args):
                     tf_ok, tf_details = tf_readiness(args.ros_domain_id)
                     metadata['tf_readiness'] = tf_details
                 atomic_json(attempt / 'runner_metadata.json', metadata)
+                # The probe uses a bounded wall-time wait and may finish
+                # after the loop's initial timestamp. Readiness and mission
+                # deadlines must use the actual observation time.
+                now = time.monotonic()
                 last_clock_probe = now
             if status.get('ready') and clock_ok and tf_ok and not ready:
                 nodes = status.get('nodes', [])
                 ready = all(any(node.endswith(suffix) for node in nodes)
                             for suffix in EXPECTED_NODE_SUFFIXES)
                 if ready:
+                    mark_startup_stage(
+                        'full_readiness_declared',
+                        readiness_graph_nodes=nodes)
                     start_rviz()
                     mission_deadline = (now + args.mission_timeout
                                         if args.time_mode == 'wall'
@@ -960,6 +1029,12 @@ def internal_trial(args):
                     mission_sim_start = status.get('elapsed_s')
                     metadata['readiness_elapsed_s'] = now - start
                     metadata['readiness_graph_nodes'] = nodes
+                    mark_startup_stage(
+                        'mission_timer_started',
+                        mission_clock=(
+                            'wall' if args.time_mode == 'wall' else 'sim'),
+                        mission_sim_start=mission_sim_start)
+                    metadata['startup_timeline'] = startup_timeline
                     atomic_json(attempt / 'runner_metadata.json', metadata)
             if (ready and status.get('settled')
                     and not holding_open):
@@ -1247,6 +1322,7 @@ def next_attempt(campaign, trial_id):
 def attempt_namespace(args, trial_number, attempt_number, campaign):
     trial_id = f'trial_{trial_number:02d}'
     attempt_id = f'{trial_id}_attempt_{attempt_number:02d}'
+    ros_domain_id, webots_port = resolved_trial_resources(args, trial_number)
     return argparse.Namespace(
         internal_trial=True,
         attempt_dir=str(campaign / 'attempts' / attempt_id),
@@ -1255,8 +1331,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         run_id=attempt_id,
         world_profile=getattr(args, 'world_profile', 'small'),
         source_world_path=getattr(args, 'source_world_path', ''),
-        ros_domain_id=args.ros_domain_base + trial_number - 1,
-        webots_port=args.webots_port_base + trial_number - 1,
+        ros_domain_id=ros_domain_id,
+        webots_port=webots_port,
         webots_mode='fast' if args.fast_mode else 'realtime',
         webots_gui=args.rendering,
         launch_rviz=args.rviz,
@@ -1643,6 +1719,13 @@ def create_manifest(args, campaign, workspace):
         'webots_mode': 'fast' if args.fast_mode else 'realtime',
         'execution_profile': args.execution_profile,
         'rendering_mode': 'enabled' if args.rendering else 'disabled',
+        'rviz': args.rviz,
+        'sensor_profile': args.sensor_profile,
+        'logging_mode': {
+            'observer': True,
+            'console_status': args.logger_console_status,
+        },
+        'fast_mode': args.fast_mode,
         'exact_webots_options': (
             f'--port=<trial-port> --batch '
             f'--mode={"fast" if args.fast_mode else "realtime"}'
@@ -1991,10 +2074,13 @@ def apply_profile_defaults(args, profile_name=None):
 
 def apply_execution_profile(args):
     """Resolve rendering/RViz defaults while retaining explicit overrides."""
-    name = args.execution_profile or 'throughput'
+    name = args.execution_profile or 'headless'
     settings = {
         'visual': (True, True),
         'rendered': (True, False),
+        'headless': (False, False),
+        # Retained for controlled experiments only.  It is not the valid
+        # benchmark recommendation because it changes the sensor profile.
         'throughput': (False, False),
     }
     profile_rendering, profile_rviz = settings[name]
@@ -2013,6 +2099,12 @@ def apply_execution_profile(args):
     if getattr(args, 'sensor_profile', None) is None:
         args.sensor_profile = (
             'throughput' if name == 'throughput' else 'full')
+    elif name == 'headless' and args.sensor_profile != 'full':
+        print(
+            'EXECUTION_PROFILE_CONFLICT profile=headless '
+            f'sensor_profile_override={args.sensor_profile}; '
+            'full sensors are the validated headless configuration',
+            flush=True)
     args.execution_profile = name
     return args
 
@@ -2048,11 +2140,15 @@ def parser():
     result.add_argument(
         '--fast-mode', type=boolean, default=True, metavar='BOOL')
     result.add_argument(
+        '--logger-console-status', type=boolean, default=False,
+        metavar='BOOL', help='Enable periodic logger console status output.')
+    result.add_argument(
         '--rendering', type=boolean, default=None, metavar='BOOL')
     result.add_argument(
         '--execution-profile',
-        choices=['visual', 'rendered', 'throughput'], default=None,
-        help='Reusable visual/rendered/headless execution configuration.')
+        choices=['visual', 'rendered', 'headless', 'throughput'], default=None,
+        help=('Reusable execution configuration. headless is the validated '
+              'full-sensor mode; throughput is experimental/rejected.'))
     result.add_argument(
         '--hold-open-after-completion',
         type=boolean,
@@ -2110,6 +2206,7 @@ def validate_cli_options(args):
         args.mission_timeout = None
     if args.emergency_wall_runtime is not None and args.emergency_wall_runtime <= 0:
         raise SystemExit('--emergency-wall-runtime must be positive')
+    validate_resource_bounds(args)
     if (not args.internal_trial and args.rviz
             and (args.trials != 1 or args.maximum_concurrency != 1)):
         raise SystemExit(

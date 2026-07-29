@@ -349,3 +349,10 @@ TEST(Nav2FailureClassification, CodeZeroWithoutEvidenceRemainsUnknown)
 {
   EXPECT_EQ(m::classify_nav2_failure(""), "UNKNOWN_NAV2_FAILURE");
 }
+
+TEST(Nav2FailureClassification, PreservesSpecificFailureSignals)
+{
+  EXPECT_EQ(m::classify_nav2_failure("failed progress checker"), "PROGRESS_CHECK_FAILURE");
+  EXPECT_EQ(m::classify_nav2_failure("recovery behavior exhausted"), "RECOVERY_FAILURE");
+  EXPECT_EQ(m::classify_nav2_failure("transform unavailable"), "TRANSFORM_FAILURE");
+}

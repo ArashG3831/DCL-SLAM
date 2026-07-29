@@ -4,12 +4,17 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml
+from my_epuck_project.cooperative_profiles import profile
 
 
 LIFECYCLE_NODES = [
@@ -19,7 +24,7 @@ LIFECYCLE_NODES = [
 ]
 
 
-def nav2_nodes(package_dir, robot):
+def nav2_nodes(package_dir, robot, selected):
     source = os.path.join(
         package_dir, 'resource', f'nav2_{robot}_shared_map.yaml'
     )
@@ -27,7 +32,12 @@ def nav2_nodes(package_dir, robot):
         RewrittenYaml(
             source_file=source,
             root_key=robot,
-            param_rewrites={},
+            param_rewrites={
+                'local_costmap.local_costmap.ros__parameters.resolution':
+                    str(selected['local_costmap_resolution']),
+                'global_costmap.global_costmap.ros__parameters.resolution':
+                    str(selected['global_costmap_resolution']),
+            },
             convert_types=True,
         ),
         allow_substs=True,
@@ -72,19 +82,25 @@ def nav2_nodes(package_dir, robot):
     return nodes
 
 
-def generate_launch_description():
+def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
+    selected = profile(
+        LaunchConfiguration('world_profile').perform(context),
+        os.path.join(package_dir, 'worlds'),
+    )
     filtered_slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch',
             'two_robots_teammate_filtered_dual_slam_launch.py',
         )),
         launch_arguments={
+            'world_profile': selected['name'],
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
         }.items(),
     )
+    relative = selected['world_metadata']['relative_transform']
     alignment = [
         Node(
             package='tf2_ros',
@@ -102,8 +118,8 @@ def generate_launch_description():
             name='shared_to_robot2_map',
             output='screen',
             arguments=[
-                '--x', '-0.299999998712', '--y', '-0.000027796077',
-                '--z', '0.0', '--yaw', '-3.1415',
+                '--x', str(relative[0]), '--y', str(relative[1]),
+                '--z', '0.0', '--yaw', str(relative[2]),
                 '--frame-id', 'shared_map', '--child-frame-id', 'robot2/map',
             ],
         ),
@@ -139,17 +155,28 @@ def generate_launch_description():
                     'output_topic': 'shared_map',
                     'metadata_topic': 'shared_map_metadata',
                     'output_frame': 'shared_map',
-                    'resolution': 0.01,
+                    'resolution': selected['fusion_resolution'],
                 }],
             ),
         ])
-    return LaunchDescription([
-        DeclareLaunchArgument('webots_port', default_value='23000'),
-        DeclareLaunchArgument('webots_mode', default_value='realtime'),
-        DeclareLaunchArgument('webots_gui', default_value='true'),
+    return [
         filtered_slam,
         *alignment,
         *exchange,
-        *nav2_nodes(package_dir, 'robot1'),
-        *nav2_nodes(package_dir, 'robot2'),
+        *nav2_nodes(package_dir, 'robot1', selected),
+        *nav2_nodes(package_dir, 'robot2', selected),
+    ]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_profile',
+            default_value='small',
+            choices=['large', 'small'],
+        ),
+        DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('webots_mode', default_value='realtime'),
+        DeclareLaunchArgument('webots_gui', default_value='true'),
+        OpaqueFunction(function=launch_setup),
     ])

@@ -2,12 +2,13 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from my_epuck_project.cooperative_profiles import profile
 
-def generator(robot):
+def generator(robot, minimum_frontier_cells):
     return Node(
         package='my_epuck_frontier_candidates', executable='frontier_candidate_generator',
         name='frontier_candidate_generator', namespace=robot, output='screen',
@@ -22,7 +23,7 @@ def generator(robot):
             'candidate_topic': f'/{robot}/frontier_candidates',
             'marker_topic': f'/{robot}/frontier_candidate_markers',
             'processing_rate_hz': 0.5,
-            'minimum_frontier_cells': 5,
+            'minimum_frontier_cells': minimum_frontier_cells,
             'minimum_frontier_length_m': 0.05,
             'stable_id_quantization_m': 0.05,
             'approach_clearance_m': 0.06,
@@ -34,22 +35,38 @@ def generator(robot):
         }],
     )
 
-def generate_launch_description():
+def launch_setup(context):
     project = get_package_share_directory('my_epuck_project')
+    selected = profile(
+        LaunchConfiguration('world_profile').perform(context),
+        os.path.join(project, 'worlds'),
+    )
     stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             project, 'launch', 'two_robots_teammate_filtered_stack_launch.py')),
         launch_arguments={
+            'world_profile': selected['name'],
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
         }.items(),
     )
+    return [
+        stack,
+        generator('robot1', selected['minimum_frontier_cells']),
+        generator('robot2', selected['minimum_frontier_cells']),
+    ]
+
+
+def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_profile',
+            default_value='small',
+            choices=['large', 'small'],
+        ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
-        stack,
-        generator('robot1'),
-        generator('robot2'),
+        OpaqueFunction(function=launch_setup),
     ])

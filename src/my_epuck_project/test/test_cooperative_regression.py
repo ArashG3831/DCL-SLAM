@@ -7,6 +7,7 @@ import sys
 import time
 
 from my_epuck_project.cooperative_regression import (
+    apply_profile_defaults,
     attempt_namespace,
     classify_attempt,
     hold_open_artifacts_valid,
@@ -70,6 +71,36 @@ def test_manual_rviz_uses_installed_cooperative_config():
     assert command[2].endswith(
         '/resource/cooperative_manual_exploration.rviz')
     assert Path(command[2]).is_file()
+
+
+def test_runner_profile_defaults_and_rviz_selection():
+    """New runs default large while explicit small retains proven timeouts."""
+    large = apply_profile_defaults(parser().parse_args([]))
+    assert large.world_profile == 'large'
+    assert large.startup_timeout == 180.0
+    assert large.mission_timeout == 1800.0
+    assert large.shift_window == 1
+    small = apply_profile_defaults(
+        parser().parse_args(['--world-profile', 'small']))
+    assert small.startup_timeout == 120.0
+    assert small.mission_timeout == 240.0
+    assert small.shift_window == 3
+    large_rviz = manual_rviz_command('large')
+    assert large_rviz[:2] == ['rviz2', '-d']
+    assert Path(large_rviz[2]).is_file()
+    assert 'large.rviz' in large_rviz[2]
+
+
+def test_world_profile_reaches_internal_trial_command(tmp_path):
+    """The selected profile and source world cross the supervisor boundary."""
+    args = options(tmp_path, trials=1)
+    args.world_profile = 'large'
+    args.source_world_path = str(tmp_path / 'large.wbt')
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    assert command[command.index('--world-profile') + 1] == 'large'
+    assert command[command.index('--source-world-path') + 1] == (
+        args.source_world_path)
 
 
 def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(

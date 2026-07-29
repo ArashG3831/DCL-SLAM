@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Continuous decentralized two-robot exploration with a passive observer."""
 
+import json
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -9,6 +10,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     IncludeLaunchDescription,
+    OpaqueFunction,
     TimerAction,
 )
 from launch.conditions import IfCondition
@@ -16,16 +18,29 @@ from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from my_epuck_project.cooperative_profiles import (
+    manual_rviz_path,
+    profile,
+    profile_summary,
+)
 
 
-def generate_launch_description():
+def runtime_actions(context):
     project = get_package_share_directory('my_epuck_project')
+    selected = profile(
+        LaunchConfiguration('world_profile').perform(context),
+        os.path.join(project, 'worlds'),
+    )
+    summary = profile_summary(selected)
+    source_world_path = LaunchConfiguration(
+        'source_world_path').perform(context) or selected['world_path']
     continuous_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             project, 'launch',
             'two_robots_cooperative_single_goal_launch.py',
         )),
         launch_arguments={
+            'world_profile': selected['name'],
             'coordinator_mode': 'continuous',
             'one_goal_only': 'false',
             'coordinator_autostart':
@@ -61,6 +76,33 @@ def generate_launch_description():
             'launch_file':
                 'two_robots_observed_continuous_exploration_launch.py',
             'enable_console_status': LaunchConfiguration('logger_console_status'),
+            'world_profile': selected['name'],
+            'source_world_path': source_world_path,
+            'installed_world_path': selected['world_path'],
+            'world_dimensions': list(
+                selected['world_metadata']['dimensions']),
+            'robot_start_poses_json': json.dumps(
+                summary['robot_start_poses'], sort_keys=True),
+            'known_relative_transform':
+                list(selected['world_metadata']['relative_transform']),
+            'slam_resolution': selected['slam_resolution'],
+            'fusion_resolution': selected['fusion_resolution'],
+            'global_costmap_resolution':
+                selected['global_costmap_resolution'],
+            'local_costmap_resolution':
+                selected['local_costmap_resolution'],
+            'lidar_maximum_range': summary['lidar_maximum_range'],
+            'initial_configuration_json': json.dumps({
+                'minimum_frontier_cells':
+                    selected['minimum_frontier_cells'],
+                'minimum_known_cell_gain_for_activity':
+                    selected['minimum_known_cell_gain_for_activity'],
+                'coverage_attribution_resolution':
+                    selected['coverage_attribution_resolution'],
+            }, sort_keys=True),
+            'world_sha256': selected['world_metadata']['sha256'],
+            'coverage_attribution_resolution':
+                selected['coverage_attribution_resolution'],
         }],
     )
     rviz = Node(
@@ -71,21 +113,32 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('launch_rviz')),
         arguments=[
             '-d',
-            os.path.join(
-                project,
-                'resource',
-                'cooperative_manual_exploration.rviz',
-            ),
+            manual_rviz_path(selected, os.path.join(project, 'resource')),
         ],
         additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
         parameters=[{'use_sim_time': False}],
     )
+    return [continuous_stack, observer, rviz]
+
+
+def generate_launch_description():
     timeout = TimerAction(
         period=LaunchConfiguration('mission_timeout_s'),
         condition=IfCondition(LaunchConfiguration('enable_mission_timeout')),
         actions=[EmitEvent(event=Shutdown(reason='bounded mission timeout'))],
     )
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_profile',
+            default_value='large',
+            choices=['large', 'small'],
+            description='Reusable continuous-exploration world profile.',
+        ),
+        DeclareLaunchArgument(
+            'source_world_path',
+            default_value='',
+            description='Optional source path recorded as experiment metadata.',
+        ),
         DeclareLaunchArgument('run_id', default_value=''),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
@@ -112,8 +165,6 @@ def generate_launch_description():
         DeclareLaunchArgument('map_stability_window_s', default_value='15.0'),
         DeclareLaunchArgument('completion_consensus_grace_s', default_value='8.0'),
         DeclareLaunchArgument('logger_console_status', default_value='true'),
-        continuous_stack,
-        observer,
-        rviz,
+        OpaqueFunction(function=runtime_actions),
         timeout,
     ])

@@ -42,6 +42,22 @@ class CooperativeExperimentLogger(Node):
     def __init__(self):
         super().__init__('cooperative_experiment_logger')
         defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.}
+        defaults.update({
+            'world_profile': 'small',
+            'source_world_path': '',
+            'installed_world_path': '',
+            'world_dimensions': [0.0, 0.0],
+            'robot_start_poses_json': '{}',
+            'known_relative_transform': [-0.3, 0.0, -math.pi],
+            'slam_resolution': 0.01,
+            'fusion_resolution': 0.01,
+            'global_costmap_resolution': 0.005,
+            'local_costmap_resolution': 0.005,
+            'lidar_maximum_range': 12.0,
+            'initial_configuration_json': '{}',
+            'world_sha256': '',
+            'coverage_attribution_resolution': 0.01,
+        })
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
@@ -242,13 +258,16 @@ class CooperativeExperimentLogger(Node):
         elif self.divergence_since is None:self.divergence_since=time.monotonic()
         elif not self.divergence_reported and time.monotonic()-self.divergence_since>=self.p['shared_map_divergence_grace_s']:
             self.divergence_reported=True; self.event('SHARED_MAP_DIVERGENCE','independent shared maps differ beyond grace period',severity='WARN')
-        transforms={'robot1':(0.,0.,0.),'robot2':(-.299999998712,-.000027796077,-3.1415)}
+        transforms={
+            'robot1': (0., 0., 0.),
+            'robot2': tuple(self.p['known_relative_transform']),
+        }
         if self.p['enable_coverage_attribution']:
             for r,snapshot in zip(self.robots,local):
                 if snapshot and self._last_attributed.get(r)!=snapshot[0]:
                     transform=transforms.get(r,(0.,0.,0.)); transformed=self._transformed_cache.get(r)
                     if transformed is None or transformed[0]!=snapshot[0]:
-                        transformed=(snapshot[0],known_world_cells(snapshot[1],.01,transform)); self._transformed_cache[r]=transformed
+                        transformed=(snapshot[0],known_world_cells(snapshot[1],self.p['coverage_attribution_resolution'],transform)); self._transformed_cache[r]=transformed
                     self.attribution.observe(r,transformed[1],time.monotonic()-self.start); self._last_attributed[r]=snapshot[0]
         a=self.attribution.summary(); row=self.row_time(); row.update(robot1_local_known=self.map_counts('robot1','map')[0],robot2_local_known=self.map_counts('robot2','map')[0],robot1_shared_known=known[0],robot2_shared_known=known[1],shared_free_cells=counts[0][0],shared_occupied_cells=counts[0][1],shared_unknown_cells=counts[0][2],known_area_m2=known[0]*maps[0].info.resolution**2,coverage_gain_cells=gain,coverage_gain_since_start_cells=current-self.initial_known,unique_first_seen_robot1_cells=a['unique_first_seen_cells'].get('robot1',0),unique_first_seen_robot2_cells=a['unique_first_seen_cells'].get('robot2',0),later_duplicated_by_robot1_cells=a['later_duplicated_cells'].get('robot1',0),later_duplicated_by_robot2_cells=a['later_duplicated_cells'].get('robot2',0),simultaneously_observed_cells=a['simultaneously_observed_cells'],total_known_union_cells=a['total_known_union_cells'],duplicated_known_fraction=a['duplicated_known_fraction'],shared_maps_equivalent=equivalent); self.csv_row(self.coverage,row)
     def sample_health(self):
@@ -287,7 +306,41 @@ class CooperativeExperimentLogger(Node):
         try:return subprocess.check_output(['git',*args],cwd='/home/arash/webots_ws',text=True,stderr=subprocess.DEVNULL).strip()
         except Exception:return default
     def write_manifest(self,clean,status):
-        value={'schema_version':SCHEMA,'run_id':self.run_id,'utc_start_time':self.start_utc,'utc_end_time':utc_now() if status!='running' else None,'elapsed_duration_s':time.monotonic()-self.start,'git_commit':self.git_value(['rev-parse','HEAD'],'unknown'),'worktree_dirty':bool(self.git_value(['status','--porcelain'],'')),'launch_file':self.p['launch_file'],'launch_arguments':'recorded in logger parameters','world_resource':'two_robots.wbt','ros_distribution':os.getenv('ROS_DISTRO',''),'rmw_implementation':os.getenv('RMW_IMPLEMENTATION','default'),'ros_domain_id':os.getenv('ROS_DOMAIN_ID','0'),'hostname':socket.gethostname(),'logger_parameters':finite(self.p),'map_resolution':.01,'robot_ids':self.robots,'initial_robot_poses':{'robot1':[0.,0.,0.],'robot2':[-.3,0.,math.pi]},'known_initial_relative_transform':[-.299999998712,-.000027796077,-3.1415],'clean_shutdown':clean,'shutdown_status':status}; atomic_json(self.directory/'run_manifest.json',value)
+        value={
+            'schema_version':SCHEMA,'run_id':self.run_id,
+            'utc_start_time':self.start_utc,
+            'utc_end_time':utc_now() if status!='running' else None,
+            'elapsed_duration_s':time.monotonic()-self.start,
+            'git_commit':self.git_value(['rev-parse','HEAD'],'unknown'),
+            'worktree_dirty':bool(self.git_value(['status','--porcelain'],'')),
+            'launch_file':self.p['launch_file'],
+            'launch_arguments':'recorded in logger parameters',
+            'world_profile':self.p['world_profile'],
+            'world_resource':self.p['installed_world_path'],
+            'source_world_path':self.p['source_world_path'],
+            'world_dimensions_m':list(self.p['world_dimensions']),
+            'world_sha256':self.p['world_sha256'],
+            'ros_distribution':os.getenv('ROS_DISTRO',''),
+            'rmw_implementation':os.getenv('RMW_IMPLEMENTATION','default'),
+            'ros_domain_id':os.getenv('ROS_DOMAIN_ID','0'),
+            'hostname':socket.gethostname(),
+            'logger_parameters':finite(self.p),
+            'slam_resolution':self.p['slam_resolution'],
+            'peer_export_resolution':self.p['slam_resolution'],
+            'fusion_resolution':self.p['fusion_resolution'],
+            'global_costmap_resolution':self.p['global_costmap_resolution'],
+            'local_costmap_resolution':self.p['local_costmap_resolution'],
+            'lidar_maximum_range':self.p['lidar_maximum_range'],
+            'initial_map_costmap_configuration':json.loads(
+                self.p['initial_configuration_json']),
+            'robot_ids':self.robots,
+            'initial_robot_poses':json.loads(
+                self.p['robot_start_poses_json']),
+            'known_initial_relative_transform':list(
+                self.p['known_relative_transform']),
+            'clean_shutdown':clean,'shutdown_status':status,
+        }
+        atomic_json(self.directory/'run_manifest.json',value)
     def summary(self,clean):
         elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')

@@ -40,8 +40,9 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --trials 10 --maximum-concurrency 3 \
+  --world-profile large \
   --ros-domain-base 100 --webots-port-base 23000 \
-  --startup-timeout 120 --mission-timeout 240 \
+  --startup-timeout 180 --mission-timeout 1800 \
   --fast-mode true --rendering false
 ```
 
@@ -59,23 +60,41 @@ python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --calibration true --isolation-pilot false
 ```
 
-One rendered manual test with the passive RViz view:
+The default for new continuous/manual campaigns is `--world-profile large`,
+which selects `epuck_d500_two_world_large.wbt`, 0.03 m local/shared/global-map
+resolution, and 0.02 m local-costmap resolution. The proven 1.5 m small world
+and its existing resolutions remain explicitly available with
+`--world-profile small`.
+
+One normal-speed rendered large-world run with the passive RViz view:
 
 ```bash
+cd ~/webots_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
 python3 src/my_epuck_project/tools/run_cooperative_regression.py \
-  --trials 1 --maximum-concurrency 1 \
-  --ros-domain-base 150 --webots-port-base 23100 \
-  --startup-timeout 120 --mission-timeout 240 \
+  --trials 1 \
+  --maximum-concurrency 1 \
+  --world-profile large \
+  --ros-domain-base 151 \
+  --webots-port-base 23101 \
+  --startup-timeout 180 \
+  --mission-timeout 1800 \
   --fast-mode false --rendering true --rviz true \
-  --hold-open-after-completion true
+  --hold-open-after-completion true \
+  --skip-build \
+  --skip-tests
 ```
 
 The manual RViz preset initially shows both shared maps, the grid, and one pose
 Axes display on each robot's namespaced `base_link`. The complete TF tree
 remains available but starts disabled, as do both LaserScan displays, robot
-models, plans, markers, and both robots' local and global costmaps. The runner
-starts this optional window after stack readiness so it does not compete with
-Webots, SLAM, and Nav2 initialization.
+models, plans, markers, and both robots' local and global costmaps. Both
+profiles retain an Orbit camera and normal 3D controls. The large profile
+starts with a 45 m camera distance centered along the long arena. The runner
+starts the optional RViz window after stack readiness; RViz is not a readiness
+dependency.
 
 `--hold-open-after-completion true` requires one trial, concurrency one, and
 rendering. After both robots complete and the settled final status, claims,
@@ -111,8 +130,8 @@ The configurable operational options include `--output-root`,
 `--startup-timeout`, `--mission-timeout`, `--settling-period`,
 `--graceful-shutdown-timeout`, `--hard-shutdown-timeout`,
 `--free-threshold`, `--occupied-threshold`, and `--shift-window`. Use
-`--help` for the complete interface. No source edit is needed between
-campaigns.
+`--world-profile` selects `large` or `small`; `--help` lists the complete
+interface. No source edit is needed between campaigns.
 
 ## Safe interruption and resume
 

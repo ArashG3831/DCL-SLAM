@@ -21,6 +21,12 @@ from ament_index_python.packages import get_package_share_directory
 import psutil
 
 from .cooperative_regression_report import analyze_campaign, atomic_json
+from .cooperative_profiles import (
+    PROFILE_SETTINGS,
+    manual_rviz_path,
+    profile,
+    profile_summary,
+)
 from .occupancy_map_comparison import (
     canonical_map,
     common_geometry,
@@ -134,12 +140,58 @@ def windows_port_pid(port):
     return int(match.group(1)) if match else None
 
 
-def manual_rviz_command():
+def manual_rviz_command(world_profile='small'):
     """Return the installed passive RViz command used by manual trials."""
-    config = Path(get_package_share_directory(
-        'my_epuck_project')) / 'resource' / (
-            'cooperative_manual_exploration.rviz')
+    package = Path(get_package_share_directory('my_epuck_project'))
+    selected = profile(world_profile, package / 'worlds')
+    config = manual_rviz_path(selected, package / 'resource')
     return ['rviz2', '-d', str(config)]
+
+
+def resolve_runner_profile(args):
+    """Resolve and verify source/installed copies of the selected world."""
+    workspace = Path(args.workspace).resolve()
+    source_worlds = workspace / 'src' / 'my_epuck_project' / 'worlds'
+    installed_package = Path(get_package_share_directory('my_epuck_project'))
+    source = profile(args.world_profile, source_worlds)
+    installed = profile(args.world_profile, installed_package / 'worlds')
+    source_hash = source['world_metadata']['sha256']
+    installed_hash = installed['world_metadata']['sha256']
+    if source_hash != installed_hash:
+        raise RuntimeError(
+            'selected source and installed worlds differ: '
+            f'{source["world_path"]} != {installed["world_path"]}')
+    args.source_world_path = source['world_path']
+    args.installed_world_path = installed['world_path']
+    args.profile_metadata = profile_summary(source)
+    return source
+
+
+def print_profile_selection(args, selected):
+    """Print the exact reusable experiment configuration before launch."""
+    metadata = selected['world_metadata']
+    print(f'world_profile={selected["name"]}')
+    print(f'source_world_path={args.source_world_path}')
+    print(f'installed_world_path={args.installed_world_path}')
+    print(
+        'map_resolutions_m='
+        f'slam:{selected["slam_resolution"]},'
+        f'fusion:{selected["fusion_resolution"]},'
+        f'global_costmap:{selected["global_costmap_resolution"]},'
+        f'local_costmap:{selected["local_costmap_resolution"]}')
+    for name in ('robot1', 'robot2'):
+        robot = metadata['robots'][name]
+        print(
+            f'{name}_start=translation:{robot.translation},'
+            f'rotation:{robot.rotation}')
+    print(f'known_relative_transform={metadata["relative_transform"]}')
+    print(f'mission_timeout_s={args.mission_timeout}')
+    print(
+        f'webots_port_range={args.webots_port_base}..'
+        f'{args.webots_port_base + args.trials - 1}')
+    print(
+        f'ros_domain_range={args.ros_domain_base}..'
+        f'{args.ros_domain_base + args.trials - 1}')
 
 
 def hold_open_artifacts_valid(attempt):
@@ -484,6 +536,8 @@ def internal_trial(args):
         'process_group_id': os.getpgrp(),
         'utc_start': utc_now(),
         'launch_arguments': {
+            'world_profile': args.world_profile,
+            'source_world_path': args.source_world_path,
             'run_id': args.run_id,
             'output_root': str(attempt / 'observer'),
             'mission_timeout_s': (
@@ -512,6 +566,8 @@ def internal_trial(args):
     launch_command = [
         'ros2', 'launch', 'my_epuck_project',
         'two_robots_observed_continuous_exploration_launch.py',
+        f'world_profile:={args.world_profile}',
+        f'source_world_path:={args.source_world_path}',
         f'run_id:={args.run_id}',
         f'output_root:={attempt / "observer"}',
         f'mission_timeout_s:='
@@ -603,7 +659,7 @@ def internal_trial(args):
                     metadata['readiness_elapsed_s'] = now - start
                     metadata['readiness_graph_nodes'] = nodes
                     if args.launch_rviz:
-                        rviz_command = manual_rviz_command()
+                        rviz_command = manual_rviz_command(args.world_profile)
                         rviz_environment = environment.copy()
                         rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
                         rviz_log = (attempt / 'rviz.log').open(
@@ -865,6 +921,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         trial_id=trial_id,
         attempt_id=attempt_id,
         run_id=attempt_id,
+        world_profile=getattr(args, 'world_profile', 'small'),
+        source_world_path=getattr(args, 'source_world_path', ''),
         ros_domain_id=args.ros_domain_base + trial_number - 1,
         webots_port=args.webots_port_base + trial_number - 1,
         webots_mode='fast' if args.fast_mode else 'realtime',
@@ -1124,8 +1182,11 @@ def build_and_test(workspace, skip_build, skip_tests):
         result = run([
             sys.executable, '-m', 'pytest', '-q',
             'src/my_epuck_project/test/test_cooperative_regression.py',
+            'src/my_epuck_project/test/test_cooperative_world_profiles.py',
+            'src/my_epuck_project/test/test_cooperative_manual_rviz.py',
             'src/my_epuck_project/test/test_cooperative_trial_collector.py',
             'src/my_epuck_project/test/test_occupancy_map_comparison.py',
+            'src/my_epuck_project/test/test_map_fusion_geometry.py',
             'src/my_epuck_project/test/test_experiment_logger_runtime.py',
             'src/my_epuck_project/test/test_experiment_metrics.py',
             'src/my_epuck_project/test/'
@@ -1218,10 +1279,41 @@ def create_manifest(args, campaign, workspace):
             + ('' if args.rendering
                else ' --no-rendering --stdout --stderr --minimize')),
         'simulation_time_measurement': 'unavailable',
-        'world': 'epuck_d500_two_world_teammate_visible.wbt',
+        'world_profile': args.world_profile,
+        'world': args.profile_metadata['world'],
+        'source_world_path': args.source_world_path,
+        'installed_world_path': args.installed_world_path,
+        'world_dimensions_m':
+            args.profile_metadata['world_dimensions_m'],
+        'world_sha256': args.profile_metadata['world_sha256'],
+        'robot_start_poses': args.profile_metadata['robot_start_poses'],
+        'known_initial_relative_transform':
+            args.profile_metadata['known_relative_transform'],
+        'slam_resolution': args.profile_metadata['slam_resolution'],
+        'peer_export_resolution':
+            args.profile_metadata['peer_export_resolution'],
+        'fusion_resolution': args.profile_metadata['fusion_resolution'],
+        'global_costmap_resolution':
+            args.profile_metadata['global_costmap_resolution'],
+        'local_costmap_resolution':
+            args.profile_metadata['local_costmap_resolution'],
+        'lidar_maximum_range':
+            args.profile_metadata['lidar_maximum_range'],
+        'initial_map_costmap_configuration': {
+            'minimum_frontier_cells':
+                args.profile_metadata['minimum_frontier_cells'],
+            'minimum_known_cell_gain_for_activity':
+                args.profile_metadata[
+                    'minimum_known_cell_gain_for_activity'],
+            'coverage_attribution_resolution':
+                args.profile_metadata['coverage_attribution_resolution'],
+            'map_comparison_shift_window':
+                args.profile_metadata['map_comparison_shift_window'],
+        },
         'launch_file':
             'two_robots_observed_continuous_exploration_launch.py',
         'launch_arguments': {
+            'world_profile': args.world_profile,
             'use_sim_time': False,
             'coordinator_mode': 'continuous',
             'one_goal_only': False,
@@ -1293,6 +1385,22 @@ def campaign_main(args):
     else:
         campaign.mkdir()
         (campaign / 'attempts').mkdir()
+    if args.world_profile is None:
+        recorded_profile = None
+        manifest_path = campaign / 'campaign_manifest.json'
+        if manifest_path.exists():
+            try:
+                recorded = json.loads(
+                    manifest_path.read_text(encoding='utf-8'))
+                recorded_profile = recorded.get('world_profile')
+                if recorded_profile is None and recorded.get('world') == (
+                        'epuck_d500_two_world_teammate_visible.wbt'):
+                    recorded_profile = 'small'
+            except (OSError, ValueError):
+                pass
+        apply_profile_defaults(args, recorded_profile or 'large')
+    else:
+        apply_profile_defaults(args)
     if args.analysis_only or args.regenerate_report:
         progress = load_progress(campaign)
         refresh_selected_classifications(campaign, progress)
@@ -1321,6 +1429,8 @@ def campaign_main(args):
         print(f'campaign_summary={campaign / "campaign_summary.json"}')
         return 0
     build_and_test(workspace, args.skip_build, args.skip_tests)
+    selected_profile = resolve_runner_profile(args)
+    print_profile_selection(args, selected_profile)
     progress = load_progress(campaign)
     completed = set()
     for trial, relative in list(progress['valid_trials'].items()):
@@ -1488,6 +1598,20 @@ def boolean(text):
     raise argparse.ArgumentTypeError('expected true or false')
 
 
+def apply_profile_defaults(args, profile_name=None):
+    """Apply defaults only where the caller did not provide an override."""
+    name = profile_name or args.world_profile or 'large'
+    settings = PROFILE_SETTINGS[name]
+    args.world_profile = name
+    if args.startup_timeout is None:
+        args.startup_timeout = settings['startup_timeout']
+    if args.mission_timeout is None:
+        args.mission_timeout = settings['mission_timeout']
+    if args.shift_window is None:
+        args.shift_window = settings['map_comparison_shift_window']
+    return args
+
+
 def parser():
     result = argparse.ArgumentParser(
         description='Automated isolated cooperative exploration regression')
@@ -1496,11 +1620,19 @@ def parser():
     result.add_argument('--campaign-id')
     result.add_argument('--output-root', default='results')
     result.add_argument('--workspace', default='/home/arash/webots_ws')
+    result.add_argument(
+        '--world-profile',
+        choices=['large', 'small'],
+        default=None,
+        help=(
+            'World/configuration profile; defaults to large for new runs and '
+            'to the recorded profile when resuming or analyzing'),
+    )
     result.add_argument('--resume', action='store_true')
     result.add_argument('--ros-domain-base', type=int, default=100)
     result.add_argument('--webots-port-base', type=int, default=23000)
-    result.add_argument('--startup-timeout', type=float, default=120.0)
-    result.add_argument('--mission-timeout', type=float, default=240.0)
+    result.add_argument('--startup-timeout', type=float)
+    result.add_argument('--mission-timeout', type=float)
     result.add_argument('--settling-period', type=float, default=4.0)
     result.add_argument(
         '--fast-mode', type=boolean, default=True, metavar='BOOL')
@@ -1528,7 +1660,7 @@ def parser():
     result.add_argument('--skip-tests', action='store_true')
     result.add_argument('--free-threshold', type=int, default=25)
     result.add_argument('--occupied-threshold', type=int, default=65)
-    result.add_argument('--shift-window', type=int, default=3)
+    result.add_argument('--shift-window', type=int)
     result.add_argument('--graceful-shutdown-timeout', type=float, default=20.0)
     result.add_argument('--hard-shutdown-timeout', type=float, default=10.0)
     # Private per-attempt interface used only by campaign supervisors.
@@ -1540,6 +1672,7 @@ def parser():
     result.add_argument('--run-id', help=argparse.SUPPRESS)
     result.add_argument('--ros-domain-id', type=int, help=argparse.SUPPRESS)
     result.add_argument('--webots-port', type=int, help=argparse.SUPPRESS)
+    result.add_argument('--source-world-path', help=argparse.SUPPRESS)
     result.add_argument('--webots-mode', help=argparse.SUPPRESS)
     result.add_argument('--webots-gui', type=boolean, help=argparse.SUPPRESS)
     result.add_argument('--launch-rviz', type=boolean, help=argparse.SUPPRESS)
@@ -1572,6 +1705,9 @@ def main(argv=None):
     validate_cli_options(args)
     try:
         if args.internal_trial:
+            apply_profile_defaults(args, args.world_profile or 'small')
+            if args.source_world_path is None:
+                args.source_world_path = ''
             return internal_trial(args)
         return campaign_main(args)
     except (RuntimeError, ValueError, OSError) as error:

@@ -3,13 +3,20 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from my_epuck_project.cooperative_profiles import profile
 
 
-def coordinator(robot, peer, test_rank, test_frontier_id):
+def coordinator(
+        robot, peer, test_rank, test_frontier_id,
+        minimum_known_cell_gain):
     return Node(
         package='my_epuck_cooperative_exploration',
         executable='cooperative_frontier_coordinator',
@@ -62,6 +69,8 @@ def coordinator(robot, peer, test_rank, test_frontier_id):
                 LaunchConfiguration('map_stability_window_s'),
             'completion_consensus_grace_s':
                 LaunchConfiguration('completion_consensus_grace_s'),
+            'minimum_known_cell_gain_for_activity':
+                minimum_known_cell_gain,
             'autostart': LaunchConfiguration('coordinator_autostart'),
             # Verification-only selector. -1 preserves normal ranked selection.
             'test_candidate_rank': test_rank,
@@ -70,11 +79,16 @@ def coordinator(robot, peer, test_rank, test_frontier_id):
     )
 
 
-def generate_launch_description():
+def launch_setup(context):
     project = get_package_share_directory('my_epuck_project')
+    selected = profile(
+        LaunchConfiguration('world_profile').perform(context),
+        os.path.join(project, 'worlds'),
+    )
     stack = IncludeLaunchDescription(PythonLaunchDescriptionSource(os.path.join(
         project, 'launch', 'two_robots_frontier_candidates_launch.py')),
         launch_arguments={
+            'world_profile': selected['name'],
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
@@ -84,7 +98,23 @@ def generate_launch_description():
     robot2_rank = LaunchConfiguration('robot2_test_candidate_rank')
     robot1_frontier = LaunchConfiguration('robot1_test_frontier_id')
     robot2_frontier = LaunchConfiguration('robot2_test_frontier_id')
+    minimum_gain = selected['minimum_known_cell_gain_for_activity']
+    return [
+        stack,
+        coordinator(
+            'robot1', 'robot2', robot1_rank, robot1_frontier, minimum_gain),
+        coordinator(
+            'robot2', 'robot1', robot2_rank, robot2_frontier, minimum_gain),
+    ]
+
+
+def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_profile',
+            default_value='small',
+            choices=['large', 'small'],
+        ),
         DeclareLaunchArgument('coordinator_mode', default_value='single_goal'),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
@@ -103,7 +133,5 @@ def generate_launch_description():
         DeclareLaunchArgument('robot2_test_candidate_rank', default_value='-1'),
         DeclareLaunchArgument('robot1_test_frontier_id', default_value=''),
         DeclareLaunchArgument('robot2_test_frontier_id', default_value=''),
-        stack,
-        coordinator('robot1', 'robot2', robot1_rank, robot1_frontier),
-        coordinator('robot2', 'robot1', robot2_rank, robot2_frontier),
+        OpaqueFunction(function=launch_setup),
     ])

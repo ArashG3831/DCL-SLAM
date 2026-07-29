@@ -9,6 +9,7 @@ from launch.actions import (
     EmitEvent,
     IncludeLaunchDescription,
     LogInfo,
+    OpaqueFunction,
     RegisterEventHandler,
 )
 from launch.events import matches_action
@@ -18,9 +19,10 @@ from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
+from my_epuck_project.cooperative_profiles import profile
 
 
-def slam_actions(package_dir, robot):
+def slam_actions(package_dir, robot, slam_resolution):
     slam = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
@@ -38,7 +40,11 @@ def slam_actions(package_dir, robot):
                 package_dir, 'resource',
                 f'slam_toolbox_{robot}_teammate_filtered.yaml',
             ),
-            {'use_lifecycle_manager': False, 'use_sim_time': False},
+            {
+                'use_lifecycle_manager': False,
+                'use_sim_time': False,
+                'resolution': slam_resolution,
+            },
         ],
     )
     configure = EmitEvent(event=ChangeState(
@@ -60,15 +66,19 @@ def slam_actions(package_dir, robot):
     return [slam, configure, activate]
 
 
-def generate_launch_description():
+def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
+    selected = profile(
+        LaunchConfiguration('world_profile').perform(context),
+        os.path.join(package_dir, 'worlds'),
+    )
     base = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_namespaced_launch.py'
         )),
         launch_arguments={
             'use_sim_time': 'false',
-            'world': 'epuck_d500_two_world_teammate_visible.wbt',
+            'world': selected['world'],
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
@@ -76,8 +86,9 @@ def generate_launch_description():
     )
     filters = []
     fixed_odom = {
-        'robot1': [-0.299999998712, -0.000027796077, -3.1415],
-        'robot2': [-0.299999999999703, -0.000000000000102, 3.1415],
+        'robot1': list(selected['world_metadata']['relative_transform']),
+        'robot2': list(
+            selected['world_metadata']['reverse_relative_transform']),
     }
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
         filters.append(Node(
@@ -112,12 +123,23 @@ def generate_launch_description():
                 'warning_interval': 2.0,
             }],
         ))
+    return [
+        base,
+        *filters,
+        *slam_actions(package_dir, 'robot1', selected['slam_resolution']),
+        *slam_actions(package_dir, 'robot2', selected['slam_resolution']),
+    ]
+
+
+def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'world_profile',
+            default_value='small',
+            choices=['large', 'small'],
+        ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
-        base,
-        *filters,
-        *slam_actions(package_dir, 'robot1'),
-        *slam_actions(package_dir, 'robot2'),
+        OpaqueFunction(function=launch_setup),
     ])

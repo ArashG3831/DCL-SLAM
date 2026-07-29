@@ -93,8 +93,8 @@ remains available but starts disabled, as do both LaserScan displays, robot
 models, plans, markers, and both robots' local and global costmaps. Both
 profiles retain an Orbit camera and normal 3D controls. The large profile
 starts with a 45 m camera distance centered along the long arena. The runner
-starts the optional RViz window after stack readiness; RViz is not a readiness
-dependency.
+starts the optional RViz window with the stack so startup is visible; RViz is
+not a readiness dependency.
 
 `--hold-open-after-completion true` requires one trial, concurrency one, and
 rendering. After both robots complete and the settled final status, claims,
@@ -160,3 +160,10 @@ Exit codes:
 
 At exit the command prints the exact paths to `campaign_report.md`,
 `campaign_summary.json`, `trials.csv`, and `pairwise_map_metrics.csv`.
+Webots profiles default to `--time-mode sim`: the Webots ROS 2 driver is the
+single `/clock` publisher, and mission TTLs, Nav2, SLAM, coordination and
+observer timestamps follow simulation time. Startup, process shutdown,
+clock-stall and emergency limits remain wall-clock safeguards. Use
+`--no-mission-timeout` for an unbounded simulated mission and
+`--emergency-wall-runtime SECONDS` for unattended protection. Physical-robot
+launches remain wall-time profiles.

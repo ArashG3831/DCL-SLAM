@@ -42,7 +42,7 @@ def slam_actions(package_dir, robot, slam_resolution):
             ),
             {
                 'use_lifecycle_manager': False,
-                'use_sim_time': False,
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'resolution': slam_resolution,
             },
         ],
@@ -77,7 +77,8 @@ def launch_setup(context):
             package_dir, 'launch', 'two_robots_namespaced_launch.py'
         )),
         launch_arguments={
-            'use_sim_time': 'false',
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world': selected['world'],
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
@@ -99,7 +100,7 @@ def launch_setup(context):
             output='screen',
             remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
             parameters=[{
-                'use_sim_time': False,
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'input_topic': f'/{robot}/scan_d500_fixed',
                 'output_topic': f'/{robot}/scan_d500_slam',
                 'peer_base_frame': f'{peer}/base_footprint',
@@ -141,5 +142,8 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         OpaqueFunction(function=launch_setup),
     ])

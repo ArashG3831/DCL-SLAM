@@ -688,8 +688,9 @@ def analyze_campaign(campaign_dir, free_threshold=25,
     ]
     counts = Counter(
         item.get('classification', 'UNKNOWN') for item in all_attempt_metadata)
+    successful_outcomes = {'PASS', 'MISSION_COMPLETE'}
     pass_count = sum(
-        row['classification'] == 'PASS' for row in trial_rows)
+        row['classification'] in successful_outcomes for row in trial_rows)
     summary = {
         'schema_version': '1.0.0',
         'campaign_id': manifest.get('campaign_id', campaign.name),
@@ -700,10 +701,14 @@ def analyze_campaign(campaign_dir, free_threshold=25,
         'pass_count': pass_count,
         'failure_count': len(trial_rows) - pass_count,
         'timeout_count': sum(
-            row['classification'] == 'MISSION_TIMEOUT'
+            row['classification'] in {
+                'MISSION_TIMEOUT', 'SIMULATED_MISSION_TIMEOUT',
+            }
             for row in trial_rows),
         'crash_count': sum(
-            row['classification'] == 'PROCESS_CRASH'
+            row['classification'] in {
+                'PROCESS_CRASH', 'RUNTIME_PROCESS_CRASH',
+            }
             for row in trial_rows),
         'infrastructure_retry_count': max(
             0, len(all_attempt_metadata) - len(trial_rows)),
@@ -898,7 +903,8 @@ def render_report(campaign, manifest, summary, trials, within, metric_stats,
     ]
     for heading, body in section_text:
         lines += ['', f'## {heading}', '', body]
-    failed = [row for row in trials if row['classification'] != 'PASS']
+    failed = [row for row in trials if row['classification'] not in {
+        'PASS', 'MISSION_COMPLETE', 'BOUNDED_DIAGNOSTIC'}]
     if failed:
         lines += ['', '## Failed trial details', '']
         for row in failed:

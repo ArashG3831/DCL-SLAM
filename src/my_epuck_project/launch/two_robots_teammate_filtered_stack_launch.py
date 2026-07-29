@@ -37,6 +37,11 @@ def nav2_nodes(package_dir, robot, selected):
                     str(selected['local_costmap_resolution']),
                 'global_costmap.global_costmap.ros__parameters.resolution':
                     str(selected['global_costmap_resolution']),
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'controller_server.ros__parameters.progress_checker.required_movement_radius':
+                    '0.08' if selected['name'] == 'large' else '0.5',
+                'controller_server.ros__parameters.progress_checker.movement_time_allowance':
+                    '18.0' if selected['name'] == 'large' else '10.0',
             },
             convert_types=True,
         ),
@@ -74,7 +79,7 @@ def nav2_nodes(package_dir, robot, selected):
         namespace=robot,
         output='screen',
         parameters=[{
-            'use_sim_time': False,
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
             'autostart': True,
             'node_names': LIFECYCLE_NODES,
         }],
@@ -98,6 +103,7 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
@@ -134,7 +140,7 @@ def launch_setup(context):
                 namespace=robot,
                 output='screen',
                 parameters=[{
-                    'use_sim_time': False,
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
                     'source_robot_id': robot,
                     'input_topic': f'/{robot}/map',
                     'output_topic': f'/cslam/{robot}/local_map',
@@ -148,7 +154,7 @@ def launch_setup(context):
                 namespace=robot,
                 output='screen',
                 parameters=[{
-                    'use_sim_time': False,
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
                     'local_map_topic': f'/{robot}/map',
                     'remote_peer_topic': f'/cslam/{peer}/local_map',
                     'expected_remote_source': peer,
@@ -178,5 +184,8 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         OpaqueFunction(function=launch_setup),
     ])

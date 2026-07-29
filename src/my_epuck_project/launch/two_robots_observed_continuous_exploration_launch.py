@@ -63,6 +63,8 @@ def runtime_actions(context):
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
         }.items(),
     )
     observer = Node(
@@ -103,6 +105,7 @@ def runtime_actions(context):
             'world_sha256': selected['world_metadata']['sha256'],
             'coverage_attribution_resolution':
                 selected['coverage_attribution_resolution'],
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
     rviz = Node(
@@ -116,7 +119,7 @@ def runtime_actions(context):
             manual_rviz_path(selected, os.path.join(project, 'resource')),
         ],
         additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
-        parameters=[{'use_sim_time': False}],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
     return [continuous_stack, observer, rviz]
 
@@ -143,6 +146,9 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         DeclareLaunchArgument(
             'launch_rviz',
             default_value='false',

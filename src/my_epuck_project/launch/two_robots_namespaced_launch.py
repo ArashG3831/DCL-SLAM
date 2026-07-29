@@ -34,11 +34,22 @@ def launch_setup(context):
     webots_gui = (
         LaunchConfiguration('webots_gui').perform(context).lower() == 'true'
     )
+    sensor_profile = LaunchConfiguration('sensor_profile').perform(context)
 
     base_urdf_path = os.path.join(package_dir, 'resource', 'epuck_d500_webots.urdf')
     base_control_path = os.path.join(package_dir, 'resource', 'ros2_control.yml')
     with open(base_urdf_path, 'r') as f:
         base_urdf = f.read()
+    if sensor_profile == 'throughput':
+        # The campaign audit found no project subscriber or controller use for
+        # these devices. Keep lidar, odometry, and IMU unchanged.
+        for device in ('ps0', 'ps1', 'ps2', 'ps3', 'ps4', 'ps5', 'ps6', 'ps7', 'tof'):
+            base_urdf = base_urdf.replace(
+                '<enabled>true</enabled>', '<enabled>false</enabled>', 1)
+        base_urdf = base_urdf.replace(
+            '<topicName>/camera</topicName>',
+            '<topicName>/camera</topicName>\n'
+            '                <enabled>false</enabled>', 1)
     with open(base_control_path, 'r') as f:
         base_control = f.read()
 
@@ -48,7 +59,9 @@ def launch_setup(context):
             'worlds',
             world,
         ]),
-        ros2_supervisor=False,
+        # The Webots ROS 2 supervisor is the authoritative publisher of the
+        # simulation /clock.  Robot controllers consume that one clock.
+        ros2_supervisor=True,
         port=webots_port,
         mode=webots_mode,
         gui=webots_gui,
@@ -213,7 +226,9 @@ def launch_setup(context):
             waiting_nodes,
         ])
 
-    return [webots] + robot_actions
+    # WebotsLauncher creates the official Ros2Supervisor action separately;
+    # include it so its single /clock publisher is actually launched.
+    return [webots, webots._supervisor] + robot_actions
 
 
 def generate_launch_description():
@@ -245,5 +260,7 @@ def generate_launch_description():
             choices=['true', 'false'],
             description='Enable Webots rendering and its normal window.',
         ),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         OpaqueFunction(function=launch_setup),
     ])

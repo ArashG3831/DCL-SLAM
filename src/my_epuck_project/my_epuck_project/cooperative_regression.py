@@ -19,6 +19,15 @@ import time
 
 from ament_index_python.packages import get_package_share_directory
 import psutil
+import rclpy
+from nav_msgs.msg import Odometry
+from rosgraph_msgs.msg import Clock
+from rclpy.context import Context
+from rclpy.duration import Duration
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
 
 from .cooperative_regression_report import analyze_campaign, atomic_json
 from .cooperative_profiles import (
@@ -38,8 +47,13 @@ from .occupancy_map_comparison import (
 
 
 CLASSIFICATIONS = (
+    'MISSION_COMPLETE', 'BOUNDED_DIAGNOSTIC', 'SIMULATED_MISSION_TIMEOUT',
+    'EMERGENCY_WALL_TIMEOUT', 'INFRASTRUCTURE_FAILURE',
+    'RUNTIME_PROCESS_CRASH', 'MANUAL_STOP', 'CLEAN_SHUTDOWN',
+    'SHUTDOWN_DEGRADED',
+    # Read compatibility for reports produced before the classification split.
     'PASS', 'SYSTEM_FAILURE', 'MISSION_TIMEOUT', 'PROCESS_CRASH',
-    'INFRASTRUCTURE_FAILURE', 'INCOMPLETE_ARTIFACTS', 'USER_INTERRUPTED',
+    'INCOMPLETE_ARTIFACTS', 'USER_INTERRUPTED',
 )
 REQUIRED_OBSERVER_FILES = (
     'summary.json', 'events.jsonl', 'warnings.jsonl', 'topic_health.csv',
@@ -132,7 +146,13 @@ def windows_port_pid(port):
     executable = Path('/mnt/c/Windows/System32/netstat.exe')
     if not executable.exists():
         return None
-    result = run([str(executable), '-ano', '-p', 'tcp'], timeout=10)
+    try:
+        result = run([str(executable), '-ano', '-p', 'tcp'], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        # This is supplemental Windows PID telemetry. The direct TCP probe
+        # remains authoritative and a slow WSL interop call must not abort an
+        # otherwise healthy simulation.
+        return None
     expression = re.compile(
         rf'^\s*TCP\s+\S*:{int(port)}\s+\S+\s+LISTENING\s+(\d+)\s*$',
         re.IGNORECASE | re.MULTILINE)
@@ -140,12 +160,15 @@ def windows_port_pid(port):
     return int(match.group(1)) if match else None
 
 
-def manual_rviz_command(world_profile='small'):
-    """Return the installed passive RViz command used by manual trials."""
+def manual_rviz_command(world_profile='small', use_sim_time=False):
+    """Return the installed passive RViz command with explicit ROS time."""
     package = Path(get_package_share_directory('my_epuck_project'))
     selected = profile(world_profile, package / 'worlds')
     config = manual_rviz_path(selected, package / 'resource')
-    return ['rviz2', '-d', str(config)]
+    return [
+        'rviz2', '-d', str(config), '--ros-args',
+        '-p', f'use_sim_time:={str(bool(use_sim_time)).lower()}',
+    ]
 
 
 def resolve_runner_profile(args):
@@ -186,6 +209,13 @@ def print_profile_selection(args, selected):
             f'rotation:{robot.rotation}')
     print(f'known_relative_transform={metadata["relative_transform"]}')
     print(f'mission_timeout_s={args.mission_timeout}')
+    print(f'time_mode={args.time_mode}')
+    print(f'use_sim_time={args.time_mode == "sim"}')
+    print(f'execution_profile={args.execution_profile}')
+    print(f'rendering={args.rendering}')
+    print(f'rviz={args.rviz}')
+    print(f'emergency_wall_runtime_s={args.emergency_wall_runtime}')
+    print('expected_clock_publisher=webots_ros2_driver Ros2Supervisor -> /clock')
     print(
         f'webots_port_range={args.webots_port_base}..'
         f'{args.webots_port_base + args.trials - 1}')
@@ -249,6 +279,194 @@ def domain_nodes(domain):
     lines = [line for line in result.stdout.splitlines()
              if line.startswith('[')]
     return json.loads(lines[-1]) if lines else []
+
+
+def clock_readiness(domain, timeout_s=4.0):
+    """Probe one advancing clock in a fresh, isolated rclpy context.
+
+    This intentionally does not use the ROS CLI daemon.  All discovery,
+    publisher counting, and message receipt happen through the same node and
+    context, and all deadlines use the process wall clock.
+    """
+    started = time.monotonic()
+    previous_domain = os.environ.get('ROS_DOMAIN_ID')
+    os.environ['ROS_DOMAIN_ID'] = str(domain)
+    context = Context()
+    details = {
+        'probe_pid': os.getpid(),
+        'domain_id': int(domain),
+        'rmw_implementation': os.environ.get('RMW_IMPLEMENTATION', 'default'),
+        'context_identity': id(context),
+        'probe_start_wall_monotonic': started,
+        'topic': '/clock',
+        'topic_type': 'rosgraph_msgs/msg/Clock',
+        'qos': {
+            'history': 'KEEP_LAST', 'depth': 10,
+            'reliability': 'BEST_EFFORT', 'durability': 'VOLATILE',
+        },
+        'publisher_count_samples': [],
+        'samples': [],
+        'sample_wall_times': [],
+        'max_inter_sample_wall_gap_s': None,
+    }
+    values = []
+    sample_wall_times = []
+    node = None
+    executor = None
+    try:
+        rclpy.init(args=None, context=context)
+        node = rclpy.create_node('regression_clock_probe', context=context)
+        executor = SingleThreadedExecutor(context=context)
+        executor.add_node(node)
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+        def receive(message):
+            values.append(message.clock.sec + message.clock.nanosec * 1e-9)
+            sample_wall_times.append(time.monotonic())
+
+        node.create_subscription(Clock, '/clock', receive, qos)
+        loop_started = time.monotonic()
+        details['setup_wall_elapsed_s'] = loop_started - started
+        deadline = loop_started + timeout_s
+        while time.monotonic() < deadline and len(values) < 2:
+            count = node.count_publishers('/clock')
+            details['publisher_count_samples'].append({
+                'wall_elapsed_s': time.monotonic() - started,
+                'count': count,
+            })
+            executor.spin_once(timeout_sec=0.1)
+        count = node.count_publishers('/clock')
+        details['publishers'] = count
+        details['samples'] = list(values)
+        details['sample_count'] = len(values)
+        details['sample_wall_times'] = [t - started for t in sample_wall_times]
+        if len(sample_wall_times) > 1:
+            details['max_inter_sample_wall_gap_s'] = max(
+                b - a for a, b in zip(sample_wall_times, sample_wall_times[1:]))
+        if count == 0:
+            details['reason'] = 'CLOCK_TOPIC_MISSING'
+        elif count != 1:
+            details['reason'] = 'CLOCK_PUBLISHER_COUNT_INVALID'
+        elif len(values) < 2:
+            details['reason'] = 'CLOCK_NOT_ADVANCING'
+        elif values[-1] <= values[0]:
+            details['reason'] = 'CLOCK_NOT_ADVANCING'
+        else:
+            details['reason'] = 'READY'
+        return details['reason'] == 'READY', details
+    except Exception as exc:  # probe diagnostics must identify internal faults
+        details['reason'] = 'CLOCK_PROBE_INTERNAL_ERROR'
+        details['error'] = f'{type(exc).__name__}: {exc}'
+        return False, details
+    finally:
+        if node is not None:
+            if executor is not None:
+                executor.remove_node(node)
+            node.destroy_node()
+        if executor is not None:
+            executor.shutdown()
+        if context.ok():
+            context.shutdown()
+        if previous_domain is None:
+            os.environ.pop('ROS_DOMAIN_ID', None)
+        else:
+            os.environ['ROS_DOMAIN_ID'] = previous_domain
+
+
+def tf_readiness(domain, timeout_s=4.0):
+    """Verify odometry and namespaced odom->base transforms using wall time."""
+    started = time.monotonic()
+    previous_domain = os.environ.get('ROS_DOMAIN_ID')
+    os.environ['ROS_DOMAIN_ID'] = str(domain)
+    context = Context()
+    details = {
+        'probe_pid': os.getpid(),
+        'domain_id': int(domain),
+        'context_identity': id(context),
+        'requested_transforms': [],
+        'odom_received': {},
+        'first_odom_wall_elapsed_s': {},
+        'first_transform_wall_elapsed_s': {},
+        'latest_odom_stamp': {},
+    }
+    odom_received = {}
+    first_odom = {}
+    first_transform = {}
+    node = None
+    executor = None
+    try:
+        rclpy.init(args=None, context=context)
+        node = rclpy.create_node('regression_tf_probe', context=context)
+        executor = SingleThreadedExecutor(context=context)
+        executor.add_node(node)
+        buffer = Buffer()
+        TransformListener(buffer, node)
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE)
+        for robot in ('robot1', 'robot2'):
+            odom_received[robot] = False
+            details['requested_transforms'].append({
+                'target': f'{robot}/base_footprint',
+                'source': f'{robot}/odom',
+            })
+
+            def receive(message, name=robot):
+                odom_received[name] = True
+                first_odom.setdefault(name, time.monotonic() - started)
+                stamp = message.header.stamp
+                details['latest_odom_stamp'][name] = {
+                    'sec': stamp.sec, 'nanosec': stamp.nanosec,
+                }
+
+            node.create_subscription(Odometry, f'/{robot}/odom', receive, qos)
+        loop_started = time.monotonic()
+        details['setup_wall_elapsed_s'] = loop_started - started
+        deadline = loop_started + timeout_s
+        while time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.1)
+            for robot in ('robot1', 'robot2'):
+                if odom_received[robot] and robot not in first_transform:
+                    if buffer.can_transform(
+                            f'{robot}/base_footprint', f'{robot}/odom',
+                            Time(), timeout=Duration(seconds=0.0)):
+                        first_transform[robot] = time.monotonic() - started
+            if len(first_transform) == 2:
+                break
+        details['odom_received'] = dict(odom_received)
+        details['first_odom_wall_elapsed_s'] = dict(first_odom)
+        details['first_transform_wall_elapsed_s'] = dict(first_transform)
+        if len(first_transform) == 2:
+            details['reason'] = 'READY'
+        else:
+            missing = [robot for robot in ('robot1', 'robot2')
+                       if robot not in first_transform]
+            details['missing_robots'] = missing
+            details['reason'] = 'TF_READINESS_TIMEOUT'
+        return details['reason'] == 'READY', details
+    except Exception as exc:
+        details['reason'] = 'TF_PROBE_INTERNAL_ERROR'
+        details['error'] = f'{type(exc).__name__}: {exc}'
+        return False, details
+    finally:
+        if node is not None:
+            if executor is not None:
+                executor.remove_node(node)
+            node.destroy_node()
+        if executor is not None:
+            executor.shutdown()
+        if context.ok():
+            context.shutdown()
+        if previous_domain is None:
+            os.environ.pop('ROS_DOMAIN_ID', None)
+        else:
+            os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
 def validate_resource_range(args, completed_trials=None):
@@ -420,6 +638,19 @@ def scoped_shutdown(processes, graceful_timeout, hard_timeout,
     }
 
 
+def append_shutdown_event(path, event_type, **fields):
+    """Append one durable, wall-timestamped cleanup event."""
+    record = {
+        'event_type': event_type,
+        'wall_time_utc': utc_now(),
+        'wall_monotonic_s': time.monotonic(),
+        **fields,
+    }
+    with path.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps(record, sort_keys=True) + '\n')
+        stream.flush()
+
+
 def required_observer_artifacts(directory):
     return {
         name: (directory / name).is_file()
@@ -428,7 +659,8 @@ def required_observer_artifacts(directory):
 
 
 def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
-                     interrupted, cleanup, settled_observed=False):
+                     interrupted, cleanup, settled_observed=False,
+                     emergency_wall_timeout=False, process_exit_codes=None):
     final_state = None
     try:
         final_state = json.loads(
@@ -457,14 +689,23 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
     except (OSError, ValueError):
         pass
     log_review = parse_log_errors(attempt / 'launch.log')
+    process_exit_codes = process_exit_codes or {}
+    shutdown_nonzero = {
+        name: code for name, code in process_exit_codes.items()
+        if code not in (None, 0)
+    }
     if interrupted:
-        classification = 'USER_INTERRUPTED'
+        classification = 'MANUAL_STOP'
     elif not ready:
         classification = 'INFRASTRUCTURE_FAILURE'
-    elif timed_out:
-        classification = 'MISSION_TIMEOUT'
+    elif emergency_wall_timeout:
+        classification = 'EMERGENCY_WALL_TIMEOUT'
     elif unexpected_exit or log_review['traceback']:
-        classification = 'PROCESS_CRASH'
+        classification = 'RUNTIME_PROCESS_CRASH'
+    elif timed_out:
+        # A bounded diagnostic deliberately ends the attempt after a healthy
+        # simulated interval; it is not a runtime failure.
+        classification = 'BOUNDED_DIAGNOSTIC'
     elif final_state is None or not maps_valid or not all(
             observer_files.values()):
         classification = 'INCOMPLETE_ARTIFACTS'
@@ -499,7 +740,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             and system.get('write_failures', 0) == 0
             and cleanup.get('all_exited', False)
         )
-        classification = 'PASS' if passed else 'SYSTEM_FAILURE'
+        classification = 'MISSION_COMPLETE' if passed else 'SHUTDOWN_DEGRADED'
     details = {
         'ready': ready,
         'timed_out': timed_out,
@@ -510,6 +751,10 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         'observer_summary_path': str(
             Path('observer') / observer.name / 'summary.json'),
         'log_review': log_review,
+        'shutdown_time_nonzero_exits': shutdown_nonzero,
+        'cleanup_quality': (
+            'CLEAN' if cleanup.get('all_exited', False) else 'DEGRADED'),
+        'primary_outcome': classification,
     }
     return classification, details
 
@@ -521,6 +766,7 @@ def internal_trial(args):
     (attempt / 'observer').mkdir()
     (attempt / 'ros_logs').mkdir()
     (attempt / 'tmp').mkdir()
+    shutdown_events = attempt / 'shutdown_events.jsonl'
     start = time.monotonic()
     metadata = {
         'schema_version': '1.0.0',
@@ -541,13 +787,17 @@ def internal_trial(args):
             'run_id': args.run_id,
             'output_root': str(attempt / 'observer'),
             'mission_timeout_s': (
-                args.mission_timeout + args.settling_period + 30.0),
+                args.mission_timeout + args.settling_period + 30.0
+                if args.mission_timeout is not None else 600.0),
             'webots_port': args.webots_port,
             'webots_mode': args.webots_mode,
             'webots_gui': str(args.webots_gui).lower(),
+            'sensor_profile': args.sensor_profile,
             'launch_rviz': 'false',
             'enable_mission_timeout':
-                not args.hold_open_after_completion,
+                not args.hold_open_after_completion
+                and args.mission_timeout is not None,
+            'use_sim_time': args.time_mode == 'sim',
             'logger_console_status': False,
         },
         'rviz_requested': args.launch_rviz,
@@ -571,13 +821,15 @@ def internal_trial(args):
         f'run_id:={args.run_id}',
         f'output_root:={attempt / "observer"}',
         f'mission_timeout_s:='
-        f'{args.mission_timeout + args.settling_period + 30.0}',
+        f'{args.mission_timeout + args.settling_period + 30.0 if args.mission_timeout is not None else 600.0}',
         f'webots_port:={args.webots_port}',
         f'webots_mode:={args.webots_mode}',
         f'webots_gui:={str(args.webots_gui).lower()}',
+        f'sensor_profile:={args.sensor_profile}',
         'launch_rviz:=false',
         f'enable_mission_timeout:='
-        f'{str(not args.hold_open_after_completion).lower()}',
+        f'{str(not args.hold_open_after_completion and args.mission_timeout is not None).lower()}',
+        f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         'logger_console_status:=false',
     ]
     collector_command = [
@@ -586,6 +838,7 @@ def internal_trial(args):
         '-p', f'output_dir:={attempt}',
         '-p', f'run_id:={args.run_id}',
         '-p', f'settling_period_s:={args.settling_period}',
+        '-p', f'use_sim_time:={str(args.time_mode == "sim").lower()}',
     ]
     launch_log = (attempt / 'launch.log').open('w', encoding='utf-8')
     collector_log = (attempt / 'collector.log').open('w', encoding='utf-8')
@@ -609,9 +862,39 @@ def internal_trial(args):
         'launch_command': launch_command,
         'collector_command': collector_command,
     })
+    rviz = None
+    rviz_log = None
+    def start_rviz():
+        nonlocal rviz, rviz_log
+        if not args.launch_rviz or rviz is not None:
+            return
+        rviz_command = manual_rviz_command(
+            args.world_profile, use_sim_time=args.time_mode == 'sim')
+        rviz_environment = environment.copy()
+        rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
+        rviz_log = (attempt / 'rviz.log').open('w', encoding='utf-8')
+        rviz = subprocess.Popen(
+            rviz_command,
+            env=rviz_environment,
+            stdout=rviz_log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=lambda: os.setpgid(0, launch.pid),
+        )
+        processes.append(rviz)
+        rviz_process = psutil.Process(rviz.pid)
+        rviz_process.cpu_percent(None)
+        ps_processes.append(rviz_process)
+        metadata.update({
+            'rviz_pid': rviz.pid,
+            'rviz_command': rviz_command,
+            'rviz_started_utc': utc_now(),
+            'rviz_start_reason': 'clock_and_stack_readiness',
+        })
     atomic_json(attempt / 'runner_metadata.json', metadata)
     interrupted = False
     requested_shutdown = False
+    shutdown_reason = None
 
     holding_open = False
     collector_finalized_for_hold = False
@@ -624,8 +907,6 @@ def internal_trial(args):
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     ready = False
-    rviz = None
-    rviz_log = None
     timed_out = False
     unexpected_exit = False
     peak_rss = 0
@@ -641,6 +922,10 @@ def internal_trial(args):
     last_sample = 0.0
     readiness_deadline = start + args.startup_timeout
     mission_deadline = None
+    mission_sim_start = None
+    clock_ok = args.time_mode == 'wall'
+    tf_ok = args.time_mode == 'wall'
+    last_clock_probe = 0.0
     status_path = attempt / 'collector_status.json'
     try:
         while not interrupted:
@@ -650,38 +935,35 @@ def internal_trial(args):
                 status = json.loads(status_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 pass
-            if status.get('ready') and not ready:
+            if args.time_mode == 'sim' and now - last_clock_probe >= 5.0:
+                clock_ok, clock_details = clock_readiness(args.ros_domain_id)
+                metadata['clock_readiness'] = clock_details
+                metadata['clock_error'] = (
+                    None if clock_ok else clock_details.get(
+                        'reason', 'CLOCK_PROBE_INTERNAL_ERROR'))
+                if clock_ok:
+                    tf_ok, tf_details = tf_readiness(args.ros_domain_id)
+                    metadata['tf_readiness'] = tf_details
+                atomic_json(attempt / 'runner_metadata.json', metadata)
+                last_clock_probe = now
+            if status.get('ready') and clock_ok and tf_ok and not ready:
                 nodes = status.get('nodes', [])
                 ready = all(any(node.endswith(suffix) for node in nodes)
                             for suffix in EXPECTED_NODE_SUFFIXES)
                 if ready:
-                    mission_deadline = now + args.mission_timeout
+                    start_rviz()
+                    mission_deadline = (now + args.mission_timeout
+                                        if args.time_mode == 'wall'
+                                        and args.mission_timeout is not None
+                                        else None)
+                    mission_sim_start = status.get('elapsed_s')
                     metadata['readiness_elapsed_s'] = now - start
                     metadata['readiness_graph_nodes'] = nodes
-                    if args.launch_rviz:
-                        rviz_command = manual_rviz_command(args.world_profile)
-                        rviz_environment = environment.copy()
-                        rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
-                        rviz_log = (attempt / 'rviz.log').open(
-                            'w', encoding='utf-8')
-                        rviz = subprocess.Popen(
-                            rviz_command,
-                            env=rviz_environment,
-                            stdout=rviz_log,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            preexec_fn=lambda: os.setpgid(0, launch.pid),
-                        )
-                        processes.append(rviz)
-                        rviz_process = psutil.Process(rviz.pid)
-                        rviz_process.cpu_percent(None)
-                        ps_processes.append(rviz_process)
-                        metadata['rviz_pid'] = rviz.pid
-                        metadata['rviz_command'] = rviz_command
                     atomic_json(attempt / 'runner_metadata.json', metadata)
             if (ready and status.get('settled')
                     and not holding_open):
                 requested_shutdown = True
+                shutdown_reason = 'mission_complete'
                 if args.hold_open_after_completion:
                     # Finalize the passive collector first so normal settled
                     # status, claims, and lossless maps are safely on disk
@@ -714,17 +996,26 @@ def internal_trial(args):
                 else:
                     break
             if not ready and now >= readiness_deadline:
+                shutdown_reason = 'startup_timeout'
                 break
-            if mission_timeout_expired(
-                    now, mission_deadline, holding_open):
+            sim_expired = (
+                args.time_mode == 'sim' and args.mission_timeout is not None
+                and mission_sim_start is not None
+                and status.get('elapsed_s', mission_sim_start)
+                - mission_sim_start >= args.mission_timeout)
+            if (mission_timeout_expired(now, mission_deadline, holding_open)
+                    or (sim_expired and not holding_open)):
                 timed_out = True
                 requested_shutdown = True
+                shutdown_reason = 'simulated_mission_timeout'
                 break
             if launch.poll() is not None:
                 unexpected_exit = not requested_shutdown
+                shutdown_reason = 'launch_process_exit'
                 break
             if collector.poll() is not None and not holding_open:
                 unexpected_exit = True
+                shutdown_reason = 'collector_process_exit'
                 break
             if now - last_sample >= 1.0:
                 rss, cpu, count, pids = process_tree_metrics(ps_processes)
@@ -750,20 +1041,53 @@ def internal_trial(args):
                 maximum_processes = max(maximum_processes, count)
                 metadata['tracked_pids'] = pids
                 last_sample = now
+            if (args.emergency_wall_runtime is not None
+                    and now - start >= args.emergency_wall_runtime):
+                timed_out = True
+                requested_shutdown = True
+                shutdown_reason = 'emergency_wall_timeout'
+                break
             time.sleep(0.2)
     finally:
+        append_shutdown_event(
+            shutdown_events, 'shutdown_requested',
+            shutdown_reason=shutdown_reason or (
+                'manual_stop' if interrupted else 'cleanup'))
         # Freeze the newest settled messages while their freshness is intact.
         if not collector_finalized_for_hold:
+            append_shutdown_event(
+                shutdown_events, 'signal_sent', process='collector',
+                signal='SIGINT')
             signal_process(collector, signal.SIGINT)
             wait_processes([collector], args.graceful_shutdown_timeout)
+            append_shutdown_event(
+                shutdown_events, 'final_snapshot_complete', process='collector',
+                complete=collector.poll() is not None)
         if rviz is not None:
+            append_shutdown_event(
+                shutdown_events, 'signal_sent', process='rviz', signal='SIGINT')
             signal_process(rviz, signal.SIGINT)
         # Then let the launch's passive observer finalize its own outputs.
+        append_shutdown_event(
+            shutdown_events, 'signal_sent', process='launch', signal='SIGINT')
         signal_process(launch, signal.SIGINT)
         cleanup = scoped_shutdown(
             processes, args.graceful_shutdown_timeout,
             args.hard_shutdown_timeout, process_group=launch.pid,
             send_initial_sigint=False)
+        append_shutdown_event(
+            shutdown_events, 'escalation', graceful=cleanup['graceful'],
+            terminate_succeeded=cleanup['terminate_succeeded'],
+            kill_required=cleanup['kill_required'])
+        for name, process in (
+                ('collector', collector), ('launch', launch), ('rviz', rviz)):
+            if process is not None:
+                append_shutdown_event(
+                    shutdown_events, 'process_exit', process=name,
+                    exit_code=process.poll())
+        append_shutdown_event(
+            shutdown_events, 'cleanup_complete',
+            complete=cleanup.get('all_exited', False))
         metrics_file.close()
         launch_log.close()
         collector_log.close()
@@ -788,7 +1112,12 @@ def internal_trial(args):
     classification, details = classify_attempt(
         attempt, args.run_id, ready, timed_out, unexpected_exit,
         interrupted and not user_ended_hold, cleanup,
-        settled_observed=requested_shutdown and not timed_out)
+        settled_observed=requested_shutdown and not timed_out,
+        emergency_wall_timeout=shutdown_reason == 'emergency_wall_timeout',
+        process_exit_codes={
+            'launch': launch.poll(), 'collector': collector.poll(),
+            'rviz': rviz.poll() if rviz is not None else None,
+        })
     metadata.update({
         'utc_end': utc_now(),
         'wall_time_s': time.monotonic() - start,
@@ -810,6 +1139,8 @@ def internal_trial(args):
         'hold_open_entered': holding_open,
         'hold_open_user_shutdown': user_ended_hold,
         'settled_observed': requested_shutdown and not timed_out,
+        'shutdown_reason': shutdown_reason,
+        'shutdown_events_path': 'shutdown_events.jsonl',
     })
     atomic_json(attempt / 'runner_metadata.json', metadata)
     return CLASSIFICATIONS.index(classification)
@@ -928,6 +1259,10 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         webots_mode='fast' if args.fast_mode else 'realtime',
         webots_gui=args.rendering,
         launch_rviz=args.rviz,
+        sensor_profile=(
+            getattr(args, 'sensor_profile', None) or
+            ('throughput' if getattr(args, 'execution_profile', None) ==
+             'throughput' else 'full')),
         hold_open_after_completion=args.hold_open_after_completion,
         startup_timeout=args.startup_timeout,
         mission_timeout=args.mission_timeout,
@@ -955,28 +1290,39 @@ def internal_command(namespace):
 
 def wait_for_attempt_supervisor(process, namespace, attempt):
     """Wait and forward Ctrl+C only to this attempt's process group."""
-    announced = False
+    hold_announced = False
+    rviz_announced = False
     while True:
         try:
             return process.wait(timeout=0.2)
         except subprocess.TimeoutExpired:
-            if (getattr(
-                    namespace, 'hold_open_after_completion', False)
-                    and not announced):
+            wants_rviz_status = (
+                getattr(namespace, 'launch_rviz', False)
+                and not rviz_announced)
+            wants_hold_status = (
+                getattr(namespace, 'hold_open_after_completion', False)
+                and not hold_announced)
+            if wants_rviz_status or wants_hold_status:
                 try:
                     metadata = json.loads(
                         (attempt / 'runner_metadata.json').read_text(
                             encoding='utf-8'))
                 except (OSError, ValueError):
                     metadata = {}
-                if metadata.get('hold_open_active'):
+                if wants_rviz_status and metadata.get('rviz_pid'):
+                    print(
+                        f'RVIZ_STARTED pid={metadata["rviz_pid"]}',
+                        flush=True,
+                    )
+                    rviz_announced = True
+                if wants_hold_status and metadata.get('hold_open_active'):
                     print(
                         'Mission complete. Webots and RViz are being kept '
                         'open for inspection.\n'
                         'Press Ctrl+C to shut down and finalize the campaign.',
                         flush=True,
                     )
-                    announced = True
+                    hold_announced = True
         except KeyboardInterrupt:
             os.killpg(process.pid, signal.SIGINT)
             process.wait(timeout=30)
@@ -1001,6 +1347,18 @@ def execute_attempt(namespace):
     metadata = json.loads(
         (attempt / 'runner_metadata.json').read_text(encoding='utf-8'))
     metadata['supervisor_return_code'] = returncode
+    if 'classification' not in metadata:
+        metadata.update({
+            'classification': 'INFRASTRUCTURE_FAILURE',
+            'classification_details': {
+                'reason': (
+                    'trial supervisor exited before final classification'),
+                'supervisor_return_code': returncode,
+                'supervisor_log': str(attempt / 'supervisor.log'),
+            },
+            'wall_time_s': metadata.get('wall_time_s', 0.0),
+            'cleanup_complete': False,
+        })
     atomic_json(attempt / 'runner_metadata.json', metadata)
     return metadata
 
@@ -1027,7 +1385,11 @@ def perform_attempt(args, campaign, progress, trial_number, retry=True):
             'path': relative,
             'classification': metadata['classification'],
         })
-    if metadata['classification'] == 'INFRASTRUCTURE_FAILURE' and retry:
+    retry_allowed = (
+        retry and not args.hold_open_after_completion
+        and not getattr(args, 'no_infrastructure_retry', False))
+    if (metadata['classification'] == 'INFRASTRUCTURE_FAILURE'
+            and retry_allowed):
         with PROGRESS_LOCK:
             progress['infrastructure_retries'] = (
                 progress.get('infrastructure_retries', 0) + 1)
@@ -1038,9 +1400,13 @@ def perform_attempt(args, campaign, progress, trial_number, retry=True):
             args, campaign, progress, trial_number, retry=False)
     if metadata['classification'] == 'INFRASTRUCTURE_FAILURE':
         update_progress(campaign, progress)
-        raise RuntimeError(
-            f'{namespace.attempt_id} remained an infrastructure failure '
-            'after its one permitted retry')
+        if args.hold_open_after_completion:
+            raise RuntimeError(
+                f'{namespace.attempt_id} failed before readiness; manual '
+                'hold-open attempts are not retried automatically')
+            raise RuntimeError(
+                f'{namespace.attempt_id} infrastructure readiness failed '
+                f'without retry: {metadata.get("clock_error") or "unspecified"}')
     with PROGRESS_LOCK:
         progress['valid_trials'][trial_id] = relative
     update_progress(campaign, progress)
@@ -1085,7 +1451,8 @@ def run_parallel_stage(args, campaign, progress, trial_numbers,
             while pending and len(active) < concurrency and not sustained:
                 number = pending.pop(0)
                 future = executor.submit(
-                    perform_attempt, args, campaign, progress, number)
+                    perform_attempt, args, campaign, progress, number,
+                    not args.no_infrastructure_retry)
                 active[future] = number
             if sustained and concurrency > 1:
                 concurrency -= 1
@@ -1184,6 +1551,7 @@ def build_and_test(workspace, skip_build, skip_tests):
             'src/my_epuck_project/test/test_cooperative_regression.py',
             'src/my_epuck_project/test/test_cooperative_world_profiles.py',
             'src/my_epuck_project/test/test_cooperative_manual_rviz.py',
+            'src/my_epuck_project/test/test_webots_robot_windows.py',
             'src/my_epuck_project/test/test_cooperative_trial_collector.py',
             'src/my_epuck_project/test/test_occupancy_map_comparison.py',
             'src/my_epuck_project/test/test_map_fusion_geometry.py',
@@ -1272,13 +1640,16 @@ def create_manifest(args, campaign, workspace):
         'webots_version': webots['version'],
         'webots_executable': webots['executable'],
         'webots_mode': 'fast' if args.fast_mode else 'realtime',
+        'execution_profile': args.execution_profile,
         'rendering_mode': 'enabled' if args.rendering else 'disabled',
         'exact_webots_options': (
             f'--port=<trial-port> --batch '
             f'--mode={"fast" if args.fast_mode else "realtime"}'
             + ('' if args.rendering
                else ' --no-rendering --stdout --stderr --minimize')),
-        'simulation_time_measurement': 'unavailable',
+        'simulation_time_measurement': 'collector /clock telemetry',
+        'time_mode': args.time_mode,
+        'use_sim_time': args.time_mode == 'sim',
         'world_profile': args.world_profile,
         'world': args.profile_metadata['world'],
         'source_world_path': args.source_world_path,
@@ -1314,12 +1685,14 @@ def create_manifest(args, campaign, workspace):
             'two_robots_observed_continuous_exploration_launch.py',
         'launch_arguments': {
             'world_profile': args.world_profile,
-            'use_sim_time': False,
+            'use_sim_time': args.time_mode == 'sim',
             'coordinator_mode': 'continuous',
             'one_goal_only': False,
             'launch_rviz': args.rviz,
             'hold_open_after_completion':
                 args.hold_open_after_completion,
+            'time_mode': args.time_mode,
+            'no_mission_timeout': args.no_mission_timeout,
         },
         'trial_count_requested': args.trials,
         'ros_domain_id_range': [
@@ -1338,6 +1711,8 @@ def create_manifest(args, campaign, workspace):
         'timeouts': {
             'startup_s': args.startup_timeout,
             'mission_s': args.mission_timeout,
+            'mission_timeout_domain': args.time_mode,
+            'emergency_wall_runtime_s': args.emergency_wall_runtime,
             'settling_s': args.settling_period,
             'graceful_shutdown_s': args.graceful_shutdown_timeout,
             'hard_shutdown_s': args.hard_shutdown_timeout,
@@ -1354,8 +1729,8 @@ def create_manifest(args, campaign, workspace):
         },
         'reproduction_command': command,
         'limitations': [
-            'Webots simulation time is not published because use_sim_time=false '
-            'is intentionally preserved; no real-time factor is invented.',
+            'Process launch, startup, clock-stall, and emergency limits use wall time; '
+            'mission timers use ROS simulation time when time_mode=sim.',
         ],
     }
     atomic_json(campaign / 'campaign_manifest.json', manifest)
@@ -1491,7 +1866,8 @@ def campaign_main(args):
         if args.calibration and remaining and not existing_calibration:
             number = remaining.pop(0)
             calibration = perform_attempt(
-                args, campaign, progress, number)
+                args, campaign, progress, number,
+                retry=not args.no_infrastructure_retry)
             completed.add(number)
             calibration_attempt = campaign / progress['valid_trials'][
                 f'trial_{number:02d}']
@@ -1605,10 +1981,38 @@ def apply_profile_defaults(args, profile_name=None):
     args.world_profile = name
     if args.startup_timeout is None:
         args.startup_timeout = settings['startup_timeout']
-    if args.mission_timeout is None:
+    if args.mission_timeout is None and not args.no_mission_timeout:
         args.mission_timeout = settings['mission_timeout']
     if args.shift_window is None:
         args.shift_window = settings['map_comparison_shift_window']
+    return args
+
+
+def apply_execution_profile(args):
+    """Resolve rendering/RViz defaults while retaining explicit overrides."""
+    name = args.execution_profile or 'throughput'
+    settings = {
+        'visual': (True, True),
+        'rendered': (True, False),
+        'throughput': (False, False),
+    }
+    profile_rendering, profile_rviz = settings[name]
+    explicit_rendering = args.rendering is not None
+    explicit_rviz = args.rviz is not None
+    if explicit_rendering and args.rendering != profile_rendering:
+        print(
+            f'EXECUTION_PROFILE_CONFLICT profile={name} '
+            f'rendering_override={args.rendering}', flush=True)
+    if explicit_rviz and args.rviz != profile_rviz:
+        print(
+            f'EXECUTION_PROFILE_CONFLICT profile={name} '
+            f'rviz_override={args.rviz}', flush=True)
+    args.rendering = args.rendering if explicit_rendering else profile_rendering
+    args.rviz = args.rviz if explicit_rviz else profile_rviz
+    if getattr(args, 'sensor_profile', None) is None:
+        args.sensor_profile = (
+            'throughput' if name == 'throughput' else 'full')
+    args.execution_profile = name
     return args
 
 
@@ -1633,11 +2037,21 @@ def parser():
     result.add_argument('--webots-port-base', type=int, default=23000)
     result.add_argument('--startup-timeout', type=float)
     result.add_argument('--mission-timeout', type=float)
+    result.add_argument('--no-mission-timeout', action='store_true',
+                        help='Disable the simulated/wall mission timeout.')
+    result.add_argument('--time-mode', choices=['sim', 'wall'], default='sim',
+                        help='ROS mission clock: Webots simulation or wall time.')
+    result.add_argument('--emergency-wall-runtime', type=float,
+                        help='Optional wall-clock safety limit for unattended runs.')
     result.add_argument('--settling-period', type=float, default=4.0)
     result.add_argument(
         '--fast-mode', type=boolean, default=True, metavar='BOOL')
     result.add_argument(
-        '--rendering', type=boolean, default=False, metavar='BOOL')
+        '--rendering', type=boolean, default=None, metavar='BOOL')
+    result.add_argument(
+        '--execution-profile',
+        choices=['visual', 'rendered', 'throughput'], default=None,
+        help='Reusable visual/rendered/headless execution configuration.')
     result.add_argument(
         '--hold-open-after-completion',
         type=boolean,
@@ -1648,7 +2062,7 @@ def parser():
             'open until Ctrl+C'),
     )
     result.add_argument(
-        '--rviz', type=boolean, default=False, metavar='BOOL',
+        '--rviz', type=boolean, default=None, metavar='BOOL',
         help='Open the passive RViz view (single-trial use only)')
     result.add_argument(
         '--calibration', type=boolean, default=True, metavar='BOOL')
@@ -1658,6 +2072,9 @@ def parser():
     result.add_argument('--regenerate-report', action='store_true')
     result.add_argument('--skip-build', action='store_true')
     result.add_argument('--skip-tests', action='store_true')
+    result.add_argument(
+        '--no-infrastructure-retry', action='store_true',
+        help='Run exactly one attempt and preserve its first readiness failure.')
     result.add_argument('--free-threshold', type=int, default=25)
     result.add_argument('--occupied-threshold', type=int, default=65)
     result.add_argument('--shift-window', type=int)
@@ -1676,6 +2093,9 @@ def parser():
     result.add_argument('--webots-mode', help=argparse.SUPPRESS)
     result.add_argument('--webots-gui', type=boolean, help=argparse.SUPPRESS)
     result.add_argument('--launch-rviz', type=boolean, help=argparse.SUPPRESS)
+    result.add_argument(
+        '--sensor-profile', choices=['full', 'throughput'], default=None,
+        help='Simulated-device set; physical launches are unchanged.')
     return result
 
 
@@ -1685,6 +2105,10 @@ def validate_cli_options(args):
         raise SystemExit('--trials must be positive')
     if not 1 <= args.maximum_concurrency <= 4:
         raise SystemExit('--maximum-concurrency must be between 1 and 4')
+    if args.no_mission_timeout:
+        args.mission_timeout = None
+    if args.emergency_wall_runtime is not None and args.emergency_wall_runtime <= 0:
+        raise SystemExit('--emergency-wall-runtime must be positive')
     if (not args.internal_trial and args.rviz
             and (args.trials != 1 or args.maximum_concurrency != 1)):
         raise SystemExit(
@@ -1702,6 +2126,7 @@ def validate_cli_options(args):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    apply_execution_profile(args)
     validate_cli_options(args)
     try:
         if args.internal_trial:

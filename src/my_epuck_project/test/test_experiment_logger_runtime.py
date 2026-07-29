@@ -59,6 +59,21 @@ def test_controller_error_after_info_does_not_change_call_site_severity(observer
     assert events[-1]["message"] == "Failed to make progress"
 
 
+def test_csv_timing_schema_accepts_wall_and_sim_elapsed_fields(observer):
+    """Every CSV writer accepts the dual-clock row emitted by the logger."""
+    observer.sample_telemetry()
+    observer.sample_coverage()
+    observer.sample_health()
+    assert observer.internal_errors == {}
+    observer.flush()
+    for name in ("robot1_timeseries.csv", "robot2_timeseries.csv",
+                 "coverage.csv", "topic_health.csv"):
+        header = (observer.directory / name).read_text(
+            encoding="utf-8").splitlines()[0].split(",")
+        assert "elapsed_s" in header
+        assert "wall_elapsed_s" in header
+
+
 def test_nonfatal_subsystem_error_is_counted_and_logging_continues(observer):
     def malformed():
         raise ValueError("malformed diagnostic")

@@ -25,6 +25,7 @@ def coordinator(
         output='screen',
         parameters=[{
             'robot_id': robot,
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
             'peer_robot_id': peer,
             'operating_mode': LaunchConfiguration('coordinator_mode'),
             'one_goal_only': LaunchConfiguration('one_goal_only'),
@@ -92,6 +93,8 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
         }.items(),
     )
     robot1_rank = LaunchConfiguration('robot1_test_candidate_rank')
@@ -119,6 +122,9 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         DeclareLaunchArgument('one_goal_only', default_value='true'),
         DeclareLaunchArgument('coordinator_autostart', default_value='true'),
         DeclareLaunchArgument('cycle_cooldown_s', default_value='2.5'),

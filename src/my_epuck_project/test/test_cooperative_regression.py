@@ -10,6 +10,7 @@ from my_epuck_project.cooperative_regression import (
     apply_profile_defaults,
     attempt_namespace,
     classify_attempt,
+    execute_attempt,
     hold_open_artifacts_valid,
     internal_command,
     manual_rviz_command,
@@ -22,6 +23,7 @@ from my_epuck_project.cooperative_regression import (
     validate_cli_options,
     validate_existing_attempt,
     wait_for_attempt_supervisor,
+    windows_port_pid,
 )
 from my_epuck_project.cooperative_regression_report import analyze_campaign
 from my_epuck_project.occupancy_map_comparison import (
@@ -64,6 +66,43 @@ def test_trial_resources_are_unique_and_configurable(tmp_path):
     assert all(item.launch_rviz is False for item in values)
 
 
+def test_supervisor_missing_classification_becomes_infrastructure_failure(
+        monkeypatch, tmp_path):
+    """A prematurely exited trial supervisor returns a stable classification."""
+    attempt = tmp_path / 'attempt'
+    attempt.mkdir()
+    (attempt / 'runner_metadata.json').write_text(json.dumps({
+        'attempt_id': 'trial_01_attempt_01',
+    }))
+
+    class Process:
+        returncode = 1
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+    monkeypatch.setattr(subprocess, 'Popen', lambda *args, **kwargs: Process())
+    namespace = argparse.Namespace(
+        attempt_dir=str(attempt), attempt_id='trial_01_attempt_01')
+    result = execute_attempt(namespace)
+    assert result['classification'] == 'INFRASTRUCTURE_FAILURE'
+    assert result['cleanup_complete'] is False
+
+
+def test_windows_port_pid_timeout_is_nonfatal(monkeypatch):
+    """Slow Windows PID telemetry cannot terminate a healthy trial."""
+
+    def timeout(*args, **kwargs):
+        del args, kwargs
+        raise subprocess.TimeoutExpired('netstat.exe', 10)
+
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.run', timeout)
+    monkeypatch.setattr(Path, 'exists', lambda self: True)
+    assert windows_port_pid(23100) is None
+
+
 def test_manual_rviz_uses_installed_cooperative_config():
     """The supervisor launches RViz with the installed project preset."""
     command = manual_rviz_command()
@@ -71,6 +110,19 @@ def test_manual_rviz_uses_installed_cooperative_config():
     assert command[2].endswith(
         '/resource/cooperative_manual_exploration.rviz')
     assert Path(command[2]).is_file()
+    assert command[-2:] == ['-p', 'use_sim_time:=false']
+    assert manual_rviz_command('large', use_sim_time=True)[-2:] == [
+        '-p', 'use_sim_time:=true']
+
+
+def test_external_rviz_is_started_after_readiness_and_has_explicit_time():
+    """The runner owns RViz startup and passes its selected ROS time mode."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / 'my_epuck_project' / 'cooperative_regression.py'
+    ).read_text(encoding='utf-8')
+    assert "'rviz_start_reason': 'clock_and_stack_readiness'" in source
+    assert "use_sim_time=args.time_mode == 'sim'" in source
 
 
 def test_runner_profile_defaults_and_rviz_selection():
@@ -169,7 +221,8 @@ def test_hold_active_does_not_signal_shutdown_immediately(
                 raise subprocess.TimeoutExpired('supervisor', 0.2)
             return self.returncode
 
-    namespace = argparse.Namespace(hold_open_after_completion=True)
+    namespace = argparse.Namespace(
+        hold_open_after_completion=True, launch_rviz=False)
     monkeypatch.setattr(
         'my_epuck_project.cooperative_regression.os.killpg',
         lambda *unused: pytest.fail(f'unexpected signal: {unused}'))
@@ -198,7 +251,8 @@ def test_hold_ctrl_c_forwards_one_scoped_sigint_and_finishes(
     monkeypatch.setattr(
         'my_epuck_project.cooperative_regression.os.killpg',
         lambda pid, signum: sent.append((pid, signum)))
-    namespace = argparse.Namespace(hold_open_after_completion=True)
+    namespace = argparse.Namespace(
+        hold_open_after_completion=True, launch_rviz=False)
     assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
     assert sent == [(13579, signal.SIGINT)]
 
@@ -214,7 +268,8 @@ def test_failure_before_completion_is_not_held(monkeypatch, tmp_path):
             del timeout
             return self.returncode
 
-    namespace = argparse.Namespace(hold_open_after_completion=True)
+    namespace = argparse.Namespace(
+        hold_open_after_completion=True, launch_rviz=False)
     monkeypatch.setattr(
         'my_epuck_project.cooperative_regression.os.killpg',
         lambda *unused: pytest.fail(f'unexpected signal: {unused}'))
@@ -241,6 +296,64 @@ def test_infrastructure_failure_retried_once(monkeypatch, tmp_path):
     assert len(progress['attempts']) == 2
     assert progress['infrastructure_retries'] == 1
     assert progress['valid_trials']['trial_01'].endswith('attempt_02')
+
+
+def test_hold_open_infrastructure_failure_is_not_retried(
+        monkeypatch, tmp_path):
+    """A manual GUI attempt does not silently consume another two minutes."""
+    (tmp_path / 'attempts').mkdir()
+    progress = {
+        'attempts': [], 'valid_trials': {}, 'adaptive_reductions': []}
+    calls = []
+
+    def fake_execute(namespace):
+        calls.append(namespace.attempt_id)
+        Path(namespace.attempt_dir).mkdir()
+        return {
+            'classification': 'INFRASTRUCTURE_FAILURE',
+            'wall_time_s': 1.0,
+        }
+
+    args = options(tmp_path, trials=1)
+    args.hold_open_after_completion = True
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.execute_attempt',
+        fake_execute)
+    with pytest.raises(
+            RuntimeError, match='not retried automatically'):
+        perform_attempt(args, tmp_path, progress, 1)
+    assert calls == ['trial_01_attempt_01']
+    assert len(progress['attempts']) == 1
+    assert progress.get('infrastructure_retries', 0) == 0
+
+
+def test_rviz_start_is_announced_before_readiness(
+        monkeypatch, tmp_path, capsys):
+    """The parent reports the optional GUI without requiring stack readiness."""
+    attempt = tmp_path / 'attempt'
+    attempt.mkdir()
+    (attempt / 'runner_metadata.json').write_text(
+        json.dumps({'rviz_pid': 24680}))
+
+    class Process:
+        pid = 13579
+        returncode = 0
+        calls = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired('supervisor', 0.2)
+            return self.returncode
+
+    namespace = argparse.Namespace(
+        hold_open_after_completion=False, launch_rviz=True)
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.os.killpg',
+        lambda *unused: pytest.fail(f'unexpected signal: {unused}'))
+    assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
+    assert 'RVIZ_STARTED pid=24680' in capsys.readouterr().out
 
 
 def test_system_failure_is_not_retried(monkeypatch, tmp_path):
@@ -381,7 +494,7 @@ def test_timeout_classification_is_valid_failure(tmp_path):
     classification, _ = classify_attempt(
         attempt, f'{trial}_attempt_01', True, True, False, False,
         {'all_exited': True})
-    assert classification == 'MISSION_TIMEOUT'
+    assert classification == 'BOUNDED_DIAGNOSTIC'
 
 
 def test_requested_shutdown_traceback_is_not_a_runtime_crash(tmp_path):
@@ -406,7 +519,7 @@ def test_collection_trigger_age_precedes_slow_artifact_write(tmp_path):
     classification, _ = classify_attempt(
         attempt, f'{trial}_attempt_01', True, False, False, False,
         {'all_exited': True})
-    assert classification == 'PASS'
+    assert classification == 'MISSION_COMPLETE'
 
 
 def test_settled_observation_proves_freshness_for_legacy_artifact(tmp_path):
@@ -419,7 +532,7 @@ def test_settled_observation_proves_freshness_for_legacy_artifact(tmp_path):
     classification, _ = classify_attempt(
         attempt, f'{trial}_attempt_01', True, False, False, False,
         {'all_exited': True}, settled_observed=True)
-    assert classification == 'PASS'
+    assert classification == 'MISSION_COMPLETE'
 
 
 def test_resume_validation_rejects_partial_artifacts(tmp_path):

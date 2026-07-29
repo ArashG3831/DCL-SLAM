@@ -13,6 +13,7 @@ from my_epuck_interfaces.msg import ExplorationClaim, ExplorationStatus
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -231,6 +232,7 @@ class CooperativeTrialCollector(Node):
             raise ValueError('output_dir is required')
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.start_monotonic = time.monotonic()
+        self.start_ros_seconds = self.get_clock().now().nanoseconds * 1e-9
         self.lock = threading.RLock()
         self.finalized = False
         self.messages = {
@@ -275,7 +277,12 @@ class CooperativeTrialCollector(Node):
                 f'/{robot}/navigate_to_pose/_action/status',
                 lambda message, item=robot:
                     self.store(item, 'navigate_status', message), transient)
-        self.create_timer(0.5, self.write_health)
+        # Health/status is a process-control channel.  Keep it wall-timed so
+        # a missing or paused simulation clock cannot prevent watchdogs and
+        # artifact finalization from running.
+        self.create_timer(
+            0.5, self.write_health,
+            clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.write_health()
 
     def store(self, robot, kind, message):
@@ -283,7 +290,10 @@ class CooperativeTrialCollector(Node):
             if self.finalized:
                 return
             self.messages[robot][kind] = message
-            self.received[robot][kind] = time.monotonic()
+            self.received[robot][kind] = self.get_clock().now().nanoseconds * 1e-9
+
+    def ros_seconds(self):
+        return self.get_clock().now().nanoseconds * 1e-9
 
     def graph_snapshot(self):
         return sorted({
@@ -323,7 +333,7 @@ class CooperativeTrialCollector(Node):
                    for status in message.status_list)
 
     def health_document(self):
-        now = time.monotonic()
+        now = self.ros_seconds()
         complete = self.complete_and_fresh(now)
         if complete:
             if self.both_complete_since is None:
@@ -348,7 +358,9 @@ class CooperativeTrialCollector(Node):
             'both_mission_complete': complete,
             'settled': settled,
             'settled_status_age_s': self.settled_snapshot,
-            'elapsed_s': now - self.start_monotonic,
+            'elapsed_s': now - self.start_ros_seconds,
+            'wall_elapsed_s': time.monotonic() - self.start_monotonic,
+            'sim_time_seconds': now,
             'received': {
                 robot: sorted(self.received[robot]) for robot in self.messages
             },
@@ -366,7 +378,7 @@ class CooperativeTrialCollector(Node):
                 )
 
     def final_document(self, reason):
-        now = time.monotonic()
+        now = self.ros_seconds()
         robots = {}
         for robot, values in self.messages.items():
             status = values['status']
@@ -390,7 +402,8 @@ class CooperativeTrialCollector(Node):
             'run_id': self.run_id,
             'finalization_reason': reason,
             'collector_pid': os.getpid(),
-            'collector_elapsed_s': now - self.start_monotonic,
+            'collector_elapsed_s': now - self.start_ros_seconds,
+            'collector_wall_elapsed_s': time.monotonic() - self.start_monotonic,
             'robots': robots,
             'graph_nodes': self.cached_graph,
         }

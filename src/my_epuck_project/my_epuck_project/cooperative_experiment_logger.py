@@ -28,9 +28,10 @@ from my_epuck_interfaces.msg import (
 from .experiment_metrics import CoverageAttribution, Grid, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
 
 SCHEMA='1.1.0'; STATES={0:'UNKNOWN',1:'PROPOSING',2:'NAVIGATING',3:'SUCCEEDED',4:'FAILED',5:'RELEASED',6:'CANCELED'}; STATUS_STATES={0:'STARTING',1:'ACTIVE',2:'NAVIGATING',3:'NO_ELIGIBLE_CANDIDATES',4:'COMPLETE',5:'STOPPED',6:'ERROR'}
-TELEMETRY=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','event_sequence','robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps','angular_speed_radps','commanded_linear_mps','commanded_angular_radps','distance_travelled_m','claim_state','claim_id','frontier_id','goal_x','goal_y','goal_yaw','navigation_active','distance_remaining_m','recoveries','candidate_count','local_known_cells','shared_known_cells','local_costmap_obstacles','global_costmap_known','global_costmap_obstacles','odom_age_s','scan_age_s','map_age_s','shared_map_age_s','claim_age_s','feedback_age_s']
-COVERAGE=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','event_sequence','robot1_local_known','robot2_local_known','robot1_shared_known','robot2_shared_known','shared_free_cells','shared_occupied_cells','shared_unknown_cells','known_area_m2','coverage_gain_cells','coverage_gain_since_start_cells','unique_first_seen_robot1_cells','unique_first_seen_robot2_cells','later_duplicated_by_robot1_cells','later_duplicated_by_robot2_cells','simultaneously_observed_cells','total_known_union_cells','duplicated_known_fraction','shared_maps_equivalent']
-HEALTH=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','event_sequence','robot_id','topic_name','topic_rate_hz','topic_age_s','expected_min_rate_hz','stale']
+TIME_FIELDS=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','wall_elapsed_s','event_sequence']
+TELEMETRY=TIME_FIELDS+['robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps','angular_speed_radps','commanded_linear_mps','commanded_angular_radps','distance_travelled_m','claim_state','claim_id','frontier_id','goal_x','goal_y','goal_yaw','navigation_active','distance_remaining_m','recoveries','candidate_count','local_known_cells','shared_known_cells','local_costmap_obstacles','global_costmap_known','global_costmap_obstacles','odom_age_s','scan_age_s','map_age_s','shared_map_age_s','claim_age_s','feedback_age_s']
+COVERAGE=TIME_FIELDS+['robot1_local_known','robot2_local_known','robot1_shared_known','robot2_shared_known','shared_free_cells','shared_occupied_cells','shared_unknown_cells','known_area_m2','coverage_gain_cells','coverage_gain_since_start_cells','unique_first_seen_robot1_cells','unique_first_seen_robot2_cells','later_duplicated_by_robot1_cells','later_duplicated_by_robot2_cells','simultaneously_observed_cells','total_known_union_cells','duplicated_known_fraction','shared_maps_equivalent']
+HEALTH=TIME_FIELDS+['robot_id','topic_name','topic_rate_hz','topic_age_s','expected_min_rate_hz','stale']
 
 def yaw(q): return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
 def as_grid(m): return Grid(m.info.width,m.info.height,m.info.resolution,m.info.origin.position.x,m.info.origin.position.y,yaw(m.info.origin.orientation),np.asarray(m.data,dtype=np.int8))
@@ -59,7 +60,7 @@ class CooperativeExperimentLogger(Node):
             'coverage_attribution_resolution': 0.01,
         })
         for k,v in defaults.items(): self.declare_parameter(k,v)
-        self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
+        self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_ros=self.get_clock().now().nanoseconds*1e-9; self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
@@ -105,11 +106,12 @@ class CooperativeExperimentLogger(Node):
             self.observe(Twist,f'/{r}/cmd_vel_nav',lambda m,x=r:self.command(x,m),self.qos(),f'{r}.cmd_vel_nav')
             self.observe(TwistStamped,f'/{r}/cmd_vel',lambda m,x=r:self.command(x,m.twist),self.qos(),f'{r}.cmd_vel')
         if self.p['enable_rosout_collection']: self.observe(Log,'/rosout',self.rosout,self.qos(True,True,1000),'rosout')
+    def ros_seconds(self): return self.get_clock().now().nanoseconds*1e-9
     def ros_now(self): n=self.get_clock().now().nanoseconds; return n//1000000000,n%1000000000
     def common(self,source='/cooperative_experiment_logger',robot=None,source_stamp=None):
         with self._state_lock:
             self.sequence+=1; sequence=self.sequence
-        sec,nsec=source_stamp or self.ros_now(); return {'schema_version':SCHEMA,'run_id':self.run_id,'event_sequence':sequence,'wall_time_utc':utc_now(),'ros_time_sec':sec,'ros_time_nanosec':nsec,'elapsed_s':time.monotonic()-self.start,'robot_id':robot,'source':source}
+        sec,nsec=source_stamp or self.ros_now(); return {'schema_version':SCHEMA,'run_id':self.run_id,'event_sequence':sequence,'wall_time_utc':utc_now(),'ros_time_sec':sec,'ros_time_nanosec':nsec,'elapsed_s':self.ros_seconds()-self.start_ros,'wall_elapsed_s':time.monotonic()-self.start,'robot_id':robot,'source':source}
     def event(self,event_type,message,robot=None,source='/cooperative_experiment_logger',severity='INFO',source_stamp=None,console=False,allow_during_shutdown=False,**extra):
         if (self._finalizing or self._closed) and not allow_during_shutdown:return None
         row=self.common(source,robot,source_stamp); row.update(severity=severity,event_type=event_type,message=message); row.update(finite(extra))
@@ -147,11 +149,11 @@ class CooperativeExperimentLogger(Node):
             self.get_logger().error(f'logger internal error reporting failed in {subsystem}',throttle_duration_sec=10.)
         finally:self._reporting_internal_error=False
     def mark(self,r,key,msg):
-        now=time.monotonic()
+        now=self.ros_seconds()
         with self._state_lock:
             self.last[(r,key)]=now; self.windows.setdefault((r,key),deque()).append(now); self.latest[r][key]=msg
     def age(self,r,key):
-        value=self.last.get((r,key)); return time.monotonic()-value if value else None
+        value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):
         self.mark(r,'odom',msg); p=msg.pose.pose.position; self.latest[r]['pose']=(p.x,p.y,yaw(msg.pose.pose.orientation)); self.latest[r]['speed']=(msg.twist.twist.linear.x,msg.twist.twist.angular.z)
         if self.p['enable_trajectory_overlap']: self.trajectory.add(r,p.x,p.y)
@@ -193,24 +195,24 @@ class CooperativeExperimentLogger(Node):
             if key in text:return value
         return 'UNKNOWN_NAV2_FAILURE'
     def status(self,r,msg):
-        self.mark(r,'exploration_status',msg); old=self.statuses.get(r); self.statuses[r]=msg; state=STATUS_STATES.get(msg.state,str(msg.state)); now=time.monotonic()
+        self.mark(r,'exploration_status',msg); old=self.statuses.get(r); self.statuses[r]=msg; state=STATUS_STATES.get(msg.state,str(msg.state)); now=self.ros_seconds()
         self.latest[r]['exploration_status']=state
         if old is None or old.state!=msg.state:
             self.event('EXPLORATION_STATUS_CHANGED',state,r,f'/cslam/{r}/exploration_status',source_stamp=stamp(msg),status_state=state,status_reason=msg.reason,status_revision=msg.message_revision,candidate_count=msg.candidate_count,eligible_candidate_count=msg.eligible_candidate_count)
         if msg.state==ExplorationStatus.NO_ELIGIBLE_CANDIDATES and self.exhausted_since[r] is None:self.exhausted_since[r]=now
         elif msg.state!=ExplorationStatus.NO_ELIGIBLE_CANDIDATES and self.exhausted_since[r] is not None:
             self.exhausted_duration[r]+=now-self.exhausted_since[r]; self.exhausted_since[r]=None
-        if msg.state==ExplorationStatus.COMPLETE and self.mission_completion_time is None:self.mission_completion_time=now-self.start
+        if msg.state==ExplorationStatus.COMPLETE and self.mission_completion_time is None:self.mission_completion_time=now-self.start_ros
     def coordinator_event(self,r,msg):
         self.mark(r,'exploration_event',msg); fields={'cycle_number':msg.cycle_number,'claim_id':msg.claim_id,'frontier_id':msg.frontier_id,'candidate_map_revision':msg.candidate_map_revision,'selected_rank':msg.selected_rank,'path_length_m':msg.path_length_m,'information_gain':msg.information_gain,'goal_x':msg.goal_pose.pose.position.x,'goal_y':msg.goal_pose.pose.position.y,'goal_yaw':yaw(msg.goal_pose.pose.orientation),'terminal_result':msg.terminal_result,'duration_s':msg.duration_s,'suppression_reason':msg.reason}
         if msg.event_type=='EXPLORATION_CYCLE_STARTED':
-            self.cycle_starts[(r,msg.claim_id)]=(time.monotonic(),self.trajectory.total_distance.get(r,0.)); self.region_attempts[r][msg.frontier_id]+=1
+            self.cycle_starts[(r,msg.claim_id)]=(self.ros_seconds(),self.trajectory.total_distance.get(r,0.)); self.region_attempts[r][msg.frontier_id]+=1
         if msg.event_type=='EXPLORATION_CYCLE_ENDED':
             start=self.cycle_starts.pop((r,msg.claim_id),None)
             if start:
-                fields['duration_s']=time.monotonic()-start[0]; fields['actual_travelled_distance_m']=self.trajectory.total_distance.get(r,0.)-start[1]; self.cycle_durations[r].append(fields['duration_s'])
+                fields['duration_s']=self.ros_seconds()-start[0]; fields['actual_travelled_distance_m']=self.trajectory.total_distance.get(r,0.)-start[1]; self.cycle_durations[r].append(fields['duration_s'])
         self.robot_counts[r][msg.event_type]+=1
-        if msg.event_type=='MISSION_COMPLETE' and self.mission_completion_time is None:self.mission_completion_time=time.monotonic()-self.start
+        if msg.event_type=='MISSION_COMPLETE' and self.mission_completion_time is None:self.mission_completion_time=self.ros_seconds()-self.start_ros
         self.event(msg.event_type,msg.reason or msg.terminal_result or msg.event_type,r,f'/cslam/{r}/exploration_event',source_stamp=stamp(msg),**fields)
     def feedback(self,r,msg):
         self.mark(r,'navigate_feedback',msg); f=msg.feedback; old=self.latest[r].get('recoveries',0); self.latest[r].update(distance_remaining=float(f.distance_remaining),recoveries=int(f.number_of_recoveries))
@@ -224,7 +226,7 @@ class CooperativeExperimentLogger(Node):
     def row_time(self):
         sec,nsec=self.ros_now()
         with self._state_lock:self.sequence+=1; sequence=self.sequence
-        return {'run_id':self.run_id,'wall_time_utc':utc_now(),'ros_time_sec':sec,'ros_time_nanosec':nsec,'elapsed_s':time.monotonic()-self.start,'event_sequence':sequence}
+        return {'run_id':self.run_id,'wall_time_utc':utc_now(),'ros_time_sec':sec,'ros_time_nanosec':nsec,'elapsed_s':self.ros_seconds()-self.start_ros,'wall_elapsed_s':time.monotonic()-self.start,'event_sequence':sequence}
     def map_snapshot(self,r,key):
         with self._state_lock:msg=self.latest[r].get(key)
         if msg is None:return None

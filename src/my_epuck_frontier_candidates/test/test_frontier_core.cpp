@@ -16,3 +16,9 @@ TEST(StableId,BoundsOriginAndUnrelatedChange){auto a=grid(8,8,.05,-.2,-.2);free_
 TEST(Path,LengthAndValidation){nav_msgs::msg::Path p;geometry_msgs::msg::PoseStamped a,b,c;a.pose.position.x=0;b.pose.position.x=3;b.pose.position.y=4;c.pose.position.x=6;c.pose.position.y=8;p.poses={a,b,c};auto l=path_length(p,0,0,6,8,.01);ASSERT_TRUE(l);EXPECT_DOUBLE_EQ(*l,10);p.poses.clear();EXPECT_FALSE(path_length(p,0,0,0,0,.1));p.poses={a};EXPECT_TRUE(path_length(p,0,0,0,0,.1));EXPECT_FALSE(path_length(p,1,1,0,0,.1));p.poses={a,b};p.poses[1].pose.position.x=std::numeric_limits<double>::quiet_NaN();EXPECT_FALSE(path_length(p,0,0,0,0,.1));}
 TEST(Revision,IdenticalTimestampDoesNotMatter){auto a=grid();auto b=std::make_shared<nav_msgs::msg::OccupancyGrid>(*a);b->header.stamp.sec=99;EXPECT_EQ(map_checksum(*a),map_checksum(*b));b->data[0]=0;EXPECT_NE(map_checksum(*a),map_checksum(*b));}
 TEST(Architecture,SourceHasNoForbiddenInterfaces){SUCCEED();}
+TEST(AsyncRequests,OldGenerationCannotTouchReplacement){
+  EXPECT_TRUE(async_request_is_current(7,7,12,12,true));
+  EXPECT_FALSE(async_request_is_current(6,7,12,12,true));
+  EXPECT_FALSE(async_request_is_current(7,7,11,12,true));
+  EXPECT_FALSE(async_request_is_current(7,7,12,12,false));
+}

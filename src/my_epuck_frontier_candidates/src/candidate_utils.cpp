@@ -11,4 +11,8 @@ uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate&f
 std::optional<double> path_length(const nav_msgs::msg::Path&p,double rx,double ry,double gx,double gy,double tol){if(p.poses.empty())return{};for(auto&s:p.poses)if(!std::isfinite(s.pose.position.x)||!std::isfinite(s.pose.position.y))return{};auto&last=p.poses.back().pose.position;if(std::hypot(last.x-gx,last.y-gy)>tol)return{};if(p.poses.size()==1){if(std::hypot(rx-gx,ry-gy)<=tol)return 0.;return{};}double total=0;for(size_t i=1;i<p.poses.size();i++)total+=std::hypot(p.poses[i].pose.position.x-p.poses[i-1].pose.position.x,p.poses[i].pose.position.y-p.poses[i-1].pose.position.y);return total;}
 bool clearance_ok(const frontier_exploration_ros2::OccupancyGrid2d&m,double wx,double wy,double clear,int threshold){int cx,cy;if(!m.worldToMap(wx,wy,cx,cy))return false;int r=int(std::ceil(clear/m.resolution()));for(int y=cy-r;y<=cy+r;y++)for(int x=cx-r;x<=cx+r;x++){if(!m.inside(x,y))return false;if(std::hypot((x-cx)*m.resolution(),(y-cy)*m.resolution())<=clear&&m.cost(x,y)>=threshold)return false;}return true;}
 double normalized_value(double v,double lo,double hi){return hi-lo<1e-9?0.:((v-lo)/(hi-lo));}
+bool async_request_is_current(uint64_t request_generation,uint64_t active_request,
+  uint64_t request_revision,uint64_t cycle_revision,bool path_checking){
+  return request_generation==active_request && request_revision==cycle_revision && path_checking;
+}
 }

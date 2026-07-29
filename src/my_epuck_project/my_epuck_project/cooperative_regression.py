@@ -794,9 +794,11 @@ def internal_trial(args):
             'webots_gui': str(args.webots_gui).lower(),
             'sensor_profile': args.sensor_profile,
             'launch_rviz': 'false',
-            'enable_mission_timeout':
-                not args.hold_open_after_completion
-                and args.mission_timeout is not None,
+            # The runner owns the mission budget.  The launch file's
+            # TimerAction starts at launch time, before controller and
+            # odometry readiness, so enabling it here can shut down a slow
+            # startup before the mission has begun.
+            'enable_mission_timeout': False,
             'use_sim_time': args.time_mode == 'sim',
             'logger_console_status': False,
         },
@@ -827,8 +829,7 @@ def internal_trial(args):
         f'webots_gui:={str(args.webots_gui).lower()}',
         f'sensor_profile:={args.sensor_profile}',
         'launch_rviz:=false',
-        f'enable_mission_timeout:='
-        f'{str(not args.hold_open_after_completion and args.mission_timeout is not None).lower()}',
+        'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         'logger_console_status:=false',
     ]

@@ -157,7 +157,7 @@ def test_world_profile_reaches_internal_trial_command(tmp_path):
 
 def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(
         tmp_path):
-    """Normal regression retains automatic completion shutdown."""
+    """Runner trials defer the mission budget until readiness is complete."""
     assert parser().parse_args([]).hold_open_after_completion is False
     args = options(tmp_path, trials=1)
     namespace = attempt_namespace(args, 1, 1, tmp_path)
@@ -165,6 +165,11 @@ def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(
     assert '--hold-open-after-completion' in command
     index = command.index('--hold-open-after-completion')
     assert command[index + 1] == 'false'
+    source = (
+        Path(__file__).resolve().parents[1]
+        / 'my_epuck_project' / 'cooperative_regression.py'
+    ).read_text(encoding='utf-8')
+    assert "'enable_mission_timeout:=false'" in source
 
 
 @pytest.mark.parametrize('trials,concurrency', [(2, 1), (1, 2)])

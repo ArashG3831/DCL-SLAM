@@ -8,11 +8,16 @@ import time
 
 import rclpy
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
+from my_epuck_project.slam_range_policy import (
+    FREE_SPACE_CAP,
+    complete_natural_no_returns,
+)
 
 
 @dataclass(frozen=True)
@@ -83,7 +88,8 @@ def beam_directions(scan):
 
 
 def selected_indices_cached(scan, center_x, center_y, radius,
-                            range_tolerance, directions):
+                            range_tolerance, directions,
+                            natural_no_return_indices=()):
     selected, intervals = [], {}
     distance = math.hypot(center_x, center_y)
     if distance <= radius:
@@ -113,7 +119,10 @@ def selected_indices_cached(scan, center_x, center_y, radius,
         if far < 0.0:
             continue
         intervals[index] = (near, far)
-        if near - range_tolerance - 1e-7 <= measured_range <= far + range_tolerance + 1e-7:
+        natural_no_return = index in natural_no_return_indices
+        if (natural_no_return and near <= scan.range_max + 1e-7) or (
+                near - range_tolerance - 1e-7 <= measured_range <=
+                far + range_tolerance + 1e-7):
             selected.append(index)
     return selected, intervals
 
@@ -125,13 +134,14 @@ def selected_indices(scan, center_x, center_y, radius, range_tolerance):
 
 
 def filtered_scan(scan, center_x, center_y, radius, range_tolerance,
-                  directions=None):
+                  directions=None, natural_no_return_indices=()):
     output = copy.copy(scan)
     output.ranges = list(scan.ranges)
     output.intensities = list(scan.intensities)
     directions = directions if directions is not None else beam_directions(scan)
     indices, intervals = selected_indices_cached(
-        scan, center_x, center_y, radius, range_tolerance, directions
+        scan, center_x, center_y, radius, range_tolerance, directions,
+        natural_no_return_indices,
     )
     for index in indices:
         output.ranges[index] = math.nan
@@ -227,6 +237,10 @@ class TeammateScanFilter(Node):
             'shared_tf_position_tolerance': 0.05,
             'shared_tf_yaw_tolerance': 0.15,
             'warning_interval': 2.0,
+            'mode': 'simulation',
+            'simulation_free_space_completion': True,
+            'physical_free_space_completion': False,
+            'free_space_cap': FREE_SPACE_CAP,
         }
         for name, default in defaults.items():
             self.declare_parameter(name, default)
@@ -246,6 +260,13 @@ class TeammateScanFilter(Node):
         self.queue_depth_limit = int(value('pending_queue_depth'))
         self.retry_period = float(value('transform_retry_period'))
         self.warning_interval = float(value('warning_interval'))
+        self.mode = str(value('mode')).strip().lower()
+        if self.mode not in ('simulation', 'physical'):
+            raise ValueError("mode must be 'simulation' or 'physical'")
+        self.free_space_completion = bool(
+            value('simulation_free_space_completion') if self.mode == 'simulation'
+            else value('physical_free_space_completion'))
+        self.free_space_cap = float(value('free_space_cap'))
         required_frames = (self.peer_frame, self.expected_frame,
                            self.own_odom_frame, self.peer_odom_frame)
         if any(not frame for frame in required_frames):
@@ -285,12 +306,22 @@ class TeammateScanFilter(Node):
         self.last_masked_indices = []
         self.last_intervals = {}
         self.last_peer_position = None
+        self.last_scan_metrics = {}
+        self.scan_metric_totals = {
+            'raw_positive_infinity': 0, 'converted_free_cap': 0,
+            'teammate_masked': 0, 'nan': 0, 'negative_infinity': 0,
+            'finite_obstacle': 0, 'exact_range_max': 0, 'invalid': 0,
+        }
+        self.logged_scan_contract = False
         self.retry_timer = self.create_timer(self.retry_period, self.process_pending)
         self.metrics_timer = self.create_timer(10.0, self.log_metrics)
         self.get_logger().info(
             f'{self.resolve_topic_name(input_topic)} -> {self.resolve_topic_name(output_topic)}; '
             f'fixed_odom={self.fixed_odom_transform}; zero passthrough; '
-            f'queue={self.queue_depth_limit} retry={self.retry_period:.3f}s exact-time-only')
+            f'queue={self.queue_depth_limit} retry={self.retry_period:.3f}s exact-time-only; '
+            f'mode={self.mode} free_space_cap={self.free_space_cap:.6f}m '
+            f'completion_enabled={self.free_space_completion} '
+            f'masking_after_conversion=True')
 
     def warn(self, message):
         now = time.monotonic()
@@ -422,15 +453,46 @@ class TeammateScanFilter(Node):
         return self.directions
 
     def publish_filtered(self, scan, pose):
+        if not self.logged_scan_contract:
+            self.get_logger().info(
+                f'SCAN_CONTRACT mode={self.mode} original_range_max='
+                f'{scan.range_max:.6f} free_space_cap={self.free_space_cap:.6f} '
+                f'completion_enabled={self.free_space_completion} '
+                f'masking_after_conversion=True')
+            self.logged_scan_contract = True
+        completed_ranges, completion = complete_natural_no_returns(
+            scan.ranges, self.free_space_cap, scan.range_min, scan.range_max,
+            self.free_space_completion)
+        completed = copy.copy(scan)
+        completed.ranges = completed_ranges
+        natural_no_return_indices = {
+            index for index, value in enumerate(scan.ranges)
+            if math.isinf(value) and value > 0.0
+        }
         output, indices, intervals = filtered_scan(
-            scan, pose.x, pose.y, self.effective_radius, self.range_tolerance,
-            self.scan_directions(scan))
+            completed, pose.x, pose.y, self.effective_radius,
+            self.range_tolerance, self.scan_directions(completed),
+            natural_no_return_indices)
+        if not rclpy.ok():
+            return
         self.publisher.publish(output)
         with self.state_lock:
             self.last_published_stamp = self.stamp_key(scan)
             self.last_peer_position = (pose.x, pose.y, pose.yaw)
             self.last_masked_indices = indices
             self.last_intervals = intervals
+            self.last_scan_metrics = {
+                'raw_positive_infinity': completion.raw_positive_infinity,
+                'converted_free_cap': completion.converted_free_cap,
+                'teammate_masked': len(indices),
+                'nan': completion.nan + len(indices),
+                'negative_infinity': completion.negative_infinity,
+                'finite_obstacle': completion.finite_obstacle,
+                'exact_range_max': completion.exact_range_max,
+                'invalid': completion.invalid,
+            }
+            for key, value in self.last_scan_metrics.items():
+                self.scan_metric_totals[key] += value
             self.published_filtered_count += 1
             self.masked_beam_count += len(indices)
 
@@ -450,7 +512,8 @@ class TeammateScanFilter(Node):
                           pose_state=self.pose_transition.state,
                           pose_counts=dict(self.pose_source_counts),
                           transition_rejections=self.pose_transition.rejected_transitions,
-                          transition_difference=self.pose_transition.last_difference)
+                          transition_difference=self.pose_transition.last_difference,
+                          scan_metrics=dict(self.scan_metric_totals))
         if waits:
             ordered = sorted(waits)
             p95 = ordered[min(len(ordered)-1, math.ceil(.95*len(ordered))-1)]

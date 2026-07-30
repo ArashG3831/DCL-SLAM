@@ -19,7 +19,7 @@
     restamp_tf: true
     map_update_interval: 0.30
     resolution: 0.01
-    max_laser_range: 1.5
+    max_laser_range: 11.98  # 12.0 m absolute scan range; 11.98 m free-only cap
     minimum_time_interval: 0.02
     transform_timeout: 2.0
     tf_buffer_duration: 30.0

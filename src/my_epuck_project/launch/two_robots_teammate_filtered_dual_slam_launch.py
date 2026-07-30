@@ -20,6 +20,7 @@ from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
 from my_epuck_project.cooperative_profiles import profile
+from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
 
 
 def slam_actions(package_dir, robot, slam_resolution):
@@ -124,6 +125,10 @@ def launch_setup(context):
                 'shared_tf_position_tolerance': 0.05,
                 'shared_tf_yaw_tolerance': 0.15,
                 'warning_interval': 2.0,
+                'mode': 'simulation',
+                'simulation_free_space_completion': True,
+                'physical_free_space_completion': False,
+                'free_space_cap': FREE_SPACE_CAP,
             }],
         ))
     return [

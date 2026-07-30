@@ -28,7 +28,7 @@ slam_toolbox:
     restamp_tf: true
     map_update_interval: 0.10
     resolution: 0.005
-    max_laser_range: 1.5
+     max_laser_range: 11.98  # simulation D500 free-only cap
     minimum_time_interval: 0.02
     transform_timeout: 1.0
     tf_buffer_duration: 30.0

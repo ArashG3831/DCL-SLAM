@@ -8,7 +8,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from my_epuck_project.cooperative_profiles import profile
 
-def generator(robot, minimum_frontier_cells):
+def generator(robot, minimum_frontier_cells, approach_clearance):
     return Node(
         package='my_epuck_frontier_candidates', executable='frontier_candidate_generator',
         name='frontier_candidate_generator', namespace=robot, output='screen',
@@ -26,20 +26,22 @@ def generator(robot, minimum_frontier_cells):
             'minimum_frontier_cells': minimum_frontier_cells,
             'minimum_frontier_length_m': 0.05,
             'stable_id_quantization_m': 0.05,
-            'approach_clearance_m': 0.06,
+            'approach_clearance_m': approach_clearance,
             'minimum_robot_distance_m': 0.08,
             'maximum_candidates_before_path_check': 8,
             'maximum_path_queries_per_cycle': 5,
             'path_query_timeout_s': 1.0,
             'planner_id': 'GridBased',
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
 
 def launch_setup(context):
     project = get_package_share_directory('my_epuck_project')
+    world_path = LaunchConfiguration('world_path').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(project, 'worlds'),
+        os.path.dirname(world_path) if world_path else os.path.join(project, 'worlds'),
     )
     stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -49,12 +51,17 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'world_path': world_path,
         }.items(),
     )
     return [
         stack,
-        generator('robot1', selected['minimum_frontier_cells']),
-        generator('robot2', selected['minimum_frontier_cells']),
+        generator('robot1', selected['minimum_frontier_cells'],
+                  0.15 if selected['name'] == 'large' else 0.06),
+        generator('robot2', selected['minimum_frontier_cells'],
+                  0.15 if selected['name'] == 'large' else 0.06),
     ]
 
 
@@ -66,7 +73,11 @@ def generate_launch_description():
             choices=['large', 'small'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
         OpaqueFunction(function=launch_setup),
     ])

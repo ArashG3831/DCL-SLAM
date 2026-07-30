@@ -63,6 +63,10 @@ class RobotStart:
     camera_width: int
     camera_height: int
 
+    @property
+    def planar_yaw(self):
+        return axis_angle_yaw(self.rotation)
+
 
 def _blocks(content, node_type):
     expression = re.compile(
@@ -125,14 +129,36 @@ def _robot(block):
 
 
 def normalize_angle(value):
-    """Normalize an angle to [-pi, pi]."""
-    return math.atan2(math.sin(value), math.cos(value))
+    """Normalize an angle to [-pi, pi)."""
+    if not math.isfinite(value):
+        raise ValueError(f'angle must be finite, got {value!r}')
+    return (value + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def axis_angle_yaw(rotation, tolerance=1e-9):
+    """Convert a Webots axis-angle rotation to a planar yaw.
+
+    Webots stores rotations as axis-angle.  A ground robot may only have a
+    rotation about the Z axis; accepting a tilted axis would make the planar
+    relative transform ambiguous, so reject it precisely.
+    """
+    if len(rotation) != 4 or not all(math.isfinite(v) for v in rotation):
+        raise ValueError(f'rotation must contain four finite values: {rotation!r}')
+    axis_x, axis_y, axis_z, angle = rotation
+    axis_norm = math.sqrt(axis_x**2 + axis_y**2 + axis_z**2)
+    if axis_norm <= tolerance:
+        if abs(angle) <= tolerance:
+            return 0.0
+        raise ValueError(f'rotation axis is zero for nonzero angle: {rotation!r}')
+    if math.hypot(axis_x, axis_y) > tolerance * axis_norm:
+        raise ValueError(f'robot rotation is not planar Z-axis rotation: {rotation!r}')
+    return normalize_angle(angle * axis_z / axis_norm)
 
 
 def relative_transform(source, target):
     """Return target in source coordinates on the world's X-Y ground plane."""
-    source_yaw = source.rotation[3]
-    target_yaw = target.rotation[3]
+    source_yaw = source.planar_yaw
+    target_yaw = target.planar_yaw
     delta_x = target.translation[0] - source.translation[0]
     delta_y = target.translation[1] - source.translation[1]
     cosine = math.cos(source_yaw)
@@ -141,6 +167,29 @@ def relative_transform(source, target):
         cosine * delta_x + sine * delta_y,
         -sine * delta_x + cosine * delta_y,
         normalize_angle(target_yaw - source_yaw),
+    )
+
+
+def compose_transform(source, relative):
+    """Compose a source world pose with a target-in-source SE(2) pose."""
+    sx, sy, syaw = source
+    tx, ty, tyaw = relative
+    cosine, sine = math.cos(syaw), math.sin(syaw)
+    return (
+        sx + cosine * tx - sine * ty,
+        sy + sine * tx + cosine * ty,
+        normalize_angle(syaw + tyaw),
+    )
+
+
+def invert_transform(transform):
+    """Return the inverse of an SE(2) transform."""
+    x, y, yaw = transform
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    return (
+        -cosine * x - sine * y,
+        sine * x - cosine * y,
+        normalize_angle(-yaw),
     )
 
 
@@ -153,8 +202,11 @@ def parse_world(path):
     robots = [_robot(block) for block in _blocks(content, 'E-puck')]
     if len(arenas) != 1 or len(viewpoints) != 1:
         raise ValueError('world must contain one RectangleArena and Viewpoint')
-    if [robot.name for robot in robots] != ['robot1', 'robot2']:
-        raise ValueError('world must contain robot1 then robot2 exactly')
+    names = [robot.name for robot in robots]
+    if len(names) != len(set(names)):
+        raise ValueError(f'world contains duplicate robot names: {names!r}')
+    if set(names) != {'robot1', 'robot2'} or len(names) != 2:
+        raise ValueError('world must contain exactly robot1 and robot2')
     arena = arenas[0]
     viewpoint = viewpoints[0]
     by_name = {robot.name: robot for robot in robots}
@@ -167,10 +219,37 @@ def parse_world(path):
             'rotation': _numbers(_field(block, 'rotation', '0 0 1 0')),
             'size': _numbers(_field(block, 'size')),
         })
+    dimensions = _numbers(_field(arena, 'floorSize'))
+    if len(dimensions) != 2 or not all(math.isfinite(v) and v > 0 for v in dimensions):
+        raise ValueError(f'arena floorSize must be two positive finite values: {dimensions!r}')
+    for robot in robots:
+        if len(robot.translation) != 3 or not all(math.isfinite(v) for v in robot.translation):
+            raise ValueError(f'non-finite pose for {robot.name}')
+        if abs(robot.translation[0]) + 0.11 > dimensions[0] / 2 or \
+                abs(robot.translation[1]) + 0.11 > dimensions[1] / 2:
+            raise ValueError(f'{robot.name} is outside the arena')
+        axis_angle_yaw(robot.rotation)
+    robot1, robot2 = by_name['robot1'], by_name['robot2']
+    separation = math.dist(robot1.translation[:2], robot2.translation[:2])
+    if not math.isfinite(separation) or separation < 0.22:
+        raise ValueError(f'robots overlap or are too close: separation={separation}')
+    for robot in robots:
+        for obstacle in obstacles:
+            cx, cy, _ = obstacle['translation']
+            width, height, _ = obstacle['size']
+            angle = obstacle['rotation'][3]
+            cosine, sine = math.cos(angle), math.sin(angle)
+            dx, dy = robot.translation[0] - cx, robot.translation[1] - cy
+            local_x = cosine * dx + sine * dy
+            local_y = -sine * dx + cosine * dy
+            if (max(abs(local_x) - width / 2, 0.0) ** 2 +
+                    max(abs(local_y) - height / 2, 0.0) ** 2) < 0.11 ** 2:
+                raise ValueError(f'{robot.name} intersects obstacle {obstacle["name"]}')
+    relative = relative_transform(robot1, robot2)
     return {
         'path': str(path),
         'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
-        'dimensions': _numbers(_field(arena, 'floorSize')),
+        'dimensions': dimensions,
         'wall_height': float(_field(arena, 'wallHeight')),
         'viewpoint': {
             'orientation': _numbers(_field(viewpoint, 'orientation')),
@@ -178,13 +257,24 @@ def parse_world(path):
         },
         'robots': by_name,
         'robot_order': tuple(robot.name for robot in robots),
-        'relative_transform': relative_transform(
-            by_name['robot1'], by_name['robot2']),
+        'initial_world_transforms': {
+            name: (robot.translation[0], robot.translation[1], robot.planar_yaw)
+            for name, robot in by_name.items()
+        },
+        'planar_yaws': {name: robot.planar_yaw for name, robot in by_name.items()},
+        'relative_transform': relative,
         'reverse_relative_transform': relative_transform(
             by_name['robot2'], by_name['robot1']),
         'obstacles': obstacles,
         'solid_box_count': len(obstacles),
         'solid_count': len(list(_blocks(content, 'Solid'))),
+        'initial_separation_m': separation,
+        'validation': {
+            'robots_inside_arena': True,
+            'robots_nonoverlapping': True,
+            'robots_clear_of_obstacles': True,
+            'finite_viewpoint': all(math.isfinite(v) for v in (*_numbers(_field(viewpoint, 'orientation')), *_numbers(_field(viewpoint, 'position')))),
+        },
         'uses_remote_proto': bool(re.search(
             r'(?m)^EXTERNPROTO\s+"https?://', content)),
     }
@@ -211,6 +301,7 @@ def profile_summary(value):
         robots[name] = {
             'translation': list(robot.translation),
             'rotation': list(robot.rotation),
+            'planar_yaw': robot.planar_yaw,
             'controller': robot.controller,
             'window': robot.window,
         }
@@ -222,6 +313,10 @@ def profile_summary(value):
         'world_dimensions_m': list(metadata['dimensions']),
         'robot_start_poses': robots,
         'known_relative_transform': list(metadata['relative_transform']),
+        'reverse_relative_transform': list(metadata['reverse_relative_transform']),
+        'initial_separation_m': metadata['initial_separation_m'],
+        'transform_source': 'WORLD_DERIVED',
+        'world_validation': metadata['validation'],
         'slam_resolution': value['slam_resolution'],
         'peer_export_resolution': value['slam_resolution'],
         'fusion_resolution': value['fusion_resolution'],

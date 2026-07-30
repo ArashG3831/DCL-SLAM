@@ -17,7 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformException, TransformListener
 from my_epuck_interfaces.msg import (
     ExplorationClaim,
     ExplorationEvent,
@@ -49,7 +49,10 @@ class CooperativeExperimentLogger(Node):
             'installed_world_path': '',
             'world_dimensions': [0.0, 0.0],
             'robot_start_poses_json': '{}',
+            # Direct/unit and physical deployments have no Webots world.
+            # Simulation launch always overrides this with WORLD_DERIVED.
             'known_relative_transform': [-0.3, 0.0, -math.pi],
+            'transform_source': 'EXPLICIT_PHYSICAL',
             'slam_resolution': 0.01,
             'fusion_resolution': 0.01,
             'global_costmap_resolution': 0.005,
@@ -61,6 +64,8 @@ class CooperativeExperimentLogger(Node):
         })
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_ros=self.get_clock().now().nanoseconds*1e-9; self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
+        if len(self.p['known_relative_transform']) != 3:
+            raise ValueError('known_relative_transform must be explicit (physical) or world-derived')
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
@@ -155,8 +160,26 @@ class CooperativeExperimentLogger(Node):
     def age(self,r,key):
         value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):
-        self.mark(r,'odom',msg); p=msg.pose.pose.position; self.latest[r]['pose']=(p.x,p.y,yaw(msg.pose.pose.orientation)); self.latest[r]['speed']=(msg.twist.twist.linear.x,msg.twist.twist.angular.z)
-        if self.p['enable_trajectory_overlap']: self.trajectory.add(r,p.x,p.y)
+        self.mark(r,'odom',msg)
+        p=msg.pose.pose.position
+        local_yaw=yaw(msg.pose.pose.orientation)
+        try:
+            transform=self.tf_buffer.lookup_transform(
+                self.p['global_frame'], msg.header.frame_id,
+                Time.from_msg(msg.header.stamp),
+                timeout=Duration(seconds=0.05))
+            t=transform.transform.translation
+            heading=yaw(transform.transform.rotation)
+            cosine, sine=math.cos(heading), math.sin(heading)
+            shared_x=t.x+cosine*p.x-sine*p.y
+            shared_y=t.y+sine*p.x+cosine*p.y
+            shared_yaw=(heading+local_yaw+math.pi)%(2*math.pi)-math.pi
+        except TransformException:
+            # Do not feed local-frame points to cross-robot metrics.
+            return
+        self.latest[r]['pose']=(shared_x,shared_y,shared_yaw)
+        self.latest[r]['speed']=(msg.twist.twist.linear.x,msg.twist.twist.angular.z)
+        if self.p['enable_trajectory_overlap']: self.trajectory.add(r,shared_x,shared_y)
     def command(self,r,msg): self.mark(r,'cmd_vel',msg); self.latest[r]['command']=(msg.linear.x,msg.angular.z)
     def plan(self,r,msg): self.mark(r,'plan',msg); self.latest[r]['path_length']=sum(math.hypot(b.pose.position.x-a.pose.position.x,b.pose.position.y-a.pose.position.y) for a,b in zip(msg.poses,msg.poses[1:]))
     def candidates(self,r,msg):
@@ -340,6 +363,14 @@ class CooperativeExperimentLogger(Node):
                 self.p['robot_start_poses_json']),
             'known_initial_relative_transform':list(
                 self.p['known_relative_transform']),
+            'transform_source': self.p['transform_source'],
+            'transform_frame_convention': {
+                'source_frame': 'robot1_initial',
+                'target_frame': 'robot2_initial',
+                'meaning': 'robot2 pose expressed in robot1 initial frame',
+                'transform_source': self.p['transform_source'],
+                'world_sha256': self.p['world_sha256'],
+            },
             'clean_shutdown':clean,'shutdown_status':status,
         }
         atomic_json(self.directory/'run_manifest.json',value)
@@ -352,7 +383,7 @@ class CooperativeExperimentLogger(Node):
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
         total_distance=sum(motion.get('distance_travelled_m',{}).values()); coverage_gain=(self.previous_known or 0)-(self.initial_known or 0)
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'continuous_exploration':continuous,'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'oscillation_episodes':self.counts['OSCILLATION_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'continuous_exploration':continuous,'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'oscillation_episodes':self.counts['OSCILLATION_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
     def finalize(self,clean=True):
         with self._lifecycle_lock:
             if self.finalized or self._finalizing:return False

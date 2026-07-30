@@ -28,6 +28,7 @@ def launch_setup(context):
 
     package_dir = get_package_share_directory('my_epuck_project')
     world = LaunchConfiguration('world').perform(context)
+    world_path = LaunchConfiguration('world_path').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     webots_port = LaunchConfiguration('webots_port').perform(context)
     webots_mode = LaunchConfiguration('webots_mode').perform(context)
@@ -54,11 +55,9 @@ def launch_setup(context):
         base_control = f.read()
 
     webots = WebotsLauncher(
-        world=PathJoinSubstitution([
-            TextSubstitution(text=package_dir),
-            'worlds',
-            world,
-        ]),
+        world=(world_path or PathJoinSubstitution([
+            TextSubstitution(text=package_dir), 'worlds', world,
+        ])),
         # The Webots ROS 2 supervisor is the authoritative publisher of the
         # simulation /clock.  Robot controllers consume that one clock.
         ros2_supervisor=True,
@@ -237,6 +236,10 @@ def generate_launch_description():
             'world',
             default_value='epuck_d500_two_world_both_active.wbt',
             description='Two active D500 e-pucks with independent ROS namespaces.',
+        ),
+        DeclareLaunchArgument(
+            'world_path', default_value='',
+            description='Exact saved world path; overrides installed profile copy.',
         ),
         DeclareLaunchArgument(
             'use_sim_time',

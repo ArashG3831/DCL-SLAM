@@ -10,6 +10,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     IncludeLaunchDescription,
+    LogInfo,
     OpaqueFunction,
     TimerAction,
 )
@@ -27,13 +28,13 @@ from my_epuck_project.cooperative_profiles import (
 
 def runtime_actions(context):
     project = get_package_share_directory('my_epuck_project')
+    source_world_path = LaunchConfiguration('source_world_path').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(project, 'worlds'),
+        os.path.dirname(source_world_path) if source_world_path else os.path.join(project, 'worlds'),
     )
     summary = profile_summary(selected)
-    source_world_path = LaunchConfiguration(
-        'source_world_path').perform(context) or selected['world_path']
+    source_world_path = source_world_path or selected['world_path']
     continuous_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             project, 'launch',
@@ -65,6 +66,7 @@ def runtime_actions(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'world_path': source_world_path,
         }.items(),
     )
     observer = Node(
@@ -87,6 +89,7 @@ def runtime_actions(context):
                 summary['robot_start_poses'], sort_keys=True),
             'known_relative_transform':
                 list(selected['world_metadata']['relative_transform']),
+            'transform_source': 'WORLD_DERIVED',
             'slam_resolution': selected['slam_resolution'],
             'fusion_resolution': selected['fusion_resolution'],
             'global_costmap_resolution':
@@ -121,7 +124,19 @@ def runtime_actions(context):
         additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
-    return [continuous_stack, observer, rviz]
+    metadata = selected['world_metadata']
+    return [
+        LogInfo(msg=(
+            f'WORLD_DERIVED selected_world={source_world_path} '
+            f'robot1={metadata["robots"]["robot1"].translation},'
+            f'yaw={metadata["robots"]["robot1"].planar_yaw:.9f} '
+            f'robot2={metadata["robots"]["robot2"].translation},'
+            f'yaw={metadata["robots"]["robot2"].planar_yaw:.9f} '
+            f'separation_m={metadata["initial_separation_m"]:.6f} '
+            f'robot2_in_robot1={metadata["relative_transform"]} '
+            f'validation={metadata["validation"]}')),
+        continuous_stack, observer, rviz,
+    ]
 
 
 def generate_launch_description():

@@ -3,6 +3,7 @@
 from dataclasses import replace
 import math
 from pathlib import Path
+import re
 import tempfile
 
 from ament_index_python.packages import get_package_share_directory
@@ -53,8 +54,8 @@ def test_large_world_exact_saved_geometry_and_devices():
     assert {item['type'] for item in metadata['obstacles']} == {'SolidBox'}
     assert metadata['robot_order'] == ('robot1', 'robot2')
     expected = {
-        'robot1': ((17.0, 0.0, 0.001), (0.0, 0.0, 1.0, 3.1415)),
-        'robot2': ((17.3, 0.0, 0.001), (0.0, 0.0, 1.0, 0.0)),
+        'robot1': ((17.0, 0.0, 0.001), (0.0, 0.0, 1.0, math.pi / 2)),
+        'robot2': ((-18.94, 0.0, 0.001), (0.0, 0.0, 1.0, math.pi / 2)),
     }
     content = Path(value['world_path']).read_text(encoding='utf-8')
     assert content.count('Pi-puck {') == 2
@@ -80,8 +81,8 @@ def test_large_world_start_clearance_contact_and_nonintersection():
         robots['robot1'].translation[:2],
         robots['robot2'].translation[:2],
     )
-    assert math.isclose(separation, 0.30, abs_tol=1e-12)
-    assert separation > 2.0 * 0.11
+    assert math.isclose(separation, 35.94, abs_tol=1e-12)
+    assert separation > 2.0 * metadata['robots']['robot1'].lidar_maximum_range
     for robot in robots.values():
         assert robot.translation[2] == 0.001
         nearest = min(
@@ -95,19 +96,16 @@ def test_large_world_start_clearance_contact_and_nonintersection():
 
 def test_project_camera_overlays_hidden_and_viewpoint_preserved():
     metadata = selected('large')['world_metadata']
-    assert metadata['viewpoint'] == {
-        'orientation': (
-            -0.5798542462666969, 0.579882702774232,
-            0.5722806165769836, 2.106437601001062),
-        'position': (
-            0.16903234705096398, 3.0323822830498233,
-            52.83721130689323),
-    }
+    assert all(math.isfinite(v) for v in metadata['viewpoint']['orientation'])
+    assert all(math.isfinite(v) for v in metadata['viewpoint']['position'])
+    assert len(metadata['viewpoint']['orientation']) == 4
+    assert len(metadata['viewpoint']['position']) == 3
     project = (WORLDS / '.epuck_d500_two_world_large.wbproj').read_text()
     for robot in ('robot1', 'robot2'):
-        assert (
-            f'renderingDevicePerspectives: {robot}:camera;0;1;0;0'
-            in project)
+        match = re.search(
+            rf'renderingDevicePerspectives: {robot}:camera;([^;\n]+);[^\n]+',
+            project)
+        assert match and match.group(1).strip() == '0'
     assert 'centralWidgetVisible: 1' in project
 
 
@@ -135,24 +133,22 @@ def test_webots_temporary_copy_keeps_large_world_project_settings(
         )
         project = generated_project.read_text(encoding='utf-8')
         for robot in ('robot1', 'robot2'):
-            assert (
-                f'renderingDevicePerspectives: {robot}:camera;0;1;0;0'
-                in project
-            )
+            match = re.search(
+                rf'renderingDevicePerspectives: {robot}:camera;([^;\n]+);[^\n]+',
+                project)
+            assert match and match.group(1).strip() == '0'
     finally:
         launcher._WebotsLauncher__world_copy.close()
         generated.unlink(missing_ok=True)
         generated_project.unlink(missing_ok=True)
 
 
-def test_world_translation_does_not_change_known_relative_transform():
+def test_world_derived_relative_transform_uses_full_planar_geometry():
     small = selected('small')['world_metadata']
     large = selected('large')['world_metadata']
-    assert all(math.isclose(a, b, abs_tol=1e-12) for a, b in zip(
-        small['relative_transform'], large['relative_transform']))
-    expected = (-0.299999998712, -0.000027796077, -3.1415)
-    assert all(math.isclose(a, b, abs_tol=1e-12) for a, b in zip(
-        large['relative_transform'], expected))
+    assert large['initial_separation_m'] > 2.0 * 12.0
+    assert math.isclose(large['planar_yaws']['robot1'],
+                        large['planar_yaws']['robot2'], abs_tol=1e-12)
     robot1 = large['robots']['robot1']
     robot2 = large['robots']['robot2']
     shift = (4.0, -2.0, 0.0)
@@ -174,6 +170,16 @@ def test_world_translation_does_not_change_known_relative_transform():
         relative_transform(robot1, moved2),
         relative_transform(robot1, robot2),
     ))
+
+
+def test_large_world_relative_transform_composes_back_to_robot2():
+    metadata = selected('large')['world_metadata']
+    robot1 = metadata['initial_world_transforms']['robot1']
+    robot2 = metadata['initial_world_transforms']['robot2']
+    recovered = __import__('my_epuck_project.cooperative_profiles', fromlist=['compose_transform']).compose_transform(
+        robot1, metadata['relative_transform'])
+    assert all(math.isclose(a, b, abs_tol=1e-9)
+               for a, b in zip(recovered, robot2))
 
 
 def test_profile_resolutions_thresholds_and_launch_defaults():

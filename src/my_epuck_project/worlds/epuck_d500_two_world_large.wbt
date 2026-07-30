@@ -15,8 +15,8 @@ WorldInfo {
   basicTimeStep 20
 }
 Viewpoint {
-  orientation -0.5798542462666969 0.579882702774232 0.5722806165769836 2.106437601001062
-  position 0.16903234705096398 3.0323822830498233 52.83721130689323
+  orientation -0.5798542462666977 0.5798827027742318 0.572280616576983 2.1064376010010615
+  position 0.09358337476747501 3.433990762034121 67.7065534222092
 }
 TexturedBackground {
 }
@@ -240,7 +240,7 @@ SolidBox {
 }
 E-puck {
   translation 17 0 0.001
-  rotation 0 0 1 3.1415
+  rotation 0 0 1 1.5707963267948966
   name "robot1"
   controller "<extern>"
   window "<none>"
@@ -298,7 +298,8 @@ E-puck {
   ]
 }
 E-puck {
-  translation 17.3 0 0.001
+  translation -18.94 0 0.001
+  rotation 0 0 1 1.5707963267948966
   name "robot2"
   controller "<extern>"
   window "<none>"

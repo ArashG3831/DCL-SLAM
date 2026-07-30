@@ -176,7 +176,12 @@ def manual_rviz_command(world_profile='small', use_sim_time=False):
 
 
 def resolve_runner_profile(args):
-    """Resolve and verify source/installed copies of the selected world."""
+    """Use the saved source world as authoritative runtime input.
+
+    Launch code remains installed, but the selected world and its project
+    companion are copied by WebotsLauncher from this exact source path.  This
+    permits an intentional saved-world pose edit without a rebuild.
+    """
     workspace = Path(args.workspace).resolve()
     source_worlds = workspace / 'src' / 'my_epuck_project' / 'worlds'
     installed_package = Path(get_package_share_directory('my_epuck_project'))
@@ -184,13 +189,10 @@ def resolve_runner_profile(args):
     installed = profile(args.world_profile, installed_package / 'worlds')
     source_hash = source['world_metadata']['sha256']
     installed_hash = installed['world_metadata']['sha256']
-    if source_hash != installed_hash:
-        raise RuntimeError(
-            'selected source and installed worlds differ: '
-            f'{source["world_path"]} != {installed["world_path"]}')
     args.source_world_path = source['world_path']
     args.installed_world_path = installed['world_path']
     args.profile_metadata = profile_summary(source)
+    args.profile_metadata['installed_world_sha256'] = installed_hash
     return source
 
 
@@ -212,6 +214,10 @@ def print_profile_selection(args, selected):
             f'{name}_start=translation:{robot.translation},'
             f'rotation:{robot.rotation}')
     print(f'known_relative_transform={metadata["relative_transform"]}')
+    print(f'initial_separation_m={metadata["initial_separation_m"]}')
+    print('transform_source=WORLD_DERIVED')
+    print(f'world_validation={metadata["validation"]}')
+    print('transform_consumers=map_fusion,shared_map_alignment,peer_pose,teammate_filter,logger,metrics,report')
     print(f'mission_timeout_s={args.mission_timeout}')
     print(f'time_mode={args.time_mode}')
     print(f'use_sim_time={args.time_mode == "sim"}')
@@ -1741,9 +1747,12 @@ def create_manifest(args, campaign, workspace):
         'world_dimensions_m':
             args.profile_metadata['world_dimensions_m'],
         'world_sha256': args.profile_metadata['world_sha256'],
+        'installed_world_sha256': args.profile_metadata.get('installed_world_sha256'),
         'robot_start_poses': args.profile_metadata['robot_start_poses'],
         'known_initial_relative_transform':
             args.profile_metadata['known_relative_transform'],
+        'transform_source': 'WORLD_DERIVED',
+        'initial_separation_m': args.profile_metadata['initial_separation_m'],
         'slam_resolution': args.profile_metadata['slam_resolution'],
         'peer_export_resolution':
             args.profile_metadata['peer_export_resolution'],

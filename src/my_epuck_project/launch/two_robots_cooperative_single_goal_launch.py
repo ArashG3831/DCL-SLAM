@@ -82,9 +82,10 @@ def coordinator(
 
 def launch_setup(context):
     project = get_package_share_directory('my_epuck_project')
+    world_path = LaunchConfiguration('world_path').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(project, 'worlds'),
+        os.path.dirname(world_path) if world_path else os.path.join(project, 'worlds'),
     )
     stack = IncludeLaunchDescription(PythonLaunchDescriptionSource(os.path.join(
         project, 'launch', 'two_robots_frontier_candidates_launch.py')),
@@ -95,6 +96,7 @@ def launch_setup(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'world_path': world_path,
         }.items(),
     )
     robot1_rank = LaunchConfiguration('robot1_test_candidate_rank')
@@ -120,6 +122,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('coordinator_mode', default_value='single_goal'),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),

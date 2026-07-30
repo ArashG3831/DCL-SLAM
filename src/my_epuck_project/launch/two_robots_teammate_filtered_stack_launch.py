@@ -89,9 +89,10 @@ def nav2_nodes(package_dir, robot, selected):
 
 def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
+    world_path = LaunchConfiguration('world_path').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(package_dir, 'worlds'),
+        os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
     filtered_slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -104,6 +105,7 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'world_path': world_path,
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
@@ -182,6 +184,7 @@ def generate_launch_description():
             choices=['large', 'small'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),

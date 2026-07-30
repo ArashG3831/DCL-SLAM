@@ -68,9 +68,10 @@ def slam_actions(package_dir, robot, slam_resolution):
 
 def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
+    world_path = LaunchConfiguration('world_path').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(package_dir, 'worlds'),
+        os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
     base = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -80,6 +81,7 @@ def launch_setup(context):
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world': selected['world'],
+            'world_path': world_path,
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
@@ -140,6 +142,7 @@ def generate_launch_description():
             choices=['large', 'small'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),

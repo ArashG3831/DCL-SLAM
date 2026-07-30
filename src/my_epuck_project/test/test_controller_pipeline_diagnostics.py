@@ -1,6 +1,8 @@
 """Deterministic tests for command-stage reasoning and bounded captures."""
 
 from pathlib import Path
+import json
+import time
 
 import rclpy
 import pytest
@@ -50,6 +52,127 @@ def test_node_constructor_creates_bounded_two_robot_observer(tmp_path):
         files = list(Path(node.root).glob('*'))
         assert files
         assert max(path.stat().st_size for path in files) < 1_000_000
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_long_run_rows_and_finalization_remain_bounded(tmp_path):
+    rclpy.init()
+    node = PipelineDiagnosticNode(parameter_overrides=[
+        Parameter('output_root', Parameter.Type.STRING, str(tmp_path)),
+        Parameter('max_rows_per_robot', Parameter.Type.INTEGER, 128),
+    ])
+    try:
+        rows = []
+        for index in range(5000):
+            item = sample(float(index), x=float(index) * 0.001).as_dict()
+            item.update({
+                'commands': {}, 'command_meta': {}, 'collision_state': {},
+                'dwb': {}, 'scan_stats': {}, 'geometry': {}, 'costmap': {},
+            })
+            rows.append(item)
+        for robot in node.robots:
+            node.rows[robot].extend(rows)
+            node.dropped_rows[robot] += 5000 - len(node.rows[robot])
+        started = time.monotonic()
+        node.finalize()
+        elapsed = time.monotonic() - started
+        assert elapsed < 5.0
+        assert all(len(values) == 128 for values in node.rows.values())
+        assert all(value == 4872 for value in node.dropped_rows.values())
+        assert node.shutdown_timing['total_shutdown_ms'] < 5000.0
+        assert (tmp_path / 'shutdown_timing.json').is_file()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_byte_budget_caps_large_diagnostic_rows(tmp_path):
+    budget = 1 * 1024 * 1024
+    rclpy.init()
+    node = PipelineDiagnosticNode(parameter_overrides=[
+        Parameter('output_root', Parameter.Type.STRING, str(tmp_path)),
+        Parameter('max_rows_per_robot', Parameter.Type.INTEGER, 4096),
+        Parameter('max_artifact_bytes_per_robot', Parameter.Type.INTEGER, budget),
+    ])
+    try:
+        for index in range(4096):
+            item = sample(float(index)).as_dict(compact=True)
+            item.update({
+                'commands': {}, 'command_meta': {}, 'collision_state': {},
+                'dwb': {}, 'scan_stats': {},
+                'geometry': {'representative': 'x' * 4096},
+                'costmap': {'representative': 'y' * 4096},
+            })
+            for robot in node.robots:
+                node.rows[robot].append(item)
+        node.finalize()
+        for robot in node.robots:
+            assert node.shutdown_timing['artifact_bytes'][robot] <= budget
+        assert any(node.shutdown_timing['dropped_by_byte_budget'].values())
+        assert 0 < node.shutdown_timing['retained_rows']['robot1'] < 4096
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_total_budget_covers_csv_jsonl_and_report(tmp_path):
+    budget = 256 * 1024
+    rclpy.init()
+    node = PipelineDiagnosticNode(parameter_overrides=[
+        Parameter('output_root', Parameter.Type.STRING, str(tmp_path)),
+        Parameter('max_rows_per_robot', Parameter.Type.INTEGER, 1024),
+        Parameter('max_artifact_bytes_per_robot', Parameter.Type.INTEGER, budget),
+    ])
+    try:
+        for robot in node.robots:
+            node.rows[robot].extend(
+                sample(float(index), commands={
+                    'controller_raw': (0.01, 0.0, float(index)),
+                }).as_dict() for index in range(1024))
+            incident = node.captures[robot].trigger(robot, sample(1023))
+            incident.samples = [{'payload': 'x' * 20000} for _ in range(64)]
+        node.finalize()
+        for robot in node.robots:
+            total = sum(path.stat().st_size for path in tmp_path.glob(
+                f'{robot}_controller_*'))
+            assert total <= budget
+        json.loads((tmp_path / 'robot1_controller_stall_report.json').read_text())
+        assert 'configured_total_budget_bytes' in node.shutdown_timing
+        assert node.shutdown_timing['written_bytes_by_artifact']
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_long_duration_equivalent_input_is_hard_bounded(tmp_path):
+    """Production writers stay bounded when attempted output exceeds 42 MiB."""
+    budget = 10 * 1024 * 1024
+    rclpy.init()
+    node = PipelineDiagnosticNode(parameter_overrides=[
+        Parameter('output_root', Parameter.Type.STRING, str(tmp_path)),
+        Parameter('max_rows_per_robot', Parameter.Type.INTEGER, 1024),
+        Parameter('max_artifact_bytes_per_robot', Parameter.Type.INTEGER, budget),
+    ])
+    try:
+        large = sample(0.0).as_dict()
+        large['geometry'] = {'representative': 'x' * 50000}
+        large['costmap'] = {'representative': 'y' * 50000}
+        for robot in node.robots:
+            node.rows[robot].extend(dict(large, sim_s=float(index))
+                                     for index in range(1024))
+        started = time.monotonic()
+        node.finalize()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        for robot in node.robots:
+            total = sum(path.stat().st_size for path in tmp_path.glob(
+                f'{robot}_controller_*'))
+            assert total <= budget
+        assert all(value > 0 for value in node.shutdown_timing[
+            'dropped_by_byte_budget'].values())
+        assert (tmp_path / 'shutdown_timing.json').is_file()
     finally:
         node.destroy_node()
         rclpy.shutdown()

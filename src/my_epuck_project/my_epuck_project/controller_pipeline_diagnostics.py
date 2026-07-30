@@ -3,6 +3,7 @@
 from collections import deque
 import csv
 from dataclasses import dataclass, field
+import io
 import json
 import math
 from pathlib import Path
@@ -316,7 +317,7 @@ class Sample:
     geometry: dict = field(default_factory=dict)
     costmap: dict = field(default_factory=dict)
 
-    def as_dict(self):
+    def as_dict(self, compact=False):
         value = self.__dict__.copy()
         value['commands'] = dict(self.commands)
         value['command_meta'] = dict(self.command_meta)
@@ -325,6 +326,14 @@ class Sample:
         value['scan_stats'] = dict(self.scan_stats)
         value['geometry'] = dict(self.geometry)
         value['costmap'] = dict(self.costmap)
+        if compact:
+            value['dwb'] = {
+                key: self.dwb.get(key) for key in (
+                    'trajectory_count', 'valid_count',
+                    'forward_valid_count', 'forward_valid', 'selected',
+                    'best_valid_forward', 'score_difference_forward_minus_selected',
+                    'critic_comparison', 'selected_index', 'best_index')
+                if key in self.dwb}
         return value
 
 
@@ -347,6 +356,7 @@ class Incident:
     trigger_geometry: dict = field(default_factory=dict)
     costmap_context: dict = field(default_factory=dict)
     scan_context: dict = field(default_factory=dict)
+    dropped_samples: int = 0
 
     def as_dict(self):
         return self.__dict__.copy()
@@ -489,11 +499,12 @@ class RollingCapture:
     """Fixed-size pre-trigger history and post-trigger incident capture."""
 
     def __init__(self, pre_s=5.0, post_s=15.0, max_samples=1600,
-                 max_incidents=8):
+                 max_incidents=8, max_incident_samples=256):
         self.pre_s = pre_s
         self.post_s = post_s
         self.max_samples = max_samples
         self.max_incidents = max_incidents
+        self.max_incident_samples = max_incident_samples
         self.history = deque(maxlen=max_samples)
         self.incidents = []
         self.active = None
@@ -501,7 +512,7 @@ class RollingCapture:
     def add(self, sample):
         self.history.append(sample)
         if self.active is not None:
-            self.active.samples.append(sample.as_dict())
+            self._append_incident_sample(sample)
             if sample.sim_s - self.active.trigger_sim_s >= self.post_s:
                 self.active.end_sim_s = sample.sim_s
                 self._finish()
@@ -516,10 +527,26 @@ class RollingCapture:
             trigger_sim_s=sample.sim_s,
             active_goal=sample.active_goal,
             distance_remaining_m=sample.distance_remaining,
-            samples=[item.as_dict() for item in self.history if item.sim_s >= start],
+            samples=[],
         )
+        for item in self.history:
+            if item.sim_s >= start:
+                self._append_incident_sample(item, incident)
         self.active = incident
         return incident
+
+    def _append_incident_sample(self, sample, incident=None):
+        incident = incident or self.active
+        if incident is None:
+            return
+        compact = sample.as_dict(compact=True)
+        if len(incident.samples) < self.max_incident_samples:
+            incident.samples.append(compact)
+            return
+        incident.dropped_samples += 1
+        # Retain a representative terminal sample as the active window grows.
+        if incident.dropped_samples % 16 == 0:
+            incident.samples[-1] = compact
 
     def clear(self, sim_s):
         if self.active is not None:
@@ -544,11 +571,25 @@ class PipelineDiagnosticNode(Node):
         self.declare_parameter('stall_distance_threshold_m', 0.15)
         self.declare_parameter('stall_displacement_threshold_m', 0.01)
         self.declare_parameter('goal_feedback_timeout_s', 2.0)
+        self.declare_parameter('max_rows_per_robot', 1024)
+        self.declare_parameter('max_artifact_bytes_per_robot', 10 * 1024 * 1024)
         self.robots = list(self.get_parameter('robot_ids').value)
         root = Path(self.get_parameter('output_root').value)
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
-        self.rows = {robot: [] for robot in self.robots}
+        self.max_rows_per_robot = int(
+            self.get_parameter('max_rows_per_robot').value)
+        if self.max_rows_per_robot <= 0:
+            raise ValueError('max_rows_per_robot must be positive')
+        self.max_artifact_bytes_per_robot = int(
+            self.get_parameter('max_artifact_bytes_per_robot').value)
+        if self.max_artifact_bytes_per_robot <= 0:
+            raise ValueError('max_artifact_bytes_per_robot must be positive')
+        self.rows = {
+            robot: deque(maxlen=self.max_rows_per_robot)
+            for robot in self.robots}
+        self.dropped_rows = {robot: 0 for robot in self.robots}
+        self.shutdown_timing = {}
         self.captures = {robot: RollingCapture() for robot in self.robots}
         self.latest = {robot: {'commands': {}, 'last_odom': None,
                               'scan_stats': {}, 'global_plan': {},
@@ -766,7 +807,7 @@ class PipelineDiagnosticNode(Node):
                 costmap)
             capture = self.captures[robot]
             capture.add(sample)
-            row = sample.as_dict()
+            row = sample.as_dict(compact=True)
             row['dwb'] = {
                 'trajectory_count': dwb.get('trajectory_count', 0),
                 'valid_count': dwb.get('valid_count', 0),
@@ -778,6 +819,8 @@ class PipelineDiagnosticNode(Node):
                 'best_forward_total_score': (dwb.get('best_valid_forward') or {}).get(
                     'total_score'),
             }
+            if len(self.rows[robot]) == self.max_rows_per_robot:
+                self.dropped_rows[robot] += 1
             self.rows[robot].append(row)
             self._detect(robot, sample)
 
@@ -809,19 +852,93 @@ class PipelineDiagnosticNode(Node):
     def finalize(self):
         if self._finalized:
             return
+        started = time.monotonic()
         self._finalized = True
+        self.shutdown_timing = {
+            'shutdown_requested_at': time.time(),
+            'sampling_stopped_ms': 0.0,
+            'incident_finalization_ms': 0.0,
+            'summary_write_ms': 0.0,
+            'row_flush_ms': 0.0,
+            'file_close_ms': 0.0,
+            'executor_remove_ms': 0.0,
+            'executor_shutdown_ms': 0.0,
+            'node_destroy_ms': 0.0,
+            'context_shutdown_ms': 0.0,
+            'total_shutdown_ms': 0.0,
+            'artifact_bytes': {},
+            'retained_rows': {
+                robot: len(rows) for robot, rows in self.rows.items()},
+            'aggregated_rows': 0,
+            'dropped_by_row_budget': dict(self.dropped_rows),
+            'dropped_by_byte_budget': {robot: 0 for robot in self.robots},
+            'configured_total_budget_bytes': self.max_artifact_bytes_per_robot,
+            'budget_policy_version': 'total-artifacts-v1',
+            'written_bytes_by_artifact': {},
+            'budget_exhausted_at': {},
+            'incidents_retained': {robot: 0 for robot in self.robots},
+            'incidents_summarized': {robot: 0 for robot in self.robots},
+        }
+        self._write_shutdown_timing()
+        self.shutdown_timing['sampling_stopped_ms'] = (
+            time.monotonic() - started) * 1000.0
+        incidents_started = time.monotonic()
         for robot, capture in self.captures.items():
             capture.clear(self.latest_sim_s)
+        incidents_finished = time.monotonic()
+        self.shutdown_timing['incident_finalization_ms'] = (
+            incidents_finished - incidents_started) * 1000.0
+        self._write_shutdown_timing()
+        reports_started = incidents_finished
+        # Reserve space for the shared timing file and allocate the remainder
+        # across complete, syntactically valid artifacts.  The old policy
+        # capped only CSV output; incident JSONL and reports could still grow
+        # without bound as a function of mission duration.
+        timing_reserve = min(64 * 1024,
+                             max(1024, self.max_artifact_bytes_per_robot // 16))
+        detail_budget = max(1024,
+                            self.max_artifact_bytes_per_robot - timing_reserve)
+        artifact_caps = {
+            'pipeline_csv': int(detail_budget * 0.40),
+            'stalls_jsonl': int(detail_budget * 0.30),
+            'stall_report': int(detail_budget * 0.30),
+        }
+        for robot in self.robots:
+            self.shutdown_timing['written_bytes_by_artifact'][robot] = {}
+        def write_text_budgeted(path, text, cap, robot, artifact):
+            encoded = text.encode('utf-8')
+            if len(encoded) <= cap:
+                path.write_bytes(encoded)
+                written = len(encoded)
+            else:
+                # Callers provide a complete JSON document.  Never truncate a
+                # JSON document in the middle of a record; emit a compact,
+                # valid omission document instead.
+                omission = json.dumps({
+                    'artifact': artifact,
+                    'status': 'budget_exhausted',
+                    'omitted_bytes': len(encoded),
+                }, separators=(',', ':')).encode('utf-8')
+                path.write_bytes(omission)
+                written = len(omission)
+                self.shutdown_timing['budget_exhausted_at'].setdefault(
+                    robot, time.time())
+                self.shutdown_timing['dropped_by_byte_budget'][robot] += 1
+            self.shutdown_timing['written_bytes_by_artifact'][robot][artifact] = written
+            return written
+        for robot, capture in self.captures.items():
             path = self.root / f'{robot}_controller_pipeline.csv'
             fields = ['sim_s', 'wall_s', 'pose_x', 'pose_y', 'pose_yaw',
                       'odom_vx', 'odom_wz', 'active_goal',
                       'distance_remaining'] + list(COMMAND_STAGES) + [
                           'command_stage_meta', 'collision_state', 'dwb',
                           'scan_stats', 'geometry', 'costmap']
-            with path.open('w', newline='', encoding='utf-8') as stream:
-                writer = csv.DictWriter(stream, fieldnames=fields)
-                writer.writeheader()
-                for row in self.rows[robot]:
+            csv_stream = io.StringIO(newline='')
+            writer = csv.DictWriter(csv_stream, fieldnames=fields)
+            writer.writeheader()
+            retained_csv_rows = 0
+            for index, row in enumerate(self.rows[robot]):
+                    position = csv_stream.tell()
                     out = {key: row.get(key) for key in fields}
                     for stage in COMMAND_STAGES:
                         value = row['commands'].get(stage)
@@ -833,9 +950,41 @@ class PipelineDiagnosticNode(Node):
                     out['geometry'] = json.dumps(row['geometry'])
                     out['costmap'] = json.dumps(row['costmap'])
                     writer.writerow(out)
-            with (self.root / f'{robot}_controller_stalls.jsonl').open('w', encoding='utf-8') as stream:
-                for incident in capture.incidents:
-                    stream.write(json.dumps(incident.as_dict()) + '\n')
+                    if csv_stream.tell() > artifact_caps['pipeline_csv']:
+                        csv_stream.seek(position)
+                        csv_stream.truncate()
+                        self.shutdown_timing['dropped_by_byte_budget'][robot] += (
+                            len(self.rows[robot]) - index)
+                        break
+                    retained_csv_rows += 1
+            csv_bytes = csv_stream.getvalue().encode('utf-8')
+            path.write_bytes(csv_bytes)
+            self.shutdown_timing['written_bytes_by_artifact'][robot]['pipeline_csv'] = len(csv_bytes)
+            self.shutdown_timing['retained_rows'][robot] = retained_csv_rows
+
+            incident_stream = io.StringIO()
+            retained_incidents = 0
+            for incident in capture.incidents:
+                record = incident.as_dict()
+                line = json.dumps(record, separators=(',', ':')) + '\n'
+                if len((incident_stream.getvalue() + line).encode('utf-8')) > artifact_caps['stalls_jsonl']:
+                    # Preserve the incident identity and classification even
+                    # when detailed samples cannot fit in the remaining cap.
+                    record['samples'] = record.get('samples', [])[:8]
+                    line = json.dumps(record, separators=(',', ':')) + '\n'
+                if len((incident_stream.getvalue() + line).encode('utf-8')) > artifact_caps['stalls_jsonl']:
+                    self.shutdown_timing['dropped_by_byte_budget'][robot] += 1
+                    self.shutdown_timing['budget_exhausted_at'].setdefault(
+                        robot, time.time())
+                    continue
+                incident_stream.write(line)
+                retained_incidents += 1
+            stalls_path = self.root / f'{robot}_controller_stalls.jsonl'
+            stalls_path.write_text(incident_stream.getvalue(), encoding='utf-8')
+            self.shutdown_timing['written_bytes_by_artifact'][robot]['stalls_jsonl'] = stalls_path.stat().st_size
+            self.shutdown_timing['incidents_retained'][robot] = retained_incidents
+            self.shutdown_timing['incidents_summarized'][robot] = len(
+                capture.incidents)
             observation = self.latest[robot].get('collision_observation', {
                 'topic': f'/{robot}/collision_monitor_state',
                 'topic_available': False, 'message_count': 0,
@@ -868,27 +1017,84 @@ class PipelineDiagnosticNode(Node):
                                   'max_incidents': capture.max_incidents},
                 'collision_monitor_state_observation': observation,
                 'incidents_by_class': {},
-                'incidents': [item.as_dict() for item in capture.incidents],
-                'sample_count': len(self.rows[robot]),
+                # Detailed incident samples are canonical in JSONL.  Keep the
+                # report compact and avoid duplicating them at shutdown.
+                'incidents': [{
+                    key: getattr(item, key) for key in (
+                        'incident_id', 'robot', 'start_sim_s', 'trigger_sim_s',
+                        'classification', 'confidence', 'end_sim_s',
+                        'dropped_samples')
+                } for item in capture.incidents],
+                'sample_count': retained_csv_rows,
+                'dropped_sample_count': self.dropped_rows[robot],
+                'max_rows_per_robot': self.max_rows_per_robot,
+                'incident_samples_artifact': stalls_path.name,
+                'budget_policy_version': 'total-artifacts-v1',
             }
             for incident in capture.incidents:
                 report['incidents_by_class'][incident.classification] = report['incidents_by_class'].get(incident.classification, 0) + 1
-            (self.root / f'{robot}_controller_stall_report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+            report_text = json.dumps(report, separators=(',', ':'))
+            report_path = self.root / f'{robot}_controller_stall_report.json'
+            write_text_budgeted(
+                report_path, report_text, artifact_caps['stall_report'],
+                robot, 'stall_report')
+        reports_finished = time.monotonic()
+        self.shutdown_timing['summary_write_ms'] = (
+            reports_finished - reports_started) * 1000.0
+        self.shutdown_timing['row_flush_ms'] = self.shutdown_timing[
+            'summary_write_ms']
+        self.shutdown_timing['file_close_ms'] = self.shutdown_timing[
+            'summary_write_ms']
+        self.shutdown_timing['artifact_bytes'] = {
+            robot: sum(path.stat().st_size for path in self.root.glob(
+                f'{robot}_controller_*'))
+            for robot in self.robots}
+        self.shutdown_timing['total_shutdown_ms'] = (
+            reports_finished - started) * 1000.0
+        self._write_shutdown_timing()
+
+    def _write_shutdown_timing(self):
+        (self.root / 'shutdown_timing.json').write_text(
+            json.dumps(self.shutdown_timing, indent=2, sort_keys=True),
+            encoding='utf-8')
 
 
 def shutdown_node(node, executor=None):
     """Flush and destroy a node across normal and external ROS shutdown."""
+    shutdown_started = time.monotonic()
     try:
         if node is not None and not node._finalized:
             node.finalize()
     finally:
         if executor is not None:
+            remove_started = time.monotonic()
             executor.remove_node(node)
+            if node is not None:
+                node.shutdown_timing['executor_remove_ms'] = (
+                    time.monotonic() - remove_started) * 1000.0
+                node._write_shutdown_timing()
+            executor_started = time.monotonic()
             executor.shutdown()
+            if node is not None:
+                node.shutdown_timing['executor_shutdown_ms'] = (
+                    time.monotonic() - executor_started) * 1000.0
+                node._write_shutdown_timing()
+        destroy_started = time.monotonic()
         if node is not None and node.context.ok():
             node.destroy_node()
+        if node is not None:
+            node.shutdown_timing['node_destroy_ms'] = (
+                time.monotonic() - destroy_started) * 1000.0
+            node._write_shutdown_timing()
+        context_started = time.monotonic()
         if rclpy.ok():
             rclpy.shutdown()
+        if node is not None:
+            node.shutdown_timing['context_shutdown_ms'] = (
+                time.monotonic() - context_started) * 1000.0
+            node.shutdown_timing['total_shutdown_ms'] = (
+                time.monotonic() - shutdown_started) * 1000.0
+            node._write_shutdown_timing()
 
 
 def main(args=None):

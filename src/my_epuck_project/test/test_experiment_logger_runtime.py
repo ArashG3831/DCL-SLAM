@@ -8,7 +8,8 @@ from rcl_interfaces.msg import Log
 from my_epuck_interfaces.msg import ExplorationEvent, ExplorationStatus
 
 from my_epuck_project.cooperative_experiment_logger import (
-    CooperativeExperimentLogger, create_logger_executor)
+    CooperativeExperimentLogger, create_logger_executor,
+    is_shutdown_conversion_error)
 
 
 @pytest.fixture
@@ -55,6 +56,28 @@ def test_logger_uses_stable_executor_for_shutdown_pybind_regression():
     finally:
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_logger_executor_is_bound_to_explicit_context():
+    from rclpy.context import Context
+    context = Context()
+    rclpy.init(context=context)
+    try:
+        executor = create_logger_executor(context)
+        assert executor.context is context
+        executor.shutdown()
+    finally:
+        if context.ok():
+            context.shutdown()
+
+
+def test_logger_conversion_signature_is_only_accepted_after_context_loss():
+    error = RuntimeError('Unable to convert call argument')
+    assert is_shutdown_conversion_error(error, True, False)
+    assert not is_shutdown_conversion_error(error, False, False)
+    assert not is_shutdown_conversion_error(error, True, True)
+    assert not is_shutdown_conversion_error(
+        RuntimeError('application callback failure'), True, False)
 
 
 def controller_error():

@@ -1,5 +1,5 @@
 """Strictly passive structured observer for two-robot exploration experiments."""
-import csv, hashlib, json, math, os, socket, statistics, subprocess, threading, time, uuid
+import csv, hashlib, json, math, os, signal, socket, statistics, subprocess, threading, time, uuid
 from collections import Counter, deque
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +12,8 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from rcl_interfaces.msg import Log
 from rclpy.duration import Duration
+from rclpy.context import Context
+from rclpy.signals import SignalHandlerOptions
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -33,6 +35,13 @@ TELEMETRY=TIME_FIELDS+['robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps
 COVERAGE=TIME_FIELDS+['robot1_local_known','robot2_local_known','robot1_shared_known','robot2_shared_known','shared_free_cells','shared_occupied_cells','shared_unknown_cells','known_area_m2','coverage_gain_cells','coverage_gain_since_start_cells','unique_first_seen_robot1_cells','unique_first_seen_robot2_cells','later_duplicated_by_robot1_cells','later_duplicated_by_robot2_cells','simultaneously_observed_cells','total_known_union_cells','duplicated_known_fraction','shared_maps_equivalent']
 HEALTH=TIME_FIELDS+['robot_id','topic_name','topic_rate_hz','topic_age_s','expected_min_rate_hz','stale']
 
+
+def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
+    """Recognize only the known queued-take teardown signature."""
+    return (shutdown_requested and not context_valid
+            and isinstance(error, RuntimeError)
+            and str(error).startswith('Unable to convert call argument'))
+
 def yaw(q): return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
 def as_grid(m): return Grid(m.info.width,m.info.height,m.info.resolution,m.info.origin.position.x,m.info.origin.position.y,yaw(m.info.origin.orientation),np.asarray(m.data,dtype=np.int8))
 def stamp(m):
@@ -40,8 +49,8 @@ def stamp(m):
 def default_run_id(): return time.strftime('%Y-%m-%dT%H%M%SZ',time.gmtime())+'_'+uuid.uuid4().hex[:4]
 
 class CooperativeExperimentLogger(Node):
-    def __init__(self):
-        super().__init__('cooperative_experiment_logger')
+    def __init__(self, **node_kwargs):
+        super().__init__('cooperative_experiment_logger', **node_kwargs)
         defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.}
         defaults.update({
             'world_profile': 'small',
@@ -391,7 +400,7 @@ class CooperativeExperimentLogger(Node):
         for timer in self._observer_timers:
             try:timer.cancel()
             except Exception as exc:self.record_internal_error('timer_cancel',exc)
-        if rclpy.ok():
+        if self.context.ok():
             self.event('RUN_END' if clean else 'RUN_INTERRUPTED','observer shutting down',console=True,allow_during_shutdown=True)
         self.flush()
         successful=False
@@ -402,12 +411,12 @@ class CooperativeExperimentLogger(Node):
             atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_manifest(clean,'clean' if clean else 'interrupted'); successful=True
         except Exception as exc:
             self.write_failures+=1
-            if rclpy.ok():
+            if self.context.ok():
                 self.get_logger().error(f'final output failed: {exc}')
             try:
                 atomic_json(self.directory/'summary.json',self.summary(False)); self.write_manifest(False,'finalization_failed')
             except Exception:
-                if rclpy.ok():
+                if self.context.ok():
                     self.get_logger().error('failed to record finalization failure')
         finally:
             with self._io_lock:
@@ -415,26 +424,57 @@ class CooperativeExperimentLogger(Node):
                 for stream in [self.events,*self.files]:
                     try:stream.flush(); stream.close()
                     except Exception as exc:
-                        if rclpy.ok():
+                        if self.context.ok():
                             self.get_logger().error(f'file close failed: {exc}')
             with self._lifecycle_lock:self.finalized=True; self._finalizing=False
         return successful
 
-def create_logger_executor():
-    """Use the stable executor API for logger shutdown compatibility."""
-    return SingleThreadedExecutor()
+def create_logger_executor(context=None):
+    """Bind the logger executor to its dedicated ROS context."""
+    return SingleThreadedExecutor(context=context)
 
 
 def main(args=None):
-    rclpy.init(args=args); node=None; executor=None; clean=True
+    context = Context()
+    rclpy.init(args=args, context=context,
+               signal_handler_options=SignalHandlerOptions.NO)
+    node = None
+    executor = None
+    clean = True
+    shutdown_requested = {'value': False}
+    previous_handlers = {}
+
+    def request_shutdown(signum, frame):
+        del signum, frame
+        shutdown_requested['value'] = True
+        if executor is not None and context.ok():
+            executor.wake()
+
     try:
-        node=CooperativeExperimentLogger(); executor=create_logger_executor(); executor.add_node(node); executor.spin()
-    except (KeyboardInterrupt, ExternalShutdownException): pass
+        node = CooperativeExperimentLogger(context=context)
+        executor = create_logger_executor(context)
+        executor.add_node(node)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, request_shutdown)
+        while not shutdown_requested['value'] and context.ok():
+            executor.spin_once(timeout_sec=0.5)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        shutdown_requested['value'] = True
+    except RuntimeError as exc:
+        if not is_shutdown_conversion_error(
+                exc, shutdown_requested['value'], context.ok()):
+            clean = False
+            raise
     except BaseException: clean=False; raise
     finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         if node is not None:
             node.finalize(clean)
-            if executor is not None:executor.remove_node(node)
+            if executor is not None:
+                executor.remove_node(node)
+                executor.shutdown()
             if node.context.ok():
                 node.destroy_node()
-        if rclpy.ok():rclpy.shutdown()
+        if context.ok():
+            context.shutdown()

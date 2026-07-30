@@ -182,16 +182,18 @@ class PendingScanQueue:
     def peek(self):
         return self.items[0] if self.items else None
 
-    def take(self, now, maximum_latency, pose_available):
+    def take(self, now, maximum_latency, pose_available,
+             degraded_allowed=False):
         item = self.peek()
         if item is None:
             return 'idle', None, 0.0
         waited = now - item[1]
         if waited > maximum_latency:
             return 'expired', self.items.popleft(), waited
-        if not pose_available:
+        if not pose_available and not degraded_allowed:
             return 'wait', item, waited
-        return 'publish', self.items.popleft(), waited
+        return ('publish_degraded' if degraded_allowed and not pose_available
+                else 'publish'), self.items.popleft(), waited
 
     def clear(self):
         self.items.clear()
@@ -226,6 +228,18 @@ class PoseSourceTransition:
             return True
         return False
 
+    def fallback_available(self):
+        """Return to the independent pose state after shared TF loss."""
+        if self.state == 'shared_map_tf_active':
+            self.state = 'fallback_odom_active'
+            self.consecutive_matches = 0
+        elif self.state in ('waiting_for_odom', 'degraded_unmasked'):
+            self.state = 'fallback_odom_active'
+
+    def degraded(self):
+        self.state = 'degraded_unmasked'
+        self.consecutive_matches = 0
+
 
 class TeammateScanFilter(Node):
     def __init__(self):
@@ -246,6 +260,9 @@ class TeammateScanFilter(Node):
             'shared_tf_position_tolerance': 0.05,
             'shared_tf_yaw_tolerance': 0.15,
             'warning_interval': 2.0,
+            'pose_loss_grace_s': 0.05,
+            'output_stall_grace_s': 1.0,
+            'force_preferred_pose_loss': False,
             'mode': 'simulation',
             'simulation_free_space_completion': True,
             'physical_free_space_completion': False,
@@ -269,6 +286,10 @@ class TeammateScanFilter(Node):
         self.queue_depth_limit = int(value('pending_queue_depth'))
         self.retry_period = float(value('transform_retry_period'))
         self.warning_interval = float(value('warning_interval'))
+        self.pose_loss_grace = float(value('pose_loss_grace_s'))
+        self.output_stall_grace = float(value('output_stall_grace_s'))
+        if self.pose_loss_grace < 0.0 or self.output_stall_grace <= 0.0:
+            raise ValueError('pose liveness grace values must be positive')
         self.mode = str(value('mode')).strip().lower()
         if self.mode not in ('simulation', 'physical'):
             raise ValueError("mode must be 'simulation' or 'physical'")
@@ -305,8 +326,24 @@ class TeammateScanFilter(Node):
         self.latency_expired_drop_count = self.queue_overflow_drop_count = 0
         self.invalid_frame_drop_count = self.stale_input_drop_count = 0
         self.maximum_observed_queue_depth = 0
-        self.pose_source_counts = {'waiting_for_odom': 0, 'odom_bootstrap': 0,
-                                   'shared_map_tf_active': 0}
+        self.pose_source_counts = {
+            'waiting_for_odom': 0, 'odom_bootstrap': 0,
+            'fallback_odom_active': 0, 'shared_map_tf_active': 0,
+            'degraded_unmasked': 0,
+        }
+        self.pose_source_transitions = {}
+        self.pose_state_transitions = {}
+        self.last_published_pose_source = None
+        self.fallback_pose_successes = 0
+        self.preferred_pose_successes = 0
+        self.degraded_unmasked_publications = 0
+        self.dropped_scan_count = 0
+        self.missing_transform_count = 0
+        self.recovery_count = 0
+        self.last_input_monotonic = None
+        self.last_output_monotonic = None
+        self.longest_output_gap = 0.0
+        self.output_stall_active = False
         self.transform_wait_samples = deque(maxlen=2048)
         self.last_published_stamp = None
         self.last_warning_monotonic = 0.0
@@ -353,6 +390,7 @@ class TeammateScanFilter(Node):
         arrival = time.monotonic()
         with self.state_lock:
             self.received_scan_count += 1
+            self.last_input_monotonic = arrival
         if not scan.header.frame_id or scan.header.frame_id != self.expected_frame:
             with self.state_lock:
                 self.invalid_frame_drop_count += 1
@@ -390,33 +428,55 @@ class TeammateScanFilter(Node):
         )
 
     def shared_peer_pose(self, stamp):
+        if self.get_parameter('force_preferred_pose_loss').value:
+            raise TransformException('preferred pose loss test hook enabled')
         return transform_message_2d(
             self.lookup_exact(self.expected_frame, self.peer_frame, stamp))
 
     def resolve_peer_pose(self, scan):
         stamp = Time.from_msg(scan.header.stamp)
-        with self.state_lock:
-            state = self.pose_transition.state
-        if state == 'shared_map_tf_active':
-            return self.shared_peer_pose(stamp), state
-        odom_pose = self.odom_peer_pose(stamp)
-        with self.state_lock:
-            self.pose_transition.odom_available()
-            state = self.pose_transition.state
+        shared_pose = None
         try:
             shared_pose = self.shared_peer_pose(stamp)
         except TransformException:
+            with self.state_lock:
+                self.missing_transform_count += 1
+        odom_pose = None
+        if self.mode == 'simulation':
+            try:
+                odom_pose = self.odom_peer_pose(stamp)
+            except TransformException:
+                pass
+        if shared_pose is not None and odom_pose is not None:
+            with self.state_lock:
+                self.pose_transition.odom_available()
+                switched = self.pose_transition.compare_shared(
+                    odom_pose, shared_pose)
+                state = self.pose_transition.state
+                difference = self.pose_transition.last_difference
+            if switched and state == 'shared_map_tf_active':
+                self.preferred_pose_successes += 1
+                self.get_logger().info(
+                    f'POSE_SOURCE_SHARED_MAP_ACTIVE position_difference='
+                    f'{difference[0]:.6f} yaw_difference={difference[1]:.6f}')
+                return shared_pose, state
+            self.fallback_pose_successes += 1
+            return odom_pose, state
+        if shared_pose is not None:
+            with self.state_lock:
+                state = self.pose_transition.state
+            if state == 'shared_map_tf_active':
+                self.preferred_pose_successes += 1
+                return shared_pose, state
+        if odom_pose is not None:
+            with self.state_lock:
+                self.pose_transition.fallback_available()
+                state = self.pose_transition.state
+            self.fallback_pose_successes += 1
             return odom_pose, state
         with self.state_lock:
-            switched = self.pose_transition.compare_shared(odom_pose, shared_pose)
-            state = self.pose_transition.state
-            difference = self.pose_transition.last_difference
-        if switched and state == 'shared_map_tf_active':
-            self.get_logger().info(
-                f'POSE_SOURCE_SHARED_MAP_ACTIVE position_difference={difference[0]:.6f} '
-                f'yaw_difference={difference[1]:.6f}')
-            return shared_pose, state
-        return odom_pose, state
+            self.pose_transition.degraded()
+        return None, 'degraded_unmasked'
 
     def process_pending(self):
         while rclpy.ok():
@@ -428,13 +488,20 @@ class TeammateScanFilter(Node):
             scan = item[0]
             try:
                 pose, source = self.resolve_peer_pose(scan)
-                available = True
             except TransformException:
-                pose, source, available = None, 'waiting_for_odom', False
+                pose, source = None, 'degraded_unmasked'
+                with self.state_lock:
+                    self.missing_transform_count += 1
+            available = pose is not None
+            degraded_allowed = (
+                not available and source == 'degraded_unmasked'
+                and now - item[1] >= self.pose_loss_grace)
             with self.state_lock:
-                action, selected, waited = self.pending.take(now, self.max_latency, available)
+                action, selected, waited = self.pending.take(
+                    now, self.max_latency, available, degraded_allowed)
                 if action == 'expired':
                     self.latency_expired_drop_count += 1
+                    self.dropped_scan_count += 1
             if action in ('idle', 'wait'):
                 return
             if action == 'expired':
@@ -448,11 +515,14 @@ class TeammateScanFilter(Node):
                     self.stale_input_drop_count += 1
                 else:
                     self.transform_wait_samples.append(waited)
-                    self.pose_source_counts[source] += 1
+                    self.pose_source_counts[source] = (
+                        self.pose_source_counts.get(source, 0) + 1)
+                    if source == 'degraded_unmasked':
+                        self.degraded_unmasked_publications += 1
             if stale:
                 self.warn('Dropped non-monotonic queued scan')
                 continue
-            self.publish_filtered(scan, pose)
+            self.publish_filtered(scan, pose, source)
 
     def scan_directions(self, scan):
         key = (len(scan.ranges), scan.angle_min, scan.angle_increment)
@@ -461,7 +531,7 @@ class TeammateScanFilter(Node):
             self.direction_key = key
         return self.directions
 
-    def publish_filtered(self, scan, pose):
+    def publish_filtered(self, scan, pose, source='shared_map_tf_active'):
         if not self.logged_scan_contract:
             self.get_logger().info(
                 f'SCAN_CONTRACT mode={self.mode} original_range_max='
@@ -478,16 +548,25 @@ class TeammateScanFilter(Node):
             index for index, value in enumerate(scan.ranges)
             if math.isinf(value) and value > 0.0
         }
-        output, indices, intervals = filtered_scan(
-            completed, pose.x, pose.y, self.effective_radius,
-            self.range_tolerance, self.scan_directions(completed),
-            natural_no_return_indices)
+        if pose is None:
+            output, indices, intervals = completed, [], {}
+        else:
+            output, indices, intervals = filtered_scan(
+                completed, pose.x, pose.y, self.effective_radius,
+                self.range_tolerance, self.scan_directions(completed),
+                natural_no_return_indices)
         if not rclpy.ok():
             return
         self.publisher.publish(output)
         with self.state_lock:
+            now = time.monotonic()
+            if self.last_output_monotonic is not None:
+                gap = now - self.last_output_monotonic
+                self.longest_output_gap = max(self.longest_output_gap, gap)
+            self.last_output_monotonic = now
             self.last_published_stamp = self.stamp_key(scan)
-            self.last_peer_position = (pose.x, pose.y, pose.yaw)
+            self.last_peer_position = (
+                None if pose is None else (pose.x, pose.y, pose.yaw))
             self.last_masked_indices = indices
             self.last_intervals = intervals
             self.last_scan_metrics = {
@@ -504,6 +583,14 @@ class TeammateScanFilter(Node):
                 self.scan_metric_totals[key] += value
             self.published_filtered_count += 1
             self.masked_beam_count += len(indices)
+            previous = self.pose_source_transitions.get(source, 0)
+            self.pose_source_transitions[source] = previous + 1
+            if source != self.last_published_pose_source:
+                transition_key = (
+                    f'{self.last_published_pose_source or "none"}->{source}')
+                self.pose_state_transitions[transition_key] = (
+                    self.pose_state_transitions.get(transition_key, 0) + 1)
+                self.last_published_pose_source = source
 
     def metrics_snapshot(self):
         with self.state_lock:
@@ -522,7 +609,22 @@ class TeammateScanFilter(Node):
                           pose_counts=dict(self.pose_source_counts),
                           transition_rejections=self.pose_transition.rejected_transitions,
                           transition_difference=self.pose_transition.last_difference,
+                          fallback_pose_successes=self.fallback_pose_successes,
+                          preferred_pose_successes=self.preferred_pose_successes,
+                          degraded_unmasked=self.degraded_unmasked_publications,
+                          dropped=self.dropped_scan_count,
+                          missing_transform=self.missing_transform_count,
+                          pose_transitions=dict(self.pose_source_transitions),
+                          pose_state_transitions=dict(self.pose_state_transitions),
+                          longest_output_gap_s=self.longest_output_gap,
                           scan_metrics=dict(self.scan_metric_totals))
+            now = time.monotonic()
+            input_age = (None if self.last_input_monotonic is None else
+                         now - self.last_input_monotonic)
+            output_age = (None if self.last_output_monotonic is None else
+                          now - self.last_output_monotonic)
+            values.update(input_freshness_s=input_age,
+                          output_freshness_s=output_age)
         if waits:
             ordered = sorted(waits)
             p95 = ordered[min(len(ordered)-1, math.ceil(.95*len(ordered))-1)]
@@ -536,6 +638,19 @@ class TeammateScanFilter(Node):
 
     def log_metrics(self):
         metrics = self.metrics_snapshot()
+        input_age = metrics['input_freshness_s']
+        output_age = metrics['output_freshness_s']
+        stalled = (input_age is not None and input_age <= self.max_latency
+                    and (output_age is None or
+                         output_age > self.output_stall_grace))
+        if stalled and not self.output_stall_active:
+            self.output_stall_active = True
+            self.warn('SLAM_FILTER_OUTPUT_STALL ' +
+                      f'input_age={input_age:.3f} output_age='
+                      f'{output_age if output_age is not None else "none"} '
+                      f'state={metrics["pose_state"]}')
+        elif not stalled:
+            self.output_stall_active = False
         self.get_logger().info('FILTER_METRICS ' + ' '.join(
             f'{key}={value}' for key, value in metrics.items()))
 

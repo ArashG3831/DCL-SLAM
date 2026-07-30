@@ -1,4 +1,5 @@
 import math
+import threading
 
 from sensor_msgs.msg import LaserScan
 
@@ -7,6 +8,7 @@ from my_epuck_project.teammate_scan_filter import (
     compose_transform, filtered_scan, inverse_transform, selected_indices,
     selected_indices_cached, is_shutdown_conversion_error,
 )
+from tf2_ros import TransformException
 
 
 def scan(ranges, angle_min=-1.0, increment=0.5, intensities=None):
@@ -178,6 +180,59 @@ def test_pending_transform_delayed_then_publishes_once_with_original_stamp():
     assert action == 'publish'
     assert item[0].header.stamp == message.header.stamp
     assert queue.take(1.09, 0.2, True)[0] == 'idle'
+
+
+def test_pending_queue_allows_bounded_degraded_publication():
+    queue = PendingScanQueue(4)
+    message = stamped_scan(20, 123)
+    queue.enqueue(message, 1.0)
+    action, item, waited = queue.take(1.06, 0.2, False, True)
+    assert action == 'publish_degraded'
+    assert math.isclose(waited, 0.06)
+    assert item[0].header.stamp == message.header.stamp
+
+
+def make_pose_resolution_fixture(shared, odom, mode='simulation'):
+    from my_epuck_project.teammate_scan_filter import TeammateScanFilter
+    node = object.__new__(TeammateScanFilter)
+    node.mode = mode
+    node.state_lock = threading.Lock()
+    node.pose_transition = PoseSourceTransition(2, 0.05, 0.15)
+    node.missing_transform_count = 0
+    node.fallback_pose_successes = 0
+    node.preferred_pose_successes = 0
+    node.shared_peer_pose = lambda stamp: (
+        shared if shared is not None else
+        (_ for _ in ()).throw(TransformException('shared unavailable')))
+    node.odom_peer_pose = lambda stamp: (
+        odom if odom is not None else
+        (_ for _ in ()).throw(TransformException('odom unavailable')))
+    return node
+
+
+def test_shared_tf_loss_uses_independent_simulation_odom_fallback():
+    node = make_pose_resolution_fixture(None, Transform2D(1.0, 2.0, 0.1))
+    node.pose_transition.state = 'shared_map_tf_active'
+    pose, state = node.resolve_peer_pose(stamped_scan(30))
+    assert pose == Transform2D(1.0, 2.0, 0.1)
+    assert state == 'fallback_odom_active'
+    assert node.missing_transform_count == 1
+
+
+def test_no_trustworthy_pose_enters_explicit_degraded_mode():
+    node = make_pose_resolution_fixture(None, None)
+    pose, state = node.resolve_peer_pose(stamped_scan(31))
+    assert pose is None
+    assert state == 'degraded_unmasked'
+    assert node.missing_transform_count == 1
+
+
+def test_physical_mode_does_not_use_simulation_odom_fallback():
+    node = make_pose_resolution_fixture(
+        None, Transform2D(1.0, 2.0, 0.1), mode='physical')
+    pose, state = node.resolve_peer_pose(stamped_scan(32))
+    assert pose is None
+    assert state == 'degraded_unmasked'
 
 
 def test_pending_latency_expiry_drops_without_publication():

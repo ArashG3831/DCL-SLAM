@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
+import signal
 import statistics
 import time
 
@@ -16,9 +17,9 @@ from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from nav_msgs.msg import Odometry, Path as NavPath
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
-from rclpy.executors import ExternalShutdownException
-from rclpy._rclpy_pybind11 import RCLError
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
 try:
@@ -45,6 +46,13 @@ SCAN_SECTORS = (
     ('right', -math.pi / 2.0, -math.pi / 4.0),
     ('front_right', -math.pi / 4.0, 0.0),
 )
+
+
+def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
+    """Recognize only the known rclpy teardown conversion failure."""
+    return (shutdown_requested and not context_valid
+            and isinstance(error, RuntimeError)
+            and str(error).startswith('Unable to convert call argument'))
 
 
 def _wrap_angle(angle):
@@ -802,25 +810,50 @@ class PipelineDiagnosticNode(Node):
             (self.root / f'{robot}_controller_stall_report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
 
 
-def shutdown_node(node):
+def shutdown_node(node, executor=None):
     """Flush and destroy a node across normal and external ROS shutdown."""
-    if not node._finalized:
-        node.finalize()
-    if node.context.ok():
-        node.destroy_node()
-    if rclpy.ok():
-        rclpy.shutdown()
+    try:
+        if node is not None and not node._finalized:
+            node.finalize()
+    finally:
+        if executor is not None:
+            executor.remove_node(node)
+            executor.shutdown()
+        if node is not None and node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = PipelineDiagnosticNode()
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    node = None
+    executor = None
+    shutdown_requested = {'value': False}
+    previous_handlers = {}
+
+    def request_shutdown(signum, frame):
+        del signum, frame
+        shutdown_requested['value'] = True
+        if executor is not None:
+            executor.wake()
+
     try:
-        rclpy.spin(node)
+        node = PipelineDiagnosticNode()
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, request_shutdown)
+        while not shutdown_requested['value'] and rclpy.ok():
+            executor.spin_once(timeout_sec=0.5)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-    except (RCLError, RuntimeError):
-        if rclpy.ok():
+    except RuntimeError as error:
+        if not is_shutdown_conversion_error(
+                error, shutdown_requested['value'],
+                node is not None and node.context.ok()):
             raise
     finally:
-        shutdown_node(node)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        shutdown_node(node, executor)

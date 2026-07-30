@@ -5,7 +5,7 @@ from sensor_msgs.msg import LaserScan
 from my_epuck_project.teammate_scan_filter import (
     Transform2D, PoseSourceTransition, beam_directions, circle_ray_interval,
     compose_transform, filtered_scan, inverse_transform, selected_indices,
-    selected_indices_cached,
+    selected_indices_cached, is_shutdown_conversion_error,
 )
 
 
@@ -24,6 +24,16 @@ def scan(ranges, angle_min=-1.0, increment=0.5, intensities=None):
     message.ranges = list(ranges)
     message.intensities = [] if intensities is None else list(intensities)
     return message
+
+
+def test_teammate_filter_shutdown_conversion_signature_is_narrow():
+    """Only the known conversion error after shutdown is eligible to stop cleanly."""
+    assert is_shutdown_conversion_error(
+        RuntimeError('Unable to convert call argument'), True, False)
+    assert not is_shutdown_conversion_error(
+        RuntimeError('Unable to convert call argument'), False, False)
+    assert not is_shutdown_conversion_error(
+        RuntimeError('callback failure'), True, False)
 
 
 def assert_preserved(source, output, changed):

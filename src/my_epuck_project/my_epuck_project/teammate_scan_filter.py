@@ -2,15 +2,17 @@ import copy
 from collections import deque
 from dataclasses import dataclass
 import math
+import signal
 import statistics
 import threading
 import time
 
 import rclpy
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -25,6 +27,13 @@ class Transform2D:
     x: float
     y: float
     yaw: float
+
+
+def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
+    """Recognize only the known rclpy teardown conversion failure."""
+    return (shutdown_requested and not context_valid
+            and isinstance(error, RuntimeError)
+            and str(error).startswith('Unable to convert call argument'))
 
 
 def normalize_angle(angle):
@@ -536,14 +545,35 @@ class TeammateScanFilter(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = TeammateScanFilter()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    shutdown_requested = {'value': False}
+    previous_handlers = {}
+
+    def request_shutdown(signum, frame):
+        del signum, frame
+        shutdown_requested['value'] = True
+        executor.wake()
+
     try:
-        rclpy.spin(node)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, request_shutdown)
+        while not shutdown_requested['value'] and rclpy.ok():
+            executor.spin_once(timeout_sec=0.5)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RuntimeError as error:
+        if not (shutdown_requested['value'] and not node.context.ok()
+                and str(error).startswith('Unable to convert call argument')):
+            raise
     finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         node.clear_pending()
+        executor.remove_node(node)
+        executor.shutdown()
         if node.context.ok():
             node.destroy_node()
         if rclpy.ok():

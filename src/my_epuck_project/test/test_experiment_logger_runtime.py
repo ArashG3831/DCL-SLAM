@@ -7,7 +7,8 @@ from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import Log
 from my_epuck_interfaces.msg import ExplorationEvent, ExplorationStatus
 
-from my_epuck_project.cooperative_experiment_logger import CooperativeExperimentLogger
+from my_epuck_project.cooperative_experiment_logger import (
+    CooperativeExperimentLogger, create_logger_executor)
 
 
 @pytest.fixture
@@ -41,6 +42,19 @@ def read_events(observer):
             encoding="utf-8"
         ).splitlines()
     ]
+
+
+def test_logger_uses_stable_executor_for_shutdown_pybind_regression():
+    """The experimental EventsExecutor conversion crash is not used."""
+    from rclpy.executors import SingleThreadedExecutor
+    rclpy.init()
+    try:
+        executor = create_logger_executor()
+        assert isinstance(executor, SingleThreadedExecutor)
+        executor.shutdown()
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def controller_error():

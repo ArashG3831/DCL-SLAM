@@ -12,8 +12,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from rcl_interfaces.msg import Log
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
-from rclpy.experimental.events_executor import EventsExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
@@ -421,10 +420,15 @@ class CooperativeExperimentLogger(Node):
             with self._lifecycle_lock:self.finalized=True; self._finalizing=False
         return successful
 
+def create_logger_executor():
+    """Use the stable executor API for logger shutdown compatibility."""
+    return SingleThreadedExecutor()
+
+
 def main(args=None):
     rclpy.init(args=args); node=None; executor=None; clean=True
     try:
-        node=CooperativeExperimentLogger(); executor=EventsExecutor(); executor.add_node(node); executor.spin()
+        node=CooperativeExperimentLogger(); executor=create_logger_executor(); executor.add_node(node); executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException): pass
     except BaseException: clean=False; raise
     finally:

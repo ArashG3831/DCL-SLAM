@@ -54,6 +54,7 @@ def launch_setup(context):
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
+            'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
         }.items(),
     )
     return [
@@ -79,5 +80,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

@@ -846,6 +846,7 @@ def internal_trial(args):
             'webots_mode': args.webots_mode,
             'webots_gui': str(args.webots_gui).lower(),
             'sensor_profile': args.sensor_profile,
+            'diagnostic_mode': args.diagnostic_mode,
             'launch_rviz': 'false',
             # The runner owns the mission budget.  The launch file's
             # TimerAction starts at launch time, before controller and
@@ -883,6 +884,7 @@ def internal_trial(args):
         f'webots_mode:={args.webots_mode}',
         f'webots_gui:={str(args.webots_gui).lower()}',
         f'sensor_profile:={args.sensor_profile}',
+        f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         'launch_rviz:=false',
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
@@ -1346,6 +1348,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             getattr(args, 'sensor_profile', None) or
             ('throughput' if getattr(args, 'execution_profile', None) ==
              'throughput' else 'full')),
+        diagnostic_mode=getattr(args, 'diagnostic_mode', False),
         hold_open_after_completion=args.hold_open_after_completion,
         startup_timeout=args.startup_timeout,
         mission_timeout=args.mission_timeout,
@@ -2202,6 +2205,9 @@ def parser():
     result.add_argument(
         '--sensor-profile', choices=['full', 'throughput'], default=None,
         help='Simulated-device set; physical launches are unchanged.')
+    result.add_argument(
+        '--diagnostic-mode', type=boolean, default=False, metavar='BOOL',
+        help='Enable bounded Nav2 command-pipeline diagnostics.')
     return result
 
 

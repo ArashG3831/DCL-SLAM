@@ -317,6 +317,7 @@ collision_monitor:
     # Topics (Jazzy defaults: in=cmd_vel_smoothed, out=cmd_vel) :contentReference[oaicite:1]{index=1}
     cmd_vel_in_topic: "cmd_vel_smoothed"
     cmd_vel_out_topic: "cmd_vel_unstamped"
+    state_topic: "collision_monitor_state"
 
     transform_tolerance: 0.2
     source_timeout: 2.0

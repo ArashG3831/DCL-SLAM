@@ -111,6 +111,19 @@ def runtime_actions(context):
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
+    diagnostic = Node(
+        package='my_epuck_project',
+        executable='controller_pipeline_diagnostics',
+        name='controller_pipeline_diagnostics',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('diagnostic_mode')),
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'output_root': os.path.join(
+                LaunchConfiguration('output_root').perform(context),
+                'controller_diagnostics'),
+        }],
+    )
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -135,7 +148,7 @@ def runtime_actions(context):
             f'separation_m={metadata["initial_separation_m"]:.6f} '
             f'robot2_in_robot1={metadata["relative_transform"]} '
             f'validation={metadata["validation"]}')),
-        continuous_stack, observer, rviz,
+        continuous_stack, observer, diagnostic, rviz,
     ]
 
 
@@ -164,6 +177,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument(
             'launch_rviz',
             default_value='false',

@@ -42,6 +42,18 @@ def nav2_nodes(package_dir, robot, selected):
                     '0.08' if selected['name'] == 'large' else '0.5',
                 'controller_server.ros__parameters.progress_checker.movement_time_allowance':
                     '18.0' if selected['name'] == 'large' else '10.0',
+                'controller_server.ros__parameters.FollowPath.publish_evaluation':
+                    LaunchConfiguration('diagnostic_mode'),
+                'controller_server.ros__parameters.FollowPath.publish_local_plan':
+                    LaunchConfiguration('diagnostic_mode'),
+                'controller_server.ros__parameters.FollowPath.publish_global_plan':
+                    LaunchConfiguration('diagnostic_mode'),
+                'controller_server.ros__parameters.FollowPath.publish_transformed_global_plan':
+                    LaunchConfiguration('diagnostic_mode'),
+                'controller_server.ros__parameters.FollowPath.publish_cost_grid_pc':
+                    LaunchConfiguration('diagnostic_mode'),
+                'collision_monitor.ros__parameters.state_topic':
+                    'collision_monitor_state',
             },
             convert_types=True,
         ),
@@ -190,5 +202,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

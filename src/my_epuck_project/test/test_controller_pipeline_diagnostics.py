@@ -3,7 +3,11 @@
 from pathlib import Path
 
 import rclpy
+import pytest
 from rclpy.parameter import Parameter
+from dwb_msgs.msg import LocalPlanEvaluation, TrajectoryScore, CriticScore
+from geometry_msgs.msg import Pose2D
+from sensor_msgs.msg import LaserScan
 
 from my_epuck_project.controller_pipeline_diagnostics import (
     Incident,
@@ -11,7 +15,10 @@ from my_epuck_project.controller_pipeline_diagnostics import (
     RollingCapture,
     Sample,
     shutdown_node,
+    DWB_TOP_K,
     command_reason,
+    scan_statistics,
+    summarize_dwb_evaluation,
 )
 
 
@@ -31,6 +38,10 @@ def test_node_constructor_creates_bounded_two_robot_observer(tmp_path):
         assert '/robot2/cmd_vel_nav' in topics
         assert '/robot1/cmd_vel' in topics
         assert '/robot2/cmd_vel' in topics
+        assert '/robot1/scan_d500' in topics
+        assert '/robot1/scan_d500_fixed' in topics
+        assert '/robot1/scan_d500_slam' in topics
+        assert '/robot2/scan_d500_slam' in topics
         assert not hasattr(PipelineDiagnosticNode, '_subscriptions')
         node.finalize()
         files = list(Path(node.root).glob('*'))
@@ -172,3 +183,91 @@ def test_incident_schema_has_unique_identity_and_unknown_missing_evidence():
     reason = command_reason([sample(1, commands={})])
     assert reason[0] == 'UNKNOWN_COMMAND_STALL'
     assert reason[3]
+
+
+def _trajectory(vx, total, raw, theta=0.0):
+    score = TrajectoryScore()
+    score.traj.velocity.x = vx
+    score.traj.velocity.theta = theta
+    score.traj.poses = [Pose2D(x=0.0, y=0.0, theta=0.0),
+                        Pose2D(x=vx, y=0.0, theta=theta)]
+    score.scores = [CriticScore(name=name, raw_score=value, scale=scale)
+                    for name, value, scale in raw]
+    score.total = total
+    return score
+
+
+def test_jazzy_dwb_validity_selected_and_best_forward_semantics():
+    evaluation = LocalPlanEvaluation()
+    evaluation.twists = [
+        _trajectory(0.0, 1.0, [('PathAlign', 1.0, 1.0),
+                               ('GoalAlign', 0.2, 1.0)], theta=0.3),
+        _trajectory(0.05, 2.8, [('PathAlign', 2.0, 1.0),
+                                ('GoalAlign', 0.8, 1.0)]),
+        _trajectory(0.04, -1.0, [('BaseObstacle', -1.0, 1.0)]),
+    ]
+    evaluation.best_index = 0
+    result = summarize_dwb_evaluation(evaluation)
+    assert result['valid_count'] == 2
+    assert result['forward_valid_count'] == 1
+    assert result['selected']['trajectory_index'] == 0
+    assert result['best_valid_forward']['trajectory_index'] == 1
+    assert result['score_difference_forward_minus_selected'] == pytest.approx(1.8)
+    assert result['best_valid_forward']['critics'][0]['weighted_contribution'] == 2.0
+    assert result['dominant_selected_advantage'][0]['name'] == 'PathAlign'
+    assert result['invalid_count'] == 1
+    assert result['top_overall'][0]['trajectory_index'] == 0
+
+
+def test_jazzy_dwb_invalid_best_index_and_no_forward_are_explicit():
+    evaluation = LocalPlanEvaluation()
+    evaluation.twists = [_trajectory(0.001, 1.0, [('GoalAlign', 1.0, 1.0)])]
+    evaluation.best_index = 99
+    result = summarize_dwb_evaluation(evaluation)
+    assert result['selected'] is None
+    assert result['best_valid_forward'] is None
+    assert result['semantics']['best_index_valid'] is False
+    assert result['forward_valid'] is False
+
+
+def test_jazzy_dwb_negative_best_score_is_not_a_selected_valid_trajectory():
+    evaluation = LocalPlanEvaluation()
+    evaluation.twists = [_trajectory(0.0, -1.0, [('BaseObstacle', -1.0, 1.0)])]
+    evaluation.best_index = 0
+    result = summarize_dwb_evaluation(evaluation)
+    assert result['selected'] is None
+    assert result['semantics']['best_index_valid'] is False
+    assert result['invalid_count'] == 1
+
+
+def test_dwb_top_k_is_bounded_and_nonfinite_is_not_valid():
+    evaluation = LocalPlanEvaluation()
+    evaluation.twists = [_trajectory(0.01 + i * 0.001, float(i), [], theta=0.0)
+                         for i in range(DWB_TOP_K + 3)]
+    evaluation.twists[-1].total = float('nan')
+    evaluation.best_index = 0
+    result = summarize_dwb_evaluation(evaluation, top_k=DWB_TOP_K)
+    assert len(result['top_overall']) == DWB_TOP_K
+    assert len(result['top_valid_forward']) == DWB_TOP_K
+    assert result['invalid_count'] == 1
+
+
+def test_scan_statistics_distinguishes_no_return_values_and_sectors():
+    scan = LaserScan()
+    scan.header.frame_id = 'robot1/d500_lidar'
+    scan.range_min = 0.05
+    scan.range_max = 12.0
+    scan.angle_min = -3.141592653589793
+    scan.angle_increment = 3.141592653589793 / 4.0
+    scan.angle_max = scan.angle_min + 7 * scan.angle_increment
+    scan.ranges = [float('inf'), float('-inf'), float('nan'), 0.0,
+                   12.0, 11.995, 1.0, 2.0]
+    result = scan_statistics(scan)
+    assert result['beam_count'] == 8
+    assert result['positive_infinite_count'] == 1
+    assert result['negative_infinite_count'] == 1
+    assert result['nan_count'] == 1
+    assert result['zero_or_negative_count'] == 1
+    assert result['exact_range_max_count'] == 1
+    assert result['near_range_max_count'] == 2
+    assert result['sectors']['front']['beam_count'] >= 1

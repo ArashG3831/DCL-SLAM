@@ -25,6 +25,18 @@ def reclassify(path):
         # retroactively change the original causal classification.
         evidence = [item for item in samples
                     if item.sim_s <= incident['trigger_sim_s']]
+        dwb_records = [item.get('dwb', {}) for item in evidence
+                       if item.get('dwb')]
+        incident['new_dwb_evidence_available'] = any(
+            item.get('selected') is not None and
+            item.get('best_valid_forward') is not None
+            for item in dwb_records)
+        incident['new_dwb_evidence_unavailable_fields'] = [
+            'selected trajectory critic comparison',
+            'best valid forward trajectory',
+            'raw/scale/weighted critic contributions',
+            'path heading and costmap crop',
+        ] if not incident['new_dwb_evidence_available'] else []
         classification, contributing, confidence, missing = command_reason(evidence)
         incident['corrected_classification'] = classification
         incident['corrected_contributing'] = contributing
@@ -68,10 +80,18 @@ def main():
             'stale_or_insufficient_evidence': stale_or_missing,
             'incidents': records,
         }
+    summary['historical_compatibility'] = {
+        'new_bounded_dwb_fields_present': any(
+            incident.get('new_dwb_evidence_available', False)
+            for value in summary['robots'].values()
+            for incident in value['incidents']),
+        'note': 'The historical run predates selected-versus-forward DWB capture; unavailable fields are listed per incident and no historical files were rewritten.',
+    }
     (args.output_root / 'corrected_controller_pipeline_analysis.json').write_text(
         json.dumps(summary, indent=2), encoding='utf-8')
     lines = ['# Corrected controller-pipeline offline analysis', '',
              f'Source: `{args.diagnostic_root}`', '']
+    lines += [f"Historical compatibility: {summary['historical_compatibility']['note']}", '']
     for robot, value in summary['robots'].items():
         lines += [f'## {robot}', '',
                   f"- Original: `{value['original_incidents_by_class']}`",

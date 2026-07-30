@@ -4,6 +4,7 @@ import rclpy
 from my_epuck_interfaces.msg import PeerMap
 from nav_msgs.msg import MapMetaData, OccupancyGrid
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -188,8 +189,9 @@ class SourceAwareMapFusion(Node):
         fused.info.origin.position.y = minimum_y
         fused.info.origin.orientation.w = 1.0
         fused.data = fused_data
-        self.map_publisher.publish(fused)
-        self.metadata_publisher.publish(fused.info)
+        if rclpy.ok():
+            self.map_publisher.publish(fused)
+            self.metadata_publisher.publish(fused.info)
 
 
 def main(args=None):
@@ -197,8 +199,11 @@ def main(args=None):
     node = SourceAwareMapFusion()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
+        if node.context.ok():
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

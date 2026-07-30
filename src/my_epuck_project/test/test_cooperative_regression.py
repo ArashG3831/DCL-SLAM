@@ -18,6 +18,7 @@ from my_epuck_project.cooperative_regression import (
     parse_log_errors,
     parser,
     perform_attempt,
+    readiness_probe_due,
     scoped_shutdown,
     update_progress,
     validate_cli_options,
@@ -471,6 +472,59 @@ def test_hard_shutdown_fallback_is_bounded():
     result = scoped_shutdown([target], 0.2, 0.2)
     assert result['kill_required']
     assert result['all_exited']
+
+
+def test_readiness_probe_stops_after_full_readiness():
+    """A later transient TF probe cannot overwrite achieved readiness."""
+    assert readiness_probe_due('sim', False, 6.0, 0.0)
+    assert not readiness_probe_due('sim', True, 600.0, 0.0)
+    assert not readiness_probe_due('wall', False, 6.0, 0.0)
+
+
+def test_bounded_diagnostic_has_successful_supervisor_exit():
+    """Bounded diagnostics are valid non-crash attempts for the supervisor."""
+    source = (Path(__file__).parents[1] / 'my_epuck_project' /
+              'cooperative_regression.py').read_text()
+    assert 'NON_FAILURE_CLASSIFICATIONS' in source
+    assert "'BOUNDED_DIAGNOSTIC'" in source
+
+
+def test_collector_shutdown_isolated_and_precedes_launch_shutdown():
+    """The collector can finish its buffered snapshot before ROS teardown."""
+    source = (Path(__file__).parents[1] / 'my_epuck_project' /
+              'cooperative_regression.py').read_text()
+    assert 'preexec_fn=os.setpgrp' in source
+    collector_signal = source.index(
+        "_send_scope([collector], signal.SIGINT")
+    launch_signal = source.index(
+        "signal_process(launch, signal.SIGINT)")
+    assert collector_signal < launch_signal
+    assert 'process_group=collector.pid' in source
+
+
+def test_project_nodes_handle_external_shutdown_without_invalid_publish():
+    """Project nodes treat global ROS shutdown as normal process termination."""
+    root = Path(__file__).parents[1] / 'my_epuck_project'
+    for name in (
+            'cooperative_experiment_logger.py',
+            'cooperative_trial_collector.py', 'd500_scan_fix.py',
+            'twist_stamper.py', 'teammate_scan_filter.py', 'map_exporter.py',
+            'source_aware_map_fusion.py'):
+        source = (root / name).read_text()
+        assert 'ExternalShutdownException' in source
+        assert 'if rclpy.ok()' in source or 'if node.context.ok()' in source
+
+
+def test_campaign_report_does_not_count_bounded_diagnostic_as_failure(tmp_path):
+    """A valid bounded diagnostic remains visible without failing campaign."""
+    trial, attempt = create_attempt(
+        tmp_path, 1, classification='BOUNDED_DIAGNOSTIC')
+    (tmp_path / 'campaign_progress.json').write_text(json.dumps({
+        'valid_trials': {trial: str(attempt.relative_to(tmp_path))},
+    }))
+    result = analyze_campaign(tmp_path)
+    assert result['failure_count'] == 0
+    assert result['diagnostic_count'] == 1
 
 
 def create_attempt(campaign, number, classification='PASS', value=0):

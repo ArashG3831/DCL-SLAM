@@ -477,9 +477,12 @@ def main(args=None):
     node = TeammateScanFilter()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node.clear_pending()
-        node.destroy_node()
+        if node.context.ok():
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

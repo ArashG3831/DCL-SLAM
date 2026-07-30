@@ -55,6 +55,9 @@ CLASSIFICATIONS = (
     'PASS', 'SYSTEM_FAILURE', 'MISSION_TIMEOUT', 'PROCESS_CRASH',
     'INCOMPLETE_ARTIFACTS', 'USER_INTERRUPTED',
 )
+NON_FAILURE_CLASSIFICATIONS = {
+    'MISSION_COMPLETE', 'BOUNDED_DIAGNOSTIC', 'CLEAN_SHUTDOWN', 'PASS',
+}
 REQUIRED_OBSERVER_FILES = (
     'summary.json', 'events.jsonl', 'warnings.jsonl', 'topic_health.csv',
     'coverage.csv', 'robot1_timeseries.csv', 'robot2_timeseries.csv',
@@ -801,6 +804,12 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
     return classification, details
 
 
+def readiness_probe_due(time_mode, ready, now, last_probe, interval=5.0):
+    """Do not overwrite achieved readiness with later transient probes."""
+    return (time_mode == 'sim' and not ready
+            and now - last_probe >= interval)
+
+
 def internal_trial(args):
     """Run one launch and collector as children of one isolated supervisor."""
     attempt = Path(args.attempt_dir).resolve()
@@ -905,8 +914,7 @@ def internal_trial(args):
         stderr=subprocess.STDOUT, text=True, preexec_fn=os.setpgrp)
     collector = subprocess.Popen(
         collector_command, env=environment, stdout=collector_log,
-        stderr=subprocess.STDOUT, text=True,
-        preexec_fn=lambda: os.setpgid(0, launch.pid))
+        stderr=subprocess.STDOUT, text=True, preexec_fn=os.setpgrp)
     processes = [launch, collector]
     mark_startup_stage('launch_process_started', pid=launch.pid)
     mark_startup_stage('collector_process_started', pid=collector.pid)
@@ -995,7 +1003,8 @@ def internal_trial(args):
                 status = json.loads(status_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 pass
-            if args.time_mode == 'sim' and now - last_clock_probe >= 5.0:
+            if readiness_probe_due(
+                    args.time_mode, ready, now, last_clock_probe):
                 clock_ok, clock_details = clock_readiness(args.ros_domain_id)
                 if 'first_clock_probe' not in startup_timeline:
                     mark_startup_stage('first_clock_probe')
@@ -1142,8 +1151,10 @@ def internal_trial(args):
             append_shutdown_event(
                 shutdown_events, 'signal_sent', process='collector',
                 signal='SIGINT')
-            signal_process(collector, signal.SIGINT)
-            wait_processes([collector], args.graceful_shutdown_timeout)
+            _send_scope([collector], signal.SIGINT,
+                        process_group=collector.pid)
+            wait_processes([collector], args.graceful_shutdown_timeout,
+                            process_group=collector.pid)
             append_shutdown_event(
                 shutdown_events, 'final_snapshot_complete', process='collector',
                 complete=collector.poll() is not None)
@@ -1227,7 +1238,7 @@ def internal_trial(args):
         'shutdown_events_path': 'shutdown_events.jsonl',
     })
     atomic_json(attempt / 'runner_metadata.json', metadata)
-    return CLASSIFICATIONS.index(classification)
+    return 0 if classification in NON_FAILURE_CLASSIFICATIONS else 1
 
 
 def validate_existing_attempt(path):

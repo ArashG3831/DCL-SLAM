@@ -12,6 +12,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from rcl_interfaces.msg import Log
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.experimental.events_executor import EventsExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -391,7 +392,9 @@ class CooperativeExperimentLogger(Node):
         for timer in self._observer_timers:
             try:timer.cancel()
             except Exception as exc:self.record_internal_error('timer_cancel',exc)
-        self.event('RUN_END' if clean else 'RUN_INTERRUPTED','observer shutting down',console=True,allow_during_shutdown=True); self.flush()
+        if rclpy.ok():
+            self.event('RUN_END' if clean else 'RUN_INTERRUPTED','observer shutting down',console=True,allow_during_shutdown=True)
+        self.flush()
         successful=False
         try:
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]
@@ -399,16 +402,22 @@ class CooperativeExperimentLogger(Node):
                 for record in warning_records:f.write(json.dumps(finite(record),allow_nan=False)+'\n')
             atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_manifest(clean,'clean' if clean else 'interrupted'); successful=True
         except Exception as exc:
-            self.write_failures+=1; self.get_logger().error(f'final output failed: {exc}')
+            self.write_failures+=1
+            if rclpy.ok():
+                self.get_logger().error(f'final output failed: {exc}')
             try:
                 atomic_json(self.directory/'summary.json',self.summary(False)); self.write_manifest(False,'finalization_failed')
-            except Exception:self.get_logger().error('failed to record finalization failure')
+            except Exception:
+                if rclpy.ok():
+                    self.get_logger().error('failed to record finalization failure')
         finally:
             with self._io_lock:
                 self._closed=True
                 for stream in [self.events,*self.files]:
                     try:stream.flush(); stream.close()
-                    except Exception as exc:self.get_logger().error(f'file close failed: {exc}')
+                    except Exception as exc:
+                        if rclpy.ok():
+                            self.get_logger().error(f'file close failed: {exc}')
             with self._lifecycle_lock:self.finalized=True; self._finalizing=False
         return successful
 
@@ -416,11 +425,12 @@ def main(args=None):
     rclpy.init(args=args); node=None; executor=None; clean=True
     try:
         node=CooperativeExperimentLogger(); executor=EventsExecutor(); executor.add_node(node); executor.spin()
-    except KeyboardInterrupt: pass
+    except (KeyboardInterrupt, ExternalShutdownException): pass
     except BaseException: clean=False; raise
     finally:
         if node is not None:
             node.finalize(clean)
             if executor is not None:executor.remove_node(node)
-            node.destroy_node()
+            if node.context.ok():
+                node.destroy_node()
         if rclpy.ok():rclpy.shutdown()

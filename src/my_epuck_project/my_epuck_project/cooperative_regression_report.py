@@ -689,6 +689,10 @@ def analyze_campaign(campaign_dir, free_threshold=25,
     counts = Counter(
         item.get('classification', 'UNKNOWN') for item in all_attempt_metadata)
     successful_outcomes = {'PASS', 'MISSION_COMPLETE'}
+    non_failure_outcomes = {
+        'PASS', 'MISSION_COMPLETE', 'BOUNDED_DIAGNOSTIC',
+        'CLEAN_SHUTDOWN',
+    }
     pass_count = sum(
         row['classification'] in successful_outcomes for row in trial_rows)
     summary = {
@@ -699,7 +703,12 @@ def analyze_campaign(campaign_dir, free_threshold=25,
             'trial_count_requested', len(trial_rows)),
         'valid_trial_count': len(trial_rows),
         'pass_count': pass_count,
-        'failure_count': len(trial_rows) - pass_count,
+        'failure_count': sum(
+            row['classification'] not in non_failure_outcomes
+            for row in trial_rows),
+        'diagnostic_count': sum(
+            row['classification'] == 'BOUNDED_DIAGNOSTIC'
+            for row in trial_rows),
         'timeout_count': sum(
             row['classification'] in {
                 'MISSION_TIMEOUT', 'SIMULATED_MISSION_TIMEOUT',

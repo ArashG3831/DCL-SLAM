@@ -1,4 +1,5 @@
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TwistStamped
 
@@ -29,15 +30,22 @@ class TwistStamper(Node):
         stamped.header.stamp = self.get_clock().now().to_msg()
         stamped.header.frame_id = 'base_link'  # or '' if you prefer
         stamped.twist = msg
-        self.pub.publish(stamped)
+        if rclpy.ok():
+            self.pub.publish(stamped)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = TwistStamper()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        if node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

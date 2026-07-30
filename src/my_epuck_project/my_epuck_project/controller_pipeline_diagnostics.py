@@ -804,8 +804,10 @@ class PipelineDiagnosticNode(Node):
 
 def shutdown_node(node):
     """Flush and destroy a node across normal and external ROS shutdown."""
-    node.finalize()
-    node.destroy_node()
+    if not node._finalized:
+        node.finalize()
+    if node.context.ok():
+        node.destroy_node()
     if rclpy.ok():
         rclpy.shutdown()
 

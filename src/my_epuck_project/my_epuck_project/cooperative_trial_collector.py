@@ -14,6 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -450,9 +451,12 @@ def main(args=None):
     try:
         while rclpy.ok() and not stopping.is_set():
             rclpy.spin_once(node, timeout_sec=0.2)
+    except ExternalShutdownException:
+        stopping.set()
     finally:
         node.finalize('signal' if stopping.is_set() else 'rclpy_shutdown')
-        node.destroy_node()
+        if node.context.ok():
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

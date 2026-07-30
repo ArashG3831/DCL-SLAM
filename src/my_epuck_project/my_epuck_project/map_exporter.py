@@ -2,6 +2,7 @@ import rclpy
 from my_epuck_interfaces.msg import PeerMap
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
@@ -55,7 +56,8 @@ class MapExporter(Node):
         message.export_stamp = self.get_clock().now().to_msg()
         message.local_evidence_only = True
         message.occupancy_grid = self.latest_map
-        self.publisher.publish(message)
+        if rclpy.ok():
+            self.publisher.publish(message)
 
 
 def main(args=None):
@@ -63,8 +65,11 @@ def main(args=None):
     node = MapExporter()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
+        if node.context.ok():
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

@@ -1,6 +1,7 @@
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
@@ -53,15 +54,22 @@ class D500ScanFix(Node):
         fixed.ranges = list(reversed(msg.ranges))
         fixed.intensities = list(reversed(msg.intensities)) if msg.intensities else []
 
-        self.pub.publish(fixed)
+        if rclpy.ok():
+            self.pub.publish(fixed)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = D500ScanFix()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        if node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

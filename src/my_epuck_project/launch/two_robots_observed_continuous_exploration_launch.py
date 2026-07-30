@@ -67,6 +67,7 @@ def runtime_actions(context):
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': source_world_path,
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
         }.items(),
     )
     observer = Node(
@@ -178,6 +179,8 @@ def generate_launch_description():
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument(
             'launch_rviz',

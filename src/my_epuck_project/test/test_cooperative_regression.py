@@ -10,6 +10,7 @@ from my_epuck_project.cooperative_regression import (
     apply_profile_defaults,
     attempt_namespace,
     classify_attempt,
+    detect_slam_filter_output_stall,
     execute_attempt,
     hold_open_artifacts_valid,
     internal_command,
@@ -29,6 +30,7 @@ from my_epuck_project.cooperative_regression import (
     windows_port_pid,
 )
 from my_epuck_project.cooperative_regression_report import analyze_campaign
+from my_epuck_project.cooperative_regression_report import _claim_value
 from my_epuck_project.occupancy_map_comparison import (
     Geometry,
     OccupancyMap,
@@ -53,6 +55,28 @@ def options(tmp_path, trials=10):
         graceful_shutdown_timeout=0.2,
         hard_shutdown_timeout=0.2,
     )
+
+
+def test_filter_output_stall_requires_fresh_fixed_input(tmp_path):
+    observer = tmp_path / 'observer'
+    observer.mkdir()
+    (observer / 'topic_health.csv').write_text(
+        'robot_id,topic_name,event_sequence,ros_time_sec,stale,topic_age_s\n'
+        'robot1,/robot1/scan_d500_fixed,1,10,False,0.1\n'
+        'robot1,/robot1/scan_d500_slam,1,10,False,0.1\n'
+        'robot1,/robot1/scan_d500_fixed,2,20,False,0.1\n'
+        'robot1,/robot1/scan_d500_slam,2,20,True,9.0\n'
+        'robot2,/robot2/scan_d500_fixed,1,10,True,9.0\n'
+        'robot2,/robot2/scan_d500_slam,1,10,True,9.0\n',
+        encoding='utf-8')
+    result = detect_slam_filter_output_stall(observer)
+    assert set(result) == {'robot1'}
+    assert result['robot1']['first_observed_stale_ros_time_s'] == 20.0
+
+
+def test_claim_report_handles_missing_claim_during_startup_failure():
+    assert _claim_value({'robots': {'robot2': {'claim': None}}},
+                        'robot2', 'state', 'UNKNOWN') == 'UNKNOWN'
 
 
 def test_trial_resources_are_unique_and_configurable(tmp_path):

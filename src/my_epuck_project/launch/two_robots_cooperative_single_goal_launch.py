@@ -98,6 +98,7 @@ def launch_setup(context):
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
         }.items(),
     )
     robot1_rank = LaunchConfiguration('robot1_test_candidate_rank')
@@ -128,6 +129,8 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),

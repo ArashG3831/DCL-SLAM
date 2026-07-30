@@ -21,6 +21,7 @@ import time
 from ament_index_python.packages import get_package_share_directory
 import psutil
 import rclpy
+from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
 from rclpy.context import Context
@@ -51,7 +52,7 @@ CLASSIFICATIONS = (
     'MISSION_COMPLETE', 'BOUNDED_DIAGNOSTIC', 'SIMULATED_MISSION_TIMEOUT',
     'EMERGENCY_WALL_TIMEOUT', 'INFRASTRUCTURE_FAILURE',
     'RUNTIME_PROCESS_CRASH', 'MANUAL_STOP', 'CLEAN_SHUTDOWN',
-    'SHUTDOWN_DEGRADED',
+    'SHUTDOWN_DEGRADED', 'SLAM_FILTER_OUTPUT_STALL',
     # Read compatibility for reports produced before the classification split.
     'PASS', 'SYSTEM_FAILURE', 'MISSION_TIMEOUT', 'PROCESS_CRASH',
     'INCOMPLETE_ARTIFACTS', 'USER_INTERRUPTED',
@@ -78,6 +79,33 @@ PROGRESS_LOCK = threading.RLock()
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def detect_slam_filter_output_stall(observer):
+    """Detect fresh fixed scans followed by a permanently stale SLAM stream."""
+    path = observer / 'topic_health.csv'
+    if not path.is_file():
+        return None
+    rows = {}
+    with path.open(newline='', encoding='utf-8') as stream:
+        for row in csv.DictReader(stream):
+            rows.setdefault((row['robot_id'], row['topic_name']), []).append(row)
+    details = {}
+    for robot in ('robot1', 'robot2'):
+        fixed = rows.get((robot, f'/{robot}/scan_d500_fixed'), [])
+        slam = rows.get((robot, f'/{robot}/scan_d500_slam'), [])
+        fixed_fresh = {row['event_sequence'] for row in fixed
+                       if row.get('stale') != 'True'}
+        first = next((row for row in slam
+                      if row.get('stale') == 'True'
+                      and row['event_sequence'] in fixed_fresh), None)
+        if first:
+            details[robot] = {
+                'first_observed_stale_ros_time_s': float(first['ros_time_sec']),
+                'last_observed_age_s': float(slam[-1]['topic_age_s'])
+                if slam and slam[-1].get('topic_age_s') else None,
+            }
+    return details or None
 
 
 def safe_campaign_id():
@@ -429,7 +457,7 @@ def clock_readiness(domain, timeout_s=4.0):
 
 
 def tf_readiness(domain, timeout_s=4.0):
-    """Verify odometry and namespaced odom->base transforms using wall time."""
+    """Verify odometry and the global transforms required by costmaps."""
     started = time.monotonic()
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
     os.environ['ROS_DOMAIN_ID'] = str(domain)
@@ -460,48 +488,114 @@ def tf_readiness(domain, timeout_s=4.0):
             history=HistoryPolicy.KEEP_LAST, depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE)
+        required = []
         for robot in ('robot1', 'robot2'):
             odom_received[robot] = False
-            details['requested_transforms'].append({
-                'target': f'{robot}/base_footprint',
-                'source': f'{robot}/odom',
-            })
+            required.extend([
+                (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'),
+                ('shared_map', f'{robot}/base_footprint', 'shared_to_base'),
+            ])
+        details['requested_transforms'] = [
+            {'target': target, 'source': source, 'role': role}
+            for target, source, role in required]
 
-            def receive(message, name=robot):
-                odom_received[name] = True
-                first_odom.setdefault(name, time.monotonic() - started)
-                stamp = message.header.stamp
-                details['latest_odom_stamp'][name] = {
-                    'sec': stamp.sec, 'nanosec': stamp.nanosec,
-                }
+        def receive(message, name):
+            odom_received[name] = True
+            first_odom.setdefault(name, time.monotonic() - started)
+            stamp = message.header.stamp
+            details['latest_odom_stamp'][name] = {
+                'sec': stamp.sec, 'nanosec': stamp.nanosec,
+            }
 
-            node.create_subscription(Odometry, f'/{robot}/odom', receive, qos)
+        for robot in ('robot1', 'robot2'):
+            node.create_subscription(
+                Odometry, f'/{robot}/odom',
+                lambda message, name=robot: receive(message, name), qos)
         loop_started = time.monotonic()
         details['setup_wall_elapsed_s'] = loop_started - started
         deadline = loop_started + timeout_s
         while time.monotonic() < deadline:
             executor.spin_once(timeout_sec=0.1)
-            for robot in ('robot1', 'robot2'):
-                if odom_received[robot] and robot not in first_transform:
-                    if buffer.can_transform(
-                            f'{robot}/base_footprint', f'{robot}/odom',
-                            Time(), timeout=Duration(seconds=0.0)):
-                        first_transform[robot] = time.monotonic() - started
-            if len(first_transform) == 2:
+            for target, source, role in required:
+                key = f'{role}:{source}->{target}'
+                if key not in first_transform and buffer.can_transform(
+                        target, source, Time(),
+                        timeout=Duration(seconds=0.0)):
+                    first_transform[key] = time.monotonic() - started
+            if len(first_transform) == len(required):
                 break
         details['odom_received'] = dict(odom_received)
         details['first_odom_wall_elapsed_s'] = dict(first_odom)
         details['first_transform_wall_elapsed_s'] = dict(first_transform)
-        if len(first_transform) == 2:
+        if len(first_transform) == len(required):
             details['reason'] = 'READY'
         else:
-            missing = [robot for robot in ('robot1', 'robot2')
-                       if robot not in first_transform]
-            details['missing_robots'] = missing
+            details['missing_transforms'] = [
+                {'target': target, 'source': source, 'role': role}
+                for target, source, role in required
+                if f'{role}:{source}->{target}' not in first_transform]
             details['reason'] = 'TF_READINESS_TIMEOUT'
         return details['reason'] == 'READY', details
     except Exception as exc:
         details['reason'] = 'TF_PROBE_INTERNAL_ERROR'
+        details['error'] = f'{type(exc).__name__}: {exc}'
+        return False, details
+    finally:
+        if node is not None:
+            if executor is not None:
+                executor.remove_node(node)
+            node.destroy_node()
+        if executor is not None:
+            executor.shutdown()
+        if context.ok():
+            context.shutdown()
+        if previous_domain is None:
+            os.environ.pop('ROS_DOMAIN_ID', None)
+        else:
+            os.environ['ROS_DOMAIN_ID'] = previous_domain
+
+
+def activate_nav2(domain, timeout_s=10.0):
+    """Start both Nav2 managers after the required transforms are available."""
+    started = time.monotonic()
+    previous_domain = os.environ.get('ROS_DOMAIN_ID')
+    os.environ['ROS_DOMAIN_ID'] = str(domain)
+    context = Context()
+    node = None
+    executor = None
+    details = {'domain_id': int(domain), 'services': {}}
+    try:
+        rclpy.init(args=None, context=context)
+        node = rclpy.create_node(
+            'regression_nav2_startup_gate', context=context)
+        executor = SingleThreadedExecutor(context=context)
+        executor.add_node(node)
+        for robot in ('robot1', 'robot2'):
+            service = f'/{robot}/lifecycle_manager_navigation/manage_nodes'
+            client = node.create_client(ManageLifecycleNodes, service)
+            remaining = max(0.0, timeout_s - (time.monotonic() - started))
+            if not client.wait_for_service(timeout_sec=remaining):
+                details['services'][robot] = 'SERVICE_TIMEOUT'
+                return False, details
+            request = ManageLifecycleNodes.Request()
+            request.command = ManageLifecycleNodes.Request.STARTUP
+            future = client.call_async(request)
+            deadline = time.monotonic() + max(
+                0.0, timeout_s - (time.monotonic() - started))
+            while not future.done() and time.monotonic() < deadline:
+                executor.spin_once(timeout_sec=0.1)
+            if not future.done():
+                details['services'][robot] = 'RESPONSE_TIMEOUT'
+                return False, details
+            response = future.result()
+            details['services'][robot] = (
+                'STARTED' if response.success else 'REJECTED')
+            if not response.success:
+                return False, details
+        details['status'] = 'READY'
+        return True, details
+    except Exception as exc:
+        details['status'] = 'INTERNAL_ERROR'
         details['error'] = f'{type(exc).__name__}: {exc}'
         return False, details
     finally:
@@ -736,6 +830,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         pass
     log_review = parse_log_errors(attempt / 'launch.log')
     process_exit_codes = process_exit_codes or {}
+    filter_stall = detect_slam_filter_output_stall(observer)
     shutdown_nonzero = {
         name: code for name, code in process_exit_codes.items()
         if code not in (None, 0)
@@ -748,6 +843,8 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         classification = 'EMERGENCY_WALL_TIMEOUT'
     elif unexpected_exit or log_review['traceback']:
         classification = 'RUNTIME_PROCESS_CRASH'
+    elif filter_stall:
+        classification = 'SLAM_FILTER_OUTPUT_STALL'
     elif timed_out:
         # A bounded diagnostic deliberately ends the attempt after a healthy
         # simulated interval; it is not a runtime failure.
@@ -801,6 +898,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         'cleanup_quality': (
             'CLEAN' if cleanup.get('all_exited', False) else 'DEGRADED'),
         'primary_outcome': classification,
+        'slam_filter_output_stall': filter_stall or {},
     }
     return classification, details
 
@@ -1011,6 +1109,7 @@ def internal_trial(args):
         f'webots_gui:={str(args.webots_gui).lower()}',
         f'sensor_profile:={args.sensor_profile}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
+        'nav2_autostart:=false',
         'launch_rviz:=false',
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
@@ -1110,6 +1209,7 @@ def internal_trial(args):
     mission_sim_start = None
     clock_ok = args.time_mode == 'wall'
     tf_ok = args.time_mode == 'wall'
+    nav2_started = args.time_mode == 'wall'
     last_clock_probe = 0.0
     status_path = attempt / 'collector_status.json'
     try:
@@ -1141,6 +1241,10 @@ def internal_trial(args):
                 if clock_ok:
                     tf_ok, tf_details = tf_readiness(args.ros_domain_id)
                     metadata['tf_readiness'] = tf_details
+                    if tf_ok and not nav2_started:
+                        nav2_started, nav2_details = activate_nav2(
+                            args.ros_domain_id, timeout_s=60.0)
+                        metadata['nav2_activation'] = nav2_details
                 atomic_json(attempt / 'runner_metadata.json', metadata)
                 # The probe uses a bounded wall-time wait and may finish
                 # after the loop's initial timestamp. Readiness and mission

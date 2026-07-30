@@ -127,9 +127,9 @@ def _status_value(final_state, robot, field, default=None):
 
 
 def _claim_value(final_state, robot, field, default=None):
+    claim = final_state.get('robots', {}).get(robot, {}).get('claim') or {}
     return (
-        final_state.get('robots', {}).get(robot, {})
-        .get('claim', {}).get(field, default)
+        claim.get(field, default)
     )
 
 

@@ -55,6 +55,7 @@ def launch_setup(context):
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
         }.items(),
     )
     return [
@@ -81,6 +82,8 @@ def generate_launch_description():
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

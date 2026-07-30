@@ -92,7 +92,7 @@ def nav2_nodes(package_dir, robot, selected):
         output='screen',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'autostart': True,
+            'autostart': LaunchConfiguration('nav2_autostart'),
             'node_names': LIFECYCLE_NODES,
         }],
     ))
@@ -203,6 +203,8 @@ def generate_launch_description():
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

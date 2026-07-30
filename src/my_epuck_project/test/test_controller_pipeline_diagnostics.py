@@ -5,6 +5,7 @@ from pathlib import Path
 import rclpy
 import pytest
 from rclpy.parameter import Parameter
+from rclpy.executors import SingleThreadedExecutor
 from dwb_msgs.msg import LocalPlanEvaluation, TrajectoryScore, CriticScore
 from geometry_msgs.msg import Pose2D
 from sensor_msgs.msg import LaserScan
@@ -15,8 +16,10 @@ from my_epuck_project.controller_pipeline_diagnostics import (
     RollingCapture,
     Sample,
     shutdown_node,
+    is_shutdown_conversion_error,
     DWB_TOP_K,
     command_reason,
+    costmap_command_contract_evidence,
     scan_statistics,
     summarize_dwb_evaluation,
 )
@@ -60,6 +63,29 @@ def test_external_ros_shutdown_flushes_and_destroys_cleanly(tmp_path):
     rclpy.shutdown()
     shutdown_node(node)
     assert list(tmp_path.glob('*'))
+
+
+def test_explicit_executor_shutdown_is_idempotent(tmp_path):
+    """The diagnostic executable uses an explicit stable executor lifecycle."""
+    rclpy.init()
+    node = PipelineDiagnosticNode(parameter_overrides=[
+        Parameter('output_root', Parameter.Type.STRING, str(tmp_path)),
+    ])
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    shutdown_node(node, executor)
+    shutdown_node(node, executor)
+    assert list(tmp_path.glob('*'))
+
+
+def test_shutdown_conversion_error_is_only_accepted_after_context_shutdown():
+    """The known pybind error is not suppressed during normal operation."""
+    error = RuntimeError('Unable to convert call argument')
+    assert is_shutdown_conversion_error(error, True, False)
+    assert not is_shutdown_conversion_error(error, False, False)
+    assert not is_shutdown_conversion_error(error, True, True)
+    assert not is_shutdown_conversion_error(
+        RuntimeError('application callback failure'), True, False)
 
 
 def sample(t, active=True, distance=1.0, x=0.0, commands=None, state=None):
@@ -271,3 +297,33 @@ def test_scan_statistics_distinguishes_no_return_values_and_sectors():
     assert result['exact_range_max_count'] == 1
     assert result['near_range_max_count'] == 2
     assert result['sectors']['front']['beam_count'] >= 1
+
+
+def test_costmap_evidence_distinguishes_clear_inflated_lethal_and_unknown():
+    """Bounded trajectory evidence retains cost and collision semantics."""
+    costmap = {
+        'frame': 'robot1/local_costmap', 'stamp_sec': 10,
+        'stamp_nanosec': 0, 'resolution': 0.1,
+        'origin': {'x': -1.0, 'y': -1.0}, 'robot_cell': {'x': 10, 'y': 10},
+        'cells': [{'x': x, 'y': 10, 'value': 0} for x in range(10, 21)] +
+                 [{'x': 15, 'y': 11, 'value': 100},
+                  {'x': 16, 'y': 11, 'value': 254},
+                  {'x': 17, 'y': 11, 'value': -1}],
+    }
+    dwb = {
+        'selected': {'endpoint': {'x': 0.4, 'y': 0.0}},
+        'best_valid_forward': {'endpoint': {'x': 0.2, 'y': 0.0}},
+    }
+    result = costmap_command_contract_evidence(dwb, costmap, (0.0, 0.0, 0.0))
+    assert result['selected']['available']
+    assert not result['selected']['lethal_crossed']
+    assert result['selected']['maximum_cost'] == 0
+    assert result['best_executable_forward']['minimum_clearance_m'] is not None
+
+
+def test_costmap_evidence_reports_missing_or_stale_input():
+    """Missing crops are explicit rather than silently treated as safe."""
+    result = costmap_command_contract_evidence(
+        {'selected': {}, 'best_valid_forward': {}}, {}, (0.0, 0.0, 0.0))
+    assert result['selected']['available'] is False
+    assert result['best_executable_forward']['available'] is False

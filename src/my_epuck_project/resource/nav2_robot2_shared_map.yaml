@@ -113,9 +113,11 @@ controller_server:
       decel_lim_x: -0.20
       decel_lim_y: 0.0
       decel_lim_theta: -1.2
-      vx_samples: 20
+      # Keep the first positive sample above the measured base response floor.
+      vx_samples: 6
       vy_samples: 5
-      vtheta_samples: 20
+      # Odd sampling preserves exact zero and avoids sub-response turns.
+      vtheta_samples: 21
       sim_time: 1.7
       linear_granularity: 0.01
       angular_granularity: 0.025

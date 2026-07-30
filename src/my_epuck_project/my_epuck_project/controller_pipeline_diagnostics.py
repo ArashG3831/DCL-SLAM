@@ -239,6 +239,64 @@ def scan_statistics(msg):
     return result
 
 
+def trajectory_costmap_evidence(record, costmap, pose):
+    """Estimate bounded cost and clearance evidence for one DWB endpoint."""
+    if not record or not costmap or not costmap.get('cells') or pose is None:
+        return {'available': False, 'reason': 'missing_or_stale_costmap_evidence'}
+    resolution = float(costmap['resolution'])
+    origin = costmap['origin']
+    yaw = float(pose[2])
+    endpoint = record.get('endpoint') or {'x': 0.0, 'y': 0.0}
+    ex = float(pose[0]) + math.cos(yaw) * float(endpoint['x']) - math.sin(yaw) * float(endpoint['y'])
+    ey = float(pose[1]) + math.sin(yaw) * float(endpoint['x']) + math.cos(yaw) * float(endpoint['y'])
+    robot_cell = costmap.get('robot_cell', {})
+    lookup = {(int(cell['x']), int(cell['y'])): int(cell['value'])
+              for cell in costmap['cells']}
+    start_x = float(pose[0])
+    start_y = float(pose[1])
+    samples = max(2, int(math.hypot(ex - start_x, ey - start_y) / resolution) + 1)
+    values = []
+    path_cells = []
+    for index in range(samples):
+        fraction = index / (samples - 1)
+        x = start_x + fraction * (ex - start_x)
+        y = start_y + fraction * (ey - start_y)
+        cell = (round((x - float(origin['x'])) / resolution),
+                round((y - float(origin['y'])) / resolution))
+        path_cells.append(cell)
+        if cell in lookup:
+            values.append(lookup[cell])
+    obstacle_cells = [(x, y) for (x, y), value in lookup.items() if value >= 100]
+    clearance = None
+    if obstacle_cells and path_cells:
+        clearance = min(
+            math.hypot(x - px, y - py) * resolution
+            for px, py in path_cells for x, y in obstacle_cells)
+    return {
+        'available': bool(values),
+        'costmap_stamp_sec': costmap.get('stamp_sec'),
+        'costmap_stamp_nanosec': costmap.get('stamp_nanosec'),
+        'costmap_frame': costmap.get('frame'),
+        'sampled_cells': len(values),
+        'minimum_clearance_m': clearance,
+        'maximum_cost': max(values) if values else None,
+        'lethal_crossed': any(value >= 254 for value in values),
+        'inscribed_or_inflated_crossed': any(value >= 100 for value in values),
+        'unknown_crossed': any(value < 0 for value in values),
+        'robot_cell': robot_cell,
+    }
+
+
+def costmap_command_contract_evidence(dwb, costmap, pose):
+    """Return selected and best-forward costmap evidence only."""
+    return {
+        'selected': trajectory_costmap_evidence(
+            dwb.get('selected'), costmap, pose),
+        'best_executable_forward': trajectory_costmap_evidence(
+            dwb.get('best_valid_forward'), costmap, pose),
+    }
+
+
 @dataclass
 class Sample:
     sim_s: float
@@ -691,13 +749,21 @@ class PipelineDiagnosticNode(Node):
                 value['wall_age_s'] = time.monotonic() - value['wall_s']
                 command_meta[stage] = value
             dwb = dict(state.get('dwb', {}))
+            full_costmap = state.get('costmap', {})
+            costmap = {key: value for key, value in full_costmap.items()
+                       if key != 'cells'}
+            costmap['age_wall_s'] = (
+                time.monotonic() - state['costmap_wall']
+                if state.get('costmap_wall') is not None else None)
+            costmap['trajectory_evidence'] = costmap_command_contract_evidence(
+                dwb, full_costmap, odom)
             sample = Sample(
                 sim_s, wall_s, odom[0], odom[1], odom[2], odom[3], odom[4],
                 dict(state['commands']), command_meta, distance, active,
                 dict(state.get('collision_state', {})), dwb,
                 dict(state.get('scan_stats', {})),
                 self._geometry_context(state, odom, dwb),
-                {})
+                costmap)
             capture = self.captures[robot]
             capture.add(sample)
             row = sample.as_dict()

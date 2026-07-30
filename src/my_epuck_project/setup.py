@@ -40,6 +40,8 @@ setup(
             'my_epuck_project.cooperative_trial_collector:main',
             'run_cooperative_regression = '
             'my_epuck_project.cooperative_regression:main',
+            'export_cooperative_maps_png = '
+            'my_epuck_project.cooperative_map_png_export:main',
             'controller_pipeline_diagnostics = '
             'my_epuck_project.controller_pipeline_diagnostics:main',
         ],

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import csv
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -810,6 +811,115 @@ def readiness_probe_due(time_mode, ready, now, last_probe, interval=5.0):
             and now - last_probe >= interval)
 
 
+LIVE_PARAMETER_NODES = (
+    'controller_server', 'velocity_smoother',
+    'local_costmap/local_costmap', 'global_costmap/global_costmap',
+    'planner_server',
+)
+LIVE_PARAMETER_FEATURE_VERSION = '2.0.0'
+
+
+def navigation_preflight(workspace):
+    """Verify the installed symlink/build contains current live-snapshot code."""
+    workspace = Path(workspace)
+    code_relative = (
+        'my_epuck_project/navigation_live_parameters.py',
+        'my_epuck_project/navigation_parameter_parity.py',
+        'my_epuck_project/cooperative_regression.py',
+        'my_epuck_project/cooperative_experiment_logger.py',
+        'my_epuck_project/controller_pipeline_diagnostics.py',
+        'my_epuck_project/teammate_scan_filter.py',
+    )
+    source_root = workspace / 'src/my_epuck_project'
+    source_files = [source_root / item for item in code_relative]
+    source_config = [source_root / 'resource/nav2_robot1_shared_map.yaml',
+                     source_root / 'resource/nav2_robot2_shared_map.yaml']
+    build_root = workspace / 'build/my_epuck_project'
+    installed_files = [build_root / item for item in code_relative]
+    installed_config = [
+        workspace / 'install/my_epuck_project/share/my_epuck_project/resource'
+        / path.name for path in source_config]
+
+    def digest(paths):
+        value = hashlib.sha256()
+        for path in paths:
+            try:
+                value.update(path.read_bytes())
+            except OSError:
+                return None
+        return value.hexdigest()
+
+    source_hash = digest(source_files)
+    installed_hash = digest(installed_files)
+    source_config_hash = digest(source_config)
+    installed_config_hash = digest(installed_config)
+    marker = None
+    marker_path = build_root / 'my_epuck_project/navigation_live_parameters.py'
+    if marker_path.exists():
+        text = marker_path.read_text(encoding='utf-8', errors='replace')
+        if "SNAPSHOT_SCHEMA = '2.0.0'" in text:
+            marker = LIVE_PARAMETER_FEATURE_VERSION
+    return {
+        'passed': source_hash == installed_hash
+        and source_config_hash == installed_config_hash
+        and marker == LIVE_PARAMETER_FEATURE_VERSION,
+        'source_hash': source_hash,
+        'installed_hash': installed_hash,
+        'source_config_hash': source_config_hash,
+        'installed_config_hash': installed_config_hash,
+        'installed_module_path': str(marker_path),
+        'installed_feature_version': marker,
+        'expected_feature_version': LIVE_PARAMETER_FEATURE_VERSION,
+    }
+
+
+def capture_live_parameter_snapshots(attempt, environment, allocated_domain):
+    """Capture bounded live Nav2 parameter dumps and normalized parity."""
+    del environment
+    from .navigation_live_parameters import (
+        SNAPSHOT_SCHEMA, collect_snapshots)
+    from .navigation_parameter_parity import live_snapshot_report, _normalize
+
+    root = Path(attempt) / 'observer' / 'live_parameters'
+    root.mkdir(parents=True, exist_ok=True)
+    nodes = [f'/{robot}/{suffix}' for robot in ('robot1', 'robot2')
+             for suffix in LIVE_PARAMETER_NODES]
+    snapshots = collect_snapshots(nodes, allocated_domain)
+    trees = {'robot1': {}, 'robot2': {}}
+    statuses = []
+    for snapshot in snapshots:
+        node = snapshot['node']
+        robot = node.split('/')[1]
+        suffix = node.split('/', 2)[2]
+        name = suffix.replace('/', '__')
+        raw_path = root / f'{robot}__{name}.json'
+        raw_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True),
+                            encoding='utf-8')
+        item = {'robot': robot, 'node': node, 'status': snapshot['status'],
+                'raw_file': raw_path.name,
+                'returncode': 0 if snapshot['status'] == 'OK' else 1,
+                'parsed': snapshot['status'] == 'OK'}
+        if snapshot['status'] == 'OK':
+            trees[robot][suffix] = snapshot['parameters']
+        statuses.append(item)
+    normalized = {robot: _normalize(tree) for robot, tree in trees.items()}
+    (root / 'robot1_normalized.json').write_text(
+        json.dumps(normalized['robot1'], indent=2, sort_keys=True),
+        encoding='utf-8')
+    (root / 'robot2_normalized.json').write_text(
+        json.dumps(normalized['robot2'], indent=2, sort_keys=True),
+        encoding='utf-8')
+    report = live_snapshot_report(trees['robot1'], trees['robot2'], statuses)
+    report.update({'schema_version': SNAPSHOT_SCHEMA,
+                   'feature_version': LIVE_PARAMETER_FEATURE_VERSION,
+                   'nodes': list(LIVE_PARAMETER_NODES),
+                   'snapshots': statuses,
+                   'bounded': True})
+    (root / 'parity_report.json').write_text(
+        json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+    return report
+
+
 def internal_trial(args):
     """Run one launch and collector as children of one isolated supervisor."""
     attempt = Path(args.attempt_dir).resolve()
@@ -870,7 +980,14 @@ def internal_trial(args):
         'startup_timeline': startup_timeline,
     }
     mark_startup_stage('runtime_parameters_generated')
+    preflight = navigation_preflight(args.workspace)
     atomic_json(attempt / 'runner_metadata.json', metadata)
+    metadata['preflight'] = preflight
+    atomic_json(attempt / 'runner_metadata.json', metadata)
+    if not preflight['passed']:
+        print('PREFLIGHT_FAILED ' + json.dumps(preflight, sort_keys=True),
+              flush=True)
+        return 1
     environment = os.environ.copy()
     environment.update({
         'ROS_DOMAIN_ID': str(args.ros_domain_id),
@@ -1052,6 +1169,17 @@ def internal_trial(args):
                             'wall' if args.time_mode == 'wall' else 'sim'),
                         mission_sim_start=mission_sim_start)
                     metadata['startup_timeline'] = startup_timeline
+                    atomic_json(attempt / 'runner_metadata.json', metadata)
+                    try:
+                        live_report = capture_live_parameter_snapshots(
+                            attempt, environment, args.ros_domain_id)
+                    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+                        live_report = {
+                            'schema_version': '1.0.0',
+                            'conclusion': 'LIVE_PARAMETER_SNAPSHOT_FAILED',
+                            'error': str(error),
+                        }
+                    metadata['live_parameter_snapshot'] = live_report
                     atomic_json(attempt / 'runner_metadata.json', metadata)
             if (ready and status.get('settled')
                     and not holding_open):
@@ -1348,6 +1476,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         trial_id=trial_id,
         attempt_id=attempt_id,
         run_id=attempt_id,
+        workspace=getattr(args, 'workspace', '/home/arash/webots_ws'),
         world_profile=getattr(args, 'world_profile', 'small'),
         source_world_path=getattr(args, 'source_world_path', ''),
         ros_domain_id=ros_domain_id,

@@ -48,6 +48,8 @@ setup(
             'my_epuck_project.frontier_proposal_adapter:main',
             'distributed_frontier_assignment = '
             'my_epuck_project.distributed_frontier_assignment:main',
+            'fixed_task_snapshot_source = '
+            'my_epuck_project.fixed_task_snapshot_source:main',
         ],
     },
 )

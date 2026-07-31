@@ -371,7 +371,14 @@ class DistributedFrontierAssignment(Node):
         task = self._round.query_tasks[self._round.query_index]
         if self._synthetic_bids:
             distance = math.dist(self._synthetic_origin, task.approach)
-            samples = (self._synthetic_origin, task.approach)
+            samples = tuple((
+                self._synthetic_origin[0] + step / 6.0 * (
+                    task.approach[0] - self._synthetic_origin[0]
+                ),
+                self._synthetic_origin[1] + step / 6.0 * (
+                    task.approach[1] - self._synthetic_origin[1]
+                ),
+            ) for step in range(7))
             self._append_bid(task, PathEvaluation(
                 True, distance, samples, self.get_clock().now().nanoseconds,
                 0, '', FailureClass.UNKNOWN,
@@ -422,16 +429,24 @@ class DistributedFrontierAssignment(Node):
             bids=self._round.bids,
         )
         self._round.local_batch = batch
+        self._publish_local_bid_batch(log_batch=True)
+
+    def _publish_local_bid_batch(self, log_batch: bool = False) -> None:
+        """Refresh the local bid heartbeat without changing round semantics."""
+        if self._round is None or self._round.local_batch is None:
+            return
+        batch = self._round.local_batch
         message = bid_batch_to_msg(batch, self.get_clock().now().to_msg())
         self._bid_publisher.publish(message)
         self._bid_batches[self._robot_id] = receive(
             batch, batch.validity_s, time.monotonic(),
         )
-        self.get_logger().info(
-            'BID_ARRAY robot=%s round=%s union=%s bids=%d' % (
-                self._robot_id, batch.round_id, batch.union_hash, len(batch.bids),
+        if log_batch:
+            self.get_logger().info(
+                'BID_ARRAY robot=%s round=%s union=%s bids=%d' % (
+                    self._robot_id, batch.round_id, batch.union_hash, len(batch.bids),
+                )
             )
-        )
 
     def _both_bid_batches_valid(self, now: float) -> bool:
         if self._round is None:
@@ -446,7 +461,7 @@ class DistributedFrontierAssignment(Node):
                 return False
         return True
 
-    def _publish_decision(self) -> None:
+    def _publish_decision(self, log_decision: bool = True) -> None:
         if self._round is None or self._round.decision is None:
             return
         local_snapshot = self._round.snapshots[0 if self._robot_id == 'robot1' else 1]
@@ -458,6 +473,8 @@ class DistributedFrontierAssignment(Node):
         )
         self._decision_publisher.publish(message)
         self._round.decision_published = True
+        if not log_decision:
+            return
         score = self._round.decision.score
         self.get_logger().info(
             'PAIR_DECISION robot=%s round=%s union=%s hash=%s r1=%s r2=%s '
@@ -705,6 +722,9 @@ class DistributedFrontierAssignment(Node):
         return str(self._peer_status.value.state)
 
     def _publish_status(self) -> None:
+        self._publish_local_bid_batch()
+        if self._round is not None and self._round.decision is not None:
+            self._publish_decision(log_decision=False)
         message = DistributedExplorationStatus()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = 'shared_map'
@@ -785,7 +805,11 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
+        executor.shutdown()
         executor.remove_node(node)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

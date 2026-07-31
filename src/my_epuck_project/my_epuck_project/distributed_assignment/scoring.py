@@ -1,0 +1,288 @@
+"""Pure exhaustive pair scoring for exactly Robot 1 and Robot 2."""
+
+import hashlib
+import json
+import math
+from dataclasses import dataclass
+from typing import Iterable, Mapping, Optional, Sequence
+
+from .canonical import bounds_iou
+from .models import (
+    AssignmentScore,
+    Bid,
+    BidBatch,
+    CanonicalTask,
+    CanonicalUnion,
+    PairDecision,
+    Point,
+)
+
+
+IDLE_TASK_ID = ''
+
+
+@dataclass(frozen=True)
+class AssignmentWeights:
+    """Explicit normalized pair-utility weights and geometry scales."""
+
+    gain: float = 3.0
+    path: float = 1.0
+    nearby_goal: float = 1.5
+    route_overlap: float = 3.0
+    hard_failure: float = 5.0
+    sensing_overlap: float = 2.0
+    workload_imbalance: float = 0.35
+    visible_gain_scale: float = 5.0
+    path_cost_scale_m: float = 12.0
+    nearby_goal_distance_m: float = 0.60
+    route_corridor_radius_m: float = 0.16
+    sensing_approach_scale_m: float = 1.5
+    minimum_useful_score: float = 1e-6
+
+
+def _bounded(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _hash(payload: object) -> str:
+    data = json.dumps(
+        payload, sort_keys=True, separators=(',', ':'), allow_nan=False,
+    ).encode('utf-8')
+    return hashlib.sha256(data).hexdigest()
+
+
+def bid_fingerprint(batch: BidBatch) -> str:
+    """Fingerprint semantic bid data independent of message arrival order."""
+    payload = []
+    for bid in sorted(batch.bids, key=lambda item: item.canonical_task_id):
+        payload.append({
+            'id': bid.canonical_task_id,
+            'valid': bid.path_valid,
+            'length_mm': round(bid.path_length_m * 1000.0),
+            'travel_milli': round(bid.estimated_travel_cost * 1000.0),
+            'heading_milli': round(bid.heading_cost * 1000.0),
+            'path_cm': [(round(x * 100.0), round(y * 100.0))
+                        for x, y in bid.path],
+        })
+    return _hash({
+        'round': batch.round_id,
+        'union': batch.union_hash,
+        'robot': batch.source_robot_id,
+        'session': batch.source_session_id,
+        'epoch': batch.source_snapshot_epoch,
+        'bids': payload,
+    })
+
+
+def _path_overlap_one_way(
+        first: Sequence[Point], second: Sequence[Point], radius: float) -> float:
+    if not first or not second:
+        return 0.0
+    return sum(
+        any(math.dist(point, other) <= 2.0 * radius for other in second)
+        for point in first
+    ) / len(first)
+
+
+def route_overlap(
+        first: Sequence[Point], second: Sequence[Point], corridor_radius_m: float) -> float:
+    """Return bounded geometric corridor overlap, without traffic timing claims."""
+    if not first or not second:
+        return 0.0
+    return _bounded(0.5 * (
+        _path_overlap_one_way(first, second, corridor_radius_m) +
+        _path_overlap_one_way(second, first, corridor_radius_m)
+    ))
+
+
+def nearby_goal_penalty(
+        first: Point, second: Point, distance_scale_m: float) -> float:
+    """Penalize distinct goals that occupy the same local work region."""
+    if distance_scale_m <= 0.0:
+        return 0.0
+    return _bounded(1.0 - math.dist(first, second) / distance_scale_m)
+
+
+def _visible_cell_overlap(first: Iterable[Point], second: Iterable[Point]) -> Optional[float]:
+    quantum = 0.05
+    first_set = {(round(x / quantum), round(y / quantum)) for x, y in first}
+    second_set = {(round(x / quantum), round(y / quantum)) for x, y in second}
+    if not first_set or not second_set:
+        return None
+    union = first_set | second_set
+    return len(first_set & second_set) / len(union)
+
+
+def sensing_overlap_estimate(
+        first: CanonicalTask, second: CanonicalTask,
+        approach_scale_m: float) -> float:
+    """Use visible cells when present, otherwise a bounded geometry approximation."""
+    cell_overlap = _visible_cell_overlap(first.visible_cells, second.visible_cells)
+    if cell_overlap is not None:
+        return _bounded(cell_overlap)
+    first_bounds = first.visible_bounds or first.bounds
+    second_bounds = second.visible_bounds or second.bounds
+    viewpoint_overlap = _bounded(
+        1.0 - math.dist(first.approach, second.approach) /
+        max(approach_scale_m, 1e-9),
+    )
+    return _bounded(0.65 * bounds_iou(first_bounds, second_bounds) +
+                    0.35 * viewpoint_overlap)
+
+
+def _score_assignment(
+        first_task: Optional[CanonicalTask], second_task: Optional[CanonicalTask],
+        first_bid: Optional[Bid], second_bid: Optional[Bid],
+        hard_failed_tasks: frozenset[str],
+        weights: AssignmentWeights) -> AssignmentScore:
+    tasks = tuple(task for task in (first_task, second_task) if task is not None)
+    bids = tuple(bid for bid in (first_bid, second_bid) if bid is not None)
+    gain = sum(_bounded(task.visible_reveal_gain / weights.visible_gain_scale)
+               for task in tasks)
+    path = sum(_bounded(bid.estimated_travel_cost / weights.path_cost_scale_m)
+               for bid in bids)
+    proximity = overlap = sensing = imbalance = 0.0
+    if first_task is not None and second_task is not None:
+        proximity = nearby_goal_penalty(
+            first_task.approach, second_task.approach,
+            weights.nearby_goal_distance_m,
+        )
+        overlap = route_overlap(
+            first_bid.path, second_bid.path, weights.route_corridor_radius_m,
+        )
+        sensing = sensing_overlap_estimate(
+            first_task, second_task, weights.sensing_approach_scale_m,
+        )
+        imbalance = _bounded(
+            abs(first_bid.path_length_m - second_bid.path_length_m) /
+            weights.path_cost_scale_m,
+        )
+    failures = sum(task.canonical_id in hard_failed_tasks for task in tasks)
+    failure_penalty = _bounded(float(failures))
+    total = (
+        weights.gain * gain - weights.path * path -
+        weights.nearby_goal * proximity -
+        weights.route_overlap * overlap -
+        weights.hard_failure * failure_penalty -
+        weights.sensing_overlap * sensing -
+        weights.workload_imbalance * imbalance
+    )
+    return AssignmentScore(
+        team_visible_gain=gain,
+        combined_path_cost=path,
+        nearby_goal_penalty=proximity,
+        route_overlap_penalty=overlap,
+        hard_failure_penalty=failure_penalty,
+        sensing_overlap_penalty=sensing,
+        workload_imbalance_penalty=imbalance,
+        total=total,
+    )
+
+
+def _bid_map(batch: BidBatch) -> Mapping[str, Bid]:
+    result = {}
+    for bid in batch.bids:
+        if bid.canonical_task_id in result:
+            raise ValueError('duplicate canonical task in bid batch')
+        if not math.isfinite(bid.path_length_m) or bid.path_length_m < 0.0:
+            continue
+        if not math.isfinite(bid.estimated_travel_cost) or bid.estimated_travel_cost < 0.0:
+            continue
+        result[bid.canonical_task_id] = bid
+    return result
+
+
+def choose_pair_assignment(
+        round_id: str, union: CanonicalUnion,
+        robot1_bids: BidBatch, robot2_bids: BidBatch,
+        hard_failed_tasks: frozenset[str] = frozenset(),
+        weights: AssignmentWeights = AssignmentWeights()) -> PairDecision:
+    """Exhaustively evaluate bounded ordered task pairs and idle cases."""
+    for batch, robot_id in ((robot1_bids, 'robot1'), (robot2_bids, 'robot2')):
+        if batch.round_id != round_id or batch.union_hash != union.union_hash:
+            raise ValueError('bid batch does not reference the canonical round')
+        if batch.source_robot_id != robot_id:
+            raise ValueError('unexpected bidder identity')
+    tasks = {task.canonical_id: task for task in union.tasks}
+    first_map, second_map = _bid_map(robot1_bids), _bid_map(robot2_bids)
+    choices1 = [IDLE_TASK_ID] + sorted(
+        task_id for task_id, bid in first_map.items()
+        if task_id in tasks and bid.path_valid
+    )
+    choices2 = [IDLE_TASK_ID] + sorted(
+        task_id for task_id, bid in second_map.items()
+        if task_id in tasks and bid.path_valid
+    )
+    candidates = []
+    for first_id in choices1:
+        for second_id in choices2:
+            if first_id == second_id:
+                continue
+            first_task = tasks.get(first_id)
+            second_task = tasks.get(second_id)
+            first_bid = first_map.get(first_id)
+            second_bid = second_map.get(second_id)
+            score = _score_assignment(
+                first_task, second_task, first_bid, second_bid,
+                hard_failed_tasks, weights,
+            )
+            combined = sum(
+                bid.path_length_m for bid in (first_bid, second_bid)
+                if bid is not None
+            )
+            maximum = max(
+                (bid.path_length_m for bid in (first_bid, second_bid)
+                 if bid is not None), default=0.0,
+            )
+            candidates.append((first_id, second_id, score, combined, maximum))
+    useful = [item for item in candidates
+              if item[2].total >= weights.minimum_useful_score]
+    if useful:
+        selected = min(useful, key=lambda item: (
+            -round(item[2].total, 12),
+            round(item[3], 12),
+            round(item[4], 12),
+            item[0], item[1],
+        ))
+    else:
+        selected = (IDLE_TASK_ID, IDLE_TASK_ID, AssignmentScore(), 0.0, 0.0)
+    first_id, second_id, score, combined, maximum = selected
+    first_fingerprint = bid_fingerprint(robot1_bids)
+    second_fingerprint = bid_fingerprint(robot2_bids)
+    decision_payload = {
+        'round_id': round_id,
+        'union_hash': union.union_hash,
+        'robot1_bid_fingerprint': first_fingerprint,
+        'robot2_bid_fingerprint': second_fingerprint,
+        'robot1_task': first_id,
+        'robot2_task': second_id,
+        'score_millionths': {
+            name: round(getattr(score, name) * 1_000_000)
+            for name in score.__dataclass_fields__
+        },
+    }
+    return PairDecision(
+        round_id=round_id,
+        union_hash=union.union_hash,
+        robot1_task_id=first_id,
+        robot2_task_id=second_id,
+        robot1_bid_fingerprint=first_fingerprint,
+        robot2_bid_fingerprint=second_fingerprint,
+        score=score,
+        decision_hash=_hash(decision_payload),
+        combined_path_length_m=combined,
+        maximum_path_length_m=maximum,
+    )
+
+
+def decisions_match(first: PairDecision, second: PairDecision) -> bool:
+    """Require positive agreement on every decision-binding fingerprint."""
+    return (
+        first.round_id == second.round_id and
+        first.union_hash == second.union_hash and
+        first.robot1_bid_fingerprint == second.robot1_bid_fingerprint and
+        first.robot2_bid_fingerprint == second.robot2_bid_fingerprint and
+        first.robot1_task_id == second.robot1_task_id and
+        first.robot2_task_id == second.robot2_task_id and
+        first.decision_hash == second.decision_hash
+    )

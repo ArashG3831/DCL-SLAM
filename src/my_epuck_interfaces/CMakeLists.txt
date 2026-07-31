@@ -16,6 +16,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ExplorationStatus.msg"
   "msg/ExplorationEvent.msg"
   "msg/PeerMap.msg"
+  "msg/PhysicalTask.msg"
+  "msg/TaskSnapshot.msg"
+  "msg/TaskBid.msg"
+  "msg/TaskBidArray.msg"
+  "msg/PairDecision.msg"
+  "msg/DistributedExplorationStatus.msg"
+  "msg/ExplorationFailure.msg"
+  "msg/DistributedExplorationEvent.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs unique_identifier_msgs
 )
 

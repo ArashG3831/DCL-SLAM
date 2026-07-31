@@ -1,0 +1,9 @@
+std_msgs/Header header
+string source_robot_id
+unique_identifier_msgs/UUID source_session_id
+uint64 source_snapshot_epoch
+uint64 source_map_revision
+string source_map_fingerprint
+builtin_interfaces/Time task_generation_stamp
+builtin_interfaces/Duration validity
+PhysicalTask[] tasks

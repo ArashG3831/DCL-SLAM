@@ -1,0 +1,23 @@
+uint8 WAITING_FOR_INPUTS=0
+uint8 BIDDING=1
+uint8 WAITING_FOR_MATCHING_DECISION=2
+uint8 NAVIGATING=3
+uint8 DEGRADED_SOLO=4
+uint8 COMPLETE=5
+uint8 BLOCKED=6
+
+std_msgs/Header header
+string source_robot_id
+unique_identifier_msgs/UUID source_session_id
+uint8 state
+string round_id
+string union_hash
+string decision_hash
+string active_canonical_task_id
+bool local_nav_goal_active
+bool nav2_healthy
+bool tf_healthy
+bool candidate_source_healthy
+bool peer_communication_healthy
+builtin_interfaces/Duration validity
+string reason

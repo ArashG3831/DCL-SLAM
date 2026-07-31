@@ -21,11 +21,17 @@ from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 from my_epuck_interfaces.msg import (
+    DistributedExplorationEvent,
+    DistributedExplorationStatus,
     ExplorationClaim,
     ExplorationEvent,
+    ExplorationFailure,
     ExplorationStatus,
     FrontierCandidateArray,
+    PairDecision,
     PeerMap,
+    TaskBidArray,
+    TaskSnapshot,
 )
 from .experiment_metrics import CoverageAttribution, Grid, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
 
@@ -79,7 +85,7 @@ class CooperativeExperimentLogger(Node):
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.statuses={}
-        self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}
+        self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
         self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.files=[]; self.writers={}
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}
@@ -114,6 +120,12 @@ class CooperativeExperimentLogger(Node):
             self.observe(ExplorationClaim,f'/cslam/{r}/exploration_claim',lambda m,x=r:self.claim(x,m),self.qos(True,False,10),f'{r}.claim')
             self.observe(ExplorationStatus,f'/cslam/{r}/exploration_status',lambda m,x=r:self.status(x,m),self.qos(True,False,10),f'{r}.status')
             self.observe(ExplorationEvent,f'/cslam/{r}/exploration_event',lambda m,x=r:self.coordinator_event(x,m),self.qos(True,False,50),f'{r}.event')
+            self.observe(TaskSnapshot,f'/{r}/task_snapshot',lambda m,x=r:self.distributed_snapshot(x,m),self.qos(True,True,1),f'{r}.task_snapshot')
+            self.observe(TaskBidArray,f'/{r}/task_bids',lambda m,x=r:self.distributed_bids(x,m),self.qos(True,True,1),f'{r}.task_bids')
+            self.observe(PairDecision,f'/{r}/pair_decision',lambda m,x=r:self.distributed_decision(x,m),self.qos(True,True,1),f'{r}.pair_decision')
+            self.observe(DistributedExplorationStatus,f'/{r}/distributed_status',lambda m,x=r:self.distributed_status(x,m),self.qos(True,True,1),f'{r}.distributed_status')
+            self.observe(DistributedExplorationEvent,f'/{r}/distributed_event',lambda m,x=r:self.distributed_event(x,m),self.qos(True,False,50),f'{r}.distributed_event')
+            self.observe(ExplorationFailure,f'/{r}/exploration_failure',lambda m,x=r:self.distributed_failure(x,m),self.qos(True,True,10),f'{r}.exploration_failure')
             self.observe(NavigateToPose_FeedbackMessage,f'/{r}/navigate_to_pose/_action/feedback',lambda m,x=r:self.feedback(x,m),self.qos(),f'{r}.feedback')
             self.observe(GoalStatusArray,f'/{r}/navigate_to_pose/_action/status',lambda m,x=r:self.mark(x,'navigate_status',m),self.qos(True,True,1),f'{r}.navigate_status')
             self.observe(NavPath,f'/{r}/plan',lambda m,x=r:self.plan(x,m),self.qos(),f'{r}.plan')
@@ -196,6 +208,37 @@ class CooperativeExperimentLogger(Node):
         self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count)
         if old is not None and old!=count:self.event('CANDIDATE_COUNT_CHANGED',f'{old} -> {count}',r)
         if not count:self.event('NO_REACHABLE_CANDIDATES','candidate batch empty',r)
+    @staticmethod
+    def uuid_text(value): return bytes(value.uuid).hex()
+    def distributed_changed(self,key,value):
+        previous=self.distributed_last.get(key); self.distributed_last[key]=value; return previous!=value
+    def distributed_snapshot(self,r,msg):
+        self.mark(r,'task_snapshot',msg)
+        if not self.distributed_changed((r,'snapshot'),(self.uuid_text(msg.source_session_id),msg.source_snapshot_epoch,msg.source_map_revision,msg.source_map_fingerprint)):return
+        tasks=[{'physical_signature':task.physical_signature,'local_frontier_id':task.local_frontier_id,'centroid':[task.centroid.x,task.centroid.y],'bounds':[task.bounding_box_min.x,task.bounding_box_min.y,task.bounding_box_max.x,task.bounding_box_max.y],'approach':[task.approach_pose.pose.position.x,task.approach_pose.pose.position.y],'visible_reveal_gain':task.visible_reveal_gain,'local_ordering_score':task.local_ordering_score,'local_path_valid':task.local_path_valid,'frontier_geometry_samples':len(task.frontier_geometry),'visible_cell_samples':len(task.visible_cells)} for task in msg.tasks]
+        self.event('DISTRIBUTED_TASK_SNAPSHOT',f'{len(tasks)} bounded physical tasks',r,f'/{r}/task_snapshot',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),snapshot_epoch=msg.source_snapshot_epoch,source_map_revision=msg.source_map_revision,source_map_fingerprint=msg.source_map_fingerprint,tasks=tasks)
+    def distributed_bids(self,r,msg):
+        self.mark(r,'task_bids',msg)
+        fingerprint=(msg.round_id,msg.union_hash,msg.source_snapshot_epoch,tuple((bid.canonical_task_id,bid.path_valid,round(bid.path_length_m,4)) for bid in msg.bids))
+        if not self.distributed_changed((r,'bids'),fingerprint):return
+        bids=[{'canonical_task_id':bid.canonical_task_id,'path_valid':bid.path_valid,'path_length_m':bid.path_length_m,'estimated_travel_cost':bid.estimated_travel_cost,'heading_cost':bid.heading_cost,'own_utility_contribution':bid.own_utility_contribution,'path_samples':[[point.x,point.y] for point in bid.path_samples]} for bid in msg.bids]
+        self.event('DISTRIBUTED_BID_ARRAY',f'{len(bids)} bounded local bids',r,f'/{r}/task_bids',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,source_snapshot_epoch=msg.source_snapshot_epoch,bids=bids)
+    def distributed_decision(self,r,msg):
+        self.mark(r,'pair_decision',msg)
+        if not self.distributed_changed((r,'decision'),(msg.round_id,msg.union_hash,msg.decision_hash)):return
+        self.event('DISTRIBUTED_PAIR_DECISION','replicated complete pair decision',r,f'/{r}/pair_decision',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,robot1_snapshot_epoch=msg.robot1_snapshot_epoch,robot2_snapshot_epoch=msg.robot2_snapshot_epoch,robot1_bid_fingerprint=msg.robot1_bid_fingerprint,robot2_bid_fingerprint=msg.robot2_bid_fingerprint,robot1_task=msg.robot1_canonical_task_id or 'IDLE',robot2_task=msg.robot2_canonical_task_id or 'IDLE',decision_hash=msg.decision_hash,total_team_score=msg.total_team_score,team_visible_gain=msg.team_visible_gain,combined_path_cost=msg.combined_path_cost,nearby_goal_penalty=msg.nearby_goal_penalty,route_overlap_penalty=msg.route_overlap_penalty,hard_failure_penalty=msg.hard_failure_penalty,sensing_overlap_penalty=msg.sensing_overlap_penalty,workload_imbalance_penalty=msg.workload_imbalance_penalty,coordinator_state=msg.coordinator_state)
+    def distributed_status(self,r,msg):
+        self.mark(r,'distributed_status',msg)
+        self.latest[r]['distributed_state']=msg.state
+        health=(msg.nav2_healthy,msg.tf_healthy,msg.candidate_source_healthy,msg.peer_communication_healthy)
+        if not self.distributed_changed((r,'status'),(msg.state,msg.round_id,msg.decision_hash,msg.active_canonical_task_id,health,msg.reason)):return
+        self.event('DISTRIBUTED_STATUS',msg.reason,r,f'/{r}/distributed_status',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),state=msg.state,round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,active_canonical_task_id=msg.active_canonical_task_id,local_nav_goal_active=msg.local_nav_goal_active,nav2_healthy=msg.nav2_healthy,tf_healthy=msg.tf_healthy,candidate_source_healthy=msg.candidate_source_healthy,peer_communication_healthy=msg.peer_communication_healthy)
+    def distributed_event(self,r,msg):
+        self.mark(r,'distributed_event',msg)
+        self.event(msg.event_type,msg.reason,r,f'/{r}/distributed_event',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,canonical_task_id=msg.canonical_task_id,physical_task_signature=msg.physical_task_signature,previous_state=msg.previous_state,next_state=msg.next_state,path_length_m=msg.path_length_m,travelled_distance_m=msg.travelled_distance_m,navigation_duration_s=msg.navigation_duration_s,newly_discovered_cells=msg.newly_discovered_cells,peer_first_discovered_cells=msg.peer_first_discovered_cells,duplicated_cells=msg.duplicated_cells,route_overlap_score=msg.route_overlap_score,sensing_overlap_estimate=msg.sensing_overlap_estimate,result=msg.result,failure_class=msg.failure_class,recoveries=msg.recoveries)
+    def distributed_failure(self,r,msg):
+        self.mark(r,'exploration_failure',msg)
+        self.event('DISTRIBUTED_TASK_FAILURE',msg.evidence,r,f'/{r}/exploration_failure',source_stamp=stamp(msg),severity='WARN',source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,canonical_task_id=msg.canonical_task_id,physical_task_signature=msg.physical_task_signature,approach=[msg.approach_pose.pose.position.x,msg.approach_pose.pose.position.y],failure_class=msg.failure_class,path_length_m=msg.path_length_m,path_samples=[[point.x,point.y] for point in msg.path_samples],retry_count=msg.retry_count)
     def claim_fields(self,msg):
         return {'source_session_id':bytes(msg.source_session_id.uuid).hex(),'message_revision':msg.message_revision,'claim_id':msg.claim_id,'frontier_id':msg.frontier_id,'map_revision':msg.map_revision,'claim_state':STATES.get(msg.state,str(msg.state)),'frontier_centroid_x':msg.frontier_centroid.x,'frontier_centroid_y':msg.frontier_centroid.y,'approach_x':msg.approach_pose.pose.position.x,'approach_y':msg.approach_pose.pose.position.y,'approach_yaw':yaw(msg.approach_pose.pose.orientation),'path_length_m':msg.path_length_m,'information_gain':msg.information_gain,'utility_score':msg.utility_score,'release_reason':msg.state_reason}
     def claim(self,r,msg):

@@ -40,7 +40,9 @@ PROFILE_SETTINGS = {
             'focal_y': 0,
             'focal_z': 0,
         },
-        'startup_timeout': 180.0,
+        # Windows Webots over WSL can take about three minutes to publish
+        # the first stable clock and finish both controller spawners.
+        'startup_timeout': 300.0,
         'mission_timeout': 1800.0,
     },
 }

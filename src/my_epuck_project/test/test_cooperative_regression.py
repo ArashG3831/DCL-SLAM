@@ -232,7 +232,7 @@ def test_runner_profile_defaults_and_rviz_selection():
     """New runs default large while explicit small retains proven timeouts."""
     large = apply_profile_defaults(parser().parse_args([]))
     assert large.world_profile == 'large'
-    assert large.startup_timeout == 180.0
+    assert large.startup_timeout == 300.0
     assert large.mission_timeout == 1800.0
     assert large.shift_window == 1
     small = apply_profile_defaults(

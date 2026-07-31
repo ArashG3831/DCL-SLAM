@@ -1041,6 +1041,17 @@ def internal_trial(args):
     (attempt / 'tmp').mkdir()
     shutdown_events = attempt / 'shutdown_events.jsonl'
     start = time.monotonic()
+    requested_rmw = os.environ.get('RMW_IMPLEMENTATION', '').strip()
+    # Jazzy installations used by this workspace provide Fast DDS but may
+    # not ship librmw_cyclonedds_cpp.so. Keep Fast DDS and disable its shared
+    # memory transport, whose lock-file collision was observed in the failed
+    # Robot 2 spawner.
+    rmw_implementation = (
+        requested_rmw if requested_rmw and requested_rmw != 'default'
+        else 'rmw_fastrtps_cpp')
+    fastdds_use_shm = os.environ.get('RMW_FASTRTPS_USE_SHM', '0')
+    os.environ['RMW_IMPLEMENTATION'] = rmw_implementation
+    os.environ['RMW_FASTRTPS_USE_SHM'] = fastdds_use_shm
     startup_timeline = {
         'runner_process_start': {'wall_elapsed_s': 0.0},
     }
@@ -1086,6 +1097,8 @@ def internal_trial(args):
             'enable_mission_timeout': False,
             'use_sim_time': args.time_mode == 'sim',
             'logger_console_status': False,
+            'rmw_implementation': rmw_implementation,
+            'rmw_fastdds_use_shm': fastdds_use_shm,
         },
         'rviz_requested': args.launch_rviz,
         'infrastructure_ready': False,
@@ -1103,8 +1116,13 @@ def internal_trial(args):
               flush=True)
         return 1
     environment = os.environ.copy()
+    # Fast DDS shared-memory port locks can collide between the many ROS 2
+    # controller/spawner processes in an isolated WSL trial. Disable that
+    # transport by default; an explicit user setting is preserved.
     environment.update({
         'ROS_DOMAIN_ID': str(args.ros_domain_id),
+        'RMW_IMPLEMENTATION': rmw_implementation,
+        'RMW_FASTRTPS_USE_SHM': fastdds_use_shm,
         'ROS_LOG_DIR': str(attempt / 'ros_logs'),
         'TMPDIR': str(attempt / 'tmp'),
         'TEMP': str(attempt / 'tmp'),
@@ -1164,11 +1182,13 @@ def internal_trial(args):
     })
     rviz = None
     rviz_log = None
+    rviz_attempted = False
 
     def start_rviz():
-        nonlocal rviz, rviz_log
-        if not args.launch_rviz or rviz is not None:
+        nonlocal rviz, rviz_log, rviz_attempted
+        if not args.launch_rviz or rviz is not None or rviz_attempted:
             return
+        rviz_attempted = True
         rviz_command = manual_rviz_command(
             args.world_profile, use_sim_time=args.time_mode == 'sim')
         rviz_environment = environment.copy()
@@ -1277,6 +1297,11 @@ def internal_trial(args):
                 # deadlines must use the actual observation time.
                 now = time.monotonic()
                 last_clock_probe = now
+            # RViz is passive visualization. Start it as soon as the
+            # simulation clock is alive, even if controller/spawner readiness
+            # is still being diagnosed.
+            if clock_ok and rviz is None:
+                start_rviz()
             if status.get('ready') and not metadata['mission_inputs_ready']:
                 metadata['mission_inputs_ready'] = True
                 atomic_json(attempt / 'runner_metadata.json', metadata)
@@ -1683,12 +1708,28 @@ def wait_for_attempt_supervisor(process, namespace, attempt):
                     )
                     hold_announced = True
         except KeyboardInterrupt:
-            os.killpg(process.pid, signal.SIGINT)
-            process.wait(timeout=30)
-            if getattr(
-                    namespace, 'hold_open_after_completion', False):
-                return process.returncode
-            raise
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # Do not mask the user's Ctrl+C with a second traceback when
+                # a Webots/ROS child takes longer than the graceful window.
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=5)
+            return process.returncode
 
 
 def execute_attempt(namespace):

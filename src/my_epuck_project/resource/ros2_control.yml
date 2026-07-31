@@ -17,5 +17,15 @@ diffdrive_controller:
     use_stamped_vel: true
     base_frame_id: base_link
     enable_odom_tf: false
+    linear:
+      x:
+        has_velocity_limits: true
+        max_velocity: 0.13
+        min_velocity: -0.13
+    angular:
+      z:
+        has_velocity_limits: true
+        max_velocity: 0.35
+        min_velocity: -0.35
 joint_state_broadcaster:
   ros__parameters: {}

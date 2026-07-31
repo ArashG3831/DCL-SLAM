@@ -60,15 +60,22 @@ def test_changed_robot2_smoother_and_goal_checker_fail_parity(tmp_path):
 
 
 def test_fixed_lattice_has_stop_rotation_and_executable_forward_samples():
-    """The fixed lattice reaches 0.15 m/s while retaining stop/rotation samples."""
+    """The fixed lattice stays within the Webots wheel-speed envelope."""
     dwb = _dwb(ROBOT1)
-    assert dwb["max_vel_x"] == 0.15
-    assert dwb["max_speed_xy"] == 0.15
+    assert dwb["max_vel_x"] == 0.13
+    assert dwb["max_speed_xy"] == 0.13
     linear = _samples(0.0, dwb["max_vel_x"], dwb["vx_samples"])
     angular = _samples(-dwb["max_vel_theta"], dwb["max_vel_theta"], dwb["vtheta_samples"])
     assert 0.0 in linear
     assert 0.0 in angular
-    assert min(value for value in linear if value > 0.0) == 0.03
+    assert math.isclose(
+        min(value for value in linear if value > 0.0), 0.026,
+        abs_tol=1e-12)
+    effective_separation = 0.052 * 1.095
+    worst_case_wheel_speed = (
+        dwb["max_vel_x"] + dwb["max_vel_theta"] * effective_separation / 2.0
+    ) / 0.02
+    assert worst_case_wheel_speed <= 7.0
     assert math.isclose(
         min(abs(value) for value in angular if value != 0.0), 0.035,
         abs_tol=1e-12)

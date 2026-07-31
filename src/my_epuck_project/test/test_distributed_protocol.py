@@ -51,6 +51,14 @@ def test_source_session_restart_resets_revision_interpretation():
     assert ledger.accept(snapshot(session='new', epoch=1, revision=1))
 
 
+def test_delayed_snapshot_from_retired_session_is_rejected():
+    """A delayed old session cannot masquerade as a second source restart."""
+    ledger = SnapshotLedger()
+    assert ledger.accept(snapshot(session='old', epoch=8, revision=30))
+    assert ledger.accept(snapshot(session='new', epoch=1, revision=1))
+    assert not ledger.accept(snapshot(session='old', epoch=9, revision=31))
+
+
 def test_same_source_revision_regression_rejected():
     """Reject a lower map revision within one source session."""
     ledger = SnapshotLedger()

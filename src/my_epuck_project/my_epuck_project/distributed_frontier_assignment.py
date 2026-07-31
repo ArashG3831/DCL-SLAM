@@ -142,6 +142,12 @@ class DistributedFrontierAssignment(Node):
         self._post_goal_settle_s = float(
             self.declare_parameter('post_goal_settle_s', 1.0).value,
         )
+        self._map_stability_grace_s = float(
+            self.declare_parameter('map_stability_grace_s', 5.0).value,
+        )
+        self._completion_confirmation_s = float(
+            self.declare_parameter('completion_confirmation_s', 4.0).value,
+        )
         self._weights = AssignmentWeights(
             gain=float(self.declare_parameter('weight_gain', 3.0).value),
             path=float(self.declare_parameter('weight_path', 1.0).value),
@@ -183,6 +189,10 @@ class DistributedFrontierAssignment(Node):
         self._active_task: Optional[CanonicalTask] = None
         self._active_round_id = ''
         self._active_decision_hash = ''
+        self._last_solo_snapshot_key: Optional[tuple[str, int]] = None
+        self._map_versions: dict[str, tuple[str, int, str]] = {}
+        self._maps_stable_since_steady_s = time.monotonic()
+        self._completion_candidate_since_steady_s: Optional[float] = None
         self._nav2 = LocalNav2(self)
         qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -240,13 +250,44 @@ class DistributedFrontierAssignment(Node):
         except (ValueError, TypeError) as error:
             self.get_logger().error('TASK_SNAPSHOT_REJECTED decode=%s' % error)
             return
-        if not self._ledger.accept(snapshot):
-            return
         now = time.monotonic()
+        previous = self._snapshots.get(snapshot.source_robot_id)
+        if not self._ledger.accept(snapshot):
+            # An exact immutable retransmission is a heartbeat, not a new epoch.
+            if previous is not None and previous.value == snapshot:
+                self._snapshots[snapshot.source_robot_id] = receive(
+                    snapshot, snapshot.validity_s, now,
+                )
+                if snapshot.source_robot_id == self._peer_id:
+                    self._peer_liveness.observe(snapshot.source_session_id, now)
+            return
+        map_version = (
+            snapshot.source_session_id, snapshot.map_revision,
+            snapshot.map_fingerprint,
+        )
+        if self._map_versions.get(snapshot.source_robot_id) != map_version:
+            self._map_versions[snapshot.source_robot_id] = map_version
+            self._maps_stable_since_steady_s = now
+            self._completion_candidate_since_steady_s = None
         self._snapshots[snapshot.source_robot_id] = receive(
             snapshot, snapshot.validity_s, now,
         )
         if snapshot.source_robot_id == self._peer_id:
+            previous_session = (
+                '' if previous is None else previous.value.source_session_id
+            )
+            if previous_session and previous_session != snapshot.source_session_id:
+                self._emit_event(
+                    'PEER_SESSION_RESTART',
+                    'fresh peer session superseded prior session',
+                )
+                if self._nav2.local_goal_active:
+                    self._nav2.cancel_navigation()
+                elif self._dispatch_in_progress:
+                    self._invalidate_round(
+                        FailureClass.EXPLICIT_CANCELLATION,
+                        'peer session restarted before local dispatch',
+                    )
             previous_state = self._peer_liveness.state
             self._peer_liveness.observe(snapshot.source_session_id, now)
             if (previous_state == CoordinatorState.DEGRADED_SOLO and
@@ -296,6 +337,8 @@ class DistributedFrontierAssignment(Node):
     def _tick(self) -> None:
         now = time.monotonic()
         self._expire_failures(now)
+        if self._state == CoordinatorState.COMPLETE:
+            return
         if self._nav2.local_goal_active or self._dispatch_in_progress:
             return
         if now < self._settle_until_steady_s:
@@ -305,6 +348,9 @@ class DistributedFrontierAssignment(Node):
         if first is None or second is None:
             if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
                 self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
+                local = first if self._robot_id == 'robot1' else second
+                if local is not None:
+                    self._continue_degraded_solo(local)
             else:
                 self._transition(
                     CoordinatorState.WAITING_FOR_INPUTS,
@@ -330,6 +376,8 @@ class DistributedFrontierAssignment(Node):
             self._committed = CommittedRound()
             self._transition(CoordinatorState.BIDDING, 'new canonical round')
             self._log_union(self._round)
+        if self._round.union.tasks:
+            self._completion_candidate_since_steady_s = None
         if self._round.local_batch is None:
             self._continue_bidding()
             return
@@ -354,6 +402,10 @@ class DistributedFrontierAssignment(Node):
         if self._committed.decision is None:
             self._committed.commit(self._round.decision)
             self._emit_event('DECISION_AGREED', 'positive replicated decision match')
+        if (self._round.decision.robot1_task_id is None and
+                self._round.decision.robot2_task_id is None and
+                self._consider_completion(now)):
+            return
         if not self._dispatch_enabled:
             self._transition(
                 CoordinatorState.WAITING_FOR_MATCHING_DECISION,
@@ -361,6 +413,100 @@ class DistributedFrontierAssignment(Node):
             )
             return
         self._start_local_dispatch()
+
+    def _consider_completion(self, now: float) -> bool:
+        """Require matching healthy empty-round persistence before COMPLETE."""
+        nav2_healthy, tf_healthy = self._nav2.health_flags()
+        peer = self._peer_status
+        peer_fresh = peer is not None and peer.fresh(now)
+        peer_healthy = bool(
+            peer_fresh and peer.value.nav2_healthy and peer.value.tf_healthy and
+            peer.value.candidate_source_healthy and
+            peer.value.peer_communication_healthy and
+            not peer.value.local_nav_goal_active
+        )
+        local_snapshot_fresh = self._fresh_snapshot(self._robot_id, now) is not None
+        peer_candidate = bool(
+            peer_fresh and (
+                peer.value.state == DistributedExplorationStatus.COMPLETE or
+                peer.value.reason == 'operational completion candidate'
+            )
+        )
+        healthy = (
+            nav2_healthy and tf_healthy and peer_healthy and local_snapshot_fresh and
+            not self._nav2.local_goal_active and not self._dispatch_in_progress
+        )
+        if not healthy:
+            self._completion_candidate_since_steady_s = None
+            self._transition(
+                CoordinatorState.BLOCKED,
+                'empty task union but completion health evidence is incomplete',
+            )
+            return False
+        if self._completion_candidate_since_steady_s is None:
+            self._completion_candidate_since_steady_s = now
+        stable_duration = now - self._maps_stable_since_steady_s
+        candidate_duration = now - self._completion_candidate_since_steady_s
+        if (stable_duration >= self._map_stability_grace_s and peer_candidate and
+                candidate_duration >= self._completion_confirmation_s):
+            self._transition(
+                CoordinatorState.COMPLETE,
+                'matching stable operational exhaustion',
+            )
+            self._emit_event('EXPLORATION_COMPLETE', self._state_reason)
+            return True
+        self._transition(
+            CoordinatorState.WAITING_FOR_INPUTS,
+            'operational completion candidate',
+        )
+        return False
+
+    def _continue_degraded_solo(self, snapshot: TaskSnapshot) -> None:
+        """Dispatch at most one locally proposed task per epoch without team claims."""
+        if not self._dispatch_enabled or self._dispatch_in_progress:
+            return
+        key = (snapshot.source_session_id, snapshot.epoch)
+        if self._last_solo_snapshot_key == key:
+            return
+        candidates = tuple(
+            task for task in snapshot.tasks
+            if task.physical_signature not in self._hard_failure_signatures
+        )
+        self._last_solo_snapshot_key = key
+        if not candidates:
+            return
+        union = build_canonical_union(
+            candidates, (), min(self._maximum_union_tasks, len(candidates)),
+        )
+        task = union.tasks[0]
+        self._dispatch_in_progress = True
+        self._active_task = task
+        self._active_round_id = 'degraded:%s:%s:%d' % (
+            self._robot_id, snapshot.source_session_id, snapshot.epoch,
+        )
+        self._active_decision_hash = 'DEGRADED_SOLO'
+        round_id = self._active_round_id
+
+        def final_path(result: PathEvaluation):
+            if self._active_round_id != round_id:
+                return
+            if not result.valid:
+                self._invalidate_round(
+                    result.failure_class,
+                    'degraded solo ComputePathToPose failed: %s' % result.error_message,
+                    result,
+                )
+                return
+            self._nav2.check_dispatch_preconditions(
+                task.members[0], True,
+                lambda checks: self._dispatch_after_checks(task, result, checks),
+            )
+
+        if not self._nav2.evaluate_path(task.members[0], final_path):
+            self._invalidate_round(
+                FailureClass.TF_OR_LIFECYCLE,
+                'degraded solo local path action unavailable',
+            )
 
     def _continue_bidding(self) -> None:
         if self._round is None:
@@ -722,6 +868,7 @@ class DistributedFrontierAssignment(Node):
         return str(self._peer_status.value.state)
 
     def _publish_status(self) -> None:
+        self._nav2.refresh_health()
         self._publish_local_bid_batch()
         if self._round is not None and self._round.decision is not None:
             self._publish_decision(log_decision=False)
@@ -741,8 +888,7 @@ class DistributedFrontierAssignment(Node):
             '' if self._active_task is None else self._active_task.canonical_id
         )
         message.local_nav_goal_active = self._nav2.local_goal_active
-        message.nav2_healthy = self._state != CoordinatorState.BLOCKED
-        message.tf_healthy = self._state != CoordinatorState.BLOCKED
+        message.nav2_healthy, message.tf_healthy = self._nav2.health_flags()
         message.candidate_source_healthy = self._fresh_snapshot(
             self._robot_id, time.monotonic(),
         ) is not None

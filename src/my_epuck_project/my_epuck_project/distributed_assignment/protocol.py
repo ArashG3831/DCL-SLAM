@@ -57,6 +57,7 @@ class SnapshotLedger:
         """Configure the per-source snapshot task bound."""
         self._maximum_tasks_per_source = maximum_tasks_per_source
         self._versions: dict[str, SourceVersion] = {}
+        self._retired_sessions: dict[str, set[str]] = {}
 
     def accept(self, snapshot: TaskSnapshot) -> bool:
         """Validate identity, bounds, session, epoch, and source-local revision."""
@@ -75,11 +76,19 @@ class SnapshotLedger:
         ):
             return False
         previous = self._versions.get(snapshot.source_robot_id)
-        if previous is not None and previous.session_id == snapshot.source_session_id:
-            if snapshot.epoch <= previous.snapshot_epoch:
+        if previous is not None:
+            if snapshot.source_session_id in self._retired_sessions.get(
+                    snapshot.source_robot_id, set()):
                 return False
-            if snapshot.map_revision < previous.map_revision:
-                return False
+            if previous.session_id == snapshot.source_session_id:
+                if snapshot.epoch <= previous.snapshot_epoch:
+                    return False
+                if snapshot.map_revision < previous.map_revision:
+                    return False
+            else:
+                self._retired_sessions.setdefault(snapshot.source_robot_id, set()).add(
+                    previous.session_id,
+                )
         self._versions[snapshot.source_robot_id] = SourceVersion(
             snapshot.source_session_id, snapshot.epoch, snapshot.map_revision,
         )

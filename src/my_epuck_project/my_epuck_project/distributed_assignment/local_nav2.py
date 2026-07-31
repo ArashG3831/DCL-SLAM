@@ -180,6 +180,9 @@ class LocalNav2:
         self._navigation_start_distance_m = 0.0
         self._navigation_recoveries = 0
         self._navigation_timeout_requested = False
+        self._navigation_cancel_requested = False
+        self._last_lifecycle_active: Optional[bool] = None
+        self._lifecycle_health_pending = False
         self._timer = node.create_timer(0.1, self._check_timeouts)
 
     @property
@@ -200,6 +203,55 @@ class LocalNav2:
             'navigate': f'{namespace}/navigate_to_pose',
             'odom': f'{namespace}/odom',
         }
+
+    def refresh_health(self) -> None:
+        """Refresh managed-node state without blocking the coordinator timer."""
+        if self._lifecycle_health_pending:
+            return
+        if any(not client.service_is_ready() for client in self._lifecycle_clients.values()):
+            self._last_lifecycle_active = False
+            return
+        self._lifecycle_health_pending = True
+        states = {}
+
+        def completed(name, future):
+            try:
+                states[name] = future.result().current_state.label
+            except Exception:  # noqa: B902
+                states[name] = 'error'
+            if len(states) == len(self._lifecycle_clients):
+                self._last_lifecycle_active = all(
+                    value == 'active' for value in states.values()
+                )
+                self._lifecycle_health_pending = False
+
+        for name, client in self._lifecycle_clients.items():
+            future = client.call_async(GetState.Request())
+            future.add_done_callback(lambda result, key=name: completed(key, result))
+
+    def health_flags(self) -> tuple[bool, bool]:
+        """Return conservative current Nav2 and required-transform health flags."""
+        nav2_healthy = (
+            self._compute_client.server_is_ready() and
+            self._navigate_client.server_is_ready() and
+            self._last_lifecycle_active is True and
+            self._map is not None and self._costmap is not None
+        )
+        tf_healthy = False
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._global_frame, self._base_frame, Time(),
+                timeout=Duration(seconds=0.0),
+            )
+            stamp = transform.header.stamp
+            stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+            age_s = 0.0 if stamp_ns == 0 else max(
+                0.0, (self._node.get_clock().now().nanoseconds - stamp_ns) / 1e9,
+            )
+            tf_healthy = age_s <= self._maximum_tf_age_s
+        except TransformException:
+            pass
+        return nav2_healthy, tf_healthy
 
     def _on_map(self, message: OccupancyGrid) -> None:
         self._map = message
@@ -327,6 +379,7 @@ class LocalNav2:
             if len(states) != len(self._lifecycle_clients):
                 return
             active = all(value == 'active' for value in states.values())
+            self._last_lifecycle_active = active
             callback(DispatchPreconditions(
                 **{**base.__dict__, 'lifecycle_active': active,
                    'reason': '' if active else 'inactive lifecycle nodes: ' + str(states)},
@@ -404,6 +457,7 @@ class LocalNav2:
         self._navigation_start_distance_m = self.travelled_distance_m
         self._navigation_recoveries = 0
         self._navigation_timeout_requested = False
+        self._navigation_cancel_requested = False
         future = self._navigate_client.send_goal_async(
             goal, feedback_callback=self._navigation_feedback,
         )
@@ -431,6 +485,14 @@ class LocalNav2:
             int(feedback.feedback.number_of_recoveries),
         )
 
+    def cancel_navigation(self) -> bool:
+        """Request explicit cancellation of this namespace's active goal."""
+        if not self.local_goal_active:
+            return False
+        self._navigation_cancel_requested = True
+        self._navigation_goal_handle.cancel_goal_async()
+        return True
+
     def _navigation_result(self, future) -> None:
         wrapped = future.result()
         result = wrapped.result
@@ -443,7 +505,7 @@ class LocalNav2:
         evidence = FailureEvidence()
         if self._navigation_timeout_requested:
             evidence = FailureEvidence(timed_out=True)
-        elif wrapped.status == GoalStatus.STATUS_CANCELED:
+        elif self._navigation_cancel_requested or wrapped.status == GoalStatus.STATUS_CANCELED:
             evidence = FailureEvidence(explicitly_cancelled=True)
         self._finish_navigation(NavigationOutcome(
             True, wrapped.status, error_code, error_message,

@@ -46,6 +46,8 @@ setup(
             'my_epuck_project.controller_pipeline_diagnostics:main',
             'frontier_proposal_adapter = '
             'my_epuck_project.frontier_proposal_adapter:main',
+            'distributed_frontier_assignment = '
+            'my_epuck_project.distributed_frontier_assignment:main',
         ],
     },
 )

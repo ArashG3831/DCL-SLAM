@@ -44,6 +44,8 @@ setup(
             'my_epuck_project.cooperative_map_png_export:main',
             'controller_pipeline_diagnostics = '
             'my_epuck_project.controller_pipeline_diagnostics:main',
+            'frontier_proposal_adapter = '
+            'my_epuck_project.frontier_proposal_adapter:main',
         ],
     },
 )

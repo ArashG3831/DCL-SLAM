@@ -10,9 +10,12 @@ from my_epuck_project.distributed_assignment.scoring import (
     decisions_match,
 )
 from my_epuck_project.fixed_task_snapshot_source import (
+    FixedTaskSnapshotSource,
     SESSIONS,
     alternate_hallway_tasks,
 )
+
+import rclpy
 
 
 def synthetic_bid(task, origin):
@@ -51,3 +54,29 @@ def test_both_peers_choose_matching_alternate_hallway_decision():
     assert decisions_match(robot1_decision, robot2_decision)
     assert robot1_decision.robot1_task_id == signatures['north-near']
     assert robot1_decision.robot2_task_id == signatures['east-branch']
+
+
+def test_fixed_source_republishes_exact_immutable_snapshot():
+    """Heartbeat retransmission must not mutate one epoch's provenance fields."""
+    rclpy.init(args=[
+        '--ros-args', '-r', '__ns:=/robot1', '-p', 'robot_id:=robot1',
+    ])
+    node = FixedTaskSnapshotSource()
+
+    class Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    recorder = Recorder()
+    node._publisher = recorder
+    try:
+        node._publish_snapshot()
+        node._publish_snapshot()
+        assert len(recorder.messages) == 2
+        assert recorder.messages[0] is recorder.messages[1]
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

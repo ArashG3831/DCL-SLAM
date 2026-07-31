@@ -104,12 +104,16 @@ class FixedTaskSnapshotSource(Node):
         )
         self._publisher = self.create_publisher(TaskSnapshot, 'task_snapshot', qos)
         self._published = False
+        self._message = None
         self._timer = self.create_timer(1.0, self._publish_snapshot)
 
     def _publish_snapshot(self) -> None:
         """Republish the same immutable epoch until every late peer discovers it."""
         if self._scenario != 'alternate_hallway':
             raise ValueError('only the bounded alternate_hallway scenario is supported')
+        if self._message is not None:
+            self._publisher.publish(self._message)
+            return
         session_id = SESSIONS[self._robot_id]
         message = TaskSnapshot()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -127,6 +131,7 @@ class FixedTaskSnapshotSource(Node):
         for task in message.tasks:
             task.generation_stamp = message.header.stamp
             task.approach_pose.header.stamp = message.header.stamp
+        self._message = message
         self._publisher.publish(message)
         if not self._published:
             self._published = True

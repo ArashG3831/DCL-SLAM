@@ -100,8 +100,12 @@ remains available but starts disabled, as do both LaserScan displays, robot
 models, plans, markers, and both robots' local and global costmaps. Both
 profiles retain an Orbit camera and normal 3D controls. The large profile
 starts with a 45 m camera distance centered along the long arena. The runner
-starts the optional RViz window with the stack so startup is visible; RViz is
-not a readiness dependency.
+starts the optional RViz window after infrastructure readiness (`/clock`, the
+required TF chains, and the expected launch graph) so startup is visible;
+frontier claims and mission completion are not RViz or infrastructure
+readiness dependencies. If RViz cannot be spawned, the attempt records the
+exact command and spawn error in `runner_metadata.json` instead of silently
+omitting the window.
 
 `--hold-open-after-completion true` requires one trial, concurrency one, and
 rendering. After both robots complete and the settled final status, claims,

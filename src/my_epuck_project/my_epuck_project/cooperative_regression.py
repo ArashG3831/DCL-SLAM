@@ -909,6 +909,20 @@ def readiness_probe_due(time_mode, ready, now, last_probe, interval=5.0):
             and now - last_probe >= interval)
 
 
+def required_graph_ready(nodes):
+    """Return whether the launch graph has reached infrastructure readiness.
+
+    Frontier claims are mission-state messages, not startup infrastructure.
+    The passive collector's ``ready`` field also requires one claim from each
+    coordinator, which is intentionally not part of this gate: a coordinator
+    may be healthy while it is still proposing or has no eligible claim.
+    """
+    return all(
+        any(node.endswith(suffix) for node in nodes)
+        for suffix in EXPECTED_NODE_SUFFIXES
+    )
+
+
 LIVE_PARAMETER_NODES = (
     'controller_server', 'velocity_smoother',
     'local_costmap/local_costmap', 'global_costmap/global_costmap',
@@ -1074,6 +1088,8 @@ def internal_trial(args):
             'logger_console_status': False,
         },
         'rviz_requested': args.launch_rviz,
+        'infrastructure_ready': False,
+        'mission_inputs_ready': False,
         'hold_open_after_completion': args.hold_open_after_completion,
         'startup_timeline': startup_timeline,
     }
@@ -1148,6 +1164,7 @@ def internal_trial(args):
     })
     rviz = None
     rviz_log = None
+
     def start_rviz():
         nonlocal rviz, rviz_log
         if not args.launch_rviz or rviz is not None:
@@ -1157,21 +1174,30 @@ def internal_trial(args):
         rviz_environment = environment.copy()
         rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
         rviz_log = (attempt / 'rviz.log').open('w', encoding='utf-8')
-        rviz = subprocess.Popen(
-            rviz_command,
-            env=rviz_environment,
-            stdout=rviz_log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            preexec_fn=lambda: os.setpgid(0, launch.pid),
-        )
+        metadata['rviz_start_attempted_utc'] = utc_now()
+        metadata['rviz_command'] = rviz_command
+        try:
+            rviz = subprocess.Popen(
+                rviz_command,
+                env=rviz_environment,
+                stdout=rviz_log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                preexec_fn=lambda: os.setpgid(0, launch.pid),
+            )
+        except OSError as error:
+            metadata['rviz_start_error'] = (
+                f'{type(error).__name__}: {error}')
+            rviz_log.close()
+            rviz_log = None
+            atomic_json(attempt / 'runner_metadata.json', metadata)
+            return
         processes.append(rviz)
         rviz_process = psutil.Process(rviz.pid)
         rviz_process.cpu_percent(None)
         ps_processes.append(rviz_process)
         metadata.update({
             'rviz_pid': rviz.pid,
-            'rviz_command': rviz_command,
             'rviz_started_utc': utc_now(),
             'rviz_start_reason': 'clock_and_stack_readiness',
         })
@@ -1251,13 +1277,16 @@ def internal_trial(args):
                 # deadlines must use the actual observation time.
                 now = time.monotonic()
                 last_clock_probe = now
-            if status.get('ready') and clock_ok and tf_ok and not ready:
+            if status.get('ready') and not metadata['mission_inputs_ready']:
+                metadata['mission_inputs_ready'] = True
+                atomic_json(attempt / 'runner_metadata.json', metadata)
+            if clock_ok and tf_ok and not ready:
                 nodes = status.get('nodes', [])
-                ready = all(any(node.endswith(suffix) for node in nodes)
-                            for suffix in EXPECTED_NODE_SUFFIXES)
+                ready = required_graph_ready(nodes)
                 if ready:
+                    metadata['infrastructure_ready'] = True
                     mark_startup_stage(
-                        'full_readiness_declared',
+                        'infrastructure_readiness_declared',
                         readiness_graph_nodes=nodes)
                     start_rviz()
                     mission_deadline = (now + args.mission_timeout

@@ -20,17 +20,20 @@ from my_epuck_project.cooperative_regression import (
     parser,
     perform_attempt,
     readiness_probe_due,
+    required_graph_ready,
+    resolved_trial_resources,
     scoped_shutdown,
     update_progress,
     validate_cli_options,
-    validate_resource_bounds,
-    resolved_trial_resources,
     validate_existing_attempt,
+    validate_resource_bounds,
     wait_for_attempt_supervisor,
     windows_port_pid,
 )
-from my_epuck_project.cooperative_regression_report import analyze_campaign
-from my_epuck_project.cooperative_regression_report import _claim_value
+from my_epuck_project.cooperative_regression_report import (
+    _claim_value,
+    analyze_campaign,
+)
 from my_epuck_project.occupancy_map_comparison import (
     Geometry,
     OccupancyMap,
@@ -199,13 +202,30 @@ def test_manual_rviz_uses_installed_cooperative_config():
 
 
 def test_external_rviz_is_started_after_readiness_and_has_explicit_time():
-    """The runner owns RViz startup and passes its selected ROS time mode."""
+    """The runner owns RViz startup after infrastructure readiness."""
     source = (
         Path(__file__).resolve().parents[1]
         / 'my_epuck_project' / 'cooperative_regression.py'
     ).read_text(encoding='utf-8')
     assert "'rviz_start_reason': 'clock_and_stack_readiness'" in source
     assert "use_sim_time=args.time_mode == 'sim'" in source
+    assert 'if clock_ok and tf_ok and not ready:' in source
+    assert (
+        "if status.get('ready') and not metadata['mission_inputs_ready']"
+        in source
+    )
+
+
+def test_graph_readiness_does_not_require_frontier_claims():
+    """A live graph is infrastructure-ready before either claim exists."""
+    nodes = [
+        '/robot1/cooperative_frontier_coordinator',
+        '/robot2/cooperative_frontier_coordinator',
+        '/robot1/map_fusion',
+        '/robot2/map_fusion',
+    ]
+    assert required_graph_ready(nodes)
+    assert not required_graph_ready(nodes[:-1])
 
 
 def test_runner_profile_defaults_and_rviz_selection():
@@ -519,9 +539,9 @@ def test_collector_shutdown_isolated_and_precedes_launch_shutdown():
               'cooperative_regression.py').read_text()
     assert 'preexec_fn=os.setpgrp' in source
     collector_signal = source.index(
-        "_send_scope([collector], signal.SIGINT")
+        '_send_scope([collector], signal.SIGINT')
     launch_signal = source.index(
-        "signal_process(launch, signal.SIGINT)")
+        'signal_process(launch, signal.SIGINT)')
     assert collector_signal < launch_signal
     assert 'process_group=collector.pid' in source
 

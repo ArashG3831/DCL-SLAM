@@ -1,17 +1,18 @@
-# Third-party frontier search core
+# Frontier engine dependency
 
-The files under `third_party/frontier_exploration_ros2/` are a narrowly adapted subset of
-[Mert Güler's frontier-exploration-ros2](https://github.com/mertgulerx/frontier-exploration-ros2),
-Apache-2.0, inspected at local version 1.6.0.
+The candidate generator now links the exported
+`frontier_exploration_ros2::frontier_exploration_ros2_core` target from the checked-out
+`src/frontier-exploration-ros2` repository (Apache-2.0, version 1.6.0). It uses the public APIs for:
 
-Upstream source files used as the basis:
+- frontier extraction;
+- costmap-aware accessible goal generation;
+- deterministic frontier signatures; and
+- lidar-style visible-reveal gain.
 
-- `include/frontier_exploration_ros2/frontier_types.hpp`
-- `include/frontier_exploration_ros2/frontier_search.hpp`
-- `src/frontier_search.cpp`
+The old files under `third_party/frontier_exploration_ros2/` remain as historical migration
+material but are no longer included or compiled. Keeping them avoids rewriting the validated
+baseline history; the build has a single active frontier core implementation.
 
-Project modifications are prominent in the adapted files: the data model was reduced to the
-candidate-generator use case, complete boundary geometry is retained for stable IDs, occupancy-grid
-origin yaw is applied in both map/world directions, and extraction is transport-independent.
-The complete upstream explorer, dispatcher, MRTSP solver, and suppression implementation are not copied.
-See `LICENSES/Apache-2.0.txt`.
+The complete upstream autonomous dispatch node is not launched by this package. Nav2 path validation
+remains local to the candidate generator and final dispatch remains in each robot's replicated
+assignment node. See `LICENSES/Apache-2.0.txt`.

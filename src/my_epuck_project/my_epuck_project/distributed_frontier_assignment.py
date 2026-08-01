@@ -186,6 +186,8 @@ class DistributedFrontierAssignment(Node):
             route_corridor_radius_m=float(
                 self.declare_parameter('route_corridor_radius_m', 0.16).value,
             ),
+            minimum_visible_gain_m=self._minimum_solo_visible_gain_m,
+            maximum_path_length_m=self._maximum_solo_path_m,
         )
         self._ledger = SnapshotLedger(self._snapshot_maximum_tasks)
         self._snapshots: dict[str, Received[TaskSnapshot]] = {}

@@ -144,6 +144,11 @@ class AssignmentDiagnostics:
     rejected_gain_threshold_count: int = 0
     rejected_local_score_threshold_count: int = 0
     rejected_path_threshold_count: int = 0
+    feasible_useful_robot1_count: int = 0
+    feasible_useful_robot2_count: int = 0
+    valid_one_active_assignment_count: int = 0
+    valid_two_active_pair_count: int = 0
+    idle_idle_permitted: bool = False
     best_non_idle_robot1_task_id: str = ''
     best_non_idle_robot2_task_id: str = ''
     best_non_idle_score: AssignmentScore = AssignmentScore()

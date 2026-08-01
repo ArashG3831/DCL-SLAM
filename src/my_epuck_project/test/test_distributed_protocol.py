@@ -131,15 +131,15 @@ def test_useful_partial_assignment_beats_idle_when_peer_has_no_valid_bid():
     assert selected.diagnostics.availability_reason == 'ONLY_ROBOT1_REACHABLE'
 
 
-def test_idle_diagnostics_identify_non_idle_utility_below_zero():
-    """IDLE is explainable when every valid path costs more than its gain."""
+def test_idle_diagnostics_identify_no_feasible_task():
+    """IDLE is explainable when the only proposal has zero visible gain."""
     first = PhysicalTask(
         'robot1', 's1', 1, 1, 'north', 1, (0.0, 1.0),
         Bounds((-0.1, 0.9), (0.1, 1.1)), (0.0, 1.0),
-        visible_reveal_gain=0.1,
+        visible_reveal_gain=0.0,
     )
     union = build_canonical_union((first,), ())
-    bid = Bid(union.tasks[0].canonical_id, True, 12.0, 12.0)
+    bid = Bid(union.tasks[0].canonical_id, True, 1.0, 1.0)
     selected = choose_pair_assignment(
         'round', union,
         BidBatch('round', union.union_hash, 'robot1', 's1', 1, 5.0, (bid,)),
@@ -147,8 +147,7 @@ def test_idle_diagnostics_identify_non_idle_utility_below_zero():
     )
     assert selected.robot1_task_id == ''
     assert selected.robot2_task_id == ''
-    assert selected.diagnostics.idle_reason == 'NON_IDLE_UTILITY_BELOW_IDLE'
-    assert selected.diagnostics.best_non_idle_score.total < 0.0
+    assert selected.diagnostics.idle_reason == 'BELOW_GAIN_THRESHOLD'
 
 
 def test_delayed_old_message_cannot_cancel_committed_navigation():

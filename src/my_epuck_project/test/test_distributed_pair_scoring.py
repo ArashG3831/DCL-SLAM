@@ -169,3 +169,144 @@ def test_decision_hash_and_tie_break_ignore_bid_arrival_order():
         weights=AssignmentWeights(route_overlap=0.0, sensing_overlap=0.0),
     )
     assert decisions_match(a, b)
+
+
+def test_feasible_negative_soft_utility_still_assigns_one_active_robot():
+    """Feasibility, not zero-valued IDLE, controls useful work."""
+    task = make_task(
+        'robot1', 'small-useful', (10.0, 0.0), (10.0, 0.2),
+        Bounds((9.8, 0.0), (10.2, 0.4)), gain=0.05,
+    )
+    union = build_canonical_union([task], [])
+    task_id = union.tasks[0].canonical_id
+    decision = choose_pair_assignment(
+        'round', union, batch('robot1', union.union_hash, [
+            bid(task_id, 10.0, [(0.0, 0.0), (10.0, 0.0)]),
+        ]), batch('robot2', union.union_hash, []),
+    )
+    assert decision.robot1_task_id == task_id
+    assert decision.robot2_task_id == ''
+    assert decision.score.total < 0.0
+    assert decision.diagnostics.idle_idle_permitted is False
+
+
+def test_two_feasible_negative_tasks_beat_idle_idle():
+    """Two feasible tasks remain eligible even when absolute score is negative."""
+    first_task = make_task(
+        'robot1', 'negative-a', (10.0, 0.0), (10.0, 0.2),
+        Bounds((9.8, 0.0), (10.2, 0.4)), gain=0.05,
+    )
+    second_task = make_task(
+        'robot2', 'negative-b', (0.0, 10.0), (0.0, 10.2),
+        Bounds((-0.2, 9.8), (0.2, 10.2)), gain=0.05,
+    )
+    union = build_canonical_union([first_task], [second_task])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['negative-a'], 10.0, [(0, 0), (10, 0)]),
+            bid(ids['negative-b'], 10.0, [(0, 10), (0, 20)]),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['negative-a'], 10.0, [(0, 0), (10, 0)]),
+            bid(ids['negative-b'], 10.0, [(0, 10), (0, 20)]),
+        ]),
+    )
+    assert decision.robot1_task_id or decision.robot2_task_id
+    assert decision.diagnostics.idle_idle_permitted is False
+    assert decision.score.total < 0.0
+
+
+def test_zero_gain_is_explicitly_infeasible():
+    """Zero visible reveal gain cannot be dispatched."""
+    task = make_task(
+        'robot1', 'zero-gain', (1.0, 0.0), (1.0, 0.2),
+        Bounds((0.8, 0.0), (1.2, 0.4)), gain=0.0,
+    )
+    union = build_canonical_union([task], [])
+    task_id = union.tasks[0].canonical_id
+    decision = choose_pair_assignment(
+        'round', union, batch('robot1', union.union_hash, [
+            bid(task_id, 1.0, [(0, 0), (1, 0)]),
+        ]), batch('robot2', union.union_hash, []),
+    )
+    assert decision.robot1_task_id == ''
+    assert decision.diagnostics.idle_reason == 'BELOW_GAIN_THRESHOLD'
+
+
+def test_excessive_backtracking_is_explicitly_infeasible():
+    """A path beyond the bounded assignment horizon cannot win."""
+    task = make_task(
+        'robot1', 'backtrack', (19.0, 0.0), (19.0, 0.2),
+        Bounds((18.8, 0.0), (19.2, 0.4)), gain=5.0,
+    )
+    union = build_canonical_union([task], [])
+    task_id = union.tasks[0].canonical_id
+    decision = choose_pair_assignment(
+        'round', union, batch('robot1', union.union_hash, [
+            bid(task_id, 19.0, [(0, 0), (19, 0)]),
+        ]), batch('robot2', union.union_hash, []),
+    )
+    assert decision.robot1_task_id == ''
+    assert decision.diagnostics.idle_reason == 'EXCESSIVE_BACKTRACK'
+
+
+def test_hard_failed_equivalent_task_does_not_block_useful_task():
+    """A hard-failed physical task is filtered while another task proceeds."""
+    failed = make_task(
+        'robot1', 'failed', (1.0, 0.0), (1.0, 0.2),
+        Bounds((0.8, 0.0), (1.2, 0.4)), gain=5.0,
+    )
+    useful = make_task(
+        'robot2', 'useful', (0.0, 2.0), (0.0, 2.2),
+        Bounds((-0.2, 2.0), (0.2, 2.4)), gain=0.05,
+    )
+    union = build_canonical_union([failed], [useful])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['failed'], 1.0, [(0, 0), (1, 0)]),
+            bid(ids['useful'], 10.0, [(0, 0), (0, 2)]),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['failed'], 1.0, [(0, 0), (1, 0)]),
+            bid(ids['useful'], 10.0, [(0, 0), (0, 2)]),
+        ]),
+        hard_failed_tasks=frozenset({ids['failed']}),
+    )
+    assert ids['failed'] not in (decision.robot1_task_id, decision.robot2_task_id)
+    assert ids['useful'] in (decision.robot1_task_id, decision.robot2_task_id)
+
+
+def test_one_active_can_beat_conflicting_two_active_pair():
+    """A strongly overlapping second task does not force a pair assignment."""
+    first_task = make_task(
+        'robot1', 'primary', (2.0, 0.0), (2.0, 0.2),
+        Bounds((1.8, 0.0), (2.2, 0.4)), gain=2.0,
+    )
+    second_task = make_task(
+        'robot2', 'nearby', (2.8, 0.0), (2.8, 0.2),
+        Bounds((2.6, 0.0), (3.0, 0.4)), gain=0.05,
+    )
+    union = build_canonical_union([first_task], [second_task])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    same_path = [(0, 0), (1, 0), (2, 0)]
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['primary'], 2.0, same_path),
+            bid(ids['nearby'], 2.0, same_path),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['primary'], 2.0, same_path),
+            bid(ids['nearby'], 2.0, same_path),
+        ]),
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) in {
+        (ids['primary'], ''), ('', ids['primary']),
+    }

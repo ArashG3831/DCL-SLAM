@@ -39,6 +39,8 @@ class AssignmentWeights:
     route_corridor_radius_m: float = 0.16
     sensing_approach_scale_m: float = 1.5
     minimum_useful_score: float = 1e-6
+    minimum_visible_gain_m: float = 0.05
+    maximum_path_length_m: float = 18.0
 
 
 def _bounded(value: float) -> float:
@@ -193,6 +195,35 @@ def _bid_map(batch: BidBatch) -> Mapping[str, Bid]:
     return result
 
 
+def _task_feasible(
+        task: CanonicalTask, bid: Optional[Bid],
+        hard_failed_tasks: frozenset[str],
+        weights: AssignmentWeights) -> bool:
+    """Apply explicit assignment safety/utility feasibility gates.
+
+    Soft pair utility is deliberately not part of this predicate.  A useful
+    frontier may have negative absolute score after travel and overlap terms,
+    but it must still be assignable when it is the best feasible work.
+    """
+    if bid is None or not bid.path_valid:
+        return False
+    if task.canonical_id in hard_failed_tasks:
+        return False
+    if not math.isfinite(task.visible_reveal_gain):
+        return False
+    if task.visible_reveal_gain < weights.minimum_visible_gain_m:
+        return False
+    if not math.isfinite(bid.path_length_m) or bid.path_length_m < 0.0:
+        return False
+    if bid.path_length_m > weights.maximum_path_length_m:
+        return False
+    if (not math.isfinite(bid.estimated_travel_cost) or
+            bid.estimated_travel_cost < 0.0 or
+            bid.estimated_travel_cost > weights.maximum_path_length_m):
+        return False
+    return True
+
+
 def choose_pair_assignment(
         round_id: str, union: CanonicalUnion,
         robot1_bids: BidBatch, robot2_bids: BidBatch,
@@ -208,11 +239,15 @@ def choose_pair_assignment(
     first_map, second_map = _bid_map(robot1_bids), _bid_map(robot2_bids)
     valid_first = {
         task_id for task_id, bid in first_map.items()
-        if task_id in tasks and bid.path_valid
+        if task_id in tasks and _task_feasible(
+            tasks[task_id], bid, hard_failed_tasks, weights,
+        )
     }
     valid_second = {
         task_id for task_id, bid in second_map.items()
-        if task_id in tasks and bid.path_valid
+        if task_id in tasks and _task_feasible(
+            tasks[task_id], bid, hard_failed_tasks, weights,
+        )
     }
     choices1 = [IDLE_TASK_ID] + sorted(
         valid_first
@@ -244,10 +279,8 @@ def choose_pair_assignment(
             candidates.append((first_id, second_id, score, combined, maximum))
     non_idle = [item for item in candidates
                 if item[0] or item[1]]
-    useful = [item for item in non_idle
-              if item[2].total >= weights.minimum_useful_score]
-    if useful:
-        selected = min(useful, key=lambda item: (
+    if non_idle:
+        selected = min(non_idle, key=lambda item: (
             -round(item[2].total, 12),
             round(item[3], 12),
             round(item[4], 12),
@@ -262,12 +295,32 @@ def choose_pair_assignment(
         round(item[4], 12),
         item[0], item[1],
     )) if non_idle else None
+    bid_task_ids = set(first_map) | set(second_map)
+    hard_rejected = bid_task_ids & hard_failed_tasks
+    gain_rejected = {
+        task_id for task_id in bid_task_ids if task_id in tasks and
+        tasks[task_id].visible_reveal_gain < weights.minimum_visible_gain_m
+    }
+    path_rejected = {
+        task_id for task_id, bid in {**first_map, **second_map}.items()
+        if task_id in tasks and (
+            bid.path_length_m > weights.maximum_path_length_m or
+            bid.estimated_travel_cost > weights.maximum_path_length_m
+        )
+    }
     if not union.tasks:
         idle_reason = 'NO_TASKS'
-    elif not valid_first and not valid_second:
+    elif not bid_task_ids:
         idle_reason = 'NO_VALID_BIDS'
-    elif best_non_idle is None or best_non_idle[2].total < weights.minimum_useful_score:
-        idle_reason = 'NON_IDLE_UTILITY_BELOW_IDLE'
+    elif not valid_first and not valid_second:
+        if hard_rejected and hard_rejected >= bid_task_ids:
+            idle_reason = 'FAILURE_SUPPRESSED'
+        elif gain_rejected and gain_rejected >= bid_task_ids:
+            idle_reason = 'BELOW_GAIN_THRESHOLD'
+        elif path_rejected and path_rejected >= bid_task_ids:
+            idle_reason = 'EXCESSIVE_BACKTRACK'
+        else:
+            idle_reason = 'NO_FEASIBLE_TASK'
     else:
         idle_reason = 'OTHER'
     if valid_first and valid_second:
@@ -297,6 +350,17 @@ def choose_pair_assignment(
         rejected_failure_suppression_count=sum(
             task.canonical_id in hard_failed_tasks for task in union.tasks
         ),
+        rejected_gain_threshold_count=len(gain_rejected),
+        rejected_path_threshold_count=len(path_rejected),
+        feasible_useful_robot1_count=len(valid_first),
+        feasible_useful_robot2_count=len(valid_second),
+        valid_one_active_assignment_count=sum(
+            1 for item in non_idle if bool(item[0]) ^ bool(item[1])
+        ),
+        valid_two_active_pair_count=sum(
+            1 for item in non_idle if item[0] and item[1]
+        ),
+        idle_idle_permitted=not bool(non_idle),
         best_non_idle_robot1_task_id=best_non_idle[0] if best_non_idle else '',
         best_non_idle_robot2_task_id=best_non_idle[1] if best_non_idle else '',
         best_non_idle_score=best_score,

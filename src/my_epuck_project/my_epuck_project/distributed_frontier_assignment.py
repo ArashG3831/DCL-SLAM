@@ -195,6 +195,11 @@ class DistributedFrontierAssignment(Node):
         self._peer_decision: Optional[Received[PairDecisionMsg]] = None
         self._peer_status: Optional[Received[DistributedExplorationStatus]] = None
         self._hard_failure_signatures: dict[str, float] = {}
+        # Keep bounded, evidence-based local/peer failure history so a hard
+        # failure cannot immediately re-enter the next auction under the
+        # same physical signature.  The duration escalates for repeated hard
+        # evidence, while transient classes never enter this table.
+        self._hard_failure_counts: dict[str, int] = {}
         self._peer_liveness = PeerLiveness(peer_timeout_s)
         self._round: Optional[RoundWork] = None
         self._committed = CommittedRound()
@@ -345,11 +350,31 @@ class DistributedFrontierAssignment(Node):
         if message.source_robot_id == self._robot_id:
             return
         hard_values = {FAILURE_TO_MESSAGE[item] for item in HARD_FAILURES}
-        if message.failure_class in hard_values:
-            ttl = max(0.1, min(120.0, duration_to_seconds(message.validity)))
-            self._hard_failure_signatures[message.physical_task_signature] = (
-                time.monotonic() + ttl
+        if (message.failure_class in hard_values and
+                message.physical_task_signature):
+            self._record_hard_failure(
+                message.physical_task_signature,
+                duration_to_seconds(message.validity),
             )
+
+    def _record_hard_failure(self, signature: str, requested_ttl_s: float) -> None:
+        """Record bounded suppression for directly observed hard evidence."""
+        if not signature:
+            return
+        now = time.monotonic()
+        count = self._hard_failure_counts.get(signature, 0) + 1
+        self._hard_failure_counts[signature] = count
+        base = max(0.1, min(15.0, requested_ttl_s))
+        ttl = min(120.0, base * (2 ** (count - 1)))
+        self._hard_failure_signatures[signature] = max(
+            self._hard_failure_signatures.get(signature, 0.0), now + ttl,
+        )
+        # Keep this diagnostic bounded and auditable without making failure
+        # suppression dependent on logger timing.
+        self.get_logger().info(
+            'HARD_FAILURE_SUPPRESSION signature=%s count=%d ttl_s=%.3f' %
+            (signature, count, ttl),
+        )
 
     def _fresh_snapshot(self, robot_id: str, now: float) -> Optional[TaskSnapshot]:
         received = self._snapshots.get(robot_id)
@@ -930,6 +955,13 @@ class DistributedFrontierAssignment(Node):
         message.nav2_error_code = int(max(0, nav2_error_code))
         message.nav2_error_message = nav2_error_message
         self._failure_publisher.publish(message)
+        if failure in HARD_FAILURES:
+            # The local robot must not immediately reselect the same physical
+            # task after evidence-based planner/controller failure.  The same
+            # record is also published for the peer, which applies its own
+            # receiver-local expiry and escalation.
+            self._record_hard_failure(member.physical_signature, message.validity.sec +
+                                      message.validity.nanosec * 1e-9)
 
     def _hard_failed_task_ids(self, union: CanonicalUnion) -> frozenset[str]:
         signatures = set(self._hard_failure_signatures)

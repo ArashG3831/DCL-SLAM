@@ -1,6 +1,6 @@
 """Replicated peer-to-peer two-robot frontier assignment ROS node."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import math
 import time
@@ -456,9 +456,25 @@ class DistributedFrontierAssignment(Node):
             first_batch = self._bid_batches['robot1'].value
             second_batch = self._bid_batches['robot2'].value
             hard_ids = self._hard_failed_task_ids(self._round.union)
-            self._round.decision = choose_pair_assignment(
+            decision = choose_pair_assignment(
                 self._round.round_id, self._round.union,
                 first_batch, second_batch, hard_ids, self._weights,
+            )
+            # Snapshot cardinalities are transport/provenance facts rather
+            # than solver inputs.  Attach them here so the decision telemetry
+            # can distinguish an empty source snapshot from a source whose
+            # tasks were all rejected by local path validation.
+            self._round.decision = replace(
+                decision,
+                diagnostics=replace(
+                    decision.diagnostics,
+                    robot1_snapshot_task_count=len(
+                        self._round.snapshots[0].tasks,
+                    ),
+                    robot2_snapshot_task_count=len(
+                        self._round.snapshots[1].tasks,
+                    ),
+                ),
             )
             self._publish_decision()
             self._transition(

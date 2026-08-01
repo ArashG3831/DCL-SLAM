@@ -86,6 +86,10 @@ class CooperativeExperimentLogger(Node):
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.statuses={}
         self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
+        # Protocol counters deliberately separate replicated publications from
+        # unique decisions and local navigation outcomes.
+        self.unique_agreed_rounds=set(); self.unique_agreed_decisions=set()
+        self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
         self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.files=[]; self.writers={}
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}
@@ -215,7 +219,7 @@ class CooperativeExperimentLogger(Node):
     def distributed_snapshot(self,r,msg):
         self.mark(r,'task_snapshot',msg)
         if not self.distributed_changed((r,'snapshot'),(self.uuid_text(msg.source_session_id),msg.source_snapshot_epoch,msg.source_map_revision,msg.source_map_fingerprint)):return
-        tasks=[{'physical_signature':task.physical_signature,'local_frontier_id':task.local_frontier_id,'centroid':[task.centroid.x,task.centroid.y],'bounds':[task.bounding_box_min.x,task.bounding_box_min.y,task.bounding_box_max.x,task.bounding_box_max.y],'approach':[task.approach_pose.pose.position.x,task.approach_pose.pose.position.y],'visible_reveal_gain':task.visible_reveal_gain,'local_ordering_score':task.local_ordering_score,'local_path_valid':task.local_path_valid,'frontier_geometry_samples':len(task.frontier_geometry),'visible_cell_samples':len(task.visible_cells)} for task in msg.tasks]
+        tasks=[{'physical_signature':task.physical_signature,'local_frontier_id':task.local_frontier_id,'centroid':[task.centroid.x,task.centroid.y],'bounds':[task.bounding_box_min.x,task.bounding_box_min.y,task.bounding_box_max.x,task.bounding_box_max.y],'approach':[task.approach_pose.pose.position.x,task.approach_pose.pose.position.y],'visible_reveal_gain':task.visible_reveal_gain,'local_ordering_score':task.local_ordering_score,'local_path_valid':task.local_path_valid,'local_path_length_m':task.local_path_length_m,'local_path_samples':len(task.local_path_samples),'frontier_geometry_samples':len(task.frontier_geometry),'visible_cell_samples':len(task.visible_cells)} for task in msg.tasks]
         self.event('DISTRIBUTED_TASK_SNAPSHOT',f'{len(tasks)} bounded physical tasks',r,f'/{r}/task_snapshot',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),snapshot_epoch=msg.source_snapshot_epoch,source_map_revision=msg.source_map_revision,source_map_fingerprint=msg.source_map_fingerprint,tasks=tasks)
     def distributed_bids(self,r,msg):
         self.mark(r,'task_bids',msg)
@@ -230,15 +234,68 @@ class CooperativeExperimentLogger(Node):
     def distributed_status(self,r,msg):
         self.mark(r,'distributed_status',msg)
         self.latest[r]['distributed_state']=msg.state
+        distributed_states = {
+            DistributedExplorationStatus.WAITING_FOR_INPUTS: 'WAITING_FOR_INPUTS',
+            DistributedExplorationStatus.BIDDING: 'BIDDING',
+            DistributedExplorationStatus.WAITING_FOR_MATCHING_DECISION: 'WAITING_FOR_MATCHING_DECISION',
+            DistributedExplorationStatus.NAVIGATING: 'NAVIGATING',
+            DistributedExplorationStatus.DEGRADED_SOLO: 'DEGRADED_SOLO',
+            DistributedExplorationStatus.COMPLETE: 'COMPLETE',
+            DistributedExplorationStatus.BLOCKED: 'BLOCKED',
+        }
+        self.latest[r]['claim_state'] = distributed_states.get(
+            msg.state, str(msg.state),
+        )
+        self.latest[r]['navigation_active'] = bool(msg.local_nav_goal_active)
         health=(msg.nav2_healthy,msg.tf_healthy,msg.candidate_source_healthy,msg.peer_communication_healthy)
         if not self.distributed_changed((r,'status'),(msg.state,msg.round_id,msg.decision_hash,msg.active_canonical_task_id,health,msg.reason)):return
         self.event('DISTRIBUTED_STATUS',msg.reason,r,f'/{r}/distributed_status',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),state=msg.state,round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,active_canonical_task_id=msg.active_canonical_task_id,local_nav_goal_active=msg.local_nav_goal_active,nav2_healthy=msg.nav2_healthy,tf_healthy=msg.tf_healthy,candidate_source_healthy=msg.candidate_source_healthy,peer_communication_healthy=msg.peer_communication_healthy)
+        if msg.state == DistributedExplorationStatus.COMPLETE and self.mission_completion_time is None:
+            self.mission_completion_time = self.ros_seconds() - self.start_ros
     def distributed_event(self,r,msg):
         self.mark(r,'distributed_event',msg)
-        self.event(msg.event_type,msg.reason,r,f'/{r}/distributed_event',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,canonical_task_id=msg.canonical_task_id,physical_task_signature=msg.physical_task_signature,previous_state=msg.previous_state,next_state=msg.next_state,path_length_m=msg.path_length_m,travelled_distance_m=msg.travelled_distance_m,navigation_duration_s=msg.navigation_duration_s,newly_discovered_cells=msg.newly_discovered_cells,peer_first_discovered_cells=msg.peer_first_discovered_cells,duplicated_cells=msg.duplicated_cells,route_overlap_score=msg.route_overlap_score,sensing_overlap_estimate=msg.sensing_overlap_estimate,result=msg.result,failure_class=msg.failure_class,recoveries=msg.recoveries)
+        if msg.event_type == 'DECISION_AGREED':
+            self.agreement_publications += 1
+            self.unique_agreed_rounds.add(msg.round_id)
+            if msg.decision_hash:
+                self.unique_agreed_decisions.add(msg.decision_hash)
+        elif msg.event_type == 'NAV_GOAL_SENT':
+            self.dispatch_attempts += 1
+        elif msg.event_type in ('NAVIGATION_SUCCEEDED', 'NAVIGATION_FAILED', 'NAVIGATION_CANCELLED'):
+            self.goals_terminal += 1
+        fields = dict(source_session_id=self.uuid_text(msg.source_session_id),
+                      round_id=msg.round_id, union_hash=msg.union_hash,
+                      decision_hash=msg.decision_hash,
+                      canonical_task_id=msg.canonical_task_id,
+                      physical_task_signature=msg.physical_task_signature,
+                      previous_state=msg.previous_state,
+                      next_state=msg.next_state,
+                      path_length_m=msg.path_length_m,
+                      travelled_distance_m=msg.travelled_distance_m,
+                      navigation_duration_s=msg.navigation_duration_s,
+                      newly_discovered_cells=msg.newly_discovered_cells,
+                      peer_first_discovered_cells=msg.peer_first_discovered_cells,
+                      duplicated_cells=msg.duplicated_cells,
+                      route_overlap_score=msg.route_overlap_score,
+                      sensing_overlap_estimate=msg.sensing_overlap_estimate,
+                      result=msg.result, failure_class=msg.failure_class,
+                      recoveries=msg.recoveries,
+                      nav2_error_code=msg.nav2_error_code,
+                      nav2_error_message=msg.nav2_error_message)
+        source = f'/{r}/distributed_event'
+        self.event(msg.event_type, msg.reason, r, source,
+                   source_stamp=stamp(msg), **fields)
+        # The replicated executor reports the local action acceptance as a
+        # state-transition event rather than using the legacy claim topic.
+        # Normalize that protocol event so navigation telemetry retains the
+        # accepted-goal count used by the existing report schema.
+        if (msg.event_type == 'STATE_TRANSITION' and
+                msg.reason == 'local agreed goal accepted for send'):
+            self.event('NAV_GOAL_ACCEPTED', msg.reason, r, source,
+                       source_stamp=stamp(msg), **fields)
     def distributed_failure(self,r,msg):
         self.mark(r,'exploration_failure',msg)
-        self.event('DISTRIBUTED_TASK_FAILURE',msg.evidence,r,f'/{r}/exploration_failure',source_stamp=stamp(msg),severity='WARN',source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,canonical_task_id=msg.canonical_task_id,physical_task_signature=msg.physical_task_signature,approach=[msg.approach_pose.pose.position.x,msg.approach_pose.pose.position.y],failure_class=msg.failure_class,path_length_m=msg.path_length_m,path_samples=[[point.x,point.y] for point in msg.path_samples],retry_count=msg.retry_count)
+        self.event('DISTRIBUTED_TASK_FAILURE',msg.evidence,r,f'/{r}/exploration_failure',source_stamp=stamp(msg),severity='WARN',source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,canonical_task_id=msg.canonical_task_id,physical_task_signature=msg.physical_task_signature,approach=[msg.approach_pose.pose.position.x,msg.approach_pose.pose.position.y],failure_class=msg.failure_class,path_length_m=msg.path_length_m,path_samples=[[point.x,point.y] for point in msg.path_samples],retry_count=msg.retry_count,nav2_error_code=msg.nav2_error_code,nav2_error_message=msg.nav2_error_message)
     def claim_fields(self,msg):
         return {'source_session_id':bytes(msg.source_session_id.uuid).hex(),'message_revision':msg.message_revision,'claim_id':msg.claim_id,'frontier_id':msg.frontier_id,'map_revision':msg.map_revision,'claim_state':STATES.get(msg.state,str(msg.state)),'frontier_centroid_x':msg.frontier_centroid.x,'frontier_centroid_y':msg.frontier_centroid.y,'approach_x':msg.approach_pose.pose.position.x,'approach_y':msg.approach_pose.pose.position.y,'approach_yaw':yaw(msg.approach_pose.pose.orientation),'path_length_m':msg.path_length_m,'information_gain':msg.information_gain,'utility_score':msg.utility_score,'release_reason':msg.state_reason}
     def claim(self,r,msg):
@@ -435,7 +492,7 @@ class CooperativeExperimentLogger(Node):
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
         total_distance=sum(motion.get('distance_travelled_m',{}).values()); coverage_gain=(self.previous_known or 0)-(self.initial_known or 0)
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'continuous_exploration':continuous,'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'oscillation_episodes':self.counts['OSCILLATION_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal},'continuous_exploration':continuous,'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'oscillation_episodes':self.counts['OSCILLATION_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
     def finalize(self,clean=True):
         with self._lifecycle_lock:
             if self.finalized or self._finalizing:return False

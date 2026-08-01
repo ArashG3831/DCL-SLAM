@@ -932,6 +932,12 @@ class DistributedFrontierAssignment(Node):
             nav2_error_code: int = 0, nav2_error_message: str = '') -> None:
         if self._active_task is None:
             return
+        member = self._active_task.members[0]
+        if failure in HARD_FAILURES:
+            # Record local suppression before consulting snapshot provenance;
+            # a stale snapshot must not make the failing robot immediately
+            # reselect the same physical task.
+            self._record_hard_failure(member.physical_signature, 15.0)
         local_snapshot = self._fresh_snapshot(self._robot_id, time.monotonic())
         if local_snapshot is None:
             return
@@ -943,7 +949,6 @@ class DistributedFrontierAssignment(Node):
         message.round_id = self._active_round_id
         message.canonical_task_id = self._active_task.canonical_id
         message.physical_task_signature = self._active_task.members[0].physical_signature
-        member = self._active_task.members[0]
         message.approach_pose.header = message.header
         message.approach_pose.pose.position.x, message.approach_pose.pose.position.y = (
             member.approach
@@ -963,13 +968,6 @@ class DistributedFrontierAssignment(Node):
         message.nav2_error_code = int(max(0, nav2_error_code))
         message.nav2_error_message = nav2_error_message
         self._failure_publisher.publish(message)
-        if failure in HARD_FAILURES:
-            # The local robot must not immediately reselect the same physical
-            # task after evidence-based planner/controller failure.  The same
-            # record is also published for the peer, which applies its own
-            # receiver-local expiry and escalation.
-            self._record_hard_failure(member.physical_signature, message.validity.sec +
-                                      message.validity.nanosec * 1e-9)
 
     def _hard_failed_task_ids(self, union: CanonicalUnion) -> frozenset[str]:
         signatures = set(self._hard_failure_signatures)

@@ -10,12 +10,12 @@ from my_epuck_project.distributed_assignment.models import (
     TaskSnapshot,
 )
 from my_epuck_project.distributed_assignment.protocol import (
-    CommittedRound,
-    PeerLiveness,
-    SnapshotLedger,
     bid_batch_valid,
+    CommittedRound,
     completion_state,
+    PeerLiveness,
     receive,
+    SnapshotLedger,
 )
 
 
@@ -120,6 +120,14 @@ def test_peer_timeout_enters_solo_and_requires_fresh_session_handshake():
     assert liveness.evaluate(14.0) == CoordinatorState.DEGRADED_SOLO
     assert liveness.observe('peer-old', 15.0) == CoordinatorState.DEGRADED_SOLO
     assert liveness.observe('peer-new', 16.0) == CoordinatorState.WAITING_FOR_INPUTS
+
+
+def test_peer_status_heartbeat_prevents_snapshot_expiry_from_being_peer_loss():
+    """A live navigating peer can refresh liveness without new proposals."""
+    liveness = PeerLiveness(timeout_s=3.0)
+    liveness.observe('peer-session', 10.0)
+    liveness.observe('peer-session', 12.0)
+    assert liveness.evaluate(14.5) == CoordinatorState.WAITING_FOR_INPUTS
 
 
 def complete_inputs(**changes):

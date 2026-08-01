@@ -3,6 +3,7 @@
 import math
 
 from my_epuck_project.distributed_assignment.local_nav2 import (
+    LocalNav2,
     downsample_path,
     occupancy_value,
     path_length,
@@ -48,3 +49,11 @@ def test_path_length_and_samples_are_measured_and_bounded():
     assert samples[0] == points[0]
     assert samples[-1] == points[-1]
     assert path_length(points) == 99.0
+
+
+def test_pending_navigation_goal_counts_as_active_before_handle_arrives():
+    """Prevent a second dispatch during the NavigateToPose handle race."""
+    nav = LocalNav2.__new__(LocalNav2)
+    nav._navigation_goal_handle = None
+    nav._navigation_send_pending = True
+    assert nav.local_goal_active

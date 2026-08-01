@@ -2,8 +2,9 @@
 
 This utility runs isolated, passive, repeatable two-robot Webots simulation
 campaigns. It does not publish commands, navigation goals, claims, statuses,
-maps, or candidate data. The committed decentralized coordinators remain the
-only exploration decision makers.
+maps, or candidate data. The final launch uses two equal
+`distributed_frontier_assignment` peers; the legacy claim coordinator is
+available only through `two_robots_legacy_claim_baseline_launch.py`.
 
 ## Prerequisites
 
@@ -94,9 +95,12 @@ python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --skip-tests
 ```
 
-The manual RViz preset initially shows both shared maps, the grid, and one pose
-Axes display on each robot's namespaced `base_link`. The complete TF tree
-remains available but starts disabled, as do both LaserScan displays, robot
+The manual RViz preset initially shows Robot 1's replicated shared map, the
+grid, and one pose Axes display on each robot's namespaced `base_link`. Robot
+2's equivalent shared-map display remains configured but starts disabled: on
+the WSLg/Ogre stack, initializing both indexed occupancy-map displays at once
+can produce a GLSL sampler-link failure and leave the RViz window unusable.
+The complete TF tree remains available but starts disabled, as do both LaserScan displays, robot
 models, plans, markers, and both robots' local and global costmaps. Both
 profiles retain an Orbit camera and normal 3D controls. The large profile
 starts with a 45 m camera distance centered along the long arena. The runner
@@ -106,6 +110,21 @@ frontier claims and mission completion are not RViz or infrastructure
 readiness dependencies. If RViz cannot be spawned, the attempt records the
 exact command and spawn error in `runner_metadata.json` instead of silently
 omitting the window.
+
+Distributed coordination liveness:
+
+- task snapshots are bounded proposal leases, not peer-heartbeat messages;
+- a navigating peer keeps its active canonical task visible through the
+  distributed status heartbeat while its next proposal is being generated;
+- degraded-solo mode requires loss of that status/session heartbeat, not merely
+  an expired candidate snapshot;
+- locally generated reachable tasks carry the generator's bounded path length
+  and path samples, so the assignment bidder reuses them and queries Nav2 only
+  for peer-origin tasks;
+- a pending `NavigateToPose` goal handle counts as locally active, preventing a
+  second dispatch during the action-server response race;
+- the local execution wrapper cancels and classifies an evidence-based
+  no-progress navigation after its bounded steady-time guard.
 
 `--hold-open-after-completion true` requires one trial, concurrency one, and
 rendering. After both robots complete and the settled final status, claims,
@@ -178,3 +197,12 @@ clock-stall and emergency limits remain wall-clock safeguards. Use
 `--no-mission-timeout` for an unbounded simulated mission and
 `--emergency-wall-runtime SECONDS` for unattended protection. Physical-robot
 launches remain wall-time profiles.
+
+The observer summary separates protocol publications from work outcomes. The
+`coordination` object records `agreement_publications`,
+`unique_agreed_rounds`, `unique_agreed_decisions`, `dispatch_attempts`, and
+`goals_terminal`; these must not be inferred from a single event counter.
+Candidate generation and assignment bidding share one bounded per-robot
+`ComputePathToPose` lease (`/tmp/my_epuck_<robot>_compute_path.lock`) so only
+one local planner request is in flight at a time. A lease wait is retried and
+is not classified as an unreachable task or a peer failure.

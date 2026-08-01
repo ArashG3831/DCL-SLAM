@@ -10,9 +10,9 @@ from my_epuck_project.distributed_assignment.scoring import (
     decisions_match,
 )
 from my_epuck_project.fixed_task_snapshot_source import (
+    alternate_hallway_tasks,
     FixedTaskSnapshotSource,
     SESSIONS,
-    alternate_hallway_tasks,
 )
 
 import rclpy

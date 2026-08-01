@@ -1,8 +1,8 @@
 """Failure conservatism, suppression, and travelled-distance tests."""
 
 from my_epuck_project.distributed_assignment.failures import (
-    FailureSuppressor,
     classify_failure,
+    FailureSuppressor,
 )
 from my_epuck_project.distributed_assignment.models import (
     Bounds,
@@ -39,6 +39,13 @@ def test_generic_action_rejection_is_not_manufactured_planner_diagnosis():
     """Keep a generic goal-handle rejection classified as rejection."""
     result = classify_failure(FailureEvidence(action_rejected=True))
     assert result == FailureClass.ACTION_REJECTION
+
+
+def test_observed_controller_no_progress_is_classified_explicitly():
+    """A local measured no-progress cancellation is evidence-based."""
+    assert classify_failure(
+        FailureEvidence(controller_no_progress=True),
+    ) == FailureClass.CONTROLLER_NO_PROGRESS
 
 
 def test_tf_and_lifecycle_failures_are_transient_and_not_suppressed():

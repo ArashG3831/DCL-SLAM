@@ -25,7 +25,9 @@ from .distributed_assignment.canonical import (
     canonical_round_id,
     TaskIdentity,
 )
-from .distributed_assignment.failures import HARD_FAILURES
+from .distributed_assignment.failures import (
+    HARD_FAILURES, bounded_suppression_duration,
+)
 from .distributed_assignment.local_nav2 import (
     DispatchPreconditions,
     LocalNav2,
@@ -364,11 +366,17 @@ class DistributedFrontierAssignment(Node):
         now = time.monotonic()
         count = self._hard_failure_counts.get(signature, 0) + 1
         self._hard_failure_counts[signature] = count
-        base = max(0.1, min(15.0, requested_ttl_s))
-        ttl = min(120.0, base * (2 ** (count - 1)))
+        ttl = bounded_suppression_duration(count, requested_ttl_s)
         self._hard_failure_signatures[signature] = max(
             self._hard_failure_signatures.get(signature, 0.0), now + ttl,
         )
+        if len(self._hard_failure_counts) > 128:
+            expired = [
+                key for key in self._hard_failure_counts
+                if key not in self._hard_failure_signatures
+            ]
+            if expired:
+                self._hard_failure_counts.pop(expired[0], None)
         # Keep this diagnostic bounded and auditable without making failure
         # suppression dependent on logger timing.
         self.get_logger().info(

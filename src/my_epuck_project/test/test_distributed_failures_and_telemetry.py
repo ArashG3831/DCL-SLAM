@@ -2,6 +2,7 @@
 
 from my_epuck_project.distributed_assignment.failures import (
     classify_failure,
+    bounded_suppression_duration,
     FailureSuppressor,
 )
 from my_epuck_project.distributed_assignment.models import (
@@ -68,6 +69,14 @@ def test_repeated_hard_evidence_creates_bounded_suppression():
     assert suppressor.observe(failure, 2.0)
     assert suppressor.suppressed(proposal(), 3.0)
     assert not suppressor.suppressed(proposal(), 8.0)
+
+
+def test_local_hard_failure_ttl_escalates_but_stays_bounded():
+    """Repeated local hard evidence blocks reselection for bounded periods."""
+    assert bounded_suppression_duration(1, 15.0) == 15.0
+    assert bounded_suppression_duration(2, 15.0) == 30.0
+    assert bounded_suppression_duration(10, 15.0) == 120.0
+    assert bounded_suppression_duration(1, 999.0) == 15.0
 
 
 def test_peer_hard_failure_blocks_same_signature_without_alternative():

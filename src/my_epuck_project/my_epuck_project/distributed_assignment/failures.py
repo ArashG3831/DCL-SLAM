@@ -35,6 +35,15 @@ HARD_FAILURES = frozenset({
 })
 
 
+def bounded_suppression_duration(
+        failure_count: int, requested_ttl_s: float,
+        maximum_duration_s: float = 120.0) -> float:
+    """Return an escalating but bounded TTL for hard evidence."""
+    count = max(1, int(failure_count))
+    base = max(0.1, min(15.0, float(requested_ttl_s)))
+    return min(float(maximum_duration_s), base * (2 ** (count - 1)))
+
+
 @dataclass
 class _Suppression:
     failures: int

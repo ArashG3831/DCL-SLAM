@@ -1,6 +1,7 @@
 """Replicated peer-to-peer two-robot frontier assignment ROS node."""
 
 from dataclasses import dataclass
+import hashlib
 import math
 import time
 from typing import Optional
@@ -73,6 +74,7 @@ class RoundWork:
     union: CanonicalUnion
     snapshots: tuple[TaskSnapshot, TaskSnapshot]
     query_tasks: tuple[CanonicalTask, ...]
+    content_fingerprint: str = ''
     query_index: int = 0
     bids: tuple[Bid, ...] = ()
     local_batch: Optional[BidBatch] = None
@@ -351,6 +353,28 @@ class DistributedFrontierAssignment(Node):
         received = self._snapshots.get(robot_id)
         return received.value if received is not None and received.fresh(now) else None
 
+    @staticmethod
+    def _snapshot_content_fingerprint(
+            first: TaskSnapshot, second: TaskSnapshot) -> str:
+        """Fingerprint task content while ignoring epoch-only heartbeats."""
+        payload = []
+        for snapshot in (first, second):
+            tasks = []
+            for task in sorted(snapshot.tasks, key=lambda item: item.physical_signature):
+                tasks.append((
+                    task.physical_signature,
+                    tuple(round(value, 3) for value in task.approach),
+                    round(task.approach_yaw, 3),
+                    tuple(round(value, 3) for value in task.bounds.minimum),
+                    tuple(round(value, 3) for value in task.bounds.maximum),
+                    round(task.visible_reveal_gain, 4),
+                    round(task.local_ordering_score, 4),
+                    bool(task.local_path_valid),
+                    round(task.local_path_length_m, 3),
+                ))
+            payload.append((snapshot.source_robot_id, tuple(tasks)))
+        return hashlib.sha256(repr(tuple(payload)).encode('utf-8')).hexdigest()
+
     def _tick(self) -> None:
         now = time.monotonic()
         self._expire_failures(now)
@@ -392,6 +416,18 @@ class DistributedFrontierAssignment(Node):
             TaskIdentity('robot1', first.source_session_id, first.epoch),
             TaskIdentity('robot2', second.source_session_id, second.epoch),
         )
+        content_fingerprint = self._snapshot_content_fingerprint(first, second)
+        if (
+                self._round is not None and self._round.decision is not None and
+                self._round.round_id != round_id and
+                not self._round.decision.robot1_task_id and
+                not self._round.decision.robot2_task_id and
+                self._round.content_fingerprint == content_fingerprint):
+            self._transition(
+                CoordinatorState.WAITING_FOR_INPUTS,
+                'unchanged IDLE task content; waiting for meaningful proposal change',
+            )
+            return
         if self._round is None or self._round.round_id != round_id:
             union = build_canonical_union(
                 first.tasks, second.tasks, self._maximum_union_tasks,
@@ -401,6 +437,7 @@ class DistributedFrontierAssignment(Node):
                 union=union,
                 snapshots=(first, second),
                 query_tasks=union.tasks[:self._maximum_path_queries],
+                content_fingerprint=content_fingerprint,
             )
             self._bid_batches.clear()
             self._peer_decision = None

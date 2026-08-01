@@ -24,7 +24,7 @@ def _peer(robot, origin_x):
         parameters=[{
             'robot_id': robot, 'dispatch_enabled': False,
             'synthetic_bids': True, 'synthetic_origin_x': origin_x,
-            'synthetic_origin_y': 0.0, 'maximum_union_tasks': 8,
+            'synthetic_origin_y': 0.0, 'maximum_union_tasks': 10,
             'maximum_path_queries': 8, 'bid_validity_s': 30.0,
             'decision_validity_s': 30.0, 'peer_timeout_s': 30.0,
             'use_sim_time': False,

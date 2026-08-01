@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Final two-robot decentralized mapping, pair assignment, and local Nav2 launch."""
 
-import os
 import json
+import os
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -25,6 +25,10 @@ def launch_setup(context):
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
     summary = profile_summary(selected)
+    dispatch_enabled = (
+        LaunchConfiguration('dispatch_enabled').perform(context).lower()
+        == 'true'
+    )
     assignment = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_distributed_assignment_launch.py',
@@ -37,7 +41,9 @@ def launch_setup(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
-            'dispatch_enabled': 'true',
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
+            'dispatch_enabled': str(dispatch_enabled).lower(),
         }.items(),
     )
     observer = Node(
@@ -70,12 +76,13 @@ def launch_setup(context):
             'initial_configuration_json': json.dumps({
                 'frontier_engine': 'frontier_exploration_ros2 public core',
                 'maximum_tasks_per_source': 5,
-                'maximum_union_tasks': 8,
+                'maximum_union_tasks': 10,
                 'maximum_path_queries': 8,
-                'dispatch_enabled': True,
+                'dispatch_enabled': dispatch_enabled,
                 'map_fusion_resolution': selected['fusion_resolution'],
             }, sort_keys=True),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'enable_console_status': LaunchConfiguration('logger_console_status'),
         }],
     )
     return [assignment, observer]
@@ -92,9 +99,22 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('diagnostic_mode', default_value='false'),
+        DeclareLaunchArgument('sensor_profile', default_value='full',
+                              choices=['full', 'throughput']),
+        DeclareLaunchArgument('nav2_autostart', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('dispatch_enabled', default_value='true',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('enable_observer', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('run_id', default_value=''),
         DeclareLaunchArgument('output_root', default_value='/home/arash/webots_ws/results'),
+        DeclareLaunchArgument('mission_timeout_s', default_value='600.0'),
+        DeclareLaunchArgument('enable_mission_timeout', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_rviz', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('logger_console_status', default_value='true',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

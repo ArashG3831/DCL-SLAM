@@ -23,7 +23,9 @@ def _proposal_adapter(robot):
         parameters=[{
             'robot_id': robot,
             'maximum_tasks': 5,
-            'validity_s': 3.0,
+            # A snapshot is a bounded proposal lease, not a heartbeat.  Keep
+            # it alive long enough for the bounded peer-path bid round.
+            'validity_s': 8.0,
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
@@ -44,8 +46,14 @@ def _assignment_peer(robot):
             'dispatch_enabled': LaunchConfiguration('dispatch_enabled'),
             'synthetic_bids': False,
             'maximum_tasks_per_source': 5,
-            'maximum_union_tasks': 8,
+            'maximum_union_tasks': 10,
             'maximum_path_queries': 8,
+            'minimum_solo_visible_gain_m': 0.05,
+            'minimum_solo_ordering_score': 0.0,
+            'maximum_solo_path_m': 18.0,
+            'bid_validity_s': 8.0,
+            'decision_validity_s': 8.0,
+            'peer_timeout_s': 12.0,
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )

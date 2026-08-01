@@ -54,7 +54,7 @@ class FrontierProposalAdapter(Node):
         if self._robot_id not in ('robot1', 'robot2'):
             raise ValueError('robot_id must be robot1 or robot2')
         self._maximum_tasks = int(self.declare_parameter('maximum_tasks', 5).value)
-        self._validity_s = float(self.declare_parameter('validity_s', 3.0).value)
+        self._validity_s = float(self.declare_parameter('validity_s', 8.0).value)
         self._signature_quantum_m = float(
             self.declare_parameter('signature_quantization_m', 0.05).value,
         )
@@ -65,14 +65,25 @@ class FrontierProposalAdapter(Node):
         self._session_text = uuid.uuid4().hex
         self._session_uuid = text_to_uuid(self._session_text)
         self._epoch = 0
-        qos = QoSProfile(
+        # FrontierCandidateArray is published by the existing C++ generator
+        # with the ordinary volatile profile.  Keep that transport contract
+        # on the input side; a transient-local subscriber is incompatible
+        # with a volatile publisher and silently receives no batches.
+        input_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        snapshot_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self._publisher = self.create_publisher(TaskSnapshot, output_topic, qos)
+        self._publisher = self.create_publisher(
+            TaskSnapshot, output_topic, snapshot_qos,
+        )
         self._subscription = self.create_subscription(
-            FrontierCandidateArray, input_topic, self._on_candidates, qos,
+            FrontierCandidateArray, input_topic, self._on_candidates, input_qos,
         )
         self.get_logger().info(
             'proposal adapter robot=%s session=%s top_k=%d dispatch=false' % (
@@ -130,6 +141,8 @@ class FrontierProposalAdapter(Node):
             task.visible_reveal_gain = candidate.information_gain
             task.local_ordering_score = candidate.score
             task.local_path_valid = candidate.reachability_state == candidate.REACHABLE
+            task.local_path_length_m = candidate.local_path_length_m or candidate.path_length_m
+            task.local_path_samples = list(candidate.local_path_samples)
             task.generation_stamp = candidates.header.stamp
             message.tasks.append(task)
         self._publisher.publish(message)

@@ -1,8 +1,8 @@
 """Replicated peer-to-peer two-robot frontier assignment ROS node."""
 
+from dataclasses import dataclass
 import math
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 from my_epuck_interfaces.msg import (
@@ -20,9 +20,9 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from .distributed_assignment.canonical import (
-    TaskIdentity,
     build_canonical_union,
     canonical_round_id,
+    TaskIdentity,
 )
 from .distributed_assignment.failures import HARD_FAILURES
 from .distributed_assignment.local_nav2 import (
@@ -42,12 +42,12 @@ from .distributed_assignment.models import (
     TaskSnapshot,
 )
 from .distributed_assignment.protocol import (
+    bid_batch_valid,
     CommittedRound,
     PeerLiveness,
+    receive,
     Received,
     SnapshotLedger,
-    bid_batch_valid,
-    receive,
 )
 from .distributed_assignment.ros_conversion import (
     bid_batch_from_msg,
@@ -126,7 +126,10 @@ class DistributedFrontierAssignment(Node):
             float(self.declare_parameter('synthetic_origin_y', 0.0).value),
         )
         self._maximum_union_tasks = int(
-            self.declare_parameter('maximum_union_tasks', 8).value,
+            # Each peer advertises at most K tasks.  The canonical union must
+            # therefore admit the full two-peer bound 2K before equivalence
+            # clustering (K=5 in the final launch).
+            self.declare_parameter('maximum_union_tasks', 10).value,
         )
         self._maximum_path_queries = int(
             self.declare_parameter('maximum_path_queries', 8).value,
@@ -139,6 +142,15 @@ class DistributedFrontierAssignment(Node):
             self.declare_parameter('decision_validity_s', 3.0).value,
         )
         peer_timeout_s = float(self.declare_parameter('peer_timeout_s', 6.0).value)
+        self._minimum_solo_visible_gain_m = float(
+            self.declare_parameter('minimum_solo_visible_gain_m', 0.05).value,
+        )
+        self._minimum_solo_ordering_score = float(
+            self.declare_parameter('minimum_solo_ordering_score', 0.0).value,
+        )
+        self._maximum_solo_path_m = float(
+            self.declare_parameter('maximum_solo_path_m', 18.0).value,
+        )
         self._post_goal_settle_s = float(
             self.declare_parameter('post_goal_settle_s', 1.0).value,
         )
@@ -316,6 +328,11 @@ class DistributedFrontierAssignment(Node):
     def _status_callback(self, message: DistributedExplorationStatus) -> None:
         if message.source_robot_id != self._peer_id:
             return
+        peer_session = uuid_to_text(message.source_session_id)
+        if peer_session:
+            # Status is the peer liveness heartbeat.  Candidate snapshots are
+            # proposals and may legitimately stop while the peer navigates.
+            self._peer_liveness.observe(peer_session, time.monotonic())
         self._peer_status = receive(
             message, duration_to_seconds(message.validity), time.monotonic(),
         )
@@ -346,6 +363,20 @@ class DistributedFrontierAssignment(Node):
         first = self._fresh_snapshot('robot1', now)
         second = self._fresh_snapshot('robot2', now)
         if first is None or second is None:
+            peer_status = self._peer_status
+            peer_status_fresh = peer_status is not None and peer_status.fresh(now)
+            peer_navigating = bool(
+                peer_status_fresh and
+                (peer_status.value.local_nav_goal_active or
+                 (peer_status.value.state == DistributedExplorationStatus.NAVIGATING and
+                  bool(peer_status.value.active_canonical_task_id)))
+            )
+            if peer_navigating:
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'peer active assignment heartbeat; awaiting fresh proposal',
+                )
+                return
             if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
                 self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
                 local = first if self._robot_id == 'robot1' else second
@@ -471,6 +502,12 @@ class DistributedFrontierAssignment(Node):
         candidates = tuple(
             task for task in snapshot.tasks
             if task.physical_signature not in self._hard_failure_signatures
+            and task.visible_reveal_gain >= self._minimum_solo_visible_gain_m
+            and task.local_ordering_score >= self._minimum_solo_ordering_score
+            and (
+                task.local_path_length_m <= 0.0 or
+                task.local_path_length_m <= self._maximum_solo_path_m
+            )
         )
         self._last_solo_snapshot_key = key
         if not candidates:
@@ -532,15 +569,35 @@ class DistributedFrontierAssignment(Node):
             return
         round_id = self._round.round_id
 
+        local_member = next(
+            (member for member in task.members
+             if member.source_robot_id == self._robot_id),
+            None,
+        )
+        if (local_member is not None and local_member.local_path_valid and
+                math.isfinite(local_member.local_path_length_m) and
+                local_member.local_path_length_m >= 0.0):
+            self._append_bid(task, PathEvaluation(
+                True, local_member.local_path_length_m,
+                tuple(local_member.local_path),
+                self.get_clock().now().nanoseconds, 0, 'reused local candidate path',
+                FailureClass.UNKNOWN,
+            ))
+            return
+
         def completed(result: PathEvaluation):
             if self._round is None or self._round.round_id != round_id:
                 return
             self._append_bid(task, result)
 
         if not self._nav2.evaluate_path(task.members[0], completed):
+            # The per-robot planner lease may be held briefly by the
+            # candidate generator.  Keep the round in bidding and retry on
+            # the next coordinator tick instead of manufacturing a blocked
+            # round or discarding the current task set.
             self._transition(
-                CoordinatorState.BLOCKED,
-                'local ComputePathToPose server unavailable or request busy',
+                CoordinatorState.BIDDING,
+                'waiting for local ComputePathToPose query lease',
             )
 
     def _append_bid(self, task: CanonicalTask, result: PathEvaluation) -> None:
@@ -696,9 +753,16 @@ class DistributedFrontierAssignment(Node):
             )
 
         if not self._nav2.evaluate_path(task.members[0], final_path):
-            self._invalidate_round(
-                FailureClass.TF_OR_LIFECYCLE,
-                'final path action server unavailable',
+            # A local path query can be serialized behind the candidate
+            # generator.  Preserve the agreed round and retry dispatch; this
+            # is not evidence that the task is unreachable.
+            self._dispatch_in_progress = False
+            self._active_task = None
+            self._active_round_id = ''
+            self._active_decision_hash = ''
+            self._transition(
+                CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                'waiting for local ComputePathToPose query lease',
             )
 
     def _dispatch_after_checks(
@@ -746,9 +810,15 @@ class DistributedFrontierAssignment(Node):
             travelled=outcome.travelled_distance_m,
             duration=outcome.duration_s, recoveries=outcome.recoveries,
             failure=outcome.failure_class,
+            nav2_error_code=outcome.error_code,
+            nav2_error_message=outcome.error_message,
         )
         if result != 'SUCCEEDED':
-            self._publish_failure(outcome.failure_class, outcome.error_message)
+            self._publish_failure(
+                outcome.failure_class, outcome.error_message,
+                nav2_error_code=outcome.error_code,
+                nav2_error_message=outcome.error_message,
+            )
         self._active_task = None
         self._active_round_id = ''
         self._active_decision_hash = ''
@@ -770,7 +840,8 @@ class DistributedFrontierAssignment(Node):
 
     def _publish_failure(
             self, failure: FailureClass, reason: str,
-            path: Optional[PathEvaluation] = None) -> None:
+            path: Optional[PathEvaluation] = None,
+            nav2_error_code: int = 0, nav2_error_message: str = '') -> None:
         if self._active_task is None:
             return
         local_snapshot = self._fresh_snapshot(self._robot_id, time.monotonic())
@@ -801,6 +872,8 @@ class DistributedFrontierAssignment(Node):
         message.retry_count = 1
         message.validity = seconds_to_duration(15.0 if failure in HARD_FAILURES else 2.0)
         message.evidence = reason
+        message.nav2_error_code = int(max(0, nav2_error_code))
+        message.nav2_error_message = nav2_error_message
         self._failure_publisher.publish(message)
 
     def _hard_failed_task_ids(self, union: CanonicalUnion) -> frozenset[str]:
@@ -903,7 +976,8 @@ class DistributedFrontierAssignment(Node):
             self, event_type: str, reason: str, previous: str = '',
             next_state: str = '', path_length: float = 0.0,
             travelled: float = 0.0, duration: float = 0.0,
-            recoveries: int = 0, failure: FailureClass = FailureClass.UNKNOWN) -> None:
+            recoveries: int = 0, failure: FailureClass = FailureClass.UNKNOWN,
+            nav2_error_code: int = 0, nav2_error_message: str = '') -> None:
         message = DistributedExplorationEvent()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = 'shared_map'
@@ -914,7 +988,13 @@ class DistributedFrontierAssignment(Node):
         message.event_type = event_type
         message.round_id = self._active_round_id or self._current_round_id()
         message.union_hash = '' if self._round is None else self._round.union.union_hash
+        # Agreement and state-transition events can be emitted before a local
+        # task is promoted to ``_active_task``.  Preserve the round's decision
+        # fingerprint in that interval instead of emitting an empty hash.
         message.decision_hash = self._active_decision_hash
+        if (not message.decision_hash and self._round is not None and
+                self._round.decision is not None):
+            message.decision_hash = self._round.decision.decision_hash
         if self._active_task is not None:
             message.canonical_task_id = self._active_task.canonical_id
             message.physical_task_signature = self._active_task.members[0].physical_signature
@@ -927,6 +1007,8 @@ class DistributedFrontierAssignment(Node):
         message.result = event_type
         message.failure_class = FAILURE_TO_MESSAGE[failure]
         message.recoveries = recoveries
+        message.nav2_error_code = int(max(0, nav2_error_code))
+        message.nav2_error_message = nav2_error_message
         if self._round is not None and self._round.decision is not None:
             message.route_overlap_score = self._round.decision.score.route_overlap_penalty
             message.sensing_overlap_estimate = (

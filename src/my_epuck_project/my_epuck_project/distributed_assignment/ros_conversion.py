@@ -1,5 +1,7 @@
 """Conversions between assignment-core models and project ROS interfaces."""
 
+from dataclasses import asdict
+import json
 import math
 from typing import Iterable
 
@@ -209,4 +211,7 @@ def decision_to_msg(
     message.decision_hash = decision.decision_hash
     message.coordinator_state = state
     message.validity = seconds_to_duration(validity_s)
+    message.diagnostics_json = json.dumps(
+        asdict(decision.diagnostics), sort_keys=True, separators=(',', ':'),
+    )
     return message

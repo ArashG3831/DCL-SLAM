@@ -20,3 +20,4 @@ float32 workload_imbalance_penalty
 string decision_hash
 string coordinator_state
 builtin_interfaces/Duration validity
+string diagnostics_json

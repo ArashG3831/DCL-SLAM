@@ -1,14 +1,15 @@
 """Pure exhaustive pair scoring for exactly Robot 1 and Robot 2."""
 
+from dataclasses import dataclass
 import hashlib
 import json
 import math
-from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
 from .canonical import bounds_iou
 from .models import (
     AssignmentScore,
+    AssignmentDiagnostics,
     Bid,
     BidBatch,
     CanonicalTask,
@@ -205,13 +206,19 @@ def choose_pair_assignment(
             raise ValueError('unexpected bidder identity')
     tasks = {task.canonical_id: task for task in union.tasks}
     first_map, second_map = _bid_map(robot1_bids), _bid_map(robot2_bids)
-    choices1 = [IDLE_TASK_ID] + sorted(
+    valid_first = {
         task_id for task_id, bid in first_map.items()
         if task_id in tasks and bid.path_valid
-    )
-    choices2 = [IDLE_TASK_ID] + sorted(
+    }
+    valid_second = {
         task_id for task_id, bid in second_map.items()
         if task_id in tasks and bid.path_valid
+    }
+    choices1 = [IDLE_TASK_ID] + sorted(
+        valid_first
+    )
+    choices2 = [IDLE_TASK_ID] + sorted(
+        valid_second
     )
     candidates = []
     for first_id in choices1:
@@ -235,7 +242,9 @@ def choose_pair_assignment(
                  if bid is not None), default=0.0,
             )
             candidates.append((first_id, second_id, score, combined, maximum))
-    useful = [item for item in candidates
+    non_idle = [item for item in candidates
+                if item[0] or item[1]]
+    useful = [item for item in non_idle
               if item[2].total >= weights.minimum_useful_score]
     if useful:
         selected = min(useful, key=lambda item: (
@@ -247,6 +256,51 @@ def choose_pair_assignment(
     else:
         selected = (IDLE_TASK_ID, IDLE_TASK_ID, AssignmentScore(), 0.0, 0.0)
     first_id, second_id, score, combined, maximum = selected
+    best_non_idle = min(non_idle, key=lambda item: (
+        -round(item[2].total, 12),
+        round(item[3], 12),
+        round(item[4], 12),
+        item[0], item[1],
+    )) if non_idle else None
+    if not union.tasks:
+        idle_reason = 'NO_TASKS'
+    elif not valid_first and not valid_second:
+        idle_reason = 'NO_VALID_BIDS'
+    elif best_non_idle is None or best_non_idle[2].total < weights.minimum_useful_score:
+        idle_reason = 'NON_IDLE_UTILITY_BELOW_IDLE'
+    else:
+        idle_reason = 'OTHER'
+    if valid_first and valid_second:
+        availability_reason = 'BOTH_ROBOTS_REACHABLE'
+    elif valid_first:
+        availability_reason = 'ONLY_ROBOT1_REACHABLE'
+    elif valid_second:
+        availability_reason = 'ONLY_ROBOT2_REACHABLE'
+    else:
+        availability_reason = 'NO_VALID_BIDS'
+    rejected_equivalence = sum(
+        max(0, len(task.members) - 1) for task in union.tasks
+    )
+    best_score = best_non_idle[2] if best_non_idle else AssignmentScore()
+    diagnostics = AssignmentDiagnostics(
+        idle_reason=idle_reason,
+        availability_reason=availability_reason,
+        union_task_count=len(union.tasks),
+        robot1_bid_count=len(robot1_bids.bids),
+        robot2_bid_count=len(robot2_bids.bids),
+        robot1_valid_bid_count=len(valid_first),
+        robot2_valid_bid_count=len(valid_second),
+        reachable_by_both_count=len(valid_first & valid_second),
+        reachable_only_robot1_count=len(valid_first - valid_second),
+        reachable_only_robot2_count=len(valid_second - valid_first),
+        rejected_equivalence_count=rejected_equivalence,
+        rejected_failure_suppression_count=sum(
+            task.canonical_id in hard_failed_tasks for task in union.tasks
+        ),
+        best_non_idle_robot1_task_id=best_non_idle[0] if best_non_idle else '',
+        best_non_idle_robot2_task_id=best_non_idle[1] if best_non_idle else '',
+        best_non_idle_score=best_score,
+    )
     first_fingerprint = bid_fingerprint(robot1_bids)
     second_fingerprint = bid_fingerprint(robot2_bids)
     decision_payload = {
@@ -272,6 +326,7 @@ def choose_pair_assignment(
         decision_hash=_hash(decision_payload),
         combined_path_length_m=combined,
         maximum_path_length_m=maximum,
+        diagnostics=diagnostics,
     )
 
 

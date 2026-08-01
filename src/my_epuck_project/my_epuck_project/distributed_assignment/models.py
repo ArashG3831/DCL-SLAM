@@ -122,6 +122,35 @@ class AssignmentScore:
 
 
 @dataclass(frozen=True)
+class AssignmentDiagnostics:
+    """Deterministic explanation of a pair decision, including IDLE cases."""
+
+    idle_reason: str = 'OTHER'
+    availability_reason: str = 'OTHER'
+    union_task_count: int = 0
+    robot1_snapshot_task_count: int = 0
+    robot2_snapshot_task_count: int = 0
+    robot1_bid_count: int = 0
+    robot2_bid_count: int = 0
+    robot1_valid_bid_count: int = 0
+    robot2_valid_bid_count: int = 0
+    reachable_by_both_count: int = 0
+    reachable_only_robot1_count: int = 0
+    reachable_only_robot2_count: int = 0
+    rejected_equivalence_count: int = 0
+    rejected_freshness_count: int = 0
+    rejected_failure_suppression_count: int = 0
+    rejected_active_reservation_count: int = 0
+    rejected_gain_threshold_count: int = 0
+    rejected_local_score_threshold_count: int = 0
+    rejected_path_threshold_count: int = 0
+    best_non_idle_robot1_task_id: str = ''
+    best_non_idle_robot2_task_id: str = ''
+    best_non_idle_score: AssignmentScore = AssignmentScore()
+    idle_score: float = 0.0
+
+
+@dataclass(frozen=True)
 class PairDecision:
     """Complete replicated assignment for Robot 1 and Robot 2."""
 
@@ -135,6 +164,7 @@ class PairDecision:
     decision_hash: str
     combined_path_length_m: float
     maximum_path_length_m: float
+    diagnostics: AssignmentDiagnostics = AssignmentDiagnostics()
 
 
 class FailureClass(str, Enum):

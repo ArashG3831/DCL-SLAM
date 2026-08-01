@@ -433,8 +433,8 @@ class DistributedFrontierAssignment(Node):
         if self._committed.decision is None:
             self._committed.commit(self._round.decision)
             self._emit_event('DECISION_AGREED', 'positive replicated decision match')
-        if (self._round.decision.robot1_task_id is None and
-                self._round.decision.robot2_task_id is None and
+        if (not self._round.decision.robot1_task_id and
+                not self._round.decision.robot2_task_id and
                 self._consider_completion(now)):
             return
         if not self._dispatch_enabled:

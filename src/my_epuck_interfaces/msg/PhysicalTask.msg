@@ -16,4 +16,6 @@ bool has_visible_bounds
 float32 visible_reveal_gain
 float32 local_ordering_score
 bool local_path_valid
+float32 local_path_length_m
+geometry_msgs/Point[] local_path_samples
 builtin_interfaces/Time generation_stamp

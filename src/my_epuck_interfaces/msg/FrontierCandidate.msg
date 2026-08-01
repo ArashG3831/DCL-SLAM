@@ -13,3 +13,5 @@ float32 path_length_m
 float32 heading_change_rad
 float32 score
 uint8 reachability_state
+float32 local_path_length_m
+geometry_msgs/Point[] local_path_samples

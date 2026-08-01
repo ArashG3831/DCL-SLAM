@@ -98,6 +98,9 @@ def task_from_msg(message: PhysicalTaskMsg) -> PhysicalTask:
         visible_reveal_gain=message.visible_reveal_gain,
         local_ordering_score=message.local_ordering_score,
         local_path_valid=message.local_path_valid,
+        local_path_length_m=message.local_path_length_m,
+        local_path=tuple((point.x, point.y)
+                         for point in message.local_path_samples),
         generation_ros_ns=stamp.sec * 1_000_000_000 + stamp.nanosec,
     )
 

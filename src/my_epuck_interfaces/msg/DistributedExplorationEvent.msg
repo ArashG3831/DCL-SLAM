@@ -21,3 +21,5 @@ float32 sensing_overlap_estimate
 string result
 uint8 failure_class
 uint32 recoveries
+uint16 nav2_error_code
+string nav2_error_message

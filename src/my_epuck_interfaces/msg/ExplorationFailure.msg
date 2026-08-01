@@ -21,3 +21,5 @@ geometry_msgs/Point[] path_samples
 uint32 retry_count
 builtin_interfaces/Duration validity
 string evidence
+uint16 nav2_error_code
+string nav2_error_message

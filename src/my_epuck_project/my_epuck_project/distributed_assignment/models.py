@@ -36,6 +36,8 @@ class PhysicalTask:
     visible_reveal_gain: float = 0.0
     local_ordering_score: float = 0.0
     local_path_valid: bool = False
+    local_path_length_m: float = 0.0
+    local_path: Tuple[Point, ...] = ()
     generation_ros_ns: int = 0
 
 

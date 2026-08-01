@@ -149,6 +149,8 @@ class AssignmentDiagnostics:
     valid_one_active_assignment_count: int = 0
     valid_two_active_pair_count: int = 0
     idle_idle_permitted: bool = False
+    robot1_idle_reason: str = 'NOT_IDLE'
+    robot2_idle_reason: str = 'NOT_IDLE'
     best_non_idle_robot1_task_id: str = ''
     best_non_idle_robot2_task_id: str = ''
     best_non_idle_score: AssignmentScore = AssignmentScore()

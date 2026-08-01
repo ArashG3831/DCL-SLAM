@@ -361,6 +361,18 @@ def choose_pair_assignment(
             1 for item in non_idle if item[0] and item[1]
         ),
         idle_idle_permitted=not bool(non_idle),
+        robot1_idle_reason=(
+            'NOT_IDLE' if first_id else (
+                idle_reason if not second_id else
+                'BEST_FEASIBLE_ASSIGNMENT_TO_ROBOT2'
+            )
+        ),
+        robot2_idle_reason=(
+            'NOT_IDLE' if second_id else (
+                idle_reason if not first_id else
+                'BEST_FEASIBLE_ASSIGNMENT_TO_ROBOT1'
+            )
+        ),
         best_non_idle_robot1_task_id=best_non_idle[0] if best_non_idle else '',
         best_non_idle_robot2_task_id=best_non_idle[1] if best_non_idle else '',
         best_non_idle_score=best_score,

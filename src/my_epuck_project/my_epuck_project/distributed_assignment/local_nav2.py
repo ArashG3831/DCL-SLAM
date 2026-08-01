@@ -1,8 +1,9 @@
 """Small namespace-local Nav2 path evaluation and execution boundary."""
 
+from dataclasses import dataclass
+import fcntl
 import math
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
 from action_msgs.msg import GoalStatus
@@ -137,6 +138,14 @@ class LocalNav2:
         self._navigation_timeout_s = float(
             node.declare_parameter('navigation_timeout_s', 240.0).value,
         )
+        self._navigation_no_progress_timeout_s = float(
+            node.declare_parameter(
+                'navigation_no_progress_timeout_s', 30.0,
+            ).value,
+        )
+        self._navigation_min_progress_m = float(
+            node.declare_parameter('navigation_min_progress_m', 0.05).value,
+        )
         self._maximum_path_samples = int(
             node.declare_parameter('maximum_path_samples', 32).value,
         )
@@ -146,6 +155,12 @@ class LocalNav2:
         self._costmap_lethal_threshold = int(
             node.declare_parameter('costmap_lethal_threshold', 253).value,
         )
+        namespace = node.get_namespace().strip('/') or 'root'
+        self._path_query_lock_path = str(node.declare_parameter(
+            'path_query_lock_path',
+            '/tmp/my_epuck_%s_compute_path.lock' % namespace,
+        ).value)
+        self._path_query_lock_file = None
         self._compute_client = ActionClient(
             node, ComputePathToPose, 'compute_path_to_pose',
         )
@@ -175,11 +190,15 @@ class LocalNav2:
         self._path_callback: Optional[Callable[[PathEvaluation], None]] = None
         self._path_goal_handle = None
         self._navigation_goal_handle = None
+        self._navigation_send_pending = False
         self._navigation_callback: Optional[Callable[[NavigationOutcome], None]] = None
         self._navigation_started_steady_s = 0.0
         self._navigation_start_distance_m = 0.0
+        self._navigation_last_progress_distance_m = 0.0
+        self._navigation_last_progress_steady_s = 0.0
         self._navigation_recoveries = 0
         self._navigation_timeout_requested = False
+        self._navigation_no_progress_requested = False
         self._navigation_cancel_requested = False
         self._last_lifecycle_active: Optional[bool] = None
         self._lifecycle_health_pending = False
@@ -188,7 +207,10 @@ class LocalNav2:
     @property
     def local_goal_active(self) -> bool:
         """Return whether this wrapper owns an unresolved local navigation goal."""
-        return self._navigation_goal_handle is not None
+        return (
+            self._navigation_goal_handle is not None or
+            self._navigation_send_pending
+        )
 
     @property
     def travelled_distance_m(self) -> float:
@@ -261,7 +283,12 @@ class LocalNav2:
 
     def _on_odom(self, message: Odometry) -> None:
         position = message.pose.pose.position
-        self._distance.observe((position.x, position.y))
+        distance = self._distance.observe((position.x, position.y))
+        if (self._navigation_goal_handle is not None and
+                distance - self._navigation_last_progress_distance_m >=
+                self._navigation_min_progress_m):
+            self._navigation_last_progress_distance_m = distance
+            self._navigation_last_progress_steady_s = time.monotonic()
 
     def _pose(self, task: PhysicalTask):
         from geometry_msgs.msg import PoseStamped
@@ -278,7 +305,9 @@ class LocalNav2:
             self, task: PhysicalTask,
             callback: Callable[[PathEvaluation], None]) -> bool:
         """Start one bounded local path request; return false if busy/unavailable."""
-        if self._path_callback is not None or not self._compute_client.server_is_ready():
+        if (self._path_callback is not None or
+                not self._compute_client.server_is_ready() or
+                not self._acquire_path_query_lock()):
             return False
         self._active_path_request += 1
         generation = self._active_path_request
@@ -350,8 +379,35 @@ class LocalNav2:
     def _finish_path(self, result: PathEvaluation) -> None:
         callback, self._path_callback = self._path_callback, None
         self._path_goal_handle = None
+        self._release_path_query_lock()
         if callback is not None:
             callback(result)
+
+    def _acquire_path_query_lock(self) -> bool:
+        """Serialize this robot's planner action with the C++ candidate node."""
+        if self._path_query_lock_file is not None:
+            return True
+        try:
+            handle = open(self._path_query_lock_path, 'a+')
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            try:
+                handle.close()
+            except UnboundLocalError:
+                pass
+            return False
+        self._path_query_lock_file = handle
+        return True
+
+    def _release_path_query_lock(self) -> None:
+        """Release the bounded per-robot planner lease, if held."""
+        handle, self._path_query_lock_file = self._path_query_lock_file, None
+        if handle is None:
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     def check_dispatch_preconditions(
             self, task: PhysicalTask, final_path_valid: bool,
@@ -455,9 +511,13 @@ class LocalNav2:
         self._navigation_callback = callback
         self._navigation_started_steady_s = time.monotonic()
         self._navigation_start_distance_m = self.travelled_distance_m
+        self._navigation_last_progress_distance_m = self.travelled_distance_m
+        self._navigation_last_progress_steady_s = self._navigation_started_steady_s
         self._navigation_recoveries = 0
         self._navigation_timeout_requested = False
+        self._navigation_no_progress_requested = False
         self._navigation_cancel_requested = False
+        self._navigation_send_pending = True
         future = self._navigate_client.send_goal_async(
             goal, feedback_callback=self._navigation_feedback,
         )
@@ -465,7 +525,20 @@ class LocalNav2:
         return True
 
     def _navigation_goal_response(self, future) -> None:
-        goal_handle = future.result()
+        try:
+            goal_handle = future.result()
+        except Exception as error:  # noqa: B902
+            self._navigation_send_pending = False
+            self._finish_navigation(NavigationOutcome(
+                False, GoalStatus.STATUS_UNKNOWN, 0,
+                'NavigateToPose goal response exception: ' + str(error),
+                FailureClass.UNKNOWN,
+                time.monotonic() - self._navigation_started_steady_s,
+                self.travelled_distance_m - self._navigation_start_distance_m,
+                self._navigation_recoveries,
+            ))
+            return
+        self._navigation_send_pending = False
         if goal_handle is None or not goal_handle.accepted:
             self._finish_navigation(NavigationOutcome(
                 False, GoalStatus.STATUS_UNKNOWN, 0, 'NavigateToPose goal rejected',
@@ -476,6 +549,8 @@ class LocalNav2:
             ))
             return
         self._navigation_goal_handle = goal_handle
+        if self._navigation_cancel_requested:
+            goal_handle.cancel_goal_async()
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._navigation_result)
 
@@ -490,11 +565,23 @@ class LocalNav2:
         if not self.local_goal_active:
             return False
         self._navigation_cancel_requested = True
-        self._navigation_goal_handle.cancel_goal_async()
+        if self._navigation_goal_handle is not None:
+            self._navigation_goal_handle.cancel_goal_async()
         return True
 
     def _navigation_result(self, future) -> None:
-        wrapped = future.result()
+        try:
+            wrapped = future.result()
+        except Exception as error:  # noqa: B902
+            self._finish_navigation(NavigationOutcome(
+                True, GoalStatus.STATUS_UNKNOWN, 0,
+                'NavigateToPose result exception: ' + str(error),
+                FailureClass.UNKNOWN,
+                time.monotonic() - self._navigation_started_steady_s,
+                max(0.0, self.travelled_distance_m - self._navigation_start_distance_m),
+                self._navigation_recoveries,
+            ))
+            return
         result = wrapped.result
         error_code = 0 if result is None else result.error_code
         error_message = 'missing action result' if result is None else result.error_msg
@@ -505,8 +592,12 @@ class LocalNav2:
         evidence = FailureEvidence()
         if self._navigation_timeout_requested:
             evidence = FailureEvidence(timed_out=True)
+        elif self._navigation_no_progress_requested:
+            evidence = FailureEvidence(controller_no_progress=True)
         elif self._navigation_cancel_requested or wrapped.status == GoalStatus.STATUS_CANCELED:
             evidence = FailureEvidence(explicitly_cancelled=True)
+        if self._navigation_no_progress_requested and not error_message:
+            error_message = 'local controller no-progress timeout'
         self._finish_navigation(NavigationOutcome(
             True, wrapped.status, error_code, error_message,
             FailureClass.UNKNOWN if succeeded else classify_failure(evidence),
@@ -518,6 +609,7 @@ class LocalNav2:
     def _finish_navigation(self, result: NavigationOutcome) -> None:
         callback, self._navigation_callback = self._navigation_callback, None
         self._navigation_goal_handle = None
+        self._navigation_send_pending = False
         if callback is not None:
             callback(result)
 
@@ -532,7 +624,14 @@ class LocalNav2:
                 ComputePathToPose.Result.TIMEOUT, 'local path query timeout',
                 FailureClass.TIMEOUT,
             ))
-        if (self.local_goal_active and not self._navigation_timeout_requested and
+        if (self._navigation_goal_handle is not None and
+                not self._navigation_timeout_requested and
                 now - self._navigation_started_steady_s > self._navigation_timeout_s):
             self._navigation_timeout_requested = True
+            self._navigation_goal_handle.cancel_goal_async()
+        if (self._navigation_goal_handle is not None and
+                not self._navigation_no_progress_requested and
+                now - self._navigation_last_progress_steady_s >
+                self._navigation_no_progress_timeout_s):
+            self._navigation_no_progress_requested = True
             self._navigation_goal_handle.cancel_goal_async()

@@ -461,11 +461,14 @@ class DiagnosticNode(Node):
         self.nav_runs = []
         self.active_nav = {robot: None for robot in ROBOTS}
         self.last_terminal_sim = {robot: None for robot in ROBOTS}
-        self.manual_steps = [
-            ('robot1', 'short', False), ('robot2', 'short', False),
-            ('robot1', 'medium', False), ('robot2', 'medium', False),
-            ('both', 'simultaneous', True),
-        ]
+        self.manual_steps = (
+            [
+                ('robot1', 'short', False), ('robot2', 'short', False),
+            ] if self.phase_profile == 'short' else [
+                ('robot1', 'short', False), ('robot2', 'short', False),
+                ('robot1', 'medium', False), ('robot2', 'medium', False),
+                ('both', 'simultaneous', True),
+            ])
         self.manual_index = 0
         self.manual_prepared = {}
         self.frontier_steps = [

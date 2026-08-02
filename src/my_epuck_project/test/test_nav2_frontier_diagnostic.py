@@ -64,6 +64,22 @@ def test_short_phase_profile_reaches_frontiers_in_180_seconds():
     assert phase_at(180.0, profile='short') == 'FRONTIER_TO_NAV2'
 
 
+def test_short_profile_does_not_schedule_medium_manual_goals(tmp_path):
+    rclpy.init()
+    node = DiagnosticNode(parameter_overrides=[
+        Parameter('output_directory', value=str(tmp_path)),
+        Parameter('mission_duration_s', value=180.0),
+        Parameter('phase_profile', value='short'),
+    ])
+    try:
+        assert node.manual_steps == [
+            ('robot1', 'short', False), ('robot2', 'short', False)]
+    finally:
+        node.close_artifacts()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_node_constructs_with_clock_callback_and_streaming_artifacts(tmp_path):
     rclpy.init()
     node = DiagnosticNode(parameter_overrides=[

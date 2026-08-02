@@ -17,8 +17,9 @@ def clear_live_footprints(
     """Clear occupied evidence strictly beneath fresh physical footprints.
 
     ``footprints`` contains dictionaries with ``x``, ``y``, ``radius_m`` and
-    ``pose_age_s``.  Unknown cells are left unknown, and stale poses clear no
-    cells.  The optional margin is bounded to one occupancy-grid cell.
+    ``pose_age_s``. Occupied cells beneath a fresh physical footprint become
+    explicit free space (0); unknown cells remain unknown and stale poses
+    clear no cells. The optional margin is bounded to one occupancy-grid cell.
     """
     if uncertainty_cells < 0 or uncertainty_cells > 1:
         raise ValueError('uncertainty_cells must be 0 or 1')
@@ -63,7 +64,7 @@ def clear_live_footprints(
                     continue
                 index = row * grid.info.width + column
                 if result.data[index] >= 0:
-                    result.data[index] = -1
+                    result.data[index] = 0
                     cleared += 1
         total += cleared
         details.append({**footprint, 'cleared_cell_count': cleared,

@@ -12,7 +12,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
-def message_key(messages):
+def message_key(messages, local_revision, remote_revision):
     return tuple(
         (
             message.header.frame_id,
@@ -23,7 +23,7 @@ def message_key(messages):
             message.info.resolution,
         )
         for message in messages
-    )
+    ) + (local_revision, remote_revision)
 
 
 class SourceAwareMapFusion(Node):
@@ -88,6 +88,7 @@ class SourceAwareMapFusion(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.local_map = None
         self.remote_map = None
+        self.local_revision = 0
         self.last_remote_revision = 0
         self.map_revision = 0
         self.live_pose_cache = {}
@@ -101,6 +102,7 @@ class SourceAwareMapFusion(Node):
 
     def local_callback(self, message):
         self.local_map = message
+        self.local_revision += 1
         if self.publish_on_callback:
             self.try_fuse()
 
@@ -249,7 +251,8 @@ class SourceAwareMapFusion(Node):
         if self.sanitize_live_footprints:
             footprints, pose_key = self.live_footprints()
             fusion_key = (
-                message_key(messages),
+                message_key(messages, self.local_revision,
+                            self.last_remote_revision),
                 tuple(round(value, 4) for transform in transforms
                       for value in transform),
                 pose_key,

@@ -113,7 +113,7 @@ def test_live_robot_footprint_is_removed_from_sanitized_map():
     sanitized, details = sanitize_shared_map(
         grid(), [footprint()], uncertainty_cells=0)
     assert details['cleared_cell_count'] > 0
-    assert sanitized.data[15 * 30 + 15] == -1
+    assert sanitized.data[15 * 30 + 15] == 0
 
 
 def test_nearby_wall_outside_footprint_remains_occupied():
@@ -135,8 +135,8 @@ def test_stale_robot_pose_causes_no_map_clearing():
 def test_two_live_footprints_are_both_removed():
     sanitized, _ = sanitize_shared_map(
         grid(), [footprint(-0.05), footprint(0.05)], uncertainty_cells=0)
-    assert sanitized.data[15 * 30 + 10] == -1
-    assert sanitized.data[15 * 30 + 20] == -1
+    assert sanitized.data[15 * 30 + 10] == 0
+    assert sanitized.data[15 * 30 + 20] == 0
 
 
 def test_start_gate_classifies_free_and_inflated():

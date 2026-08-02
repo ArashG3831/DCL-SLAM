@@ -12,6 +12,20 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
+def message_key(messages):
+    return tuple(
+        (
+            message.header.frame_id,
+            message.header.stamp.sec,
+            message.header.stamp.nanosec,
+            message.info.width,
+            message.info.height,
+            message.info.resolution,
+        )
+        for message in messages
+    )
+
+
 class SourceAwareMapFusion(Node):
     """Fuse own local SLAM evidence with one validated remote peer map."""
 
@@ -77,6 +91,7 @@ class SourceAwareMapFusion(Node):
         self.last_remote_revision = 0
         self.map_revision = 0
         self.live_pose_cache = {}
+        self.last_sanitized_key = None
         self.retry_timer = self.create_timer(0.5, self.try_fuse)
         self.get_logger().info(
             f'Local {self.resolve_topic_name(local_topic)} + remote-only '
@@ -155,6 +170,57 @@ class SourceAwareMapFusion(Node):
             for x, y in ((0.0, 0.0), (width, 0.0), (0.0, height), (width, height))
         ]
 
+    def live_footprints(self):
+        """Return fresh/cached live footprints and a cheap change key."""
+        footprints = []
+        key = []
+        for frame in self.live_robot_frames:
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.output_frame, frame, Time(),
+                    timeout=Duration(seconds=0.05))
+                stamp = Time.from_msg(transform.header.stamp)
+                now = self.get_clock().now()
+                age = max(0.0, (now - stamp).nanoseconds / 1e9)
+                x = transform.transform.translation.x
+                y = transform.transform.translation.y
+                heading = self.yaw(transform.transform.rotation)
+                footprints.append({
+                    'robot_frame': frame, 'x': x, 'y': y,
+                    'radius_m': self.live_footprint_radius,
+                    'pose_age_s': age,
+                })
+                self.live_pose_cache[frame] = (x, y, stamp)
+                key.append((frame, True, round(x, 3), round(y, 3),
+                            round(heading, 3), age <= self.live_pose_max_age_s))
+            except TransformException as error:
+                cached = self.live_pose_cache.get(frame)
+                now = self.get_clock().now()
+                cached_age = None
+                if cached is not None:
+                    cached_age = max(
+                        0.0, (now - cached[2]).nanoseconds / 1e9)
+                if cached is not None and cached_age <= self.live_pose_max_age_s:
+                    footprints.append({
+                        'robot_frame': frame, 'x': cached[0], 'y': cached[1],
+                        'radius_m': self.live_footprint_radius,
+                        'pose_age_s': cached_age,
+                    })
+                    key.append((frame, True, round(cached[0], 3),
+                                round(cached[1], 3), round(cached_age, 2),
+                                True))
+                else:
+                    self.get_logger().warning(
+                        f'Live footprint unavailable for {frame}: {error}',
+                        throttle_duration_sec=5.0)
+                    footprints.append({
+                        'robot_frame': frame, 'pose_age_s': None,
+                        'x': 0.0, 'y': 0.0,
+                        'radius_m': self.live_footprint_radius,
+                    })
+                    key.append((frame, False))
+        return footprints, tuple(key)
+
     def try_fuse(self):
         if self.local_map is None or self.remote_map is None:
             return
@@ -178,6 +244,19 @@ class SourceAwareMapFusion(Node):
         maximum_y = math.ceil(max(p[1] for p in corners)/self.resolution)*self.resolution
         width = max(1, int(round((maximum_x-minimum_x)/self.resolution)))
         height = max(1, int(round((maximum_y-minimum_y)/self.resolution)))
+
+        footprints = []
+        if self.sanitize_live_footprints:
+            footprints, pose_key = self.live_footprints()
+            fusion_key = (
+                message_key(messages),
+                tuple(round(value, 4) for transform in transforms
+                      for value in transform),
+                pose_key,
+            )
+            if fusion_key == self.last_sanitized_key:
+                return
+            self.last_sanitized_key = fusion_key
         fused_data = [-1] * (width*height)
 
         for message, transform in zip(messages, transforms):
@@ -219,49 +298,6 @@ class SourceAwareMapFusion(Node):
                 self.map_publisher.publish(fused)
                 self.metadata_publisher.publish(fused.info)
             return
-        footprints = []
-        for frame in self.live_robot_frames:
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    self.output_frame, frame, Time(),
-                    timeout=Duration(seconds=0.05))
-                stamp = Time.from_msg(transform.header.stamp)
-                now = self.get_clock().now()
-                age = max(0.0, (now - stamp).nanoseconds / 1e9)
-                footprints.append({
-                    'robot_frame': frame,
-                    'x': transform.transform.translation.x,
-                    'y': transform.transform.translation.y,
-                    'radius_m': self.live_footprint_radius,
-                    'pose_age_s': age,
-                })
-                self.live_pose_cache[frame] = (
-                    transform.transform.translation.x,
-                    transform.transform.translation.y,
-                    stamp,
-                )
-            except TransformException as error:
-                cached = self.live_pose_cache.get(frame)
-                now = self.get_clock().now()
-                cached_age = None
-                if cached is not None:
-                    cached_age = max(
-                        0.0, (now - cached[2]).nanoseconds / 1e9)
-                if cached is not None and cached_age <= self.live_pose_max_age_s:
-                    footprints.append({
-                        'robot_frame': frame, 'x': cached[0], 'y': cached[1],
-                        'radius_m': self.live_footprint_radius,
-                        'pose_age_s': cached_age,
-                    })
-                else:
-                    self.get_logger().warning(
-                        f'Live footprint unavailable for {frame}: {error}',
-                        throttle_duration_sec=5.0)
-                    footprints.append({
-                        'robot_frame': frame, 'pose_age_s': None,
-                        'x': 0.0, 'y': 0.0,
-                        'radius_m': self.live_footprint_radius,
-                    })
         fused, sanitization = sanitize_shared_map(
             fused, footprints,
             uncertainty_cells=self.live_footprint_uncertainty_cells,

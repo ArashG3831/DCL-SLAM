@@ -134,14 +134,25 @@ def path_length(path: NavPath) -> float:
     return total
 
 
-def phase_at(elapsed: float, mission_duration: float = 600.0) -> str:
+PHASE_BOUNDARIES = {
+    'full': (0.0, 60.0, 300.0, 450.0, 600.0),
+    'short': (0.0, 20.0, 100.0, 140.0, 180.0),
+}
+
+
+def phase_at(elapsed: float, mission_duration: float = 600.0,
+             profile: str = 'full') -> str:
     """Return the named phase for readiness-relative simulation time."""
     del mission_duration
-    if elapsed < 60.0:
+    try:
+        _, filter_end, nav_end, candidate_end, _ = PHASE_BOUNDARIES[profile]
+    except KeyError as error:
+        raise ValueError(f'unknown phase profile: {profile}') from error
+    if elapsed < filter_end:
         return 'FILTER_AND_MAPPING'
-    if elapsed < 300.0:
+    if elapsed < nav_end:
         return 'NAV2_ONLY'
-    if elapsed < 450.0:
+    if elapsed < candidate_end:
         return 'FRONTIER_GENERATION_ONLY'
     return 'FRONTIER_TO_NAV2'
 
@@ -347,6 +358,7 @@ class DiagnosticNode(Node):
         self.declare_parameter('mission_duration_s', 600.0)
         self.declare_parameter('startup_timeout_s', 300.0)
         self.declare_parameter('world_profile', 'large')
+        self.declare_parameter('phase_profile', 'full')
         output = self.get_parameter('output_directory').value
         if not output:
             raise ValueError('output_directory must be configured')
@@ -357,6 +369,9 @@ class DiagnosticNode(Node):
         self.startup_timeout = float(
             self.get_parameter('startup_timeout_s').value)
         self.world_profile = str(self.get_parameter('world_profile').value)
+        self.phase_profile = str(self.get_parameter('phase_profile').value)
+        if self.phase_profile not in PHASE_BOUNDARIES:
+            raise ValueError(f'unknown phase profile: {self.phase_profile}')
         self.started_wall = time.monotonic()
         self.started_utc = utc_now()
         self.ready_sim = None
@@ -1013,7 +1028,7 @@ class DiagnosticNode(Node):
                 self._finish()
             return
         elapsed = self.mission_elapsed()
-        phase = phase_at(elapsed, self.mission_duration)
+        phase = phase_at(elapsed, self.mission_duration, self.phase_profile)
         if phase != self.last_phase:
             self._transition_phase(self.last_phase, phase)
             self.last_phase = phase
@@ -1139,7 +1154,7 @@ class DiagnosticNode(Node):
         delta = 0.0 if self.last_sample_sim is None else max(
             0.0, elapsed - self.last_sample_sim)
         self.last_sample_sim = elapsed
-        phase = phase_at(elapsed, self.mission_duration)
+        phase = phase_at(elapsed, self.mission_duration, self.phase_profile)
         for robot in ROBOTS:
             transform = self._lookup_pose(robot)
             pose = self.poses[robot]
@@ -2005,6 +2020,10 @@ class DiagnosticNode(Node):
             'startup_duration_wall_s': None if self.ready_wall is None
             else self.ready_wall - self.started_wall,
             'mission_duration_requested_s': self.mission_duration,
+            'phase_profile': self.phase_profile,
+            'phase_boundaries_s': dict(zip(
+                ('readiness', 'filter_end', 'nav2_end', 'candidate_end',
+                 'integration_end'), PHASE_BOUNDARIES[self.phase_profile])),
             'mission_duration_observed_s': elapsed,
             'world_profile': self.world_profile,
             'readiness': self.readiness_report,
@@ -2207,6 +2226,8 @@ def runner_parser() -> argparse.ArgumentParser:
     result.add_argument('--rendering', type=boolean)
     result.add_argument('--rviz', type=boolean)
     result.add_argument('--mission-timeout', type=float, default=600.0)
+    result.add_argument('--phase-profile', choices=('short', 'full'),
+                        default='full')
     result.add_argument('--startup-timeout', type=float, default=300.0)
     result.add_argument('--emergency-wall-runtime', type=float, default=1200.0)
     result.add_argument('--ros-domain-id', type=int, default=232)
@@ -2273,6 +2294,7 @@ def launch_command(args: argparse.Namespace, world: Path,
         f'output_directory:={attempt}',
         f'mission_duration_s:={args.mission_timeout}',
         f'startup_timeout_s:={args.startup_timeout}',
+        f'phase_profile:={args.phase_profile}',
     ]
 
 

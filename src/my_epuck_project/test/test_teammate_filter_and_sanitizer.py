@@ -35,9 +35,9 @@ def grid():
     return result
 
 
-def footprint(x=0.0, y=0.0, age=0.0, radius=0.037):
+def footprint(x=0.0, y=0.0, age=0.0, radius=0.037, role='peer'):
     return {'robot_frame': 'robot1/base_footprint', 'x': x, 'y': y,
-            'radius_m': radius, 'pose_age_s': age}
+            'radius_m': radius, 'pose_age_s': age, 'role': role}
 
 
 def test_actual_verified_robot_silhouette_is_fully_masked():
@@ -134,9 +134,48 @@ def test_stale_robot_pose_causes_no_map_clearing():
 
 def test_two_live_footprints_are_both_removed():
     sanitized, _ = sanitize_shared_map(
-        grid(), [footprint(-0.05), footprint(0.05)], uncertainty_cells=0)
+        grid(), [footprint(-0.05, role='own'),
+                 footprint(0.05, role='peer')], uncertainty_cells=0)
     assert sanitized.data[15 * 30 + 10] == 0
     assert sanitized.data[15 * 30 + 20] == 0
+
+
+def test_own_fresh_peer_stale_clears_only_own():
+    source = grid()
+    sanitized, details = sanitize_shared_map(
+        source, [footprint(-0.05, role='own'),
+                 footprint(0.05, age=0.51, role='peer')],
+        uncertainty_cells=0)
+    assert details['cleared_by_role']['own'] > 0
+    assert details['cleared_by_role']['peer'] == 0
+    assert details['stale_by_role']['peer'] == 1
+
+
+def test_own_stale_clears_nothing_even_with_fresh_peer():
+    source = grid()
+    sanitized, details = sanitize_shared_map(
+        source, [footprint(role='own', age=0.51),
+                 footprint(0.05, role='peer')], uncertainty_cells=0)
+    assert details['cleared_by_role']['own'] == 0
+    assert details['cleared_by_role']['peer'] > 0
+
+
+def test_successive_current_own_footprints_clear_while_moving():
+    source = grid()
+    first, _ = sanitize_shared_map(
+        source, [footprint(-0.04, role='own')], uncertainty_cells=0)
+    second, details = sanitize_shared_map(
+        first, [footprint(0.04, role='own')], uncertainty_cells=0)
+    assert details['cleared_by_role']['own'] > 0
+    assert second.data[15 * 30 + 11] == 0
+    assert second.data[15 * 30 + 19] == 0
+
+
+def test_local_source_grid_is_not_mutated_by_sanitization():
+    source = grid()
+    original = list(source.data)
+    sanitize_shared_map(source, [footprint(role='own')], uncertainty_cells=1)
+    assert list(source.data) == original
 
 
 def test_start_gate_classifies_free_and_inflated():

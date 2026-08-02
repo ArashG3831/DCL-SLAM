@@ -56,6 +56,12 @@ class SourceAwareMapFusion(Node):
         self.resolution = float(self.get_parameter('resolution').value)
         self.live_robot_frames = list(
             self.get_parameter('live_robot_frames').value)
+        namespace = self.get_namespace().strip('/')
+        self.own_robot_id = namespace or self.live_robot_frames[0].split('/')[0]
+        self.peer_robot_id = next(
+            (frame.split('/')[0] for frame in self.live_robot_frames
+             if frame.split('/')[0] != self.own_robot_id),
+            None)
         self.live_footprint_radius = float(
             self.get_parameter('live_footprint_radius_m').value)
         self.live_footprint_uncertainty_cells = int(
@@ -173,10 +179,16 @@ class SourceAwareMapFusion(Node):
         ]
 
     def live_footprints(self):
-        """Return fresh/cached live footprints and a cheap change key."""
+        """Return independent own/peer footprints and freshness telemetry.
+
+        Own clearing is deliberately independent of peer TF availability. A
+        stale peer suppresses only that peer's footprint; it must never make
+        the local robot's own live footprint stale as a side effect.
+        """
         footprints = []
         key = []
         for frame in self.live_robot_frames:
+            role = 'own' if frame.split('/')[0] == self.own_robot_id else 'peer'
             try:
                 transform = self.tf_buffer.lookup_transform(
                     self.output_frame, frame, Time(),
@@ -190,6 +202,7 @@ class SourceAwareMapFusion(Node):
                 footprints.append({
                     'robot_frame': frame, 'x': x, 'y': y,
                     'radius_m': self.live_footprint_radius,
+                    'role': role,
                     'pose_age_s': age,
                 })
                 self.live_pose_cache[frame] = (x, y, stamp)
@@ -206,6 +219,7 @@ class SourceAwareMapFusion(Node):
                     footprints.append({
                         'robot_frame': frame, 'x': cached[0], 'y': cached[1],
                         'radius_m': self.live_footprint_radius,
+                        'role': role,
                         'pose_age_s': cached_age,
                     })
                     key.append((frame, True, round(cached[0], 3),
@@ -215,13 +229,22 @@ class SourceAwareMapFusion(Node):
                     self.get_logger().warning(
                         f'Live footprint unavailable for {frame}: {error}',
                         throttle_duration_sec=5.0)
-                    footprints.append({
-                        'robot_frame': frame, 'pose_age_s': None,
-                        'x': 0.0, 'y': 0.0,
-                        'radius_m': self.live_footprint_radius,
-                    })
                     key.append((frame, False))
-        return footprints, tuple(key)
+        telemetry = {}
+        for role in ('own', 'peer'):
+            matches = [item for item in footprints if item['role'] == role]
+            if matches:
+                telemetry[f'{role}_pose_age_s'] = min(
+                    item['pose_age_s'] for item in matches)
+                telemetry[f'{role}_pose_available'] = True
+                telemetry[f'{role}_clear_skipped_reason'] = (
+                    'POSE_STALE' if telemetry[f'{role}_pose_age_s']
+                    > self.live_pose_max_age_s else 'NONE')
+            else:
+                telemetry[f'{role}_pose_age_s'] = None
+                telemetry[f'{role}_pose_available'] = False
+                telemetry[f'{role}_clear_skipped_reason'] = 'TF_UNAVAILABLE'
+        return footprints, tuple(key), telemetry
 
     def try_fuse(self):
         if self.local_map is None or self.remote_map is None:
@@ -249,7 +272,7 @@ class SourceAwareMapFusion(Node):
 
         footprints = []
         if self.sanitize_live_footprints:
-            footprints, pose_key = self.live_footprints()
+            footprints, pose_key, pose_telemetry = self.live_footprints()
             fusion_key = (
                 message_key(messages, self.local_revision,
                             self.last_remote_revision),
@@ -311,6 +334,12 @@ class SourceAwareMapFusion(Node):
                 f'revision={self.map_revision}',
                 f'cleared_cell_count={sanitization["cleared_cell_count"]}',
                 f'stale_pose_count={sanitization["stale_pose_count"]}',
+                f'own_pose_age_s={pose_telemetry["own_pose_age_s"]}',
+                f'peer_pose_age_s={pose_telemetry["peer_pose_age_s"]}',
+                f'own_cells_cleared={sanitization["cleared_by_role"]["own"]}',
+                f'peer_cells_cleared={sanitization["cleared_by_role"]["peer"]}',
+                f'own_clear_skipped_reason={pose_telemetry["own_clear_skipped_reason"]}',
+                f'peer_clear_skipped_reason={pose_telemetry["peer_clear_skipped_reason"]}',
                 f'footprint_radius_m={self.live_footprint_radius}',
                 f'uncertainty_cells={self.live_footprint_uncertainty_cells}',
             )))

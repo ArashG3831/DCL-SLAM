@@ -30,11 +30,17 @@ def clear_live_footprints(
         return result, {'cleared_cell_count': 0, 'stale_pose_count': len(footprints)}
     total = 0
     stale = 0
+    cleared_by_role = {'own': 0, 'peer': 0}
+    stale_by_role = {'own': 0, 'peer': 0}
     details = []
     for footprint in footprints:
         age = footprint.get('pose_age_s')
+        role = footprint.get('role', 'peer')
+        if role not in cleared_by_role:
+            role = 'peer'
         if age is None or age < 0.0 or age > max_pose_age_s:
             stale += 1
+            stale_by_role[role] += 1
             details.append({**footprint, 'cleared_cell_count': 0,
                             'stale': True})
             continue
@@ -67,11 +73,14 @@ def clear_live_footprints(
                     result.data[index] = 0
                     cleared += 1
         total += cleared
+        cleared_by_role[role] += cleared
         details.append({**footprint, 'cleared_cell_count': cleared,
                         'clear_radius_m': clear_radius, 'stale': False})
     return result, {
         'cleared_cell_count': total,
         'stale_pose_count': stale,
+        'cleared_by_role': cleared_by_role,
+        'stale_by_role': stale_by_role,
         'footprints': details,
     }
 

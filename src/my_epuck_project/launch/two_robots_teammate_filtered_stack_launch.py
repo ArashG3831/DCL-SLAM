@@ -187,12 +187,19 @@ def launch_setup(context):
                     'live_footprint_radius_m': 0.037,
                     'live_footprint_uncertainty_cells': 1,
                     'live_pose_max_age_s': 0.5,
+                    'min_fusion_rebuild_period_s': LaunchConfiguration(
+                        'fusion_rebuild_period_s'),
                     # The accepted baseline retains callback publication.
                     # The allocator-free diagnostic uses the bounded timer so
                     # fusion cannot starve Nav2/controller execution.
                     'publish_on_callback': not diagnostic_mode,
                     'sanitize_live_footprints': diagnostic_mode,
                 }],
+                prefix=(
+                    'systemd-run --user --scope --quiet '
+                    '-p CPUQuota=' + LaunchConfiguration(
+                        'fusion_cpu_quota_percent').perform(context) + '%'
+                    if diagnostic_mode else ''),
             ),
         ])
     return [
@@ -220,6 +227,8 @@ def generate_launch_description():
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),

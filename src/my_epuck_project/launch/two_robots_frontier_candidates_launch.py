@@ -55,6 +55,10 @@ def launch_setup(context):
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'fusion_cpu_quota_percent': LaunchConfiguration(
+                'fusion_cpu_quota_percent'),
+            'fusion_rebuild_period_s': LaunchConfiguration(
+                'fusion_rebuild_period_s'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
         }.items(),
     )
@@ -83,6 +87,8 @@ def generate_launch_description():
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),

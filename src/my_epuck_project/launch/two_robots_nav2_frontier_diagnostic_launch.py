@@ -71,6 +71,8 @@ def generate_launch_description():
         DeclareLaunchArgument('startup_timeout_s', default_value='300.0'),
         DeclareLaunchArgument('phase_profile', default_value='full',
                               choices=['full', 'short']),
+        DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         stack,
         diagnostic,
         stop_when_finished,

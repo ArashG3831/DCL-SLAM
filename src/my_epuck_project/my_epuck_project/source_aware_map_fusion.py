@@ -50,6 +50,7 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('live_pose_max_age_s', 0.5)
         self.declare_parameter('publish_on_callback', True)
         self.declare_parameter('sanitize_live_footprints', False)
+        self.declare_parameter('min_fusion_rebuild_period_s', 0.0)
 
         local_topic = self.get_parameter('local_map_topic').value
         remote_topic = self.get_parameter('remote_peer_topic').value
@@ -76,6 +77,8 @@ class SourceAwareMapFusion(Node):
             self.get_parameter('publish_on_callback').value)
         self.sanitize_live_footprints = bool(
             self.get_parameter('sanitize_live_footprints').value)
+        self.min_fusion_rebuild_period_s = max(
+            0.0, float(self.get_parameter('min_fusion_rebuild_period_s').value))
         if not self.expected_source:
             raise ValueError('expected_remote_source must not be empty')
         if self.resolution <= 0.0:
@@ -108,6 +111,7 @@ class SourceAwareMapFusion(Node):
         self.output_grid = None
         self.last_footprint_cells = set()
         self.last_pose_key = None
+        self.last_full_rebuild_wall = 0.0
         self.profile_window = {
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
@@ -425,6 +429,17 @@ class SourceAwareMapFusion(Node):
         )
         map_changed = base_key != self.base_key
         if map_changed:
+            now_wall = time.monotonic()
+            if (self.base_grid is not None
+                    and now_wall - self.last_full_rebuild_wall
+                    < self.min_fusion_rebuild_period_s):
+                self._profile(
+                    mode='COALESCED', map_changed=True,
+                    dimensions=(width, height), cells_inspected=0,
+                    cells_copied=0, cells_modified=0, published=False,
+                    wall_s=time.perf_counter() - started_wall,
+                    cpu_s=time.process_time() - started_cpu)
+                return
             base, inspected = self._make_base_grid(
                 messages, transforms, minimum_x, minimum_y, width, height)
             self.base_grid = base
@@ -435,6 +450,7 @@ class SourceAwareMapFusion(Node):
             self.output_grid.data = list(base.data)
             self.last_footprint_cells = set()
             self.map_revision += 1
+            self.last_full_rebuild_wall = now_wall
             cells = self._fresh_footprint_cells(base, footprints)
             modified = self._apply_pose_cells(cells)
             mode = 'FULL_REBUILD'

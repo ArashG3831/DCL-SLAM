@@ -1008,7 +1008,7 @@ class DiagnosticNode(Node):
             if grid is None:
                 return None
             stamp = grid.header.stamp
-            return (stamp.sec, stamp.nanosec, grid.info.width,
+            return (id(grid), stamp.sec, stamp.nanosec, grid.info.width,
                     grid.info.height, grid.info.resolution)
 
         cell_key = tuple(round(value / 0.01) for value in pose)

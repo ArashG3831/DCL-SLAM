@@ -1,42 +1,50 @@
-import copy
+"""Remove observed teammate lidar returns from the simulation SLAM branch."""
+
 from collections import deque
+import copy
 from dataclasses import dataclass
 import math
-import signal
-import statistics
-import threading
 import time
+
+from my_epuck_project.slam_range_policy import (
+    complete_natural_no_returns,
+    FREE_SPACE_CAP,
+)
 
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
+
 from sensor_msgs.msg import LaserScan
+
 from tf2_ros import Buffer, TransformException, TransformListener
-from my_epuck_project.slam_range_policy import (
-    FREE_SPACE_CAP,
-    complete_natural_no_returns,
-)
+
+
+# Measured from the Webots E-puck v2/Pi-puck/D500 model used by this package.
+# E-puck.proto body bounding cylinder: radius 0.037 m (1145-1155), and
+# Pi-puck.proto board surfaces: radius 0.035 m (102-143), but both terminate
+# below the D500 horizontal ray.  The world places the D500 housing at z=.055
+# with radius .025 m (large world 253-273); this is the measured scan-plane
+# silhouette.  One mm covers the mesh/grid boundary.  The historical
+# peer_radius_m remains unchanged; this is the selected verified model.
+VERIFIED_SILHOUETTE_RADIUS_M = 0.026
+VERIFIED_GEOMETRY_MODEL = 'epuck_v2_pi_puck_d500_conservative_circle'
 
 
 @dataclass(frozen=True)
 class Transform2D:
+    """Planar rigid transform."""
+
     x: float
     y: float
     yaw: float
 
 
-def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
-    """Recognize only the known rclpy teardown conversion failure."""
-    return (shutdown_requested and not context_valid
-            and isinstance(error, RuntimeError)
-            and str(error).startswith('Unable to convert call argument'))
-
-
 def normalize_angle(angle):
+    """Normalize an angle to [-pi, pi]."""
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
@@ -50,16 +58,8 @@ def compose_transform(first, second):
     )
 
 
-def inverse_transform(transform):
-    cosine, sine = math.cos(transform.yaw), math.sin(transform.yaw)
-    return Transform2D(
-        -cosine * transform.x - sine * transform.y,
-        sine * transform.x - cosine * transform.y,
-        normalize_angle(-transform.yaw),
-    )
-
-
 def transform_message_2d(transform):
+    """Project a TransformStamped onto the horizontal plane."""
     translation = transform.transform.translation
     rotation = transform.transform.rotation
     yaw = math.atan2(
@@ -69,624 +69,398 @@ def transform_message_2d(transform):
     return Transform2D(translation.x, translation.y, yaw)
 
 
-def pose_difference(first, second):
-    return math.hypot(first.x - second.x, first.y - second.y), abs(
-        normalize_angle(first.yaw - second.yaw)
-    )
-
-
-def circle_ray_interval(center_x, center_y, radius, angle):
-    dx, dy = math.cos(angle), math.sin(angle)
-    projection = center_x * dx + center_y * dy
-    perpendicular_squared = center_x**2 + center_y**2 - projection**2
-    if perpendicular_squared > radius**2 + 1e-7:
+def circle_first_intersection(center_x, center_y, radius, beam_angle):
+    """Return the nearest nonnegative ray-circle intersection, if any."""
+    if radius <= 0.0:
+        raise ValueError('radius must be positive')
+    direction_x, direction_y = math.cos(beam_angle), math.sin(beam_angle)
+    projection = center_x * direction_x + center_y * direction_y
+    discriminant = projection * projection - (
+        center_x * center_x + center_y * center_y - radius * radius)
+    if discriminant < -1e-12:
         return None
-    half_chord = math.sqrt(max(0.0, radius**2 - perpendicular_squared))
-    near, far = projection - half_chord, projection + half_chord
-    if far < 0.0:
-        return None
-    return max(0.0, near), far
-
-
-def beam_directions(scan):
-    return [
-        (math.cos(scan.angle_min + index * scan.angle_increment),
-         math.sin(scan.angle_min + index * scan.angle_increment))
-        for index in range(len(scan.ranges))
-    ]
-
-
-def selected_indices_cached(scan, center_x, center_y, radius,
-                            range_tolerance, directions,
-                            natural_no_return_indices=()):
-    selected, intervals = [], {}
-    distance = math.hypot(center_x, center_y)
-    if distance <= radius:
-        candidates = range(len(scan.ranges))
-    else:
-        center_angle = math.atan2(center_y, center_x)
-        half_angle = math.asin(min(1.0, radius / distance))
-        candidates = []
-        for index, (dx, dy) in enumerate(directions):
-            beam_angle = math.atan2(dy, dx)
-            if abs(normalize_angle(beam_angle - center_angle)) <= half_angle + 1e-7:
-                candidates.append(index)
-    radius_squared = radius * radius
-    for index in candidates:
-        measured_range = scan.ranges[index]
-        if not math.isfinite(measured_range):
-            continue
-        if measured_range < scan.range_min or measured_range > scan.range_max:
-            continue
-        dx, dy = directions[index]
-        projection = center_x * dx + center_y * dy
-        perpendicular_squared = center_x**2 + center_y**2 - projection**2
-        if perpendicular_squared > radius_squared + 1e-7:
-            continue
-        half_chord = math.sqrt(max(0.0, radius_squared - perpendicular_squared))
-        near, far = max(0.0, projection - half_chord), projection + half_chord
-        if far < 0.0:
-            continue
-        intervals[index] = (near, far)
-        natural_no_return = index in natural_no_return_indices
-        if (natural_no_return and near <= scan.range_max + 1e-7) or (
-                near - range_tolerance - 1e-7 <= measured_range <=
-                far + range_tolerance + 1e-7):
-            selected.append(index)
-    return selected, intervals
-
-
-def selected_indices(scan, center_x, center_y, radius, range_tolerance):
-    return selected_indices_cached(
-        scan, center_x, center_y, radius, range_tolerance, beam_directions(scan)
+    half_chord = math.sqrt(max(0.0, discriminant))
+    intersections = (
+        distance for distance in (projection - half_chord,
+                                  projection + half_chord)
+        if distance >= -1e-12
     )
+    return min((max(0.0, distance) for distance in intersections),
+               default=None)
 
 
-def filtered_scan(scan, center_x, center_y, radius, range_tolerance,
-                  directions=None, natural_no_return_indices=()):
+def mask_teammate_returns(scan, peer_x, peer_y, peer_radius_m,
+                          range_tolerance_m, geometry_radius_m=None):
+    """Replace finite returns near the teammate's first surface with NaN."""
+    if range_tolerance_m < 0.0:
+        raise ValueError('range_tolerance_m must not be negative')
+    geometry_radius = (peer_radius_m if geometry_radius_m is None
+                       else float(geometry_radius_m))
+    if geometry_radius <= 0.0:
+        raise ValueError('geometry_radius_m must be positive')
     output = copy.copy(scan)
     output.ranges = list(scan.ranges)
-    output.intensities = list(scan.intensities)
-    directions = directions if directions is not None else beam_directions(scan)
-    indices, intervals = selected_indices_cached(
-        scan, center_x, center_y, radius, range_tolerance, directions,
-        natural_no_return_indices,
+    masked_indices = []
+    for index, measured in enumerate(scan.ranges):
+        if not (math.isfinite(measured)
+                and measured > scan.range_min
+                and measured < scan.range_max):
+            continue
+        beam_angle = scan.angle_min + index * scan.angle_increment
+        expected_near = circle_first_intersection(
+            peer_x, peer_y, geometry_radius, beam_angle)
+        if (expected_near is not None
+                and abs(measured - expected_near) <= range_tolerance_m):
+            output.ranges[index] = math.nan
+            masked_indices.append(index)
+    return output, masked_indices
+
+
+def prepare_slam_scan(scan, peer_x, peer_y, peer_radius_m,
+                      range_tolerance_m, free_space_cap,
+                      geometry_radius_m=None):
+    """Mask finite teammate hits, then complete simulation no-returns."""
+    masked_scan, masked_indices = mask_teammate_returns(
+        scan, peer_x, peer_y, peer_radius_m, range_tolerance_m,
+        geometry_radius_m=geometry_radius_m)
+    completed_ranges, completion_stats = complete_natural_no_returns(
+        masked_scan.ranges,
+        free_space_cap,
+        masked_scan.range_min,
+        masked_scan.range_max,
+        enabled=True,
     )
-    for index in indices:
-        output.ranges[index] = math.nan
-    return output, indices, intervals
+    output = copy.copy(masked_scan)
+    output.ranges = completed_ranges
+    return output, masked_indices, completion_stats
 
 
 class PendingScanQueue:
-    def __init__(self, maximum_depth):
+    """Small FIFO used while exact-time odometry transforms arrive."""
+
+    MAXIMUM_DEPTH = 4
+
+    def __init__(self, maximum_depth=MAXIMUM_DEPTH):
+        """Create a FIFO with an enforced four-scan upper bound."""
+        if not 1 <= maximum_depth <= self.MAXIMUM_DEPTH:
+            raise ValueError('pending queue depth must be between 1 and 4')
         self.maximum_depth = maximum_depth
         self.items = deque()
-        self.overflow_drops = 0
-
-    @staticmethod
-    def key(item):
-        stamp = item[0].header.stamp
-        return stamp.sec, stamp.nanosec
 
     def enqueue(self, scan, arrival_time):
-        items = list(self.items)
-        items.append((scan, arrival_time))
-        items.sort(key=self.key)
-        dropped = None
-        if len(items) > self.maximum_depth:
-            dropped = items.pop(0)
-            self.overflow_drops += 1
-        self.items = deque(items)
-        return dropped
+        """Append a scan and return the oldest scan if the FIFO overflows."""
+        self.items.append((scan, arrival_time))
+        if len(self.items) > self.maximum_depth:
+            return self.items.popleft()
+        return None
 
-    def peek(self):
-        return self.items[0] if self.items else None
-
-    def take(self, now, maximum_latency, pose_available,
-             degraded_allowed=False):
-        item = self.peek()
-        if item is None:
+    def take(self, now, maximum_latency, pose_available):
+        """Wait, expire, or remove the oldest item for filtered publication."""
+        if not self.items:
             return 'idle', None, 0.0
+        item = self.items[0]
         waited = now - item[1]
         if waited > maximum_latency:
             return 'expired', self.items.popleft(), waited
-        if not pose_available and not degraded_allowed:
+        if not pose_available:
             return 'wait', item, waited
-        return ('publish_degraded' if degraded_allowed and not pose_available
-                else 'publish'), self.items.popleft(), waited
-
-    def clear(self):
-        self.items.clear()
-
-
-class PoseSourceTransition:
-    def __init__(self, required_matches, position_tolerance, yaw_tolerance):
-        self.state = 'waiting_for_odom'
-        self.required_matches = required_matches
-        self.position_tolerance = position_tolerance
-        self.yaw_tolerance = yaw_tolerance
-        self.consecutive_matches = 0
-        self.rejected_transitions = 0
-        self.last_difference = None
-
-    def odom_available(self):
-        if self.state == 'waiting_for_odom':
-            self.state = 'odom_bootstrap'
-
-    def compare_shared(self, odom_pose, shared_pose):
-        if self.state == 'shared_map_tf_active':
-            return True
-        position, yaw = pose_difference(odom_pose, shared_pose)
-        self.last_difference = (position, yaw)
-        if position > self.position_tolerance or yaw > self.yaw_tolerance:
-            self.consecutive_matches = 0
-            self.rejected_transitions += 1
-            return False
-        self.consecutive_matches += 1
-        if self.consecutive_matches >= self.required_matches:
-            self.state = 'shared_map_tf_active'
-            return True
-        return False
-
-    def fallback_available(self):
-        """Return to the independent pose state after shared TF loss."""
-        if self.state == 'shared_map_tf_active':
-            self.state = 'fallback_odom_active'
-            self.consecutive_matches = 0
-        elif self.state in ('waiting_for_odom', 'degraded_unmasked'):
-            self.state = 'fallback_odom_active'
-
-    def degraded(self):
-        self.state = 'degraded_unmasked'
-        self.consecutive_matches = 0
+        return 'publish', self.items.popleft(), waited
 
 
 class TeammateScanFilter(Node):
+    """Publish a teammate-masked, simulation-completed scan only for SLAM."""
+
     def __init__(self):
+        """Configure the simulation-only filter and exact-time TF queue."""
         super().__init__('teammate_scan_filter')
         defaults = {
             'input_topic': 'scan_d500_fixed', 'output_topic': 'scan_d500_slam',
             'peer_base_frame': '', 'expected_lidar_frame': '',
             'own_odom_frame': '', 'peer_odom_frame': '',
             'own_odom_to_peer_odom': [0.0, 0.0, 0.0],
-            'peer_shape_type': 'circle', 'peer_shape_dimensions': [0.050],
-            'static_safety_margin': 0.003, 'dynamic_motion_margin': 0.007,
-            'range_matching_tolerance': 0.012,
-            'maximum_processing_latency': 0.2, 'pending_queue_depth': 4,
-            'transform_retry_period': 0.02,
-            'queue_overflow_policy': 'drop_oldest',
-            'allow_latest_transform_fallback': False,
-            'shared_tf_confirmation_scans': 5,
-            'shared_tf_position_tolerance': 0.05,
-            'shared_tf_yaw_tolerance': 0.15,
+            'peer_radius_m': 0.035, 'range_tolerance_m': 0.005,
+            'teammate_geometry_radius_m': 0.035,
+            'maximum_processing_latency': 0.20,
+            'pending_queue_depth': 4, 'transform_retry_period': 0.02,
             'warning_interval': 2.0,
-            'pose_loss_grace_s': 0.05,
-            'output_stall_grace_s': 1.0,
-            'force_preferred_pose_loss': False,
-            'mode': 'simulation',
             'simulation_free_space_completion': True,
-            'physical_free_space_completion': False,
             'free_space_cap': FREE_SPACE_CAP,
         }
         for name, default in defaults.items():
             self.declare_parameter(name, default)
-        value = lambda name: self.get_parameter(name).value
-        input_topic, output_topic = value('input_topic'), value('output_topic')
-        self.peer_frame = value('peer_base_frame')
-        self.expected_frame = value('expected_lidar_frame')
-        self.own_odom_frame = value('own_odom_frame')
-        self.peer_odom_frame = value('peer_odom_frame')
+
+        def value(name):
+            return self.get_parameter(name).value
+        self.peer_frame = str(value('peer_base_frame'))
+        self.expected_frame = str(value('expected_lidar_frame'))
+        self.own_odom_frame = str(value('own_odom_frame'))
+        self.peer_odom_frame = str(value('peer_odom_frame'))
         fixed = list(value('own_odom_to_peer_odom'))
+        if len(fixed) != 3:
+            raise ValueError('own_odom_to_peer_odom must contain x, y, yaw')
         self.fixed_odom_transform = Transform2D(*map(float, fixed))
-        dimensions = list(value('peer_shape_dimensions'))
-        self.static_margin = float(value('static_safety_margin'))
-        self.dynamic_margin = float(value('dynamic_motion_margin'))
-        self.range_tolerance = float(value('range_matching_tolerance'))
+        self.peer_radius = float(value('peer_radius_m'))
+        self.range_tolerance = float(value('range_tolerance_m'))
+        self.geometry_radius = float(value('teammate_geometry_radius_m'))
         self.max_latency = float(value('maximum_processing_latency'))
-        self.queue_depth_limit = int(value('pending_queue_depth'))
         self.retry_period = float(value('transform_retry_period'))
         self.warning_interval = float(value('warning_interval'))
-        self.pose_loss_grace = float(value('pose_loss_grace_s'))
-        self.output_stall_grace = float(value('output_stall_grace_s'))
-        if self.pose_loss_grace < 0.0 or self.output_stall_grace <= 0.0:
-            raise ValueError('pose liveness grace values must be positive')
-        self.mode = str(value('mode')).strip().lower()
-        if self.mode not in ('simulation', 'physical'):
-            raise ValueError("mode must be 'simulation' or 'physical'")
-        self.free_space_completion = bool(
-            value('simulation_free_space_completion') if self.mode == 'simulation'
-            else value('physical_free_space_completion'))
         self.free_space_cap = float(value('free_space_cap'))
-        required_frames = (self.peer_frame, self.expected_frame,
-                           self.own_odom_frame, self.peer_odom_frame)
-        if any(not frame for frame in required_frames):
-            raise ValueError('peer/lidar/odom frame parameters must not be empty')
-        if value('peer_shape_type') != 'circle' or len(dimensions) != 1:
-            raise ValueError('peer shape must be a circle with one diameter')
-        if value('queue_overflow_policy') != 'drop_oldest':
-            raise ValueError('only drop_oldest overflow is supported')
-        if bool(value('allow_latest_transform_fallback')):
-            raise ValueError('latest-transform fallback is intentionally unsupported')
-        self.body_radius = float(dimensions[0]) / 2.0
-        self.effective_radius = self.body_radius + self.static_margin + self.dynamic_margin
-        self.pose_transition = PoseSourceTransition(
-            int(value('shared_tf_confirmation_scans')),
-            float(value('shared_tf_position_tolerance')),
-            float(value('shared_tf_yaw_tolerance')),
-        )
-        self.publisher = self.create_publisher(LaserScan, output_topic, qos_profile_sensor_data)
+        if not bool(value('simulation_free_space_completion')):
+            raise ValueError(
+                'simulation free-space completion must remain enabled')
+        if any(not frame for frame in (
+                self.peer_frame, self.expected_frame, self.own_odom_frame,
+                self.peer_odom_frame)):
+            raise ValueError(
+                'peer/lidar/odom frame parameters must not be empty')
+        if (self.peer_radius <= 0.0 or self.range_tolerance < 0.0
+                or self.geometry_radius <= 0.0):
+            raise ValueError(
+                'peer radius must be positive and tolerance nonnegative')
+        if not 0.0 < self.max_latency <= 0.20 or self.retry_period <= 0.0:
+            raise ValueError(
+                'latency must be in (0, 0.20] and retry period positive')
+
+        self.publisher = self.create_publisher(
+            LaserScan, value('output_topic'), qos_profile_sensor_data)
         self.subscription = self.create_subscription(
-            LaserScan, input_topic, self.scan_callback, qos_profile_sensor_data)
+            LaserScan, value('input_topic'), self.scan_callback,
+            qos_profile_sensor_data)
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.state_lock = threading.Lock()
-        self.pending = PendingScanQueue(self.queue_depth_limit)
-        self.received_scan_count = self.enqueued_scan_count = 0
-        self.published_filtered_count = self.masked_beam_count = 0
-        self.latency_expired_drop_count = self.queue_overflow_drop_count = 0
-        self.invalid_frame_drop_count = self.stale_input_drop_count = 0
-        self.maximum_observed_queue_depth = 0
-        self.pose_source_counts = {
-            'waiting_for_odom': 0, 'odom_bootstrap': 0,
-            'fallback_odom_active': 0, 'shared_map_tf_active': 0,
-            'degraded_unmasked': 0,
-        }
-        self.pose_source_transitions = {}
-        self.pose_state_transitions = {}
-        self.last_published_pose_source = None
-        self.fallback_pose_successes = 0
-        self.preferred_pose_successes = 0
-        self.degraded_unmasked_publications = 0
-        self.dropped_scan_count = 0
-        self.missing_transform_count = 0
-        self.recovery_count = 0
-        self.last_input_monotonic = None
-        self.last_output_monotonic = None
-        self.longest_output_gap = 0.0
-        self.output_stall_active = False
-        self.transform_wait_samples = deque(maxlen=2048)
+        self.pending = PendingScanQueue(int(value('pending_queue_depth')))
+        self.retry_timer = self.create_timer(self.retry_period,
+                                             self._process_pending)
+        self.metrics_timer = self.create_timer(10.0, self._log_metrics)
+        self.counts = dict.fromkeys((
+            'received', 'published', 'masked', 'dropped_tf_timeout',
+            'dropped_overflow', 'dropped_invalid_frame',
+            'dropped_nonmonotonic', 'raw_positive_infinity',
+            'converted_free_cap'), 0)
+        self.teammate_window = dict.fromkeys((
+            'finite_returns', 'masked_returns', 'suspected_missed_returns',
+            'outside_model_radius', 'range_tolerance_miss',
+            'noncircular_geometry', 'environment_return'), 0)
+        self.maximum_teammate_residual_m = 0.0
+        self.sum_teammate_residual_m = 0.0
+        self.sum_teammate_radial_m = 0.0
+        self.maximum_teammate_radial_m = 0.0
+        self.teammate_residual_samples = 0
+        self.last_peer_pose_age_s = None
+        self.exact_tf_lookups = 0
+        self.exact_tf_failures = 0
+        self.maximum_pending_depth = 0
+        self.longest_output_gap_s = 0.0
         self.last_published_stamp = None
+        self.last_output_monotonic = None
         self.last_warning_monotonic = 0.0
-        self.direction_key = None
-        self.directions = None
-        self.last_masked_indices = []
-        self.last_intervals = {}
-        self.last_peer_position = None
-        self.last_scan_metrics = {}
-        self.scan_metric_totals = {
-            'raw_positive_infinity': 0, 'converted_free_cap': 0,
-            'teammate_masked': 0, 'nan': 0, 'negative_infinity': 0,
-            'finite_obstacle': 0, 'exact_range_max': 0, 'invalid': 0,
-        }
-        self.logged_scan_contract = False
-        self.retry_timer = self.create_timer(self.retry_period, self.process_pending)
-        self.metrics_timer = self.create_timer(10.0, self.log_metrics)
         self.get_logger().info(
-            f'{self.resolve_topic_name(input_topic)} -> {self.resolve_topic_name(output_topic)}; '
-            f'fixed_odom={self.fixed_odom_transform}; zero passthrough; '
-            f'queue={self.queue_depth_limit} retry={self.retry_period:.3f}s exact-time-only; '
-            f'mode={self.mode} free_space_cap={self.free_space_cap:.6f}m '
-            f'completion_enabled={self.free_space_completion} '
-            f'masking_after_conversion=True')
-
-    def warn(self, message):
-        now = time.monotonic()
-        with self.state_lock:
-            allowed = now - self.last_warning_monotonic >= self.warning_interval
-            if allowed:
-                self.last_warning_monotonic = now
-        if allowed:
-            self.get_logger().warning(message)
+            f'{self.resolve_topic_name(value("input_topic"))} -> '
+            f'{self.resolve_topic_name(value("output_topic"))}; '
+            f'odom-only exact-time pose; radius={self.peer_radius:.3f}m '
+            f'tolerance={self.range_tolerance:.3f}m; zero passthrough')
+        self.get_logger().info(
+            f'geometry_model={VERIFIED_GEOMETRY_MODEL}; '
+            f'visible_radius={self.geometry_radius:.3f}m')
 
     @staticmethod
-    def stamp_seconds(stamp):
-        return stamp.sec + stamp.nanosec * 1e-9
-
-    @staticmethod
-    def stamp_key(scan):
+    def _stamp_key(scan):
         return scan.header.stamp.sec, scan.header.stamp.nanosec
 
+    def _warn(self, message):
+        now = time.monotonic()
+        if now - self.last_warning_monotonic >= self.warning_interval:
+            self.last_warning_monotonic = now
+            self.get_logger().warning(message)
+
     def scan_callback(self, scan):
-        arrival = time.monotonic()
-        with self.state_lock:
-            self.received_scan_count += 1
-            self.last_input_monotonic = arrival
-        if not scan.header.frame_id or scan.header.frame_id != self.expected_frame:
-            with self.state_lock:
-                self.invalid_frame_drop_count += 1
-            self.warn(f'Dropped frame {scan.header.frame_id!r}; expected {self.expected_frame!r}')
+        """Validate and enqueue one fixed scan without passthrough."""
+        self.counts['received'] += 1
+        if scan.header.frame_id != self.expected_frame:
+            self.counts['dropped_invalid_frame'] += 1
+            self._warn(
+                f'Dropped frame {scan.header.frame_id!r}; '
+                f'expected {self.expected_frame!r}')
             return
-        age = self.get_clock().now().nanoseconds * 1e-9 - self.stamp_seconds(scan.header.stamp)
-        if age > self.max_latency:
-            with self.state_lock:
-                self.stale_input_drop_count += 1
-            self.warn(f'Dropped stale input aged {age:.3f}s')
+        if (self.last_published_stamp is not None
+                and self._stamp_key(scan) <= self.last_published_stamp):
+            self.counts['dropped_nonmonotonic'] += 1
+            self._warn('Dropped non-monotonic input scan')
             return
-        with self.state_lock:
-            dropped = self.pending.enqueue(scan, arrival)
-            self.enqueued_scan_count += 1
-            if dropped is not None:
-                self.queue_overflow_drop_count += 1
-            depth = len(self.pending.items)
-            self.maximum_observed_queue_depth = max(self.maximum_observed_queue_depth, depth)
+        dropped = self.pending.enqueue(scan, time.monotonic())
         if dropped is not None:
-            self.warn('Pending scan queue overflow: dropped oldest scan')
+            self.counts['dropped_overflow'] += 1
+            self._warn('Pending queue overflow: dropped oldest scan')
+        self.maximum_pending_depth = max(
+            self.maximum_pending_depth, len(self.pending.items))
+        self._process_pending()
 
-    def lookup_exact(self, target, source, stamp):
-        if not self.tf_buffer.can_transform(target, source, stamp, timeout=Duration()):
-            raise TransformException(f'exact transform {target} <- {source} unavailable')
-        return self.tf_buffer.lookup_transform(target, source, stamp, timeout=Duration())
+    def _lookup_exact(self, target, source, stamp):
+        self.exact_tf_lookups += 1
+        if not self.tf_buffer.can_transform(
+                target, source, stamp, timeout=Duration()):
+            self.exact_tf_failures += 1
+            raise TransformException(
+                f'exact transform {target} <- {source} unavailable')
+        try:
+            return self.tf_buffer.lookup_transform(
+                target, source, stamp, timeout=Duration())
+        except TransformException:
+            self.exact_tf_failures += 1
+            raise
 
-    def odom_peer_pose(self, stamp):
+    def _odom_peer_pose(self, stamp):
+        """Compute own_lidar <- own_odom <- peer_odom <- peer_base."""
         lidar_from_own_odom = transform_message_2d(
-            self.lookup_exact(self.expected_frame, self.own_odom_frame, stamp))
+            self._lookup_exact(
+                self.expected_frame, self.own_odom_frame, stamp))
         peer_odom_from_peer_base = transform_message_2d(
-            self.lookup_exact(self.peer_odom_frame, self.peer_frame, stamp))
+            self._lookup_exact(self.peer_odom_frame, self.peer_frame, stamp))
         return compose_transform(
             compose_transform(lidar_from_own_odom, self.fixed_odom_transform),
             peer_odom_from_peer_base,
         )
 
-    def shared_peer_pose(self, stamp):
-        if self.get_parameter('force_preferred_pose_loss').value:
-            raise TransformException('preferred pose loss test hook enabled')
-        return transform_message_2d(
-            self.lookup_exact(self.expected_frame, self.peer_frame, stamp))
-
-    def resolve_peer_pose(self, scan):
-        stamp = Time.from_msg(scan.header.stamp)
-        shared_pose = None
-        try:
-            shared_pose = self.shared_peer_pose(stamp)
-        except TransformException:
-            with self.state_lock:
-                self.missing_transform_count += 1
-        odom_pose = None
-        if self.mode == 'simulation':
-            try:
-                odom_pose = self.odom_peer_pose(stamp)
-            except TransformException:
-                pass
-        if shared_pose is not None and odom_pose is not None:
-            with self.state_lock:
-                self.pose_transition.odom_available()
-                switched = self.pose_transition.compare_shared(
-                    odom_pose, shared_pose)
-                state = self.pose_transition.state
-                difference = self.pose_transition.last_difference
-            if switched and state == 'shared_map_tf_active':
-                self.preferred_pose_successes += 1
-                self.get_logger().info(
-                    f'POSE_SOURCE_SHARED_MAP_ACTIVE position_difference='
-                    f'{difference[0]:.6f} yaw_difference={difference[1]:.6f}')
-                return shared_pose, state
-            self.fallback_pose_successes += 1
-            return odom_pose, state
-        if shared_pose is not None:
-            with self.state_lock:
-                state = self.pose_transition.state
-            if state == 'shared_map_tf_active':
-                self.preferred_pose_successes += 1
-                return shared_pose, state
-        if odom_pose is not None:
-            with self.state_lock:
-                self.pose_transition.fallback_available()
-                state = self.pose_transition.state
-            self.fallback_pose_successes += 1
-            return odom_pose, state
-        with self.state_lock:
-            self.pose_transition.degraded()
-        return None, 'degraded_unmasked'
-
-    def process_pending(self):
-        while rclpy.ok():
-            now = time.monotonic()
-            with self.state_lock:
-                item = self.pending.peek()
-            if item is None:
-                return
-            scan = item[0]
-            try:
-                pose, source = self.resolve_peer_pose(scan)
-            except TransformException:
-                pose, source = None, 'degraded_unmasked'
-                with self.state_lock:
-                    self.missing_transform_count += 1
-            available = pose is not None
-            degraded_allowed = (
-                not available and source == 'degraded_unmasked'
-                and now - item[1] >= self.pose_loss_grace)
-            with self.state_lock:
-                action, selected, waited = self.pending.take(
-                    now, self.max_latency, available, degraded_allowed)
-                if action == 'expired':
-                    self.latency_expired_drop_count += 1
-                    self.dropped_scan_count += 1
-            if action in ('idle', 'wait'):
-                return
+    def _process_pending(self):
+        while self.pending.items and rclpy.ok():
+            action, item, _ = self.pending.take(
+                time.monotonic(), self.max_latency, pose_available=False)
             if action == 'expired':
-                self.warn(f'Dropped startup/queued scan after {waited:.3f}s pose wait')
+                self.counts['dropped_tf_timeout'] += 1
+                self._warn('Dropped scan after exact-transform deadline')
                 continue
-            scan = selected[0]
-            key = self.stamp_key(scan)
-            with self.state_lock:
-                stale = self.last_published_stamp is not None and key <= self.last_published_stamp
-                if stale:
-                    self.stale_input_drop_count += 1
-                else:
-                    self.transform_wait_samples.append(waited)
-                    self.pose_source_counts[source] = (
-                        self.pose_source_counts.get(source, 0) + 1)
-                    if source == 'degraded_unmasked':
-                        self.degraded_unmasked_publications += 1
-            if stale:
-                self.warn('Dropped non-monotonic queued scan')
+            scan = item[0]
+            if (self.last_published_stamp is not None
+                    and self._stamp_key(scan) <= self.last_published_stamp):
+                self.pending.items.popleft()
+                self.counts['dropped_nonmonotonic'] += 1
+                self._warn('Dropped non-monotonic queued scan')
                 continue
-            self.publish_filtered(scan, pose, source)
+            try:
+                pose = self._odom_peer_pose(Time.from_msg(scan.header.stamp))
+            except TransformException:
+                return
+            try:
+                age = (self.get_clock().now()
+                       - Time.from_msg(scan.header.stamp)).nanoseconds / 1e9
+                self.last_peer_pose_age_s = max(0.0, age)
+            except (TypeError, ValueError):
+                self.last_peer_pose_age_s = None
+            action, item, _ = self.pending.take(
+                time.monotonic(), self.max_latency, pose_available=True)
+            if action == 'expired':
+                self.counts['dropped_tf_timeout'] += 1
+                self._warn('Dropped scan after exact-transform deadline')
+                continue
+            self._publish_filtered(item[0], pose)
 
-    def scan_directions(self, scan):
-        key = (len(scan.ranges), scan.angle_min, scan.angle_increment)
-        if key != self.direction_key:
-            self.directions = beam_directions(scan)
-            self.direction_key = key
-        return self.directions
-
-    def publish_filtered(self, scan, pose, source='shared_map_tf_active'):
-        if not self.logged_scan_contract:
-            self.get_logger().info(
-                f'SCAN_CONTRACT mode={self.mode} original_range_max='
-                f'{scan.range_max:.6f} free_space_cap={self.free_space_cap:.6f} '
-                f'completion_enabled={self.free_space_completion} '
-                f'masking_after_conversion=True')
-            self.logged_scan_contract = True
-        completed_ranges, completion = complete_natural_no_returns(
-            scan.ranges, self.free_space_cap, scan.range_min, scan.range_max,
-            self.free_space_completion)
-        completed = copy.copy(scan)
-        completed.ranges = completed_ranges
-        natural_no_return_indices = {
-            index for index, value in enumerate(scan.ranges)
-            if math.isinf(value) and value > 0.0
-        }
-        if pose is None:
-            output, indices, intervals = completed, [], {}
-        else:
-            output, indices, intervals = filtered_scan(
-                completed, pose.x, pose.y, self.effective_radius,
-                self.range_tolerance, self.scan_directions(completed),
-                natural_no_return_indices)
+    def _publish_filtered(self, scan, pose):
+        output, indices, completion = prepare_slam_scan(
+            scan, pose.x, pose.y, self.peer_radius,
+            self.range_tolerance, self.free_space_cap,
+            geometry_radius_m=self.geometry_radius)
+        self._record_teammate_window(scan, pose, indices)
         if not rclpy.ok():
             return
         self.publisher.publish(output)
-        with self.state_lock:
-            now = time.monotonic()
-            if self.last_output_monotonic is not None:
-                gap = now - self.last_output_monotonic
-                self.longest_output_gap = max(self.longest_output_gap, gap)
-            self.last_output_monotonic = now
-            self.last_published_stamp = self.stamp_key(scan)
-            self.last_peer_position = (
-                None if pose is None else (pose.x, pose.y, pose.yaw))
-            self.last_masked_indices = indices
-            self.last_intervals = intervals
-            self.last_scan_metrics = {
-                'raw_positive_infinity': completion.raw_positive_infinity,
-                'converted_free_cap': completion.converted_free_cap,
-                'teammate_masked': len(indices),
-                'nan': completion.nan + len(indices),
-                'negative_infinity': completion.negative_infinity,
-                'finite_obstacle': completion.finite_obstacle,
-                'exact_range_max': completion.exact_range_max,
-                'invalid': completion.invalid,
-            }
-            for key, value in self.last_scan_metrics.items():
-                self.scan_metric_totals[key] += value
-            self.published_filtered_count += 1
-            self.masked_beam_count += len(indices)
-            previous = self.pose_source_transitions.get(source, 0)
-            self.pose_source_transitions[source] = previous + 1
-            if source != self.last_published_pose_source:
-                transition_key = (
-                    f'{self.last_published_pose_source or "none"}->{source}')
-                self.pose_state_transitions[transition_key] = (
-                    self.pose_state_transitions.get(transition_key, 0) + 1)
-                self.last_published_pose_source = source
+        now = time.monotonic()
+        if self.last_output_monotonic is not None:
+            self.longest_output_gap_s = max(
+                self.longest_output_gap_s,
+                now - self.last_output_monotonic)
+        self.last_output_monotonic = now
+        self.last_published_stamp = self._stamp_key(scan)
+        self.counts['published'] += 1
+        self.counts['masked'] += len(indices)
+        self.counts['raw_positive_infinity'] += (
+            completion.raw_positive_infinity)
+        self.counts['converted_free_cap'] += completion.converted_free_cap
 
-    def metrics_snapshot(self):
-        with self.state_lock:
-            waits = list(self.transform_wait_samples)
-            values = dict(received=self.received_scan_count,
-                          enqueued=self.enqueued_scan_count,
-                          published=self.published_filtered_count,
-                          masked=self.masked_beam_count,
-                          expired=self.latency_expired_drop_count,
-                          overflow=self.queue_overflow_drop_count,
-                          invalid_frame=self.invalid_frame_drop_count,
-                          stale=self.stale_input_drop_count,
-                          depth=len(self.pending.items),
-                          max_depth=self.maximum_observed_queue_depth,
-                          pose_state=self.pose_transition.state,
-                          pose_counts=dict(self.pose_source_counts),
-                          transition_rejections=self.pose_transition.rejected_transitions,
-                          transition_difference=self.pose_transition.last_difference,
-                          fallback_pose_successes=self.fallback_pose_successes,
-                          preferred_pose_successes=self.preferred_pose_successes,
-                          degraded_unmasked=self.degraded_unmasked_publications,
-                          dropped=self.dropped_scan_count,
-                          missing_transform=self.missing_transform_count,
-                          pose_transitions=dict(self.pose_source_transitions),
-                          pose_state_transitions=dict(self.pose_state_transitions),
-                          longest_output_gap_s=self.longest_output_gap,
-                          scan_metrics=dict(self.scan_metric_totals))
-            now = time.monotonic()
-            input_age = (None if self.last_input_monotonic is None else
-                         now - self.last_input_monotonic)
-            output_age = (None if self.last_output_monotonic is None else
-                          now - self.last_output_monotonic)
-            values.update(input_freshness_s=input_age,
-                          output_freshness_s=output_age)
-        if waits:
-            ordered = sorted(waits)
-            p95 = ordered[min(len(ordered)-1, math.ceil(.95*len(ordered))-1)]
-            values.update(wait_min=min(waits), wait_mean=statistics.fmean(waits),
-                          wait_median=statistics.median(waits), wait_p95=p95,
-                          wait_max=max(waits), wait_samples=len(waits))
-        else:
-            values.update(wait_min=0.0, wait_mean=0.0, wait_median=0.0,
-                          wait_p95=0.0, wait_max=0.0, wait_samples=0)
-        return values
+    def _record_teammate_window(self, scan, pose, masked_indices):
+        """Aggregate finite-return diagnostics around the peer silhouette."""
+        masked = set(masked_indices)
+        window = self.geometry_radius + self.range_tolerance + 0.02
+        for index, measured in enumerate(scan.ranges):
+            if not (math.isfinite(measured)
+                    and measured > scan.range_min
+                    and measured < scan.range_max):
+                continue
+            angle = scan.angle_min + index * scan.angle_increment
+            endpoint_x = measured * math.cos(angle)
+            endpoint_y = measured * math.sin(angle)
+            radial = math.hypot(endpoint_x - pose.x, endpoint_y - pose.y)
+            if radial > window:
+                continue
+            self.teammate_window['finite_returns'] += 1
+            predicted = circle_first_intersection(
+                pose.x, pose.y, self.geometry_radius, angle)
+            residual = (abs(measured - predicted)
+                        if predicted is not None else math.inf)
+            if math.isfinite(residual):
+                self.maximum_teammate_residual_m = max(
+                    self.maximum_teammate_residual_m, residual)
+                self.sum_teammate_residual_m += residual
+                self.teammate_residual_samples += 1
+            self.sum_teammate_radial_m += radial
+            self.maximum_teammate_radial_m = max(
+                self.maximum_teammate_radial_m, radial)
+            if index in masked:
+                self.teammate_window['masked_returns'] += 1
+                continue
+            self.teammate_window['suspected_missed_returns'] += 1
+            if radial > self.geometry_radius + self.range_tolerance:
+                self.teammate_window['environment_return'] += 1
+            elif predicted is None:
+                self.teammate_window['noncircular_geometry'] += 1
+            elif residual > self.range_tolerance:
+                self.teammate_window['range_tolerance_miss'] += 1
+            elif radial > self.geometry_radius:
+                self.teammate_window['outside_model_radius'] += 1
 
-    def log_metrics(self):
-        metrics = self.metrics_snapshot()
-        input_age = metrics['input_freshness_s']
-        output_age = metrics['output_freshness_s']
-        stalled = (input_age is not None and input_age <= self.max_latency
-                    and (output_age is None or
-                         output_age > self.output_stall_grace))
-        if stalled and not self.output_stall_active:
-            self.output_stall_active = True
-            self.warn('SLAM_FILTER_OUTPUT_STALL ' +
-                      f'input_age={input_age:.3f} output_age='
-                      f'{output_age if output_age is not None else "none"} '
-                      f'state={metrics["pose_state"]}')
-        elif not stalled:
-            self.output_stall_active = False
+    def _metrics_snapshot(self):
+        return {
+            **self.counts,
+            **{f'teammate_window_{key}': value
+               for key, value in self.teammate_window.items()},
+            'teammate_window_max_residual_m': round(
+                self.maximum_teammate_residual_m, 6),
+            'teammate_window_mean_residual_m': round(
+                self.sum_teammate_residual_m / max(
+                    1, self.teammate_residual_samples), 6),
+            'teammate_window_mean_radial_m': round(
+                self.sum_teammate_radial_m / max(
+                    1, self.teammate_window['finite_returns']), 6),
+            'teammate_window_max_radial_m': round(
+                self.maximum_teammate_radial_m, 6),
+            'geometry_radius_m': self.geometry_radius,
+            'geometry_model': VERIFIED_GEOMETRY_MODEL,
+            'peer_pose_age_s': self.last_peer_pose_age_s,
+            'exact_tf_lookups': self.exact_tf_lookups,
+            'exact_tf_failures': self.exact_tf_failures,
+            'pending_depth': len(self.pending.items),
+            'maximum_pending_depth': self.maximum_pending_depth,
+            'longest_output_gap_s': round(self.longest_output_gap_s, 6),
+        }
+
+    def _log_metrics(self):
         self.get_logger().info('FILTER_METRICS ' + ' '.join(
-            f'{key}={value}' for key, value in metrics.items()))
-
-    def clear_pending(self):
-        with self.state_lock:
-            self.pending.clear()
+            f'{key}={value}'
+            for key, value in self._metrics_snapshot().items()))
 
 
 def main(args=None):
-    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    """Run the teammate scan filter with explicit executor teardown."""
+    rclpy.init(args=args)
     node = TeammateScanFilter()
-    executor = SingleThreadedExecutor()
+    executor = SingleThreadedExecutor(context=node.context)
     executor.add_node(node)
-    shutdown_requested = {'value': False}
-    previous_handlers = {}
-
-    def request_shutdown(signum, frame):
-        del signum, frame
-        shutdown_requested['value'] = True
-        executor.wake()
-
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.signal(signum, request_shutdown)
-        while not shutdown_requested['value'] and rclpy.ok():
-            executor.spin_once(timeout_sec=0.5)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-    except RuntimeError as error:
-        if not (shutdown_requested['value'] and not node.context.ok()
-                and str(error).startswith('Unable to convert call argument')):
-            raise
     finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-        node.clear_pending()
+        node.pending.items.clear()
         executor.remove_node(node)
         executor.shutdown()
         if node.context.ok():

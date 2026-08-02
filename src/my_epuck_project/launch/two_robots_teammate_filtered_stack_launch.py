@@ -108,6 +108,12 @@ def launch_setup(context):
     )
     diagnostic_mode = (
         LaunchConfiguration('diagnostic_mode').perform(context) == 'true')
+    fusion_quota = LaunchConfiguration(
+        'fusion_cpu_quota_percent').perform(context)
+    try:
+        quota_enabled = float(fusion_quota) > 0.0
+    except ValueError:
+        quota_enabled = False
     filtered_slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch',
@@ -199,7 +205,7 @@ def launch_setup(context):
                     'systemd-run --user --scope --quiet '
                     '-p CPUQuota=' + LaunchConfiguration(
                         'fusion_cpu_quota_percent').perform(context) + '%'
-                    if diagnostic_mode else ''),
+                    if diagnostic_mode and quota_enabled else ''),
             ),
         ])
     return [

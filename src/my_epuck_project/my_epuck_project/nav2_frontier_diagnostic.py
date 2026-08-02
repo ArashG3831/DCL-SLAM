@@ -1308,6 +1308,20 @@ class DiagnosticNode(Node):
                         'robot1_local_at_robot2': peer_nearest,
                         'robot2_global_costmap': cost_nearest,
                     },
+                    patches={
+                        'robot1_local': self._grid_patch_from_shared(
+                            self.maps['robot1'], pose),
+                        'robot2_local': self._grid_patch_from_shared(
+                            self.maps['robot2'], pose),
+                        'robot1_shared': self._grid_patch_from_shared(
+                            self.shared_maps['robot1'], pose),
+                        'robot2_shared_sanitized': self._grid_patch_from_shared(
+                            self.shared_maps['robot2'], pose),
+                        'robot2_global_costmap': self._grid_patch_from_shared(
+                            self.costmaps['robot2'], pose),
+                        'robot2_local_costmap': self._grid_patch_from_shared(
+                            self.local_costmaps['robot2'], pose),
+                    },
                     sanitizer_radius_m=0.067,
                     global_costmap_layers={
                         'plugins': ['static_layer', 'inflation_layer'],
@@ -2383,6 +2397,10 @@ def runner_parser() -> argparse.ArgumentParser:
     result.add_argument('--ros-domain-id', type=int, default=232)
     result.add_argument('--webots-port', type=int, default=23667)
     result.add_argument(
+        '--fusion-cpu-quota-percent', type=float, default=30.0,
+        help=('systemd CPUQuota for fusion processes; 0 disables it '
+              '(default: 30 for host protection)'))
+    result.add_argument(
         '--results-directory',
         default='results/nav2_frontier_diagnostic')
     return result
@@ -2445,6 +2463,7 @@ def launch_command(args: argparse.Namespace, world: Path,
         f'mission_duration_s:={args.mission_timeout}',
         f'startup_timeout_s:={args.startup_timeout}',
         f'phase_profile:={args.phase_profile}',
+        f'fusion_cpu_quota_percent:={args.fusion_cpu_quota_percent:g}',
     ]
 
 

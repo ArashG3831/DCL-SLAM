@@ -33,6 +33,10 @@ def generate_launch_description():
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'use_sim_time': 'true',
             'diagnostic_mode': 'true',
+            'fusion_cpu_quota_percent': LaunchConfiguration(
+                'fusion_cpu_quota_percent'),
+            'fusion_rebuild_period_s': LaunchConfiguration(
+                'fusion_rebuild_period_s'),
             'nav2_autostart': 'true',
         }.items(),
     )
@@ -71,6 +75,8 @@ def generate_launch_description():
         DeclareLaunchArgument('startup_timeout_s', default_value='300.0'),
         DeclareLaunchArgument('phase_profile', default_value='full',
                               choices=['full', 'short']),
+        # Protective default for interactive runs. Pass 0 explicitly for the
+        # unthrottled comparison required by the diagnostic protocol.
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         stack,

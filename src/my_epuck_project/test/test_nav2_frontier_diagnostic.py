@@ -137,6 +137,11 @@ def test_runner_supports_required_command_surface(tmp_path):
     assert 'webots_gui:=true' in command
     assert 'sensor_profile:=full' in command
     assert 'mission_duration_s:=600.0' in command
+    assert args.fusion_cpu_quota_percent == 30.0
+    assert 'fusion_cpu_quota_percent:=30' in command
+    unthrottled = runner_parser().parse_args([
+        '--fusion-cpu-quota-percent', '0'])
+    assert unthrottled.fusion_cpu_quota_percent == 0.0
     assert boolean('false') is False
 
 

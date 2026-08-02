@@ -505,6 +505,9 @@ class DiagnosticNode(Node):
             robot: {source: None for source in self.start_clearance_stats[robot]}
             for robot in ROBOTS
         }
+        # Clearance is diagnostic telemetry, not a control input. Cache the
+        # bounded neighbourhood scan until the map stamp or robot cell changes.
+        self._start_clearance_cache = {}
         self.time_state_seconds = {
             robot: Counter({state: 0.0 for state in TIME_STATES})
             for robot in ROBOTS
@@ -1001,18 +1004,37 @@ class DiagnosticNode(Node):
             'shared_map': grid_value(self.shared_maps[robot], *pose),
             'global_costmap': grid_value(self.costmaps[robot], *pose),
         }
-        clearances = {
-            'own_local_map': self._grid_clearance_from_shared(
-                self.maps[robot], *pose, threshold=50),
-            'peer_local_map': self._grid_clearance_from_shared(
-                self.maps[peer], *pose, threshold=50),
-            'shared_map': nearest_occupied_distance(
-                self.shared_maps[robot], *pose, occupied_threshold=50)
-            if self.shared_maps[robot] is not None else None,
-            'global_costmap': nearest_occupied_distance(
-                self.costmaps[robot], *pose, occupied_threshold=99)
-            if self.costmaps[robot] is not None else None,
-        }
+        def grid_key(grid):
+            if grid is None:
+                return None
+            stamp = grid.header.stamp
+            return (stamp.sec, stamp.nanosec, grid.info.width,
+                    grid.info.height, grid.info.resolution)
+
+        cell_key = tuple(round(value / 0.01) for value in pose)
+        cache_key = (
+            robot, cell_key, grid_key(self.maps[robot]),
+            grid_key(self.maps[peer]), grid_key(self.shared_maps[robot]),
+            grid_key(self.costmaps[robot]),
+        )
+        clearances = self._start_clearance_cache.get(cache_key)
+        if clearances is None:
+            clearances = {
+                'own_local_map': self._grid_clearance_from_shared(
+                    self.maps[robot], *pose, threshold=50),
+                'peer_local_map': self._grid_clearance_from_shared(
+                    self.maps[peer], *pose, threshold=50),
+                'shared_map': nearest_occupied_distance(
+                    self.shared_maps[robot], *pose, occupied_threshold=50)
+                if self.shared_maps[robot] is not None else None,
+                'global_costmap': nearest_occupied_distance(
+                    self.costmaps[robot], *pose, occupied_threshold=99)
+                if self.costmaps[robot] is not None else None,
+            }
+            self._start_clearance_cache[cache_key] = clearances
+            if len(self._start_clearance_cache) > 512:
+                self._start_clearance_cache.pop(
+                    next(iter(self._start_clearance_cache)))
         self.latest_start_clearance[robot] = clearances
         for source, clearance in clearances.items():
             if clearance is None:

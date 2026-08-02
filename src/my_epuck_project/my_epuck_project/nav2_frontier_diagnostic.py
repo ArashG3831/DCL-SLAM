@@ -2401,6 +2401,10 @@ def runner_parser() -> argparse.ArgumentParser:
         help=('systemd CPUQuota for fusion processes; 0 disables it '
               '(default: 30 for host protection)'))
     result.add_argument(
+        '--cpu-core-limit', type=int, default=4,
+        help=('limit the diagnostic process tree to this many CPU cores; '
+              '0 disables the affinity limit (default: 4)'))
+    result.add_argument(
         '--results-directory',
         default='results/nav2_frontier_diagnostic')
     return result
@@ -2537,6 +2541,21 @@ def _cleanup(launch, rviz, owned_pids):
     psutil.wait_procs(alive, timeout=2.0)
 
 
+def _affinity_preexec(core_limit):
+    """Return a child hook that bounds the complete diagnostic process tree."""
+    if core_limit <= 0 or not hasattr(os, 'sched_setaffinity'):
+        return None
+    allowed = sorted(os.sched_getaffinity(0))
+    selected = set(allowed[:min(core_limit, len(allowed))])
+    if not selected:
+        return None
+
+    def set_affinity():
+        os.sched_setaffinity(0, selected)
+
+    return set_affinity
+
+
 def runner_run(args: argparse.Namespace) -> int:
     """Run one diagnostic attempt and produce exactly five artifacts."""
     package_prefix()
@@ -2577,12 +2596,13 @@ def runner_run(args: argparse.Namespace) -> int:
     owned_pids = set()
     lock = threading.Lock()
     started = time.monotonic()
+    preexec = _affinity_preexec(args.cpu_core_limit)
     with (attempt / 'launch.log').open('w', encoding='utf-8') as log:
         try:
             launch = subprocess.Popen(
                 command, env=environment, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
-                start_new_session=True)
+                start_new_session=True, preexec_fn=preexec)
             threads.append(threading.Thread(
                 target=_pump, args=(launch.stdout, log, lock), daemon=True))
             threads[-1].start()
@@ -2590,7 +2610,7 @@ def runner_run(args: argparse.Namespace) -> int:
                 rviz = subprocess.Popen(
                     rviz_command(), env=environment, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, bufsize=1,
-                    start_new_session=True)
+                    start_new_session=True, preexec_fn=preexec)
                 threads.append(threading.Thread(
                     target=_pump, args=(rviz.stdout, log, lock), daemon=True))
                 threads[-1].start()
@@ -2642,6 +2662,8 @@ def runner_main(argv=None) -> int:
     if args.emergency_wall_runtime <= args.startup_timeout:
         raise SystemExit(
             '--emergency-wall-runtime must exceed --startup-timeout')
+    if args.cpu_core_limit < 0:
+        raise SystemExit('--cpu-core-limit must be zero or positive')
     try:
         return runner_run(args)
     except (RunnerError, OSError, subprocess.SubprocessError) as error:

@@ -1,8 +1,9 @@
 import math
 
-import rclpy
 from my_epuck_interfaces.msg import PeerMap
+from my_epuck_project.live_map_sanitizer import sanitize_shared_map
 from nav_msgs.msg import MapMetaData, OccupancyGrid
+import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -23,6 +24,14 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('metadata_topic', 'shared_map_metadata')
         self.declare_parameter('output_frame', 'shared_map')
         self.declare_parameter('resolution', 0.01)
+        self.declare_parameter(
+            'live_robot_frames',
+            ['robot1/base_footprint', 'robot2/base_footprint'])
+        self.declare_parameter('live_footprint_radius_m', 0.037)
+        self.declare_parameter('live_footprint_uncertainty_cells', 1)
+        self.declare_parameter('live_pose_max_age_s', 0.5)
+        self.declare_parameter('publish_on_callback', True)
+        self.declare_parameter('sanitize_live_footprints', False)
 
         local_topic = self.get_parameter('local_map_topic').value
         remote_topic = self.get_parameter('remote_peer_topic').value
@@ -31,6 +40,18 @@ class SourceAwareMapFusion(Node):
         metadata_topic = self.get_parameter('metadata_topic').value
         self.output_frame = self.get_parameter('output_frame').value
         self.resolution = float(self.get_parameter('resolution').value)
+        self.live_robot_frames = list(
+            self.get_parameter('live_robot_frames').value)
+        self.live_footprint_radius = float(
+            self.get_parameter('live_footprint_radius_m').value)
+        self.live_footprint_uncertainty_cells = int(
+            self.get_parameter('live_footprint_uncertainty_cells').value)
+        self.live_pose_max_age_s = float(
+            self.get_parameter('live_pose_max_age_s').value)
+        self.publish_on_callback = bool(
+            self.get_parameter('publish_on_callback').value)
+        self.sanitize_live_footprints = bool(
+            self.get_parameter('sanitize_live_footprints').value)
         if not self.expected_source:
             raise ValueError('expected_remote_source must not be empty')
         if self.resolution <= 0.0:
@@ -54,6 +75,8 @@ class SourceAwareMapFusion(Node):
         self.local_map = None
         self.remote_map = None
         self.last_remote_revision = 0
+        self.map_revision = 0
+        self.live_pose_cache = {}
         self.retry_timer = self.create_timer(0.5, self.try_fuse)
         self.get_logger().info(
             f'Local {self.resolve_topic_name(local_topic)} + remote-only '
@@ -63,7 +86,8 @@ class SourceAwareMapFusion(Node):
 
     def local_callback(self, message):
         self.local_map = message
-        self.try_fuse()
+        if self.publish_on_callback:
+            self.try_fuse()
 
     def reject(self, reason):
         self.get_logger().warning(reason)
@@ -89,7 +113,8 @@ class SourceAwareMapFusion(Node):
             return
         self.last_remote_revision = message.revision
         self.remote_map = message.occupancy_grid
-        self.try_fuse()
+        if self.publish_on_callback:
+            self.try_fuse()
 
     @staticmethod
     def yaw(quaternion):
@@ -189,6 +214,67 @@ class SourceAwareMapFusion(Node):
         fused.info.origin.position.y = minimum_y
         fused.info.origin.orientation.w = 1.0
         fused.data = fused_data
+        if not self.sanitize_live_footprints:
+            if rclpy.ok():
+                self.map_publisher.publish(fused)
+                self.metadata_publisher.publish(fused.info)
+            return
+        footprints = []
+        for frame in self.live_robot_frames:
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.output_frame, frame, Time(),
+                    timeout=Duration(seconds=0.05))
+                stamp = Time.from_msg(transform.header.stamp)
+                now = self.get_clock().now()
+                age = max(0.0, (now - stamp).nanoseconds / 1e9)
+                footprints.append({
+                    'robot_frame': frame,
+                    'x': transform.transform.translation.x,
+                    'y': transform.transform.translation.y,
+                    'radius_m': self.live_footprint_radius,
+                    'pose_age_s': age,
+                })
+                self.live_pose_cache[frame] = (
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    stamp,
+                )
+            except TransformException as error:
+                cached = self.live_pose_cache.get(frame)
+                now = self.get_clock().now()
+                cached_age = None
+                if cached is not None:
+                    cached_age = max(
+                        0.0, (now - cached[2]).nanoseconds / 1e9)
+                if cached is not None and cached_age <= self.live_pose_max_age_s:
+                    footprints.append({
+                        'robot_frame': frame, 'x': cached[0], 'y': cached[1],
+                        'radius_m': self.live_footprint_radius,
+                        'pose_age_s': cached_age,
+                    })
+                else:
+                    self.get_logger().warning(
+                        f'Live footprint unavailable for {frame}: {error}',
+                        throttle_duration_sec=5.0)
+                    footprints.append({
+                        'robot_frame': frame, 'pose_age_s': None,
+                        'x': 0.0, 'y': 0.0,
+                        'radius_m': self.live_footprint_radius,
+                    })
+        fused, sanitization = sanitize_shared_map(
+            fused, footprints,
+            uncertainty_cells=self.live_footprint_uncertainty_cells,
+            max_pose_age_s=self.live_pose_max_age_s)
+        self.map_revision += 1
+        self.get_logger().info(
+            'MAP_SANITIZE ' + ' '.join((
+                f'revision={self.map_revision}',
+                f'cleared_cell_count={sanitization["cleared_cell_count"]}',
+                f'stale_pose_count={sanitization["stale_pose_count"]}',
+                f'footprint_radius_m={self.live_footprint_radius}',
+                f'uncertainty_cells={self.live_footprint_uncertainty_cells}',
+            )))
         if rclpy.ok():
             self.map_publisher.publish(fused)
             self.metadata_publisher.publish(fused.info)

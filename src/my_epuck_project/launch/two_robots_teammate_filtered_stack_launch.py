@@ -13,8 +13,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
-from nav2_common.launch import RewrittenYaml
 from my_epuck_project.cooperative_profiles import profile
+from nav2_common.launch import RewrittenYaml
 
 
 LIFECYCLE_NODES = [
@@ -106,6 +106,8 @@ def launch_setup(context):
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
+    diagnostic_mode = (
+        LaunchConfiguration('diagnostic_mode').perform(context) == 'true')
     filtered_slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch',
@@ -118,6 +120,8 @@ def launch_setup(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
+            'teammate_geometry_radius_m': (
+                '0.026' if diagnostic_mode else '0.035'),
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
@@ -176,6 +180,18 @@ def launch_setup(context):
                     'metadata_topic': 'shared_map_metadata',
                     'output_frame': 'shared_map',
                     'resolution': selected['fusion_resolution'],
+                    'live_robot_frames': [
+                        'robot1/base_footprint',
+                        'robot2/base_footprint',
+                    ],
+                    'live_footprint_radius_m': 0.037,
+                    'live_footprint_uncertainty_cells': 1,
+                    'live_pose_max_age_s': 0.5,
+                    # The accepted baseline retains callback publication.
+                    # The allocator-free diagnostic uses the bounded timer so
+                    # fusion cannot starve Nav2/controller execution.
+                    'publish_on_callback': not diagnostic_mode,
+                    'sanitize_live_footprints': diagnostic_mode,
                 }],
             ),
         ])

@@ -268,6 +268,39 @@ def nearest_occupied_distance(
     return best
 
 
+def nearest_occupied_cell(grid: Optional[OccupancyGrid], x: float, y: float,
+                          maximum: float = 0.5,
+                          occupied_threshold: int = 50):
+    """Return the nearest occupied cell coordinates and distance."""
+    if grid is None:
+        return None
+    cell = grid_cell(grid, x, y)
+    if cell is None:
+        return None
+    _, cx, cy = cell
+    resolution = grid.info.resolution
+    radius = max(1, int(math.ceil(maximum / resolution)))
+    best = None
+    for my in range(max(0, cy - radius),
+                    min(grid.info.height, cy + radius + 1)):
+        for mx in range(max(0, cx - radius),
+                        min(grid.info.width, cx + radius + 1)):
+            value = int(grid.data[my * grid.info.width + mx])
+            if value < occupied_threshold:
+                continue
+            distance = math.hypot(mx - cx, my - cy) * resolution
+            if best is None or distance < best['distance_m']:
+                best = {
+                    'column': mx, 'row': my, 'value': value,
+                    'distance_m': distance,
+                    'x_m': grid.info.origin.position.x
+                    + (mx + 0.5) * resolution,
+                    'y_m': grid.info.origin.position.y
+                    + (my + 0.5) * resolution,
+                }
+    return best
+
+
 def line_point_distance(ax, ay, bx, by, px, py) -> float:
     """Return distance from a point to a finite line segment."""
     dx, dy = bx - ax, by - ay
@@ -388,6 +421,7 @@ class DiagnosticNode(Node):
         self.maps = {robot: None for robot in ROBOTS}
         self.shared_maps = {robot: None for robot in ROBOTS}
         self.costmaps = {robot: None for robot in ROBOTS}
+        self.local_costmaps = {robot: None for robot in ROBOTS}
         self.odom = {robot: None for robot in ROBOTS}
         self.poses = {robot: None for robot in ROBOTS}
         self.cmd = {robot: {'nonzero': False, 'last': 0.0} for robot in ROBOTS}
@@ -443,6 +477,8 @@ class DiagnosticNode(Node):
         self.failure_events = Counter()
         self.emitted_throttles = {}
         self.start_occupied = {robot: False for robot in ROBOTS}
+        self.last_costmap_start_value = {robot: None for robot in ROBOTS}
+        self.costmap_transition_emitted = {robot: False for robot in ROBOTS}
         self.start_gate_next_retry = {robot: 0.0 for robot in ROBOTS}
         self.start_gate_backoff = {robot: 0.25 for robot in ROBOTS}
         self.start_gate_prevented_requests = {robot: 0 for robot in ROBOTS}
@@ -522,6 +558,9 @@ class DiagnosticNode(Node):
             self.create_subscription(
                 OccupancyGrid, f'/{robot}/global_costmap/costmap',
                 partial(self._map, robot, 'costmap'), map_qos)
+            self.create_subscription(
+                OccupancyGrid, f'/{robot}/local_costmap/costmap',
+                partial(self._map, robot, 'local_costmap'), map_qos)
             self.create_subscription(
                 FrontierCandidateArray, f'/{robot}/frontier_candidates',
                 partial(self._candidate, robot), 10)
@@ -690,8 +729,10 @@ class DiagnosticNode(Node):
                 self.map_times[robot].append(now)
         elif kind == 'shared':
             self.shared_maps[robot] = message
-        else:
+        elif kind == 'costmap':
             self.costmaps[robot] = message
+        else:
+            self.local_costmaps[robot] = message
 
     def _candidate(self, robot: str, message: FrontierCandidateArray):
         now = self.now_sim()
@@ -893,6 +934,45 @@ class DiagnosticNode(Node):
         local_x = cosine * x - sine * y + transform.translation.x
         local_y = sine * x + cosine * y + transform.translation.y
         return local_x, local_y
+
+    def _grid_patch_from_shared(self, grid: Optional[OccupancyGrid],
+                                pose, radius_m=0.5):
+        """Serialize a bounded square patch for costmap provenance events."""
+        if grid is None or pose is None:
+            return None
+        point = self._point_from_shared(grid, *pose)
+        if point is None or grid.info.resolution <= 0.0:
+            return None
+        _, cx, cy = grid_cell(grid, *point)
+        cells = max(1, int(math.ceil(radius_m / grid.info.resolution)))
+        rows = []
+        occupied = []
+        for row in range(max(0, cy - cells),
+                         min(grid.info.height, cy + cells + 1)):
+            values = []
+            for column in range(max(0, cx - cells),
+                                min(grid.info.width, cx + cells + 1)):
+                value = int(grid.data[row * grid.info.width + column])
+                values.append(value)
+                if value >= 50:
+                    occupied.append({
+                        'column': column, 'row': row, 'value': value,
+                        'distance_m': math.hypot(column - cx, row - cy)
+                        * grid.info.resolution,
+                    })
+            rows.append(values)
+        occupied.sort(key=lambda item: item['distance_m'])
+        return {
+            'frame_id': grid.header.frame_id,
+            'stamp_s': stamp_seconds(grid.header.stamp),
+            'resolution_m': grid.info.resolution,
+            'origin_x_m': grid.info.origin.position.x,
+            'origin_y_m': grid.info.origin.position.y,
+            'centre_cell': grid_value(grid, *point),
+            'centre_column': cx, 'centre_row': cy,
+            'rows': rows,
+            'nearest_occupied': occupied[0] if occupied else None,
+        }
 
     def _grid_value_from_shared(self, grid: Optional[OccupancyGrid],
                                 x: float, y: float) -> Optional[int]:
@@ -1171,6 +1251,76 @@ class DiagnosticNode(Node):
             start_cost = provenance['global_costmap']
             start_classification, _ = classify_start_cell(
                 self.costmaps[robot], *(pose or (0.0, 0.0)))
+            previous_cost = self.last_costmap_start_value[robot]
+            if (robot == 'robot2' and pose is not None
+                    and previous_cost is not None
+                    and previous_cost < 99 and start_cost is not None
+                    and start_cost >= 99
+                    and not self.costmap_transition_emitted[robot]):
+                peer = 'robot1'
+                shared_nearest = nearest_occupied_cell(
+                    self.shared_maps[robot], *pose, occupied_threshold=50)
+                peer_nearest = self._grid_clearance_from_shared(
+                    self.maps[peer], *pose, threshold=50)
+                cost_nearest = nearest_occupied_cell(
+                    self.costmaps[robot], *pose, occupied_threshold=99)
+                self._event(
+                    'COSTMAP_99_TRANSITION', robot,
+                    pose=pose, previous_cost=previous_cost,
+                    current_cost=start_cost,
+                    peer_pose=self.poses[peer],
+                    inter_robot_distance=(None if self.poses[peer] is None
+                                          else math.dist(pose, self.poses[peer])),
+                    map_revisions={
+                        'robot1_local_messages': self.messages['robot1']['local_map'],
+                        'robot2_local_messages': self.messages['robot2']['local_map'],
+                        'robot1_shared_messages': self.messages['robot1']['shared_map'],
+                        'robot2_shared_messages': self.messages['robot2']['shared_map'],
+                        'robot2_global_costmap_messages': self.messages['robot2']['costmap'],
+                        'robot2_local_costmap_messages': self.messages['robot2']['local_costmap'],
+                    },
+                    map_timestamps={
+                        name: (None if value is None else stamp_seconds(value.header.stamp))
+                        for name, value in {
+                            'robot1_local': self.maps['robot1'],
+                            'robot2_local': self.maps['robot2'],
+                            'robot1_shared': self.shared_maps['robot1'],
+                            'robot2_shared': self.shared_maps['robot2'],
+                            'robot2_sanitized_shared': self.shared_maps['robot2'],
+                            'robot2_global_costmap': self.costmaps['robot2'],
+                            'robot2_local_costmap': self.local_costmaps['robot2'],
+                        }.items()},
+                    centre_values={
+                        'robot1_local': self._grid_value_from_shared(
+                            self.maps['robot1'], *pose),
+                        'robot2_local': self._grid_value_from_shared(
+                            self.maps['robot2'], *pose),
+                        'robot1_shared': grid_value(
+                            self.shared_maps['robot1'], *pose),
+                        'robot2_shared_sanitized': grid_value(
+                            self.shared_maps['robot2'], *pose),
+                        'robot2_global_costmap': start_cost,
+                        'robot2_local_costmap': self._grid_value_from_shared(
+                            self.local_costmaps['robot2'], *pose),
+                    },
+                    nearest_cells={
+                        'robot2_shared': shared_nearest,
+                        'robot1_local_at_robot2': peer_nearest,
+                        'robot2_global_costmap': cost_nearest,
+                    },
+                    sanitizer_radius_m=0.067,
+                    global_costmap_layers={
+                        'plugins': ['static_layer', 'inflation_layer'],
+                        'static_map_topic': '/robot2/shared_map',
+                        'obstacle_layer_in_plugins': False,
+                        'configured_scan_topic': '/robot2/scan_d500_fixed',
+                        'inflation_radius_m': 0.11,
+                    },
+                    source_classification=(
+                        'STATIC_LAYER_OR_INFLATION_FROM_STATIC'),
+                )
+                self.costmap_transition_emitted[robot] = True
+            self.last_costmap_start_value[robot] = start_cost
             if pose:
                 if start_cost is None or start_cost < 0:
                     self._trigger('COSTMAP_STALE', robot,

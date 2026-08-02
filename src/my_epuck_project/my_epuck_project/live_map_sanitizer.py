@@ -11,6 +11,54 @@ def _cell_center(grid, column, row):
     )
 
 
+def footprint_cell_indices(grid, footprint, *, uncertainty_cells=1):
+    """Return the bounded occupancy cells covered by one live footprint."""
+    if uncertainty_cells < 0 or uncertainty_cells > 1:
+        raise ValueError('uncertainty_cells must be 0 or 1')
+    resolution = float(grid.info.resolution)
+    if resolution <= 0.0:
+        return set()
+    radius = float(footprint['radius_m'])
+    if radius <= 0.0:
+        raise ValueError('footprint radius must be positive')
+    clear_radius = radius + uncertainty_cells * resolution
+    min_col = max(0, int(math.floor(
+        (footprint['x'] - clear_radius - grid.info.origin.position.x)
+        / resolution)))
+    max_col = min(grid.info.width - 1, int(math.floor(
+        (footprint['x'] + clear_radius - grid.info.origin.position.x)
+        / resolution)))
+    min_row = max(0, int(math.floor(
+        (footprint['y'] - clear_radius - grid.info.origin.position.y)
+        / resolution)))
+    max_row = min(grid.info.height - 1, int(math.floor(
+        (footprint['y'] + clear_radius - grid.info.origin.position.y)
+        / resolution)))
+    cells = set()
+    for row in range(min_row, max_row + 1):
+        for column in range(min_col, max_col + 1):
+            x, y = _cell_center(grid, column, row)
+            if math.hypot(x - footprint['x'], y - footprint['y']) <= clear_radius:
+                cells.add(row * grid.info.width + column)
+    return cells
+
+
+def apply_incremental_patch(base_data, output_data, previous_cells, new_cells):
+    """Restore and clear only cells touched by moving live footprints."""
+    if len(base_data) != len(output_data):
+        raise ValueError('base and output data lengths must match')
+    modified = 0
+    affected = set(previous_cells) | set(new_cells)
+    for index in affected:
+        desired = base_data[index]
+        if index in new_cells and desired >= 0:
+            desired = 0
+        if output_data[index] != desired:
+            output_data[index] = desired
+            modified += 1
+    return modified
+
+
 def clear_live_footprints(
     grid, footprints, *, uncertainty_cells=1, max_pose_age_s=0.5,
 ):
@@ -44,34 +92,17 @@ def clear_live_footprints(
             details.append({**footprint, 'cleared_cell_count': 0,
                             'stale': True})
             continue
-        radius = float(footprint['radius_m'])
-        if radius <= 0.0:
-            raise ValueError('footprint radius must be positive')
         # The one-cell margin is a bounded occupancy-grid uncertainty margin,
         # never Nav2's inflation radius.
-        clear_radius = radius + uncertainty_cells * resolution
-        min_col = max(0, int(math.floor(
-            (footprint['x'] - clear_radius - grid.info.origin.position.x)
-            / resolution)))
-        max_col = min(grid.info.width - 1, int(math.floor(
-            (footprint['x'] + clear_radius - grid.info.origin.position.x)
-            / resolution)))
-        min_row = max(0, int(math.floor(
-            (footprint['y'] - clear_radius - grid.info.origin.position.y)
-            / resolution)))
-        max_row = min(grid.info.height - 1, int(math.floor(
-            (footprint['y'] + clear_radius - grid.info.origin.position.y)
-            / resolution)))
+        clear_radius = (float(footprint['radius_m'])
+                        + uncertainty_cells * resolution)
+        cells = footprint_cell_indices(
+            grid, footprint, uncertainty_cells=uncertainty_cells)
         cleared = 0
-        for row in range(min_row, max_row + 1):
-            for column in range(min_col, max_col + 1):
-                x, y = _cell_center(grid, column, row)
-                if math.hypot(x - footprint['x'], y - footprint['y']) > clear_radius:
-                    continue
-                index = row * grid.info.width + column
-                if result.data[index] >= 0:
-                    result.data[index] = 0
-                    cleared += 1
+        for index in cells:
+            if result.data[index] >= 0:
+                result.data[index] = 0
+                cleared += 1
         total += cleared
         cleared_by_role[role] += cleared
         details.append({**footprint, 'cleared_cell_count': cleared,

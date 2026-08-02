@@ -2,7 +2,11 @@
 
 import math
 
-from my_epuck_project.live_map_sanitizer import sanitize_shared_map
+from my_epuck_project.live_map_sanitizer import (
+    apply_incremental_patch,
+    footprint_cell_indices,
+    sanitize_shared_map,
+)
 from my_epuck_project.nav2_frontier_diagnostic import classify_start_cell
 from my_epuck_project.teammate_scan_filter import (
     mask_teammate_returns,
@@ -176,6 +180,39 @@ def test_local_source_grid_is_not_mutated_by_sanitization():
     original = list(source.data)
     sanitize_shared_map(source, [footprint(role='own')], uncertainty_cells=1)
     assert list(source.data) == original
+
+
+def test_incremental_patch_noop_does_no_work():
+    base = [100] * 100
+    output = list(base)
+    output[11] = 0
+    assert apply_incremental_patch(base, output, {11}, {11}) == 0
+    assert output[11] == 0
+
+
+def test_incremental_patch_touches_only_old_and_new_footprint_cells():
+    base = [100] * 100
+    output = list(base)
+    output[11] = output[12] = 0
+    changed = apply_incremental_patch(base, output, {11, 12}, {22, 23})
+    assert changed == 4
+    assert output[11] == output[12] == 100
+    assert output[22] == output[23] == 0
+    assert all(value == 100 for index, value in enumerate(output)
+               if index not in {22, 23})
+
+
+def test_incremental_patch_preserves_unknown_cells():
+    base = [-1] * 20
+    output = list(base)
+    assert apply_incremental_patch(base, output, set(), {4, 5}) == 0
+    assert output == base
+
+
+def test_footprint_cell_set_is_bounded():
+    cells = footprint_cell_indices(grid(), footprint(role='own'),
+                                   uncertainty_cells=1)
+    assert len(cells) < 100
 
 
 def test_start_gate_classifies_free_and_inflated():

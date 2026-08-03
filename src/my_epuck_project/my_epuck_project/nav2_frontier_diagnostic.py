@@ -549,6 +549,11 @@ class DiagnosticNode(Node):
         # Clearance is diagnostic telemetry, not a control input. Cache the
         # bounded neighbourhood scan until the map stamp or robot cell changes.
         self._start_clearance_cache = {}
+        self._known_cells_cache = {}
+        self._last_artifact_flush_wall = time.monotonic()
+        self._artifact_write_counts = Counter()
+        self._candidate_reject_pending = {robot: Counter() for robot in ROBOTS}
+        self._candidate_reject_last_emit = {}
         self.time_state_seconds = {
             robot: Counter({state: 0.0 for state in TIME_STATES})
             for robot in ROBOTS
@@ -615,9 +620,9 @@ class DiagnosticNode(Node):
                 TwistStamped, f'/{robot}/cmd_vel',
                 partial(self._cmd_vel_stamped, robot), qos_profile_sensor_data)
         self.events_file = (self.output / 'diagnostic_events.jsonl').open(
-            'w', encoding='utf-8', buffering=1)
+            'w', encoding='utf-8', buffering=65536)
         self.handoff_file = (self.output / 'handoff_rejections.csv').open(
-            'w', encoding='utf-8', newline='', buffering=1)
+            'w', encoding='utf-8', newline='', buffering=65536)
         self.handoff_csv = csv.DictWriter(self.handoff_file, fieldnames=[
             'robot', 'canonical_task_id', 'physical_signature',
             'snapshot_generation_time_s', 'dispatch_attempt_time_s',
@@ -638,11 +643,11 @@ class DiagnosticNode(Node):
         self.candidate_context = {robot: {} for robot in ROBOTS}
         self.costmap_wait = {robot: None for robot in ROBOTS}
         self.timeseries_file = (self.output / 'diagnostic_timeseries.csv').open(
-            'w', encoding='utf-8', newline='', buffering=1)
+            'w', encoding='utf-8', newline='', buffering=65536)
         self.timeseries = csv.DictWriter(
             self.timeseries_file,
             fieldnames=[
-                'sim_time_s', 'mission_time_s', 'phase', 'robot', 'state',
+                'wall_time_s', 'sim_time_s', 'mission_time_s', 'phase', 'robot', 'state',
                 'x_m', 'y_m', 'cmd_nonzero', 'active_goal',
                 'fixed_scan_age_s', 'slam_scan_age_s', 'local_map_age_s',
                 'shared_map_age_s', 'costmap_age_s', 'candidate_age_s',
@@ -692,6 +697,7 @@ class DiagnosticNode(Node):
             **values,
         }
         self.events_file.write(json.dumps(record, sort_keys=True) + '\n')
+        self._artifact_write_counts['event_rows'] += 1
         encoded = 'DIAGNOSTIC_EVENT ' + json.dumps(record, sort_keys=True)
         # rclpy caches severity per Python call site, so each severity needs a
         # distinct static logger invocation.
@@ -940,9 +946,16 @@ class DiagnosticNode(Node):
             match = re.search(r'reason=([A-Z0-9_]+)', text)
             reason = match.group(1) if match else 'UNSPECIFIED_REJECTION'
             self.candidate_invalid_reasons[robot][reason] += 1
-            self._event('FRONTIER_CANDIDATE_INVALID', robot,
-                        severity='WARN', reason=reason,
-                        source='frontier_candidate_generator')
+            self._candidate_reject_pending[robot][reason] += 1
+            key = (robot, reason)
+            now = time.monotonic()
+            if now - self._candidate_reject_last_emit.get(key, -math.inf) >= 5.0:
+                count = self._candidate_reject_pending[robot].pop(reason)
+                self._candidate_reject_last_emit[key] = now
+                self._event('FRONTIER_CANDIDATE_INVALID', robot,
+                            severity='WARN', reason=reason,
+                            occurrences=count,
+                            source='frontier_candidate_generator')
         if text.startswith('CANDIDATE_CYCLE_CONTEXT') and robot:
             self.candidate_cycle_started[robot] = self.now_sim()
 
@@ -1328,6 +1341,21 @@ class DiagnosticNode(Node):
             return 0.0
         return (len(times) - 1) / (times[-1] - times[0])
 
+    def _known_cells(self, grid: Optional[OccupancyGrid]) -> int:
+        """Avoid rescanning unchanged grids from the normal 2 Hz sampler."""
+        if grid is None:
+            return 0
+        stamp = grid.header.stamp
+        key = (id(grid), stamp.sec, stamp.nanosec, len(grid.data))
+        cached = self._known_cells_cache.get(key)
+        if cached is not None:
+            return cached
+        value = known_cell_count(grid)
+        self._known_cells_cache[key] = value
+        if len(self._known_cells_cache) > 64:
+            self._known_cells_cache.pop(next(iter(self._known_cells_cache)))
+        return value
+
     def _sample(self):
         if self.completed:
             return
@@ -1454,6 +1482,7 @@ class DiagnosticNode(Node):
                                   shared_map_value=provenance['shared_map'])
             tf_available = transform is not None
             row = {
+                'wall_time_s': f'{time.monotonic():.6f}',
                 'sim_time_s': f'{self.now_sim():.6f}',
                 'mission_time_s': f'{elapsed:.6f}', 'phase': phase,
                 'robot': robot, 'state': state,
@@ -1475,8 +1504,8 @@ class DiagnosticNode(Node):
                     self._age(robot, 'candidate')),
                 'candidate_count': 0 if self.candidates[robot] is None
                 else len(self.candidates[robot].candidates),
-                'known_local_cells': known_cell_count(self.maps[robot]),
-                'known_shared_cells': known_cell_count(
+                'known_local_cells': self._known_cells(self.maps[robot]),
+                'known_shared_cells': self._known_cells(
                     self.shared_maps[robot]),
                 'own_local_map_start': provenance['own_local_map'],
                 'peer_local_map_start': provenance['peer_local_map'],
@@ -1492,7 +1521,13 @@ class DiagnosticNode(Node):
                 'tf_available': int(tf_available),
             }
             self.timeseries.writerow(row)
+            self._artifact_write_counts['timeseries_rows'] += 1
             self._automatic_triggers(robot, phase)
+        if time.monotonic() - self._last_artifact_flush_wall >= 5.0:
+            self.events_file.flush()
+            self.timeseries_file.flush()
+            self.handoff_file.flush()
+            self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
     def _format_age(value):
@@ -1692,6 +1727,7 @@ class DiagnosticNode(Node):
             'retry_count': retry_count, 'wait_duration_s': wait_duration,
         }
         self.handoff_csv.writerow(row)
+        self._artifact_write_counts['handoff_csv_rows'] += 1
         self.handoff_rejections[reason] += 1
         self.handoff_records.append(row)
         self._event(
@@ -2484,6 +2520,8 @@ class DiagnosticNode(Node):
             'handoff_rejection_counts': dict(self.handoff_rejections),
             'handoff_rejection_record_count': len(self.handoff_records),
             'handoff_rejection_csv': 'handoff_rejections.csv',
+            'artifact_write_counts': dict(self._artifact_write_counts),
+            'artifact_flush_policy': 'buffered; periodic every 5 wall seconds; final flush',
             'time_breakdown': time_breakdown,
             'failure_triggers': dict(self.failure_events),
             'planner_failure_storm': self.planner_failure_storm,

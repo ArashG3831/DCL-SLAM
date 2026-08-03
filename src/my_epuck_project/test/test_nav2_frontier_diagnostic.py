@@ -278,6 +278,37 @@ def test_handoff_final_validation_keeps_path_queries_serialized():
     assert 'if self.planner_requests[robot] is not None:' in source
 
 
+def test_handoff_artifacts_are_buffered_and_periodically_flushed():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "buffering=65536" in source
+    record_body = source[source.index('def _record_handoff'):source.index('def _handoff_safe_goal')]
+    assert '.flush()' not in record_body
+    assert 'periodic every 5 wall seconds' in source
+
+
+def test_repeated_upstream_rejections_are_rate_limited():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert '_candidate_reject_pending' in source
+    assert '_candidate_reject_last_emit' in source
+    assert 'occurrences=count' in source
+
+
+def test_timeseries_has_wall_clock_for_rtf_windows():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "'wall_time_s', 'sim_time_s'" in source
+    assert "'wall_time_s': f'{time.monotonic():.6f}'" in source
+
+
+def test_known_cell_telemetry_uses_bounded_cache():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert 'def _known_cells(self' in source
+    assert 'len(self._known_cells_cache) > 64' in source
+
+
 def test_setup_adds_only_node_console_entry_for_this_diagnostic():
     setup = (PROJECT / 'setup.py').read_text(encoding='utf-8')
     assert setup.count("'nav2_frontier_diagnostic = '") == 1

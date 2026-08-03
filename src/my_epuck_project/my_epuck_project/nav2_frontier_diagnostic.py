@@ -2703,6 +2703,15 @@ def boolean(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError('expected true or false')
 
 
+def default_cpu_core_limit() -> int:
+    """Reserve one CPU from the diagnostic process tree for the desktop."""
+    try:
+        count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        count = os.cpu_count() or 1
+    return max(1, count - 1)
+
+
 def runner_parser() -> argparse.ArgumentParser:
     """Build the lean diagnostic runner CLI."""
     result = argparse.ArgumentParser(
@@ -2730,9 +2739,9 @@ def runner_parser() -> argparse.ArgumentParser:
         help=('systemd CPUQuota for fusion processes; 0 disables it '
               '(default: 30 for host protection)'))
     result.add_argument(
-        '--cpu-core-limit', type=int, default=4,
+        '--cpu-core-limit', type=int, default=default_cpu_core_limit(),
         help=('limit the diagnostic process tree to this many CPU cores; '
-              '0 disables the affinity limit (default: 4)'))
+              '0 disables affinity; default reserves one CPU for the host'))
     result.add_argument(
         '--results-directory',
         default='results/nav2_frontier_diagnostic')

@@ -7,6 +7,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     deterministic_candidate_key,
     DiagnosticNode,
     _affinity_preexec,
+    default_cpu_core_limit,
     grid_cell,
     map_change_classification,
     region_fingerprint,
@@ -159,7 +160,7 @@ def test_runner_supports_required_command_surface(tmp_path):
     assert 'mission_duration_s:=600.0' in command
     assert args.fusion_cpu_quota_percent == 30.0
     assert 'fusion_cpu_quota_percent:=30' in command
-    assert args.cpu_core_limit == 4
+    assert args.cpu_core_limit == default_cpu_core_limit()
     unthrottled = runner_parser().parse_args([
         '--fusion-cpu-quota-percent', '0'])
     assert unthrottled.fusion_cpu_quota_percent == 0.0
@@ -178,6 +179,13 @@ def test_runner_process_affinity_limit_is_optional_and_bounded():
     assert _affinity_preexec(0) is None
     hook = _affinity_preexec(1)
     assert hook is None or callable(hook)
+
+
+def test_default_affinity_reserves_one_host_cpu():
+    assert default_cpu_core_limit() >= 1
+    if hasattr(__import__('os'), 'sched_getaffinity'):
+        assert default_cpu_core_limit() == max(
+            1, len(__import__('os').sched_getaffinity(0)) - 1)
 
 
 def test_artifact_and_time_breakdown_contracts_are_complete():

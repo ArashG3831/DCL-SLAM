@@ -12,6 +12,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     map_change_classification,
     region_fingerprint,
     candidate_physical_signature,
+    goal_grid_sample,
     launch_command,
     LAUNCH_FILE,
     phase_at,
@@ -140,6 +141,38 @@ def test_grid_cell_rejects_outside_and_resolves_inside():
     assert grid_cell(grid, -0.75, -0.25) == (0, 0, 0)
     assert grid_cell(grid, 0.75, 0.75) == (11, 3, 2)
     assert grid_cell(grid, 1.1, 0.0) is None
+
+
+def test_goal_sample_distinguishes_free_unknown_inflated_inscribed_and_lethal():
+    grid = _handoff_grid()
+    grid.data[grid_cell(grid, 1.0, 1.0)[0]] = 0
+    assert goal_grid_sample(grid, 1.0, 1.0, costmap=True)['classification'] == 'FREE'
+    grid.data[grid_cell(grid, 1.0, 1.0)[0]] = -1
+    assert goal_grid_sample(grid, 1.0, 1.0, costmap=True)['classification'] == 'UNKNOWN'
+    grid.data[grid_cell(grid, 1.0, 1.0)[0]] = 99
+    assert goal_grid_sample(grid, 1.0, 1.0, costmap=True)['classification'] == 'INSCRIBED'
+    grid.data[grid_cell(grid, 1.0, 1.0)[0]] = 100
+    assert goal_grid_sample(grid, 1.0, 1.0, costmap=True)['classification'] == 'LETHAL'
+
+
+def test_goal_sample_supports_three_centimetre_negative_and_rotated_grid():
+    grid = OccupancyGrid()
+    grid.info.resolution = 0.03
+    grid.info.width = grid.info.height = 4
+    grid.info.origin.position.x = -0.12
+    grid.info.origin.position.y = -0.12
+    grid.info.origin.orientation.z = 2 ** -0.5
+    grid.info.origin.orientation.w = 2 ** -0.5
+    grid.data = [0] * 16
+    sample = goal_grid_sample(grid, -0.135, -0.105, costmap=True)
+    assert sample['classification'] == 'FREE'
+    assert sample['cell']['column'] == 0
+    assert sample['cell']['row'] == 0
+
+
+def test_goal_sample_reports_boundary_as_outside():
+    grid = _handoff_grid()
+    assert goal_grid_sample(grid, 3.0, 0.0, costmap=True)['classification'] == 'OUTSIDE'
 
 
 def test_runner_supports_required_command_surface(tmp_path):
@@ -290,9 +323,29 @@ def test_handoff_artifacts_are_buffered_and_periodically_flushed():
     source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
         encoding='utf-8')
     assert "buffering=65536" in source
-    record_body = source[source.index('def _record_handoff'):source.index('def _handoff_safe_goal')]
+    record_body = source[source.index('def _record_handoff'):source.index('def _evaluate_handoff_safety')]
     assert '.flush()' not in record_body
     assert 'periodic every 5 wall seconds' in source
+
+
+def test_handoff_uses_one_structured_safety_result_for_logging_and_acceptance():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert 'def _evaluate_handoff_safety' in source
+    assert "safe = self._evaluate_handoff_safety(robot, candidate, batch)" in source
+    assert "self._record_handoff(robot, candidate, batch, reason, safe)" in source
+    assert "'safety_result_json'" in source
+
+
+def test_handoff_has_distinct_goal_and_peer_rejection_reasons():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    for reason in (
+            'GOAL_UNKNOWN_SHARED_MAP', 'GOAL_INFLATED_GLOBAL_COSTMAP',
+            'GOAL_INSCRIBED_GLOBAL_COSTMAP', 'GOAL_LETHAL_GLOBAL_COSTMAP',
+            'GOAL_INSUFFICIENT_CLEARANCE', 'GOAL_INSIDE_PEER_FOOTPRINT',
+            'PATH_INTERSECTS_PEER_FOOTPRINT'):
+        assert reason in source
 
 
 def test_repeated_upstream_rejections_are_rate_limited():

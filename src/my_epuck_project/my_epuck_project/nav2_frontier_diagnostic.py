@@ -222,6 +222,53 @@ def classify_start_cell(costmap: Optional[OccupancyGrid], x: float, y: float):
     return 'INFLATED', value
 
 
+def goal_grid_sample(grid: Optional[OccupancyGrid], x: float, y: float,
+                     costmap: bool = False) -> dict:
+    """Return one auditable world-to-grid sample and its occupancy class."""
+    if grid is None:
+        return {'value': None, 'classification': 'OUTSIDE', 'cell': None,
+                'frame_id': None, 'stamp_s': None}
+    cell = grid_cell(grid, x, y)
+    if cell is None:
+        return {'value': None, 'classification': 'OUTSIDE', 'cell': None,
+                'frame_id': grid.header.frame_id,
+                'stamp_s': stamp_seconds(grid.header.stamp)}
+    value, _, _ = cell[0], cell[1], cell[2]
+    occupancy = int(grid.data[value])
+    if occupancy < 0:
+        classification = 'UNKNOWN'
+    elif costmap and occupancy >= 100:
+        classification = 'LETHAL'
+    elif costmap and occupancy >= 99:
+        classification = 'INSCRIBED'
+    elif costmap and occupancy > 0:
+        classification = 'INFLATED'
+    elif not costmap and occupancy >= 50:
+        classification = 'OCCUPIED'
+    else:
+        classification = 'FREE'
+    yaw = math.atan2(
+        2.0 * (grid.info.origin.orientation.w * grid.info.origin.orientation.z
+               + grid.info.origin.orientation.x * grid.info.origin.orientation.y),
+        1.0 - 2.0 * (grid.info.origin.orientation.y ** 2
+                     + grid.info.origin.orientation.z ** 2))
+    local_x = (cell[1] + 0.5) * grid.info.resolution
+    local_y = (cell[2] + 0.5) * grid.info.resolution
+    return {
+        'value': occupancy, 'classification': classification,
+        'cell': {'index': cell[0], 'column': cell[1], 'row': cell[2],
+                 'centre_x_m': grid.info.origin.position.x
+                 + math.cos(yaw) * local_x - math.sin(yaw) * local_y,
+                 'centre_y_m': grid.info.origin.position.y
+                 + math.sin(yaw) * local_x + math.cos(yaw) * local_y},
+        'frame_id': grid.header.frame_id,
+        'stamp_s': stamp_seconds(grid.header.stamp),
+        'resolution_m': grid.info.resolution,
+        'origin_x_m': grid.info.origin.position.x,
+        'origin_y_m': grid.info.origin.position.y,
+    }
+
+
 def known_cell_count(grid: Optional[OccupancyGrid]) -> int:
     """Count known cells in an OccupancyGrid."""
     return 0 if grid is None else sum(value >= 0 for value in grid.data)
@@ -635,6 +682,8 @@ class DiagnosticNode(Node):
             'minimum_path_clearance_m', 'original_planner_result',
             'final_planner_result', 'rejection_subreason',
             'map_change_classification', 'retry_count', 'wait_duration_s',
+            'failed_predicates', 'generator_handoff_disagreement',
+            'safety_result_json', 'generator_validation_json',
         ])
         self.handoff_csv.writeheader()
         self.handoff_rejections = Counter()
@@ -820,6 +869,9 @@ class DiagnosticNode(Node):
             # The start footprint is part of final path validity too.
             if self.poses[robot] is not None:
                 points.append(self.poses[robot])
+            approach = item.approach_pose.pose.position
+            generator_goal = goal_grid_sample(
+                self.costmaps[robot], approach.x, approach.y, costmap=True)
             self.candidate_context[robot][(signature, int(message.map_revision))] = {
                 'snapshot_generation_time_s': now,
                 'source_map_revision': int(message.map_revision),
@@ -831,6 +883,27 @@ class DiagnosticNode(Node):
                     self.shared_maps[robot], points),
                 'points': points,
                 'frontier_id': int(item.frontier_id),
+                # The message does not transmit the generator's raw cell
+                # evidence.  Capture the same global-costmap input at receipt
+                # time, and label it as diagnostic provenance rather than
+                # pretending it was embedded in the candidate.
+                'generator_validation': {
+                    'path_valid': item.reachability_state == item.REACHABLE,
+                    'goal_cost': generator_goal['value'],
+                    'goal_classification': generator_goal['classification'],
+                    'clearance_m': nearest_blocked_distance(
+                        self.costmaps[robot], approach.x, approach.y)
+                    if self.costmaps[robot] is not None else None,
+                    'required_clearance_m': 0.06,
+                    'map_stamp_s': source_stamp,
+                    'costmap_stamp_s': self._grid_stamp(self.costmaps[robot]),
+                    'robot_pose': self.poses[robot],
+                    'peer_pose': self.poses[
+                        'robot2' if robot == 'robot1' else 'robot1'],
+                    'path_length_m': float(item.path_length_m),
+                    'costmap_topic': f'/{robot}/global_costmap/costmap',
+                    'map_topic': f'/{robot}/shared_map',
+                },
             }
         stats = self.candidate_stats[robot]
         stats['snapshots'] += 1
@@ -1715,16 +1788,25 @@ class DiagnosticNode(Node):
             'robot_y_m': None if pose is None else pose[1],
             'original_path_length_m': context.get('original_path_length_m'),
             'final_path_length_m': final_length,
-            'start_cell_cost': None if safe is None else safe.get('start_cost'),
-            'goal_cell_cost': None if safe is None else safe.get('goal_cost'),
+            'start_cell_cost': None if safe is None else safe.get('start_cell_cost'),
+            'goal_cell_cost': None if safe is None else safe.get(
+                'global_costmap_goal', {}).get('value'),
             'minimum_path_clearance_m': None if safe is None
-            else safe.get('nearest_obstacle_distance_m'),
+            else safe.get('minimum_path_clearance_m'),
             'original_planner_result': 'REACHABLE' if (
                 candidate.reachability_state == candidate.REACHABLE) else 'UNREACHABLE',
             'final_planner_result': final_result,
             'rejection_subreason': reason,
             'map_change_classification': map_classification,
             'retry_count': retry_count, 'wait_duration_s': wait_duration,
+            'failed_predicates': '' if safe is None else '|'.join(
+                safe.get('failed_predicates', [])),
+            'generator_handoff_disagreement': '' if safe is None else safe.get(
+                'generator_handoff_disagreement'),
+            'safety_result_json': '' if safe is None else json.dumps(
+                safe, sort_keys=True),
+            'generator_validation_json': '' if safe is None else json.dumps(
+                safe.get('generator_validation', {}), sort_keys=True),
         }
         self.handoff_csv.writerow(row)
         self._artifact_write_counts['handoff_csv_rows'] += 1
@@ -1734,44 +1816,103 @@ class DiagnosticNode(Node):
             'FRONTIER_HANDOFF_REJECTED', robot, severity='WARN',
             **{key: value for key, value in row.items() if key != 'robot'})
 
-    def _handoff_safe_goal(self, robot: str, candidate, batch):
-        """Give a precise rejection reason; never hide it as provenance."""
-        age = self._age(robot, 'candidate')
-        if age is None or age > self.FRONTIER_STALE_S:
-            return None, 'CANDIDATE_TOO_OLD'
-        if self._age(robot, 'odom') is None or self._age(robot, 'odom') > self.FRESH_SCAN_S:
-            return None, 'TF_TOO_OLD'
-        map_stamp = self._grid_stamp(self.shared_maps[robot])
-        costmap_stamp = self._grid_stamp(self.costmaps[robot])
-        if (map_stamp is not None and costmap_stamp is not None
-                and costmap_stamp + 0.01 < map_stamp):
-            return None, 'WAITING_FOR_COSTMAP'
-        pose = self.poses[robot]
-        if pose is None or not self._start_gate_allows(robot):
-            return None, 'START_NOT_TRAVERSABLE'
+    def _evaluate_handoff_safety(self, robot: str, candidate, batch) -> dict:
+        """Evaluate once; logging and acceptance consume this exact result."""
+        signature, context, _ = self._handoff_context(robot, candidate, batch)
         point = candidate.approach_pose.pose.position
-        raw = {
-            'start_cost': grid_value(self.costmaps[robot], *pose),
-            'goal_cost': grid_value(self.costmaps[robot], point.x, point.y),
-            'nearest_obstacle_distance_m': nearest_blocked_distance(
-                self.costmaps[robot], point.x, point.y),
+        peer_robot = 'robot2' if robot == 'robot1' else 'robot1'
+        pose, peer = self.poses[robot], self.poses[peer_robot]
+        shared = goal_grid_sample(self.shared_maps[robot], point.x, point.y)
+        sanitized = dict(shared)  # /shared_map is the sanitized Nav2 input.
+        global_cost = goal_grid_sample(
+            self.costmaps[robot], point.x, point.y, costmap=True)
+        local_cost = goal_grid_sample(
+            self.local_costmaps[robot], point.x, point.y, costmap=True)
+        start_cost = None if pose is None else grid_value(self.costmaps[robot], *pose)
+        candidate_age = self._age(robot, 'candidate')
+        pose_age, peer_age = self._age(robot, 'odom'), self._age(peer_robot, 'odom')
+        clearance = nearest_blocked_distance(
+            self.costmaps[robot], point.x, point.y) if self.costmaps[robot] else 0.0
+        peer_radius, peer_separation = 0.067, 0.18
+        goal_peer_distance = None if peer is None else math.dist((point.x, point.y), peer)
+        corridor = [(pose[0], pose[1])] if pose is not None else []
+        corridor.extend(self._candidate_points(candidate))
+        corridor_peer_distance = None
+        if peer is not None and len(corridor) >= 2:
+            corridor_peer_distance = min(
+                line_point_distance(*left, *right, *peer)
+                for left, right in zip(corridor, corridor[1:]))
+        failed = []
+        if candidate_age is None or candidate_age > self.FRONTIER_STALE_S:
+            failed.append('CANDIDATE_TOO_OLD')
+        if pose_age is None or pose_age > self.FRESH_SCAN_S or peer_age is None or peer_age > self.FRESH_SCAN_S:
+            failed.append('GOAL_POSE_OR_TF_STALE')
+        if pose is None or not self._start_gate_allows(robot):
+            failed.append('START_NOT_TRAVERSABLE')
+        classes = shared['classification'], global_cost['classification']
+        if shared['classification'] == 'OUTSIDE': failed.append('GOAL_OUTSIDE_SHARED_MAP')
+        if shared['classification'] == 'UNKNOWN': failed.append('GOAL_UNKNOWN_SHARED_MAP')
+        if shared['classification'] == 'OCCUPIED': failed.append('GOAL_OCCUPIED_SHARED_MAP')
+        if global_cost['classification'] == 'OUTSIDE': failed.append('GOAL_OUTSIDE_GLOBAL_COSTMAP')
+        if global_cost['classification'] == 'INFLATED': failed.append('GOAL_INFLATED_GLOBAL_COSTMAP')
+        if global_cost['classification'] == 'INSCRIBED': failed.append('GOAL_INSCRIBED_GLOBAL_COSTMAP')
+        if global_cost['classification'] == 'LETHAL': failed.append('GOAL_LETHAL_GLOBAL_COSTMAP')
+        if clearance < 0.12: failed.append('GOAL_INSUFFICIENT_CLEARANCE')
+        if goal_peer_distance is not None and goal_peer_distance < peer_radius:
+            failed.append('GOAL_INSIDE_PEER_FOOTPRINT')
+        if goal_peer_distance is not None and goal_peer_distance < peer_separation:
+            failed.append('GOAL_TOO_CLOSE_TO_PEER')
+        if corridor_peer_distance is not None and corridor_peer_distance < peer_radius:
+            failed.append('PATH_INTERSECTS_PEER_FOOTPRINT')
+        priority = (
+            'CANDIDATE_TOO_OLD', 'GOAL_POSE_OR_TF_STALE',
+            'START_NOT_TRAVERSABLE', 'GOAL_OUTSIDE_SHARED_MAP',
+            'GOAL_UNKNOWN_SHARED_MAP', 'GOAL_OCCUPIED_SHARED_MAP',
+            'GOAL_OUTSIDE_GLOBAL_COSTMAP', 'GOAL_LETHAL_GLOBAL_COSTMAP',
+            'GOAL_INSCRIBED_GLOBAL_COSTMAP', 'GOAL_INFLATED_GLOBAL_COSTMAP',
+            'GOAL_INSUFFICIENT_CLEARANCE', 'GOAL_INSIDE_PEER_FOOTPRINT',
+            'GOAL_TOO_CLOSE_TO_PEER', 'PATH_INTERSECTS_PEER_FOOTPRINT')
+        reason = next((item for item in priority if item in failed),
+                      'OTHER_GOAL_SAFETY_FAILURE' if failed else None)
+        generator = context.get('generator_validation', {})
+        if reason is None:
+            disagreement = 'NONE'
+        elif not generator.get('path_valid'):
+            disagreement = 'GENERATOR_MISSING_SAFETY_CHECK'
+        elif ((reason.startswith('GOAL_') and 'PEER' in reason)
+              or reason == 'PATH_INTERSECTS_PEER_FOOTPRINT'):
+            disagreement = 'PEER_SAFETY_ONLY_AT_HANDOFF'
+        elif generator.get('goal_cost') != global_cost['value']:
+            disagreement = 'GOAL_BECAME_UNSAFE'
+        elif generator.get('clearance_m') is not None and generator.get('clearance_m') >= generator.get('required_clearance_m', 0.06):
+            disagreement = 'HANDOFF_STRICTER_THAN_GENERATOR'
+        else:
+            disagreement = 'OTHER'
+        return {
+            'safe': reason is None, 'primary_reason': reason,
+            'failed_predicates': failed,
+            'shared_map_goal': shared, 'sanitized_map_goal': sanitized,
+            'global_costmap_goal': global_cost, 'local_costmap_goal': local_cost,
+            'minimum_path_clearance_m': clearance, 'required_clearance_m': 0.12,
+            'start_cell_cost': start_cost, 'robot_pose': pose, 'peer_pose': peer,
+            'robot_pose_age_s': pose_age, 'peer_pose_age_s': peer_age,
+            'candidate_age_s': candidate_age, 'physical_signature': signature,
+            'approach_pose': {'x_m': point.x, 'y_m': point.y,
+                              'frame_id': candidate.approach_pose.header.frame_id},
+            'goal_to_peer_distance_m': goal_peer_distance,
+            'path_to_peer_distance_m': corridor_peer_distance,
+            'peer_footprint_radius_m': peer_radius,
+            'required_peer_separation_m': peer_separation,
+            'goal_inside_live_peer_footprint': (
+                goal_peer_distance is not None and goal_peer_distance < peer_radius),
+            'path_intersects_peer_footprint': (
+                corridor_peer_distance is not None and corridor_peer_distance < peer_radius),
+            'generator_validation': generator,
+            'generator_handoff_disagreement': disagreement,
+            'map_timestamp_s': self._grid_stamp(self.shared_maps[robot]),
+            'costmap_timestamp_s': self._grid_stamp(self.costmaps[robot]),
+            'occupancy_classes': classes,
         }
-        safe = self._safe_goal(robot, point.x, point.y)
-        if safe is not None:
-            return safe, None
-        cost = raw['goal_cost']
-        shared = grid_value(self.shared_maps[robot], point.x, point.y)
-        if cost is None or shared is None:
-            return raw, 'GOAL_NOT_TRAVERSABLE'
-        if cost != 0 or shared < 0 or shared >= 50:
-            return raw, 'GOAL_NOT_TRAVERSABLE'
-        peer = self.poses['robot2' if robot == 'robot1' else 'robot1']
-        if (raw['nearest_obstacle_distance_m'] < 0.12
-                or peer is None
-                or math.dist((point.x, point.y), peer) < 0.18
-                or line_point_distance(*pose, point.x, point.y, *peer) < 0.18):
-            return raw, 'GOAL_NOT_TRAVERSABLE'
-        return raw, 'OTHER'
 
     def _safe_goal(self, robot: str, x: float, y: float) -> Optional[dict]:
         costmap = self.costmaps[robot]
@@ -2183,13 +2324,19 @@ class DiagnosticNode(Node):
                                 key=deterministic_candidate_key):
             if deterministic_candidate_key(candidate)[0]:
                 continue
-            point = candidate.approach_pose.pose.position
-            safe, reason = self._handoff_safe_goal(robot, candidate, batch)
+            map_stamp = self._grid_stamp(self.shared_maps[robot])
+            costmap_stamp = self._grid_stamp(self.costmaps[robot])
+            if (map_stamp is not None and costmap_stamp is not None
+                    and costmap_stamp + 0.01 < map_stamp):
+                waiting_for_costmap = True
+                continue
+            safe = self._evaluate_handoff_safety(robot, candidate, batch)
+            reason = safe['primary_reason']
             if reason is not None:
                 if reason == 'WAITING_FOR_COSTMAP':
                     waiting_for_costmap = True
                     continue
-                self._record_handoff(robot, candidate, batch, reason)
+                self._record_handoff(robot, candidate, batch, reason, safe)
                 continue
             ranked.append((candidate, safe, batch, age))
         if waiting_for_costmap and not ranked:
@@ -2269,8 +2416,9 @@ class DiagnosticNode(Node):
                         f'ERROR_{code}:{message}',
                         source_context=source_context)
                     return
-                final_safe, reason = self._handoff_safe_goal(
+                final_safe = self._evaluate_handoff_safety(
                     robot, current_match, current)
+                reason = final_safe['primary_reason']
                 if reason is not None:
                     self._record_handoff(
                         robot, current_match, current, reason, final_safe,

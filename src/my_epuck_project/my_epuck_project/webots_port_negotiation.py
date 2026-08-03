@@ -120,8 +120,8 @@ def negotiate_webots_port(*, world, requested_port, output_dir,
 
     The probe is Webots-only: no ROS launch, controller, Nav2, or frontier
     process is started.  A redirected port is recorded and returned for the
-    subsequent full launch, where the requested Webots port and confirmed
-    controller port are passed separately.
+    subsequent full launch, where the confirmed actual port is passed to
+    both Webots and every controller.
     """
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)

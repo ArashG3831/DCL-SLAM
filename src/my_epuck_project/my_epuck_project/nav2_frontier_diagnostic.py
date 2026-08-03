@@ -3086,9 +3086,13 @@ def runner_run(args: argparse.Namespace) -> int:
             environment=os.environ.copy())
     except WebotsPortNegotiationError as error:
         raise RunnerError(str(error)) from error
-    confirmed_controller_port = int(negotiated['actual_port'])
+    confirmed_port = int(negotiated['actual_port'])
+    # The Webots-only probe is authoritative.  Relaunch the complete stack
+    # with the confirmed port on both sides; never leave Webots on a fallback
+    # endpoint while controllers continue using the originally requested port.
+    args.webots_port = confirmed_port
     command = launch_command(
-        args, world, attempt, controller_port=confirmed_controller_port)
+        args, world, attempt, controller_port=confirmed_port)
     show_rviz = args.rviz
     if show_rviz is None:
         show_rviz = args.execution_profile == 'visual'

@@ -3153,11 +3153,11 @@ def runner_run(args: argparse.Namespace) -> int:
                     event = parse_webots_port_event(line)
                     if event:
                         kind, _source, actual = event
-                        if int(actual) != confirmed_controller_port:
+                        if int(actual) != confirmed_port:
                             raise RunnerError(
                                 'WEBOTS_PORT_NEGOTIATION_FAILED: full launch '
                                 f'reported actual port {actual}, expected '
-                                f'{confirmed_controller_port}')
+                                f'{confirmed_port}')
                         port_confirmed = True
                 try:
                     owned_pids.update(

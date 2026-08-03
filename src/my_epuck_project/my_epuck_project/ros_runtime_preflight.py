@@ -157,7 +157,13 @@ def _project_processes():
     markers = (
         'webots', 'ros2 launch', 'nav2_frontier_diagnostic',
         'run_nav2_frontier_diagnostic', 'cooperative_regression.py',
-        'webots-controller',
+        'webots-controller', 'webots_ros2_driver', 'slam_toolbox',
+        'frontier_candidate_generator', 'source_aware_map_fusion',
+        'map_exporter', 'teammate_scan_filter', 'robot_state_publisher',
+        'controller_server', 'planner_server', 'smoother_server',
+        'route_server', 'behavior_server', 'velocity_smoother',
+        'collision_monitor', 'bt_navigator', 'waypoint_follower',
+        'lifecycle_manager',
     )
     excluded = _current_process_ancestry()
     result = []
@@ -166,7 +172,14 @@ def _project_processes():
         if pid in excluded:
             continue
         command = ' '.join(process.info.get('cmdline') or [])
-        if any(marker in command.lower() for marker in markers):
+        lowered = command.lower()
+        is_project_ros = (
+            any(marker in lowered for marker in markers)
+            and ('/robot1' in lowered or '/robot2' in lowered
+                 or 'my_epuck_project' in lowered
+                 or 'webots' in lowered
+                 or 'slam_toolbox' in lowered))
+        if is_project_ros:
             result.append({
                 'pid': pid,
                 'status': process.info.get('status'),

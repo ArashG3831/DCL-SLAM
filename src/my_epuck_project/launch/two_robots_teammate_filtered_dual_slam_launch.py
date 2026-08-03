@@ -84,6 +84,8 @@ def launch_setup(context):
             'world': selected['world'],
             'world_path': world_path,
             'webots_port': LaunchConfiguration('webots_port'),
+            'webots_controller_port': LaunchConfiguration(
+                'webots_controller_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
         }.items(),
@@ -139,6 +141,8 @@ def generate_launch_description():
             choices=['large', 'small'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument(
+            'webots_controller_port', default_value=''),
         DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),

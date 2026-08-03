@@ -16,7 +16,9 @@ from ament_index_python.packages import get_package_share_directory
 
 import webots_ros2_driver.webots_controller as webots_controller_module
 import webots_ros2_driver.webots_launcher as webots_launcher_module
-from webots_ros2_driver.webots_launcher import WebotsLauncher
+from webots_ros2_driver.webots_launcher import (
+    Ros2SupervisorLauncher, WebotsLauncher,
+)
 from webots_ros2_driver.webots_controller import WebotsController
 from webots_ros2_driver.wait_for_controller_connection import WaitForControllerConnection
 
@@ -31,6 +33,8 @@ def launch_setup(context):
     world_path = LaunchConfiguration('world_path').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     webots_port = LaunchConfiguration('webots_port').perform(context)
+    controller_port = LaunchConfiguration(
+        'webots_controller_port').perform(context) or webots_port
     webots_mode = LaunchConfiguration('webots_mode').perform(context)
     webots_gui = (
         LaunchConfiguration('webots_gui').perform(context).lower() == 'true'
@@ -65,6 +69,12 @@ def launch_setup(context):
         mode=webots_mode,
         gui=webots_gui,
     )
+    # The launcher modifies the world to add Ros2Supervisor when
+    # ros2_supervisor=True, but its internal supervisor client uses the same
+    # requested listen port.  Under this WSL/Webots build the server may
+    # redirect by two ports; replace only that client with the confirmed
+    # actual port while preserving the official world augmentation.
+    webots._supervisor = Ros2SupervisorLauncher(port=controller_port)
 
     controller_manager_timeout = ['--controller-manager-timeout', '50']
     controller_manager_prefix = 'python.exe' if os.name == 'nt' else ''
@@ -162,7 +172,7 @@ def launch_setup(context):
         robot_driver = WebotsController(
             robot_name=robot_name,
             namespace=robot_name,
-            port=webots_port,
+            port=controller_port,
             parameters=[
                 {
                     'robot_description': robot_urdf_path,
@@ -249,7 +259,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'webots_port',
             default_value='23000',
-            description='Dedicated Webots external-controller TCP port.',
+            description='Requested Webots server listen port.',
+        ),
+        DeclareLaunchArgument(
+            'webots_controller_port', default_value='',
+            description='Confirmed actual Webots port used by controllers.',
         ),
         DeclareLaunchArgument(
             'webots_mode',

@@ -21,6 +21,7 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import shlex
 import shutil
@@ -59,7 +60,12 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .cooperative_profiles import profile
-from .ros_runtime_preflight import PreflightError, run_preflight
+from .ros_runtime_preflight import (
+    PreflightError, _bounded_subprocess, run_preflight,
+)
+from .webots_port_negotiation import (
+    WebotsPortNegotiationError, negotiate_webots_port, parse_webots_port_event,
+)
 
 
 WORKSPACE = Path('/home/arash/webots_ws')
@@ -2941,15 +2947,17 @@ def port_is_free(port: int) -> bool:
 
 
 def launch_command(args: argparse.Namespace, world: Path,
-                   attempt: Path) -> list[str]:
+                   attempt: Path, controller_port: int | None = None) -> list[str]:
     """Return the exact allocator-free launch command."""
     rendering = args.rendering
+    controller_port = int(controller_port or args.webots_port)
     if rendering is None:
         rendering = args.execution_profile == 'visual'
     return [
         'ros2', 'launch', PACKAGE, LAUNCH_FILE,
         f'world_profile:={args.world_profile}', f'world_path:={world}',
         f'webots_port:={args.webots_port}',
+        f'webots_controller_port:={controller_port}',
         f'webots_mode:={"fast" if args.fast_mode else "realtime"}',
         f'webots_gui:={str(rendering).lower()}',
         f'sensor_profile:={args.sensor_profile}',
@@ -2969,13 +2977,15 @@ def rviz_command() -> list[str]:
             '-p', 'use_sim_time:=true']
 
 
-def _pump(stream, log, lock):
+def _pump(stream, log, lock, events=None):
     try:
         for line in iter(stream.readline, ''):
             with lock:
                 log.write(line)
                 log.flush()
                 print(line, end='', flush=True)
+            if events is not None:
+                events.put(line)
     finally:
         stream.close()
 
@@ -3069,7 +3079,16 @@ def runner_run(args: argparse.Namespace) -> int:
               flush=True)
         print('preflight_status=SAFE_DAEMON_INDEPENDENT', flush=True)
         return 0
-    command = launch_command(args, world, attempt)
+    try:
+        negotiated = negotiate_webots_port(
+            world=world, requested_port=args.webots_port, output_dir=attempt,
+            max_attempts=5, observation_timeout_s=min(30.0, args.startup_timeout),
+            environment=os.environ.copy())
+    except WebotsPortNegotiationError as error:
+        raise RunnerError(str(error)) from error
+    confirmed_controller_port = int(negotiated['actual_port'])
+    command = launch_command(
+        args, world, attempt, controller_port=confirmed_controller_port)
     show_rviz = args.rviz
     if show_rviz is None:
         show_rviz = args.execution_profile == 'visual'
@@ -3095,6 +3114,7 @@ def runner_run(args: argparse.Namespace) -> int:
     launch = None
     rviz = None
     threads = []
+    output_events = queue.Queue()
     owned_pids = set()
     lock = threading.Lock()
     started = time.monotonic()
@@ -3106,7 +3126,7 @@ def runner_run(args: argparse.Namespace) -> int:
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True, preexec_fn=preexec)
             threads.append(threading.Thread(
-                target=_pump, args=(launch.stdout, log, lock), daemon=True))
+                target=_pump, args=(launch.stdout, log, lock, output_events), daemon=True))
             threads[-1].start()
             if show_rviz:
                 rviz = subprocess.Popen(
@@ -3114,8 +3134,54 @@ def runner_run(args: argparse.Namespace) -> int:
                     stderr=subprocess.STDOUT, text=True, bufsize=1,
                     start_new_session=True, preexec_fn=preexec)
                 threads.append(threading.Thread(
-                    target=_pump, args=(rviz.stdout, log, lock), daemon=True))
+                    target=_pump, args=(rviz.stdout, log, lock, None), daemon=True))
                 threads[-1].start()
+            port_confirmed = False
+            controller_confirmed = False
+            startup_deadline = time.monotonic() + args.startup_timeout
+            last_topic_probe = 0.0
+            while launch.poll() is None and not controller_confirmed:
+                while True:
+                    try:
+                        line = output_events.get_nowait()
+                    except queue.Empty:
+                        break
+                    event = parse_webots_port_event(line)
+                    if event:
+                        kind, _source, actual = event
+                        if int(actual) != confirmed_controller_port:
+                            raise RunnerError(
+                                'WEBOTS_PORT_NEGOTIATION_FAILED: full launch '
+                                f'reported actual port {actual}, expected '
+                                f'{confirmed_controller_port}')
+                        port_confirmed = True
+                try:
+                    owned_pids.update(
+                        child.pid for child in psutil.Process(
+                            launch.pid).children(recursive=True))
+                except psutil.Error:
+                    pass
+                if port_confirmed and time.monotonic() - last_topic_probe >= 2.0:
+                    last_topic_probe = time.monotonic()
+                    topic_probe = _bounded_subprocess(
+                        ['ros2', 'topic', 'list', '--no-daemon'],
+                        env=environment, timeout_s=5.0, kill_after_s=2.0)
+                    topics = set(topic_probe.get('stdout', '').split())
+                    controller_confirmed = (
+                        '/robot1/odom' in topics and '/robot2/odom' in topics)
+                if time.monotonic() > startup_deadline:
+                    raise RunnerError(
+                        'WEBOTS_PORT_CONFIRMED timeout waiting for both '
+                        'robot controllers')
+                if time.monotonic() - started > args.emergency_wall_runtime:
+                    raise RunnerError(
+                        'emergency wall runtime exceeded: '
+                        f'{args.emergency_wall_runtime}s')
+                time.sleep(0.2)
+            if launch.poll() is not None and not controller_confirmed:
+                raise RunnerError(
+                    'launch exited before WEBOTS_PORT_CONFIRMED and controller '
+                    'connection')
             while launch.poll() is None:
                 try:
                     owned_pids.update(

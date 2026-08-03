@@ -28,6 +28,8 @@ def generate_launch_description():
             'world_profile': LaunchConfiguration('world_profile'),
             'world_path': LaunchConfiguration('world_path'),
             'webots_port': LaunchConfiguration('webots_port'),
+            'webots_controller_port': LaunchConfiguration(
+                'webots_controller_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
@@ -64,6 +66,8 @@ def generate_launch_description():
                               choices=['large', 'small']),
         DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_port', default_value='23000'),
+        DeclareLaunchArgument(
+            'webots_controller_port', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='fast',
                               choices=['pause', 'realtime', 'fast']),
         DeclareLaunchArgument('webots_gui', default_value='false',

@@ -59,6 +59,7 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .cooperative_profiles import profile
+from .ros_runtime_preflight import PreflightError, run_preflight
 
 
 WORKSPACE = Path('/home/arash/webots_ws')
@@ -2893,6 +2894,9 @@ def runner_parser() -> argparse.ArgumentParser:
     result.add_argument(
         '--results-directory',
         default='results/nav2_frontier_diagnostic')
+    result.add_argument(
+        '--preflight-only', action='store_true',
+        help='run bounded ROS/port/process checks without spawning launch')
     return result
 
 
@@ -3046,13 +3050,25 @@ def runner_run(args: argparse.Namespace) -> int:
     """Run one diagnostic attempt and produce exactly five artifacts."""
     package_prefix()
     world = resolve_world(args)
-    if not port_is_free(args.webots_port):
-        raise RunnerError(f'Webots port is already in use: {args.webots_port}')
     root = Path(args.results_directory).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     attempt = root / f'{args.execution_profile}_{stamp}'
     attempt.mkdir()
+    try:
+        run_preflight(
+            ros_domain_id=args.ros_domain_id,
+            webots_port=args.webots_port,
+            output_dir=attempt,
+            environment=os.environ.copy(),
+        )
+    except PreflightError as error:
+        raise RunnerError(str(error)) from error
+    if args.preflight_only:
+        print(f'preflight_output={attempt / "ros_preflight.json"}',
+              flush=True)
+        print('preflight_status=SAFE_DAEMON_INDEPENDENT', flush=True)
+        return 0
     command = launch_command(args, world, attempt)
     show_rviz = args.rviz
     if show_rviz is None:

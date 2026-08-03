@@ -12,6 +12,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     map_change_classification,
     region_fingerprint,
     candidate_physical_signature,
+    capture_validity_gate,
     goal_grid_sample,
     launch_command,
     LAUNCH_FILE,
@@ -19,6 +20,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     runner_parser,
     TIME_STATES,
 )
+from my_epuck_interfaces.msg import FrontierCandidate, FrontierCandidateArray
 from nav_msgs.msg import OccupancyGrid
 import rclpy
 from rclpy.parameter import Parameter
@@ -226,11 +228,136 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
         'launch.log', 'diagnostic_events.jsonl',
         'diagnostic_timeseries.csv', 'diagnostic_summary.json',
         'effective_command.txt', 'handoff_rejections.csv',
+        'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
     }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES
     assert 'active goal with zero cmd_vel' in TIME_STATES
     assert 'idle despite valid candidates' in TIME_STATES
+
+
+def test_capture_validity_reports_first_missing_source():
+    result = capture_validity_gate(
+        generator_map_receipts=0, generator_costmap_receipts=1,
+        generator_accepted_approaches=1, snapshots_received=1,
+        candidates_considered=1, detailed_records=1, joined_candidates=1)
+    assert result['valid'] is False
+    assert result['first_missing_gate'] == 'GENERATOR_MAP_RECEIPT_MISSING'
+
+
+def test_capture_validity_accepts_joined_generator_and_handoff_evidence():
+    result = capture_validity_gate(
+        generator_map_receipts=1, generator_costmap_receipts=1,
+        generator_accepted_approaches=1, snapshots_received=1,
+        candidates_considered=1, detailed_records=1, joined_candidates=1)
+    assert result['valid'] is True
+    assert result['first_missing_gate'] is None
+
+
+def _candidate_message(identifier=1, reachable=True):
+    candidate = FrontierCandidate()
+    candidate.frontier_id = identifier
+    candidate.centroid.x = 1.1
+    candidate.centroid.y = 1.1
+    candidate.bounding_box_min.x = 1.0
+    candidate.bounding_box_min.y = 1.0
+    candidate.bounding_box_max.x = 1.2
+    candidate.bounding_box_max.y = 1.2
+    candidate.approach_pose.header.frame_id = 'shared_map'
+    candidate.approach_pose.pose.position.x = 1.0
+    candidate.approach_pose.pose.position.y = 1.0
+    candidate.information_gain = 1.0
+    candidate.path_length_m = 1.0
+    candidate.reachability_state = candidate.REACHABLE if reachable else 0
+    message = FrontierCandidateArray()
+    message.map_revision = 1
+    message.candidates = [candidate]
+    return message, candidate
+
+
+def test_nonempty_snapshot_increments_bounded_handoff_pipeline(tmp_path):
+    rclpy.init()
+    node = DiagnosticNode(parameter_overrides=[
+        Parameter('output_directory', value=str(tmp_path)),
+    ])
+    try:
+        message, _ = _candidate_message()
+        node._candidate('robot1', message)
+        pipeline = node._pipeline_snapshot('robot1')
+        assert pipeline['snapshots_received'] == 1
+        assert pipeline['snapshots_nonempty'] == 1
+        assert pipeline['candidates_received'] == 1
+        assert len(node.handoff_precheck_seen) == 0
+    finally:
+        node.close_artifacts()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_precheck_rejection_is_explicit(tmp_path):
+    rclpy.init()
+    node = DiagnosticNode(parameter_overrides=[
+        Parameter('output_directory', value=str(tmp_path)),
+    ])
+    try:
+        message, candidate = _candidate_message()
+        node._candidate('robot1', message)
+        node._record_handoff_precheck(
+            'robot1', candidate, message, 'TASK_INVALID', 'unit-test')
+        node.handoff_precheck_file.flush()
+        row = (tmp_path / 'handoff_precheck_rejections.csv').read_text().splitlines()[1]
+        assert 'TASK_INVALID' in row
+        assert 'unit-test' in row
+    finally:
+        node.close_artifacts()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_accepted_handoff_is_recorded_without_a_rejection_row(tmp_path):
+    rclpy.init()
+    node = DiagnosticNode(parameter_overrides=[
+        Parameter('output_directory', value=str(tmp_path)),
+    ])
+    try:
+        message, candidate = _candidate_message()
+        node._candidate('robot1', message)
+        node.generator_approaches['robot1'].append({
+            'x': 1.0, 'y': 1.0, 'accepted': True})
+        node._record_handoff_acceptance(
+            'robot1', candidate, message,
+            {'minimum_path_clearance_m': 0.2}, 1.0)
+        node.handoff_accept_file.flush()
+        row = (tmp_path / 'handoff_acceptances.csv').read_text().splitlines()[1]
+        assert candidate_physical_signature(candidate) in row
+        assert node.generator_handoff_joins
+    finally:
+        node.close_artifacts()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_integration_phase_has_explicit_start_event_and_pipeline_emission():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "'FRONTIER_INTEGRATION_STARTED'" in source
+    assert "'FRONTIER_HANDOFF_PIPELINE'" in source
+    assert "self._emit_handoff_pipeline()" in source
+
+
+def test_stale_snapshot_uses_explicit_precheck_reason():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "'SNAPSHOT_TOO_OLD'" in source
+    assert "'WAITING_FOR_COSTMAP'" in source
+
+
+def test_handoff_aggregate_telemetry_is_bounded():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert 'deque(maxlen=1024)' in source
+    assert 'len(self.handoff_precheck_seen) >= 2048' in source
+    assert 'now - self.handoff_pipeline_last_emit < 1.0' in source
 
 
 def _handoff_grid():

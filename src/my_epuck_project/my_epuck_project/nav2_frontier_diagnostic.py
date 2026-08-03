@@ -75,6 +75,7 @@ ARTIFACT_NAMES = frozenset({
     'launch.log', 'diagnostic_events.jsonl',
     'diagnostic_timeseries.csv', 'diagnostic_summary.json',
     'effective_command.txt', 'handoff_rejections.csv',
+    'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -107,6 +108,40 @@ WAIT_CLASSIFICATIONS = (
     'RECOVERY', 'TF_UNAVAILABLE', 'COSTMAP_UNAVAILABLE',
     'GOAL_REJECTED', 'NAVIGATING', 'SETTLING',
 )
+HANDOFF_PIPELINE_COUNTERS = (
+    'snapshots_received', 'snapshots_nonempty', 'candidates_received',
+    'candidates_after_age_filter', 'candidates_after_task_validity_filter',
+    'candidates_after_suppression_filter',
+    'candidates_after_provenance_availability', 'candidates_ranked',
+    'candidates_safety_evaluated', 'candidates_waiting_for_costmap',
+    'candidates_final_path_queried', 'candidates_rejected',
+    'candidates_accepted', 'candidates_dispatched',
+)
+
+
+def capture_validity_gate(*, generator_map_receipts: int,
+                          generator_costmap_receipts: int,
+                          generator_accepted_approaches: int,
+                          snapshots_received: int,
+                          candidates_considered: int,
+                          detailed_records: int,
+                          joined_candidates: int) -> dict:
+    """Return the first unmet forensic-capture evidence gate."""
+    gates = (
+        ('GENERATOR_MAP_RECEIPT_MISSING', generator_map_receipts > 0),
+        ('GENERATOR_COSTMAP_RECEIPT_MISSING', generator_costmap_receipts > 0),
+        ('GENERATOR_ACCEPTED_APPROACH_MISSING', generator_accepted_approaches > 0),
+        ('DIAGNOSTIC_SNAPSHOT_MISSING', snapshots_received > 0),
+        ('HANDOFF_CONSIDERATION_MISSING', candidates_considered > 0),
+        ('DETAILED_HANDOFF_RECORD_MISSING', detailed_records > 0),
+        ('JOINED_CANDIDATE_MISSING', joined_candidates > 0),
+    )
+    first_missing = next((name for name, passed in gates if not passed), None)
+    return {
+        'valid': first_missing is None,
+        'first_missing_gate': first_missing,
+        'gates': {name: passed for name, passed in gates},
+    }
 
 
 def utc_now() -> str:
@@ -520,6 +555,16 @@ class DiagnosticNode(Node):
         self.candidates = {robot: None for robot in ROBOTS}
         self.candidate_received_sim = {robot: None for robot in ROBOTS}
         self.candidate_stats = {robot: Counter() for robot in ROBOTS}
+        self.handoff_pipeline = {
+            robot: Counter({name: 0 for name in HANDOFF_PIPELINE_COUNTERS})
+            for robot in ROBOTS
+        }
+        self.handoff_precheck_seen = set()
+        self.handoff_accept_seen = set()
+        self.generator_approaches = {robot: deque(maxlen=1024) for robot in ROBOTS}
+        self.generator_handoff_joins = set()
+        self.integration_started = False
+        self.handoff_pipeline_last_emit = -math.inf
         self.candidate_intervals = {robot: [] for robot in ROBOTS}
         self.candidate_last_signature = {robot: None for robot in ROBOTS}
         self.candidate_generation = {robot: [] for robot in ROBOTS}
@@ -693,6 +738,30 @@ class DiagnosticNode(Node):
             'safety_result_json', 'generator_validation_json',
         ])
         self.handoff_csv.writeheader()
+        self.handoff_precheck_file = (
+            self.output / 'handoff_precheck_rejections.csv').open(
+                'w', encoding='utf-8', newline='', buffering=65536)
+        self.handoff_precheck_csv = csv.DictWriter(
+            self.handoff_precheck_file, fieldnames=[
+                'robot', 'canonical_task_id', 'physical_signature',
+                'snapshot_generation_time_s', 'candidate_age_s',
+                'source_map_revision', 'approach_x_m', 'approach_y_m',
+                'phase', 'precheck_reason', 'detail',
+            ])
+        self.handoff_precheck_csv.writeheader()
+        self.handoff_accept_file = (
+            self.output / 'handoff_acceptances.csv').open(
+                'w', encoding='utf-8', newline='', buffering=65536)
+        self.handoff_accept_csv = csv.DictWriter(
+            self.handoff_accept_file, fieldnames=[
+                'robot', 'canonical_task_id', 'physical_signature',
+                'snapshot_generation_time_s', 'acceptance_time_s',
+                'candidate_age_s', 'source_map_revision',
+                'current_map_revision', 'approach_x_m', 'approach_y_m',
+                'final_path_length_m', 'minimum_path_clearance_m',
+                'safety_result_json',
+            ])
+        self.handoff_accept_csv.writeheader()
         self.handoff_rejections = Counter()
         self.handoff_records = []
         self.handoff_seen = set()
@@ -915,6 +984,11 @@ class DiagnosticNode(Node):
         stats = self.candidate_stats[robot]
         stats['snapshots'] += 1
         stats['approaches'] += len(message.candidates)
+        pipeline = self.handoff_pipeline[robot]
+        pipeline['snapshots_received'] += 1
+        if message.candidates:
+            pipeline['snapshots_nonempty'] += 1
+        pipeline['candidates_received'] += len(message.candidates)
         stats['valid_paths'] += sum(
             item.reachability_state == item.REACHABLE
             and math.isfinite(item.path_length_m)
@@ -987,6 +1061,23 @@ class DiagnosticNode(Node):
         if text.startswith('FILTER_METRICS') and robot:
             for key, value in re.findall(r'(\w+)=([0-9.]+)', text):
                 self.filter_stats[robot][key] = float(value)
+        if text.startswith('GENERATOR_MAP_RECEIPT') and robot:
+            self.candidate_stats[robot]['generator_map_receipts'] += 1
+        if text.startswith('GENERATOR_COSTMAP_RECEIPT') and robot:
+            self.candidate_stats[robot]['generator_costmap_receipts'] += 1
+        if text.startswith('GENERATOR_APPROACH_CLEARANCE') and robot:
+            match = re.search(
+                r'pose=\((-?[0-9.]+),(-?[0-9.]+)\).*accepted=(true|false)',
+                text)
+            if match:
+                accepted = match.group(3) == 'true'
+                if accepted:
+                    self.candidate_stats[robot][
+                        'generator_accepted_approaches'] += 1
+                self.generator_approaches[robot].append({
+                    'x': float(match.group(1)), 'y': float(match.group(2)),
+                    'accepted': accepted,
+                })
         if text.startswith('CANDIDATE_METRICS') and robot:
             values = dict(re.findall(r'(\w+)=([0-9.]+)', text))
             converted = {key: float(value) for key, value in values.items()}
@@ -1357,6 +1448,18 @@ class DiagnosticNode(Node):
             self._cancel_all('entering frontier handoff')
             for robot in ROBOTS:
                 self.candidate_cpu_end[robot] = self._process_cpu(robot)
+            self.integration_started = True
+            self._event(
+                'FRONTIER_INTEGRATION_STARTED',
+                snapshots={robot: {
+                    'count': int(self.handoff_pipeline[robot]['snapshots_received']),
+                    'age_s': self._age(robot, 'candidate'),
+                    'candidate_count': (0 if self.candidates[robot] is None
+                                        else len(self.candidates[robot].candidates)),
+                    'active_navigation': self.active_nav[robot] is not None,
+                    'shared_map_usable': self._usable(self.shared_maps[robot]),
+                    'costmap_usable': self._usable(self.costmaps[robot]),
+                } for robot in ROBOTS})
 
     def _validate_filter_phase(self):
         for robot in ROBOTS:
@@ -1607,6 +1710,8 @@ class DiagnosticNode(Node):
             self.events_file.flush()
             self.timeseries_file.flush()
             self.handoff_file.flush()
+            self.handoff_precheck_file.flush()
+            self.handoff_accept_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
@@ -1753,6 +1858,76 @@ class DiagnosticNode(Node):
             region_fingerprint(current_map, points))
         return signature, context, classification
 
+    def _record_handoff_precheck(self, robot: str, candidate, batch,
+                                 reason: str, detail: str = ''):
+        """Record a bounded early rejection without invented safety fields."""
+        signature, context, _ = self._handoff_context(robot, candidate, batch)
+        key = (robot, signature, reason, context.get('source_map_revision'))
+        if key in self.handoff_precheck_seen or len(self.handoff_precheck_seen) >= 2048:
+            return
+        self.handoff_precheck_seen.add(key)
+        point = candidate.approach_pose.pose.position
+        self.handoff_precheck_csv.writerow({
+            'robot': robot,
+            'canonical_task_id': int(candidate.frontier_id),
+            'physical_signature': signature,
+            'snapshot_generation_time_s': context.get('snapshot_generation_time_s'),
+            'candidate_age_s': self._age(robot, 'candidate'),
+            'source_map_revision': context.get('source_map_revision'),
+            'approach_x_m': point.x, 'approach_y_m': point.y,
+            'phase': (phase_at(self.mission_elapsed(), self.mission_duration,
+                               self.phase_profile)
+                      if self.mission_elapsed() is not None else 'READINESS'),
+            'precheck_reason': reason, 'detail': detail,
+        })
+        self._artifact_write_counts['handoff_precheck_rows'] += 1
+        self.handoff_pipeline[robot]['candidates_rejected'] += 1
+
+    def _record_handoff_acceptance(self, robot: str, candidate, batch, safe,
+                                   final_length: float):
+        """Represent an accepted candidate even when no rejection row exists."""
+        signature, context, _ = self._handoff_context(robot, candidate, batch)
+        key = (robot, signature, context.get('source_map_revision'))
+        if key in self.handoff_accept_seen or len(self.handoff_accept_seen) >= 1024:
+            return
+        self.handoff_accept_seen.add(key)
+        point = candidate.approach_pose.pose.position
+        self.handoff_accept_csv.writerow({
+            'robot': robot,
+            'canonical_task_id': int(candidate.frontier_id),
+            'physical_signature': signature,
+            'snapshot_generation_time_s': context.get('snapshot_generation_time_s'),
+            'acceptance_time_s': self.now_sim(),
+            'candidate_age_s': self._age(robot, 'candidate'),
+            'source_map_revision': context.get('source_map_revision'),
+            'current_map_revision': int(batch.map_revision),
+            'approach_x_m': point.x, 'approach_y_m': point.y,
+            'final_path_length_m': final_length,
+            'minimum_path_clearance_m': safe.get('minimum_path_clearance_m'),
+            'safety_result_json': json.dumps(safe, sort_keys=True),
+        })
+        self._artifact_write_counts['handoff_acceptance_rows'] += 1
+        self.handoff_pipeline[robot]['candidates_accepted'] += 1
+        if any(
+                math.isclose(point.x, record['x'], abs_tol=1e-3)
+                and math.isclose(point.y, record['y'], abs_tol=1e-3)
+                for record in self.generator_approaches[robot]
+                if record['accepted']):
+            self.generator_handoff_joins.add((robot, signature))
+
+    def _pipeline_snapshot(self, robot: str) -> dict:
+        return {name: int(self.handoff_pipeline[robot][name])
+                for name in HANDOFF_PIPELINE_COUNTERS}
+
+    def _emit_handoff_pipeline(self, force: bool = False):
+        """Emit bounded aggregate handoff counters, never per candidate."""
+        now = self.now_sim()
+        if not force and now - self.handoff_pipeline_last_emit < 1.0:
+            return
+        self.handoff_pipeline_last_emit = now
+        self._event('FRONTIER_HANDOFF_PIPELINE', pipeline={
+            robot: self._pipeline_snapshot(robot) for robot in ROBOTS})
+
     def _record_handoff(self, robot: str, candidate, batch, reason: str,
                         safe=None, final_length=None, final_result=None,
                         retry_count=0, wait_duration=0.0,
@@ -1819,6 +1994,13 @@ class DiagnosticNode(Node):
         self._artifact_write_counts['handoff_csv_rows'] += 1
         self.handoff_rejections[reason] += 1
         self.handoff_records.append(row)
+        self.handoff_pipeline[robot]['candidates_rejected'] += 1
+        if any(
+                math.isclose(point.x, record['x'], abs_tol=1e-3)
+                and math.isclose(point.y, record['y'], abs_tol=1e-3)
+                for record in self.generator_approaches[robot]
+                if record['accepted']):
+            self.generator_handoff_joins.add((robot, signature))
         self._event(
             'FRONTIER_HANDOFF_REJECTED', robot, severity='WARN',
             **{key: value for key, value in row.items() if key != 'robot'})
@@ -2322,21 +2504,58 @@ class DiagnosticNode(Node):
         batch = self.candidates[robot]
         if batch is None:
             return []
+        pipeline = self.handoff_pipeline[robot]
         age = self._age(robot, 'candidate')
         if age is None or age > self.FRONTIER_STALE_S:
+            for candidate in batch.candidates:
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'SNAPSHOT_TOO_OLD',
+                    f'candidate_age_s={age}')
+            return []
+        if not self._usable(self.shared_maps[robot]):
+            for candidate in batch.candidates:
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'NO_CURRENT_MAP')
+            return []
+        if not self._usable(self.costmaps[robot]):
+            for candidate in batch.candidates:
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'NO_CURRENT_COSTMAP')
             return []
         ranked = []
         waiting_for_costmap = False
         for candidate in sorted(batch.candidates,
                                 key=deterministic_candidate_key):
+            pipeline['candidates_after_age_filter'] += 1
             if deterministic_candidate_key(candidate)[0]:
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'TASK_INVALID',
+                    'candidate reachability or path validity is false')
                 continue
+            pipeline['candidates_after_task_validity_filter'] += 1
+            # This allocator-free diagnostic receives only generator output;
+            # it has no independent suppression table.  A task that passed
+            # generator validity therefore passes this explicit no-op stage.
+            pipeline['candidates_after_suppression_filter'] += 1
+            signature = candidate_physical_signature(candidate)
+            context = self.candidate_context[robot].get(
+                (signature, int(batch.map_revision)))
+            if context is None:
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'PROVENANCE_MISSING')
+                continue
+            pipeline['candidates_after_provenance_availability'] += 1
             map_stamp = self._grid_stamp(self.shared_maps[robot])
             costmap_stamp = self._grid_stamp(self.costmaps[robot])
             if (map_stamp is not None and costmap_stamp is not None
                     and costmap_stamp + 0.01 < map_stamp):
                 waiting_for_costmap = True
+                pipeline['candidates_waiting_for_costmap'] += 1
+                self._record_handoff_precheck(
+                    robot, candidate, batch, 'WAITING_FOR_COSTMAP',
+                    'global costmap timestamp precedes shared-map timestamp')
                 continue
+            pipeline['candidates_safety_evaluated'] += 1
             safe = self._evaluate_handoff_safety(robot, candidate, batch)
             reason = safe['primary_reason']
             if reason is not None:
@@ -2346,6 +2565,7 @@ class DiagnosticNode(Node):
                 self._record_handoff(robot, candidate, batch, reason, safe)
                 continue
             ranked.append((candidate, safe, batch, age))
+            pipeline['candidates_ranked'] += 1
         if waiting_for_costmap and not ranked:
             wait = self.costmap_wait[robot]
             now = self.now_sim()
@@ -2369,6 +2589,7 @@ class DiagnosticNode(Node):
         return ranked
 
     def _drive_frontiers(self):
+        self._emit_handoff_pipeline()
         if (any(self.active_nav.values()) or any(self.planner_requests.values())
                 or any(self.planner_callback_active.values())):
             return
@@ -2384,13 +2605,21 @@ class DiagnosticNode(Node):
                     and 'robot1' in self.frontier_prepared):
                 first = self.frontier_prepared['robot1']
                 first_point = first['pose'].pose.position
-                ranked = [entry for entry in ranked
-                          if int(entry[0].frontier_id) != first['frontier_id']
-                          and math.hypot(
-                              entry[0].approach_pose.pose.position.x
-                              - first_point.x,
-                              entry[0].approach_pose.pose.position.y
-                              - first_point.y) >= 0.8]
+                retained = []
+                for entry in ranked:
+                    candidate = entry[0]
+                    separated = math.hypot(
+                        candidate.approach_pose.pose.position.x - first_point.x,
+                        candidate.approach_pose.pose.position.y - first_point.y)
+                    if (int(candidate.frontier_id) == first['frontier_id']
+                            or separated < 0.8):
+                        self._record_handoff_precheck(
+                            robot, candidate, entry[2],
+                            'DUPLICATE_PHYSICAL_TASK',
+                            f'pair_separation_m={separated:.3f}')
+                        continue
+                    retained.append(entry)
+                ranked = retained
             if not ranked:
                 return
             candidate, safe, batch, age = ranked[0]
@@ -2458,6 +2687,8 @@ class DiagnosticNode(Node):
                         'source_map_revision': context.get('source_map_revision'),
                     },
                 }
+                self._record_handoff_acceptance(
+                    robot, current_match, current, final_safe, length)
                 self.frontier_prepared[robot] = prepared
                 self._event(
                     'FRONTIER_SELECTED_AND_VALIDATED', robot,
@@ -2470,6 +2701,7 @@ class DiagnosticNode(Node):
                     selection_time_s=prepared['selection_time'],
                     final_path_validation_latency_s=latency)
 
+            self.handoff_pipeline[robot]['candidates_final_path_queried'] += 1
             self._request_path(
                 robot, pose, 'frontier_final_validation',
                 {'frontier_id': int(candidate.frontier_id)}, validated)
@@ -2497,6 +2729,7 @@ class DiagnosticNode(Node):
                               frontier_id=details['frontier_id'])
             label = ('frontier_simultaneous' if simultaneous
                      else f'frontier_{robot}')
+            self.handoff_pipeline[robot]['candidates_dispatched'] += 1
             self._dispatch_navigation(robot, details, 'frontier', label)
         self.frontier_prepared = {}
         self.frontier_index += 1
@@ -2536,15 +2769,21 @@ class DiagnosticNode(Node):
         for robot in ROBOTS:
             if self.candidate_cpu_end[robot] is None:
                 self.candidate_cpu_end[robot] = self._process_cpu(robot)
+        self._emit_handoff_pipeline(force=True)
         summary = self._summary()
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
+        self._event('FORENSIC_CAPTURE_VALIDITY', severity=(
+            'INFO' if summary['capture_validity']['valid'] else 'WARN'),
+            **summary['capture_validity'])
         self._event('DIAGNOSTIC_COMPLETE', passed=summary['passed'],
                     acceptance=summary['acceptance'])
         self.events_file.flush()
         self.timeseries_file.flush()
         self.handoff_file.flush()
+        self.handoff_precheck_file.flush()
+        self.handoff_accept_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
@@ -2629,6 +2868,13 @@ class DiagnosticNode(Node):
                     self.candidate_invalid_reasons[robot]),
                 'nav2_service_unavailable_samples': stats.get(
                     'nav2_service_unavailable_samples', 0),
+                'generator_map_receipts': stats.get(
+                    'generator_map_receipts', 0),
+                'generator_costmap_receipts': stats.get(
+                    'generator_costmap_receipts', 0),
+                'generator_accepted_approaches': stats.get(
+                    'generator_accepted_approaches', 0),
+                'handoff_pipeline': self._pipeline_snapshot(robot),
             }
             seconds = self.time_state_seconds[robot]
             time_breakdown[robot] = {
@@ -2639,6 +2885,22 @@ class DiagnosticNode(Node):
                 } for state in TIME_STATES
             }
         navigation_table = [self._run_summary(run) for run in self.nav_runs]
+        capture_validity = capture_validity_gate(
+            generator_map_receipts=sum(
+                table['generator_map_receipts'] for table in frontier_table.values()),
+            generator_costmap_receipts=sum(
+                table['generator_costmap_receipts'] for table in frontier_table.values()),
+            generator_accepted_approaches=sum(
+                table['generator_accepted_approaches'] for table in frontier_table.values()),
+            snapshots_received=sum(
+                table['handoff_pipeline']['snapshots_received']
+                for table in frontier_table.values()),
+            candidates_considered=sum(
+                table['handoff_pipeline']['candidates_safety_evaluated']
+                for table in frontier_table.values()),
+            detailed_records=(len(self.handoff_records)
+                              + len(self.handoff_accept_seen)),
+            joined_candidates=len(self.generator_handoff_joins))
         acceptance = self._acceptance(
             filter_table, frontier_table, navigation_table)
         return {
@@ -2675,6 +2937,15 @@ class DiagnosticNode(Node):
             'handoff_rejection_counts': dict(self.handoff_rejections),
             'handoff_rejection_record_count': len(self.handoff_records),
             'handoff_rejection_csv': 'handoff_rejections.csv',
+            'handoff_precheck_rejection_csv': 'handoff_precheck_rejections.csv',
+            'handoff_precheck_rejection_record_count': len(
+                self.handoff_precheck_seen),
+            'handoff_acceptance_csv': 'handoff_acceptances.csv',
+            'handoff_acceptance_record_count': len(self.handoff_accept_seen),
+            'handoff_pipeline': {
+                robot: self._pipeline_snapshot(robot) for robot in ROBOTS},
+            'capture_validity': capture_validity,
+            'generator_handoff_join_count': len(self.generator_handoff_joins),
             'artifact_write_counts': dict(self._artifact_write_counts),
             'artifact_flush_policy': 'buffered; periodic every 5 wall seconds; final flush',
             'time_breakdown': time_breakdown,
@@ -2816,6 +3087,10 @@ class DiagnosticNode(Node):
             self.timeseries_file.close()
         if not self.handoff_file.closed:
             self.handoff_file.close()
+        if not self.handoff_precheck_file.closed:
+            self.handoff_precheck_file.close()
+        if not self.handoff_accept_file.closed:
+            self.handoff_accept_file.close()
 
 
 def main(args=None):

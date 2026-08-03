@@ -67,7 +67,7 @@ LAUNCH_FILE = 'two_robots_nav2_frontier_diagnostic_launch.py'
 ARTIFACT_NAMES = frozenset({
     'launch.log', 'diagnostic_events.jsonl',
     'diagnostic_timeseries.csv', 'diagnostic_summary.json',
-    'effective_command.txt',
+    'effective_command.txt', 'handoff_rejections.csv',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -312,6 +312,44 @@ def line_point_distance(ax, ay, bx, by, px, py) -> float:
                  ((px - ax) * dx + (py - ay) * dy) / denominator))
     return math.hypot(px - (ax + fraction * dx),
                       py - (ay + fraction * dy))
+
+
+def candidate_physical_signature(candidate) -> str:
+    """Stable geometric identity; frontier IDs can change between snapshots."""
+    pose = candidate.approach_pose.pose.position
+    centroid = candidate.centroid
+    # Three centimetres is below a costmap cell in this setup, while avoiding
+    # meaningless identity churn from floating-point serialization.
+    return ':'.join(str(round(value, 2)) for value in (
+        centroid.x, centroid.y, pose.x, pose.y,
+        candidate.bounding_box_min.x, candidate.bounding_box_min.y,
+        candidate.bounding_box_max.x, candidate.bounding_box_max.y))
+
+
+def region_fingerprint(grid: Optional[OccupancyGrid], points,
+                       margin_m: float = 0.12):
+    """Return the cells relevant to a path/goal, not a whole-map revision."""
+    if grid is None or grid.info.resolution <= 0.0:
+        return None
+    step = grid.info.resolution
+    offsets = (-margin_m, 0.0, margin_m)
+    samples = []
+    for x, y in points:
+        for dx in offsets:
+            for dy in offsets:
+                cell = grid_cell(grid, x + dx, y + dy)
+                samples.append(None if cell is None else int(grid.data[cell[0]]))
+    return tuple(samples)
+
+
+def map_change_classification(source_revision, current_revision,
+                              source_region, current_region) -> str:
+    """Classify revision churn without treating remote mapping as unsafe."""
+    if source_revision == current_revision:
+        return 'MAP_REVISION_UNCHANGED'
+    if source_region is not None and source_region == current_region:
+        return 'REVISION_CHANGED_BUT_PATH_REGION_UNCHANGED'
+    return 'RELEVANT_MAP_CHANGE'
 
 
 @dataclass
@@ -578,6 +616,27 @@ class DiagnosticNode(Node):
                 partial(self._cmd_vel_stamped, robot), qos_profile_sensor_data)
         self.events_file = (self.output / 'diagnostic_events.jsonl').open(
             'w', encoding='utf-8', buffering=1)
+        self.handoff_file = (self.output / 'handoff_rejections.csv').open(
+            'w', encoding='utf-8', newline='', buffering=1)
+        self.handoff_csv = csv.DictWriter(self.handoff_file, fieldnames=[
+            'robot', 'canonical_task_id', 'physical_signature',
+            'snapshot_generation_time_s', 'dispatch_attempt_time_s',
+            'candidate_age_s', 'source_map_revision', 'current_map_revision',
+            'source_map_timestamp_s', 'current_map_timestamp_s',
+            'source_costmap_timestamp_s', 'current_costmap_timestamp_s',
+            'map_costmap_skew_s', 'approach_x_m', 'approach_y_m',
+            'robot_x_m', 'robot_y_m', 'original_path_length_m',
+            'final_path_length_m', 'start_cell_cost', 'goal_cell_cost',
+            'minimum_path_clearance_m', 'original_planner_result',
+            'final_planner_result', 'rejection_subreason',
+            'map_change_classification', 'retry_count', 'wait_duration_s',
+        ])
+        self.handoff_csv.writeheader()
+        self.handoff_rejections = Counter()
+        self.handoff_records = []
+        self.handoff_seen = set()
+        self.candidate_context = {robot: {} for robot in ROBOTS}
+        self.costmap_wait = {robot: None for robot in ROBOTS}
         self.timeseries_file = (self.output / 'diagnostic_timeseries.csv').open(
             'w', encoding='utf-8', newline='', buffering=1)
         self.timeseries = csv.DictWriter(
@@ -748,6 +807,25 @@ class DiagnosticNode(Node):
         self.candidate_received_sim[robot] = now
         self.last_received[robot]['candidate'] = now
         self.candidates[robot] = message
+        source_stamp = stamp_seconds(message.map_stamp)
+        for item in message.candidates:
+            signature = candidate_physical_signature(item)
+            points = self._candidate_points(item)
+            # The start footprint is part of final path validity too.
+            if self.poses[robot] is not None:
+                points.append(self.poses[robot])
+            self.candidate_context[robot][(signature, int(message.map_revision))] = {
+                'snapshot_generation_time_s': now,
+                'source_map_revision': int(message.map_revision),
+                'source_map_timestamp_s': source_stamp,
+                'source_costmap_timestamp_s': self._grid_stamp(
+                    self.costmaps[robot]),
+                'original_path_length_m': float(item.path_length_m),
+                'source_region': region_fingerprint(
+                    self.shared_maps[robot], points),
+                'points': points,
+                'frontier_id': int(item.frontier_id),
+            }
         stats = self.candidate_stats[robot]
         stats['snapshots'] += 1
         stats['approaches'] += len(message.candidates)
@@ -1532,6 +1610,133 @@ class DiagnosticNode(Node):
             return True
         return False
 
+    @staticmethod
+    def _grid_stamp(grid: Optional[OccupancyGrid]):
+        return None if grid is None else stamp_seconds(grid.header.stamp)
+
+    @staticmethod
+    def _candidate_points(candidate):
+        """Bounded corridor sample used only for revision relevance telemetry."""
+        points = [(candidate.approach_pose.pose.position.x,
+                   candidate.approach_pose.pose.position.y),
+                  (candidate.centroid.x, candidate.centroid.y)]
+        for sample in list(candidate.local_path_samples)[:64]:
+            points.append((sample.x, sample.y))
+        return points
+
+    def _handoff_context(self, robot: str, candidate, batch: FrontierCandidateArray,
+                         source_context=None):
+        signature = candidate_physical_signature(candidate)
+        context = source_context or self.candidate_context[robot].get(
+            (signature, int(batch.map_revision)), {})
+        points = context.get('points', self._candidate_points(candidate))
+        current_map = self.shared_maps[robot]
+        current_revision = int(batch.map_revision) if batch is not None else None
+        classification = map_change_classification(
+            context.get('source_map_revision', int(batch.map_revision)),
+            current_revision, context.get('source_region'),
+            region_fingerprint(current_map, points))
+        return signature, context, classification
+
+    def _record_handoff(self, robot: str, candidate, batch, reason: str,
+                        safe=None, final_length=None, final_result=None,
+                        retry_count=0, wait_duration=0.0,
+                        map_classification=None, source_context=None):
+        """Write one machine-readable record for each distinct rejection."""
+        signature, context, classification = self._handoff_context(
+            robot, candidate, batch, source_context)
+        if map_classification is None:
+            map_classification = classification
+        key = (robot, signature, reason,
+               context.get('source_map_revision'),
+               int(batch.map_revision) if batch is not None else None)
+        if key in self.handoff_seen:
+            return
+        self.handoff_seen.add(key)
+        point = candidate.approach_pose.pose.position
+        pose = self.poses[robot]
+        current_costmap_stamp = self._grid_stamp(self.costmaps[robot])
+        current_map_stamp = self._grid_stamp(self.shared_maps[robot])
+        source_costmap_stamp = context.get('source_costmap_timestamp_s')
+        row = {
+            'robot': robot,
+            'canonical_task_id': int(candidate.frontier_id),
+            'physical_signature': signature,
+            'snapshot_generation_time_s': context.get(
+                'snapshot_generation_time_s'),
+            'dispatch_attempt_time_s': self.now_sim(),
+            'candidate_age_s': self._age(robot, 'candidate'),
+            'source_map_revision': context.get('source_map_revision'),
+            'current_map_revision': int(batch.map_revision)
+            if batch is not None else None,
+            'source_map_timestamp_s': context.get('source_map_timestamp_s'),
+            'current_map_timestamp_s': current_map_stamp,
+            'source_costmap_timestamp_s': source_costmap_stamp,
+            'current_costmap_timestamp_s': current_costmap_stamp,
+            'map_costmap_skew_s': None if current_map_stamp is None
+            or current_costmap_stamp is None else current_map_stamp - current_costmap_stamp,
+            'approach_x_m': point.x, 'approach_y_m': point.y,
+            'robot_x_m': None if pose is None else pose[0],
+            'robot_y_m': None if pose is None else pose[1],
+            'original_path_length_m': context.get('original_path_length_m'),
+            'final_path_length_m': final_length,
+            'start_cell_cost': None if safe is None else safe.get('start_cost'),
+            'goal_cell_cost': None if safe is None else safe.get('goal_cost'),
+            'minimum_path_clearance_m': None if safe is None
+            else safe.get('nearest_obstacle_distance_m'),
+            'original_planner_result': 'REACHABLE' if (
+                candidate.reachability_state == candidate.REACHABLE) else 'UNREACHABLE',
+            'final_planner_result': final_result,
+            'rejection_subreason': reason,
+            'map_change_classification': map_classification,
+            'retry_count': retry_count, 'wait_duration_s': wait_duration,
+        }
+        self.handoff_csv.writerow(row)
+        self.handoff_rejections[reason] += 1
+        self.handoff_records.append(row)
+        self._event(
+            'FRONTIER_HANDOFF_REJECTED', robot, severity='WARN',
+            **{key: value for key, value in row.items() if key != 'robot'})
+
+    def _handoff_safe_goal(self, robot: str, candidate, batch):
+        """Give a precise rejection reason; never hide it as provenance."""
+        age = self._age(robot, 'candidate')
+        if age is None or age > self.FRONTIER_STALE_S:
+            return None, 'CANDIDATE_TOO_OLD'
+        if self._age(robot, 'odom') is None or self._age(robot, 'odom') > self.FRESH_SCAN_S:
+            return None, 'TF_TOO_OLD'
+        map_stamp = self._grid_stamp(self.shared_maps[robot])
+        costmap_stamp = self._grid_stamp(self.costmaps[robot])
+        if (map_stamp is not None and costmap_stamp is not None
+                and costmap_stamp + 0.01 < map_stamp):
+            return None, 'WAITING_FOR_COSTMAP'
+        pose = self.poses[robot]
+        if pose is None or not self._start_gate_allows(robot):
+            return None, 'START_NOT_TRAVERSABLE'
+        point = candidate.approach_pose.pose.position
+        raw = {
+            'start_cost': grid_value(self.costmaps[robot], *pose),
+            'goal_cost': grid_value(self.costmaps[robot], point.x, point.y),
+            'nearest_obstacle_distance_m': nearest_blocked_distance(
+                self.costmaps[robot], point.x, point.y),
+        }
+        safe = self._safe_goal(robot, point.x, point.y)
+        if safe is not None:
+            return safe, None
+        cost = raw['goal_cost']
+        shared = grid_value(self.shared_maps[robot], point.x, point.y)
+        if cost is None or shared is None:
+            return raw, 'GOAL_NOT_TRAVERSABLE'
+        if cost != 0 or shared < 0 or shared >= 50:
+            return raw, 'GOAL_NOT_TRAVERSABLE'
+        peer = self.poses['robot2' if robot == 'robot1' else 'robot1']
+        if (raw['nearest_obstacle_distance_m'] < 0.12
+                or peer is None
+                or math.dist((point.x, point.y), peer) < 0.18
+                or line_point_distance(*pose, point.x, point.y, *peer) < 0.18):
+            return raw, 'GOAL_NOT_TRAVERSABLE'
+        return raw, 'OTHER'
+
     def _safe_goal(self, robot: str, x: float, y: float) -> Optional[dict]:
         costmap = self.costmaps[robot]
         shared = self.shared_maps[robot]
@@ -1937,19 +2142,40 @@ class DiagnosticNode(Node):
         if age is None or age > self.FRONTIER_STALE_S:
             return []
         ranked = []
+        waiting_for_costmap = False
         for candidate in sorted(batch.candidates,
                                 key=deterministic_candidate_key):
             if deterministic_candidate_key(candidate)[0]:
                 continue
             point = candidate.approach_pose.pose.position
-            safe = self._safe_goal(robot, point.x, point.y)
-            if safe is None:
-                self._event(
-                    'FRONTIER_CANDIDATE_INVALID', robot, severity='WARN',
-                    frontier_id=int(candidate.frontier_id),
-                    reason='CURRENT_COSTMAP_OR_PROVENANCE_UNSAFE')
+            safe, reason = self._handoff_safe_goal(robot, candidate, batch)
+            if reason is not None:
+                if reason == 'WAITING_FOR_COSTMAP':
+                    waiting_for_costmap = True
+                    continue
+                self._record_handoff(robot, candidate, batch, reason)
                 continue
             ranked.append((candidate, safe, batch, age))
+        if waiting_for_costmap and not ranked:
+            wait = self.costmap_wait[robot]
+            now = self.now_sim()
+            if wait is None:
+                self.costmap_wait[robot] = {'started': now, 'retries': 0}
+                self._event('WAITING_FOR_COSTMAP', robot,
+                            reason='STATIC_LAYER_BEHIND_SANITIZED_MAP')
+            else:
+                wait['retries'] += 1
+                if now - wait['started'] > 2.0:
+                    for candidate in batch.candidates:
+                        if deterministic_candidate_key(candidate)[0]:
+                            continue
+                        self._record_handoff(
+                            robot, candidate, batch, 'COSTMAP_BEHIND_MAP',
+                            retry_count=wait['retries'],
+                            wait_duration=now - wait['started'])
+                    self.costmap_wait[robot] = None
+            return []
+        self.costmap_wait[robot] = None
         return ranked
 
     def _drive_frontiers(self):
@@ -1981,41 +2207,75 @@ class DiagnosticNode(Node):
             started = self.now_sim()
             pose = candidate.approach_pose
             pose.header.stamp = self.get_clock().now().to_msg()
+            _, source_context, _ = self._handoff_context(robot, candidate, batch)
 
             def validated(success, path, length, latency, code, message,
                           robot=robot, candidate=candidate, safe=safe,
-                          batch=batch, age=age, started=started):
-                del code, message
+                          batch=batch, age=age, started=started,
+                          source_context=source_context):
                 current_age = self._age(robot, 'candidate')
                 current = self.candidates[robot]
-                same_provenance = (
-                    current is not None
-                    and current.map_revision == batch.map_revision
-                    and current_age is not None
-                    and current_age <= self.FRONTIER_STALE_S)
-                if not success or not same_provenance:
-                    self._trigger(
-                        'STALE_PATH_BEFORE_DISPATCH', robot,
-                        frontier_id=int(candidate.frontier_id),
-                        final_validation_latency_s=latency,
-                        candidate_age_s=current_age,
-                        same_map_revision=same_provenance)
+                signature = candidate_physical_signature(candidate)
+                current_match = None if current is None else next(
+                    (item for item in current.candidates
+                     if candidate_physical_signature(item) == signature), None)
+                if current_age is None or current_age > self.FRONTIER_STALE_S:
+                    self._record_handoff(
+                        robot, candidate, current or batch,
+                        'CANDIDATE_TOO_OLD', safe, length,
+                        f'ERROR_{code}:{message}',
+                        source_context=source_context)
                     return
+                if current_match is None:
+                    self._record_handoff(
+                        robot, candidate, current or batch,
+                        'TASK_NO_LONGER_PRESENT', safe, length,
+                        f'ERROR_{code}:{message}',
+                        source_context=source_context)
+                    return
+                final_safe, reason = self._handoff_safe_goal(
+                    robot, current_match, current)
+                if reason is not None:
+                    self._record_handoff(
+                        robot, current_match, current, reason, final_safe,
+                        length, f'ERROR_{code}:{message}',
+                        source_context=source_context)
+                    return
+                if not success:
+                    self._record_handoff(
+                        robot, current_match, current, 'FINAL_PATH_FAILED',
+                        final_safe, length, f'ERROR_{code}:{message}',
+                        source_context=source_context)
+                    return
+                _, context, map_change = self._handoff_context(
+                    robot, current_match, current, source_context)
+                # The successfully replanned path is now the provenance.  A
+                # remote map revision must not suppress a safe current path.
                 prepared = {
                     'pose': pose, 'path': path, 'path_length': length,
-                    'path_latency': latency, 'safe': safe,
-                    'candidate_age': age, 'selection_time':
+                    'path_latency': latency, 'safe': final_safe,
+                    'candidate_age': current_age, 'selection_time':
                         self.now_sim() - started,
-                    'map_revision': int(batch.map_revision),
-                    'frontier_id': int(candidate.frontier_id),
+                    'map_revision': int(current.map_revision),
+                    'frontier_id': int(current_match.frontier_id),
+                    'physical_signature': signature,
+                    'path_provenance': {
+                        'map_revision': int(current.map_revision),
+                        'map_stamp_s': self._grid_stamp(self.shared_maps[robot]),
+                        'costmap_stamp_s': self._grid_stamp(self.costmaps[robot]),
+                        'map_change_classification': map_change,
+                        'source_map_revision': context.get('source_map_revision'),
+                    },
                 }
                 self.frontier_prepared[robot] = prepared
                 self._event(
                     'FRONTIER_SELECTED_AND_VALIDATED', robot,
-                    frontier_id=int(candidate.frontier_id),
-                    map_revision=int(batch.map_revision),
-                    visible_reveal_gain=float(candidate.information_gain),
-                    path_length_m=length, candidate_age_s=age,
+                    frontier_id=int(current_match.frontier_id),
+                    physical_signature=signature,
+                    map_revision=int(current.map_revision),
+                    map_change_classification=map_change,
+                    visible_reveal_gain=float(current_match.information_gain),
+                    path_length_m=length, candidate_age_s=current_age,
                     selection_time_s=prepared['selection_time'],
                     final_path_validation_latency_s=latency)
 
@@ -2093,6 +2353,7 @@ class DiagnosticNode(Node):
                     acceptance=summary['acceptance'])
         self.events_file.flush()
         self.timeseries_file.flush()
+        self.handoff_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
@@ -2220,6 +2481,9 @@ class DiagnosticNode(Node):
             'filter_performance': filter_table,
             'navigation_requests': navigation_table,
             'frontier_performance': frontier_table,
+            'handoff_rejection_counts': dict(self.handoff_rejections),
+            'handoff_rejection_record_count': len(self.handoff_records),
+            'handoff_rejection_csv': 'handoff_rejections.csv',
             'time_breakdown': time_breakdown,
             'failure_triggers': dict(self.failure_events),
             'planner_failure_storm': self.planner_failure_storm,
@@ -2352,11 +2616,13 @@ class DiagnosticNode(Node):
         }
 
     def close_artifacts(self):
-        """Close the two streaming artifacts after the executor stops."""
+        """Close streaming artifacts after the executor stops."""
         if not self.events_file.closed:
             self.events_file.close()
         if not self.timeseries_file.closed:
             self.timeseries_file.close()
+        if not self.handoff_file.closed:
+            self.handoff_file.close()
 
 
 def main(args=None):

@@ -8,6 +8,9 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     DiagnosticNode,
     _affinity_preexec,
     grid_cell,
+    map_change_classification,
+    region_fingerprint,
+    candidate_physical_signature,
     launch_command,
     LAUNCH_FILE,
     phase_at,
@@ -181,12 +184,98 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
     assert ARTIFACT_NAMES == {
         'launch.log', 'diagnostic_events.jsonl',
         'diagnostic_timeseries.csv', 'diagnostic_summary.json',
-        'effective_command.txt',
+        'effective_command.txt', 'handoff_rejections.csv',
     }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES
     assert 'active goal with zero cmd_vel' in TIME_STATES
     assert 'idle despite valid candidates' in TIME_STATES
+
+
+def _handoff_grid():
+    grid = OccupancyGrid()
+    grid.info.resolution = 0.1
+    grid.info.width = 30
+    grid.info.height = 30
+    grid.info.origin.orientation.w = 1.0
+    grid.data = [0] * 900
+    return grid
+
+
+def _candidate(identifier=1):
+    point = SimpleNamespace(x=1.0, y=1.0)
+    pose = SimpleNamespace(pose=SimpleNamespace(position=point))
+    return SimpleNamespace(
+        frontier_id=identifier, centroid=SimpleNamespace(x=1.1, y=1.1),
+        bounding_box_min=SimpleNamespace(x=1.0, y=1.0),
+        bounding_box_max=SimpleNamespace(x=1.2, y=1.2),
+        approach_pose=pose)
+
+
+def test_handoff_revision_change_outside_path_is_allowed_by_region_check():
+    grid = _handoff_grid()
+    source = region_fingerprint(grid, [(1.0, 1.0)])
+    grid.data[-1] = 100  # Remote map update, outside the corridor sample.
+    assert map_change_classification(4, 5, source,
+                                     region_fingerprint(grid, [(1.0, 1.0)])) == \
+        'REVISION_CHANGED_BUT_PATH_REGION_UNCHANGED'
+
+
+def test_handoff_obstacle_on_path_is_relevant_map_change():
+    grid = _handoff_grid()
+    source = region_fingerprint(grid, [(1.0, 1.0)])
+    index, _, _ = grid_cell(grid, 1.0, 1.0)
+    grid.data[index] = 100
+    assert map_change_classification(4, 5, source,
+                                     region_fingerprint(grid, [(1.0, 1.0)])) == \
+        'RELEVANT_MAP_CHANGE'
+
+
+def test_handoff_same_revision_is_not_stale():
+    assert map_change_classification(4, 4, (0,), (100,)) == \
+        'MAP_REVISION_UNCHANGED'
+
+
+def test_handoff_physical_signature_survives_frontier_id_change():
+    assert candidate_physical_signature(_candidate(1)) == \
+        candidate_physical_signature(_candidate(99))
+
+
+def test_handoff_physical_signature_changes_for_moved_goal():
+    first, second = _candidate(1), _candidate(1)
+    second.approach_pose.pose.position.x = 1.4
+    assert candidate_physical_signature(first) != candidate_physical_signature(second)
+
+
+def test_handoff_source_region_is_deterministic():
+    grid = _handoff_grid()
+    assert region_fingerprint(grid, [(1.0, 1.0)]) == \
+        region_fingerprint(grid, [(1.0, 1.0)])
+
+
+def test_handoff_source_region_preserves_unknown_cells():
+    grid = _handoff_grid()
+    index, _, _ = grid_cell(grid, 1.0, 1.0)
+    grid.data[index] = -1
+    assert -1 in region_fingerprint(grid, [(1.0, 1.0)])
+
+
+def test_handoff_region_outside_grid_is_explicit():
+    grid = _handoff_grid()
+    assert None in region_fingerprint(grid, [(-1.0, -1.0)])
+
+
+def test_handoff_revision_policy_is_not_global_equality():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "remote map revision must not suppress a safe current path" in source
+
+
+def test_handoff_final_validation_keeps_path_queries_serialized():
+    source = (PROJECT / 'my_epuck_project' / 'nav2_frontier_diagnostic.py').read_text(
+        encoding='utf-8')
+    assert "'frontier_final_validation'" in source
+    assert 'if self.planner_requests[robot] is not None:' in source
 
 
 def test_setup_adds_only_node_console_entry_for_this_diagnostic():

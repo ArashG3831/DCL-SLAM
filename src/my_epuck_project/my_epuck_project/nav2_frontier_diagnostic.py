@@ -485,6 +485,12 @@ class NavigationRun:
     goal_handle: object = None
     cmd_count: int = 0
     nonzero_cmd_count: int = 0
+    nonzero_linear_cmd_count: int = 0
+    nonzero_angular_cmd_count: int = 0
+    max_linear_cmd_mps: float = 0.0
+    max_angular_cmd_radps: float = 0.0
+    last_cmd_linear_x_mps: float = 0.0
+    last_cmd_angular_z_radps: float = 0.0
     zero_feedback_intervals: int = 0
     feedback_intervals: int = 0
     recovery_count: int = 0
@@ -1040,14 +1046,24 @@ class DiagnosticNode(Node):
         self._record_cmd(robot, message)
 
     def _record_cmd(self, robot: str, twist: Twist):
+        linear_speed = math.hypot(twist.linear.x, twist.linear.y)
+        angular_speed = abs(twist.angular.z)
         nonzero = (
-            abs(twist.linear.x) > 1e-4 or abs(twist.linear.y) > 1e-4
-            or abs(twist.angular.z) > 1e-4)
+            linear_speed > 1e-4 or angular_speed > 1e-4)
         self.cmd[robot] = {'nonzero': nonzero, 'last': self.now_sim()}
         self.messages[robot]['cmd'] += 1
         run = self.active_nav[robot]
         if run is not None and run.accepted_sim is not None:
             run.cmd_count += 1
+            run.max_linear_cmd_mps = max(run.max_linear_cmd_mps, linear_speed)
+            run.max_angular_cmd_radps = max(run.max_angular_cmd_radps,
+                                            angular_speed)
+            run.last_cmd_linear_x_mps = twist.linear.x
+            run.last_cmd_angular_z_radps = twist.angular.z
+            if linear_speed > 1e-4:
+                run.nonzero_linear_cmd_count += 1
+            if angular_speed > 1e-4:
+                run.nonzero_angular_cmd_count += 1
             if nonzero:
                 run.nonzero_cmd_count += 1
                 if run.first_motion_sim is None:
@@ -1055,7 +1071,23 @@ class DiagnosticNode(Node):
                     self._event('FIRST_NONZERO_CMD_VEL', robot,
                                 label=run.label,
                                 latency_s=run.first_motion_sim
-                                - run.accepted_sim)
+                                - run.accepted_sim,
+                                linear_x_mps=twist.linear.x,
+                                angular_z_radps=twist.angular.z)
+
+    @staticmethod
+    def _command_summary(run: NavigationRun) -> dict:
+        """Bounded actuator-facing evidence for one navigation request."""
+        return {
+            'cmd_count': run.cmd_count,
+            'nonzero_cmd_count': run.nonzero_cmd_count,
+            'nonzero_linear_cmd_count': run.nonzero_linear_cmd_count,
+            'nonzero_angular_cmd_count': run.nonzero_angular_cmd_count,
+            'max_linear_cmd_mps': run.max_linear_cmd_mps,
+            'max_angular_cmd_radps': run.max_angular_cmd_radps,
+            'last_cmd_linear_x_mps': run.last_cmd_linear_x_mps,
+            'last_cmd_angular_z_radps': run.last_cmd_angular_z_radps,
+        }
 
     def _rosout(self, message: Log):
         name = message.name
@@ -1794,7 +1826,10 @@ class DiagnosticNode(Node):
             if active_for > 10.0 and run.odom_distance_m < 0.01:
                 self._trigger('ODOM_NO_PROGRESS', robot,
                               active_duration_s=active_for,
-                              odom_distance_m=run.odom_distance_m)
+                              odom_distance_m=run.odom_distance_m,
+                              pose=self.poses[robot],
+                              recovery_count=run.maximum_recovery_count,
+                              **self._command_summary(run))
 
     def _pose(self, x: float, y: float, yaw: float = 0.0) -> PoseStamped:
         result = PoseStamped()
@@ -2429,9 +2464,18 @@ class DiagnosticNode(Node):
         if self.active_nav[robot] is not run:
             return
         feedback = message.feedback
+        previous_recoveries = run.recovery_count
         run.recovery_count = int(feedback.number_of_recoveries)
         run.maximum_recovery_count = max(
             run.maximum_recovery_count, run.recovery_count)
+        if run.recovery_count > previous_recoveries:
+            self._event(
+                'NAVIGATION_RECOVERY_TRANSITION', robot,
+                label=run.label, previous_recovery_count=previous_recoveries,
+                recovery_count=run.recovery_count,
+                active_duration_s=self.now_sim() - run.accepted_sim,
+                odom_distance_m=run.odom_distance_m,
+                **self._command_summary(run))
 
     def _nav_result(self, robot: str, run: NavigationRun, future):
         try:
@@ -2480,6 +2524,7 @@ class DiagnosticNode(Node):
             odometry_distance_m=run.odom_distance_m,
             recovery_count=run.maximum_recovery_count,
             final_pose_error_m=run.final_pose_error_m,
+            command_summary=self._command_summary(run),
             classifications=dict(run.classifications))
 
     def _check_active_navigation(self):
@@ -3001,6 +3046,7 @@ class DiagnosticNode(Node):
             if duration is not None else 0.0,
             'zero_cmd_feedback_percent': 100.0 * run.zero_feedback_intervals
             / max(1, run.feedback_intervals),
+            'command_summary': DiagnosticNode._command_summary(run),
             'odometry_distance_m': run.odom_distance_m,
             'execution_duration_s': duration,
             'recovery_count': run.maximum_recovery_count,

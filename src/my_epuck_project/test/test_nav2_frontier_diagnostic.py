@@ -2,6 +2,7 @@ from pathlib import Path
 from io import StringIO
 import threading
 from types import SimpleNamespace
+import csv
 
 from my_epuck_project.nav2_frontier_diagnostic import (
     ARTIFACT_NAMES,
@@ -24,6 +25,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     phase_at,
     runner_parser,
     TIME_STATES,
+    write_csv_header_once,
 )
 from my_epuck_interfaces.msg import FrontierCandidate, FrontierCandidateArray
 from nav_msgs.msg import OccupancyGrid
@@ -39,6 +41,7 @@ def test_runner_allows_its_required_preflight_artifacts():
         'ros_preflight.json', 'webots_port_preflight.json',
         'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
         'goal_timeline.csv', 'stationary_summary.json',
+        'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
     } <= ARTIFACT_NAMES
 
 
@@ -326,11 +329,21 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
         'ros_preflight.json', 'webots_port_preflight.json',
         'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
         'goal_timeline.csv', 'stationary_summary.json',
+        'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
     }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES
     assert 'active goal with zero cmd_vel' in TIME_STATES
     assert 'idle despite valid candidates' in TIME_STATES
+
+
+def test_goal_and_stationary_csv_headers_are_idempotent():
+    for fields in (['robot', 'kind'], ['robot', 'phase', 'cause']):
+        stream = StringIO()
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        assert write_csv_header_once(stream, writer) is True
+        assert write_csv_header_once(stream, writer) is False
+        assert stream.getvalue().splitlines() == [','.join(fields)]
 
 
 def test_capture_validity_reports_first_missing_source():

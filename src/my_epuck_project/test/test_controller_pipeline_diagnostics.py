@@ -365,6 +365,11 @@ def test_jazzy_dwb_validity_selected_and_best_forward_semantics():
     assert result['best_valid_forward']['critics'][0]['weighted_contribution'] == 2.0
     assert result['dominant_selected_advantage'][0]['name'] == 'PathAlign'
     assert result['invalid_count'] == 1
+    assert result['invalid_rejection_counts'] == {'BaseObstacle': 1}
+    assert result['valid_critic_extrema']['PathAlign'][
+        'minimum_weighted_contribution'] == pytest.approx(1.0)
+    assert result['valid_critic_extrema']['PathAlign'][
+        'maximum_weighted_contribution'] == pytest.approx(2.0)
     assert result['top_overall'][0]['trajectory_index'] == 0
 
 

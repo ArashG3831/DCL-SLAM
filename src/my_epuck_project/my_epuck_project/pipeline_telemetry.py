@@ -17,6 +17,9 @@ ANGULAR_COMMAND_EPS_RADPS = 0.02
 TRANSLATION_THRESHOLD_M = 0.01
 ROTATION_THRESHOLD_RAD = 0.04
 STAGE_FRESHNESS_S = 0.25
+DWB_ANGULAR_STALL_S = 2.0
+DWB_ZERO_STALL_S = 1.0
+DWB_STALE_STALL_S = 1.0
 
 
 def wrap_angle(angle: float) -> float:
@@ -129,6 +132,16 @@ def motion_state(window: list[dict]) -> dict:
 
 def stationary_cause(context: dict) -> str:
     """Return the strongest supported stationary cause, otherwise UNKNOWN."""
+    # Selector objects can intentionally outlive an action goal.  A retained
+    # selector is not evidence of a live precheck, and must never hide the
+    # much stronger fact that no navigation action is active.
+    if not context.get('active_goal'):
+        if context.get('intentional_frontier_idle',
+                       context.get('frontier_phase', False)):
+            return 'WAITING_FOR_FRONTIER_CANDIDATE'
+        if context.get('handoff_active'):
+            return 'GOAL_PRECHECK_OR_HANDOFF'
+        return 'NO_ACTIVE_GOAL'
     if context.get('diagnostic_timeout'):
         return 'DIAGNOSTIC_TIMEOUT'
     if context.get('recovery_active'):
@@ -137,11 +150,6 @@ def stationary_cause(context: dict) -> str:
         return 'COSTMAP_START_NOT_TRAVERSABLE'
     if context.get('planner_active'):
         return 'WAITING_FOR_PLANNER'
-    if context.get('handoff_active'):
-        return 'GOAL_PRECHECK_OR_HANDOFF'
-    if not context.get('active_goal'):
-        return ('WAITING_FOR_FRONTIER_CANDIDATE'
-                if context.get('frontier_phase') else 'NO_ACTIVE_GOAL')
     dwb = context.get('dwb_kind')
     if dwb == 'ZERO':
         return 'ACTIVE_GOAL_DWB_ZERO'
@@ -157,3 +165,66 @@ def stationary_cause(context: dict) -> str:
     if context.get('goal_transition'):
         return 'GOAL_CANCEL_OR_TRANSITION'
     return 'UNKNOWN'
+
+
+@dataclass
+class DwbStallDetector:
+    """Bounded edge detector for diagnostically significant DWB stalls.
+
+    It is deliberately command-observation-only: it does not influence the
+    controller, action server, or planner.  One event is emitted for each
+    qualifying continuous command episode and a separate event marks an
+    immediate transition away from a selected forward command.
+    """
+
+    goal_key: tuple | None = None
+    kind: str = 'MISSING_OR_STALE'
+    started_sim_s: float | None = None
+    previous_kind: str = 'MISSING_OR_STALE'
+    emitted: set[str] = None
+
+    def __post_init__(self):
+        if self.emitted is None:
+            self.emitted = set()
+
+    def observe(self, now_sim_s: float, goal_key: tuple | None,
+                kind: str) -> list[dict]:
+        """Return newly triggered bounded event descriptors."""
+        if goal_key is None or kind == 'LINEAR':
+            self.goal_key = goal_key
+            self.kind = kind
+            self.previous_kind = kind
+            self.started_sim_s = None
+            self.emitted.clear()
+            return []
+
+        if goal_key != self.goal_key or kind != self.kind:
+            prior = self.kind if goal_key == self.goal_key else 'MISSING_OR_STALE'
+            self.goal_key = goal_key
+            self.kind = kind
+            self.started_sim_s = float(now_sim_s)
+            self.emitted.clear()
+            events = []
+            if prior == 'LINEAR' and kind in ('ANGULAR_ONLY', 'ZERO'):
+                events.append({
+                    'trigger': f'TRANSITION_FROM_FORWARD_TO_{kind}',
+                    'duration_s': 0.0,
+                })
+            self.previous_kind = kind
+            return events
+
+        if self.started_sim_s is None:
+            self.started_sim_s = float(now_sim_s)
+        duration = max(0.0, float(now_sim_s) - self.started_sim_s)
+        thresholds = {
+            'ANGULAR_ONLY': (DWB_ANGULAR_STALL_S,
+                             'ANGULAR_ONLY_CONTINUOUS'),
+            'ZERO': (DWB_ZERO_STALL_S, 'ZERO_CONTINUOUS'),
+            'MISSING_OR_STALE': (DWB_STALE_STALL_S,
+                                 'COMMAND_STALE_CONTINUOUS'),
+        }
+        threshold, trigger = thresholds.get(kind, (math.inf, ''))
+        if trigger and duration >= threshold and trigger not in self.emitted:
+            self.emitted.add(trigger)
+            return [{'trigger': trigger, 'duration_s': duration}]
+        return []

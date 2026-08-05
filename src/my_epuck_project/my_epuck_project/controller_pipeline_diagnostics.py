@@ -105,9 +105,16 @@ def _score_record(score, index, selected=False, best_forward=False,
         if weighted is not None:
             contributions[critic.name] = weighted
     if rejection_reason is None and not valid:
+        negative = [critic.name for critic in score.scores
+                    if critic.name and float(critic.raw_score) < 0.0]
         names = [critic.name for critic in score.scores if critic.name]
-        rejection_reason = names[0] if names else (
-            'nonfinite_total' if not finite_total else 'negative_total')
+        if negative:
+            rejection_reason = negative[0]
+        elif names:
+            rejection_reason = names[-1]
+        else:
+            rejection_reason = ('nonfinite_total' if not finite_total
+                                else 'negative_total')
     record = {
         'trajectory_index': int(index),
         'velocity': {'linear_x_mps': float(velocity.x),
@@ -138,12 +145,39 @@ def summarize_dwb_evaluation(msg, forward_threshold=DWB_FORWARD_THRESHOLD_MPS,
         else None)
     valid = []
     forward = []
+    invalid_reasons = {}
+    critic_extrema = {}
     for index, score in enumerate(scores):
         record = _score_record(score, index, selected=index == selected_index)
         if record['valid']:
             valid.append((record['total_score'], index, record))
             if score.traj.velocity.x > forward_threshold:
                 forward.append((record['total_score'], index, record))
+            for critic in record['critics']:
+                weighted = critic['weighted_contribution']
+                if weighted is None:
+                    continue
+                name = critic['name'] or 'UNNAMED_CRITIC'
+                current = critic_extrema.get(name)
+                if current is None:
+                    critic_extrema[name] = {
+                        'sample_count': 1,
+                        'minimum_weighted_contribution': weighted,
+                        'minimum_trajectory_index': index,
+                        'maximum_weighted_contribution': weighted,
+                        'maximum_trajectory_index': index,
+                    }
+                else:
+                    current['sample_count'] += 1
+                    if weighted < current['minimum_weighted_contribution']:
+                        current['minimum_weighted_contribution'] = weighted
+                        current['minimum_trajectory_index'] = index
+                    if weighted > current['maximum_weighted_contribution']:
+                        current['maximum_weighted_contribution'] = weighted
+                        current['maximum_trajectory_index'] = index
+        else:
+            reason = record['rejection_reason'] or 'UNSPECIFIED_INVALID'
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
     valid.sort(key=lambda item: (item[0], item[1]))
     forward.sort(key=lambda item: (item[0], item[1]))
     if selected_valid_index is not None:
@@ -197,6 +231,10 @@ def summarize_dwb_evaluation(msg, forward_threshold=DWB_FORWARD_THRESHOLD_MPS,
         'top_overall': overall,
         'top_valid_forward': forward_top,
         'invalid_count': len(scores) - len(valid),
+        'invalid_rejection_counts': dict(sorted(invalid_reasons.items())),
+        'valid_critic_extrema': {
+            name: critic_extrema[name] for name in sorted(critic_extrema)
+        },
     }
 
 

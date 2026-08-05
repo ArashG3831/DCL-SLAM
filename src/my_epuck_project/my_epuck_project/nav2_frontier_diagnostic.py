@@ -42,7 +42,8 @@ from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav2_msgs.msg import CollisionMonitorState
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 import psutil
-from rcl_interfaces.msg import Log
+from rcl_interfaces.msg import Log, ParameterType
+from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.clock import Clock as RclClock, ClockType
@@ -66,6 +67,7 @@ from .pipeline_telemetry import (
     LINEAR_COMMAND_EPS_MPS,
     PIPELINE_STAGES,
     PRECEDING_STAGE,
+    DwbStallDetector,
     StageMetrics,
     attenuation,
     command_kind,
@@ -94,6 +96,7 @@ ARTIFACT_NAMES = frozenset({
     # Bounded, stage-separated command-pipeline forensic artifacts.
     'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
     'goal_timeline.csv', 'stationary_summary.json',
+    'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -135,6 +138,28 @@ HANDOFF_PIPELINE_COUNTERS = (
     'candidates_final_path_queried', 'candidates_rejected',
     'candidates_accepted', 'candidates_dispatched',
 )
+DWB_STALL_EVENT_LIMIT = 32
+DWB_STALL_PLAN_POINT_LIMIT = 64
+DWB_STALL_COSTMAP_PATCH_RADIUS_M = 0.15
+RUNTIME_GEOMETRY_PARAMETERS = {
+    'controller_server': (
+        'FollowPath.min_vel_x', 'FollowPath.max_vel_x',
+        'FollowPath.max_vel_theta', 'FollowPath.robot_radius',
+        'FollowPath.BaseObstacle.scale', 'FollowPath.PathAlign.scale',
+        'FollowPath.GoalAlign.scale', 'FollowPath.PathDist.scale',
+        'FollowPath.GoalDist.scale', 'FollowPath.RotateToGoal.scale',
+        'progress_checker.required_movement_radius',
+        'progress_checker.movement_time_allowance',
+    ),
+    'local_costmap': (
+        'robot_radius', 'inflation_layer.inflation_radius',
+        'inflation_layer.cost_scaling_factor',
+    ),
+    'global_costmap': (
+        'robot_radius', 'inflation_layer.inflation_radius',
+        'inflation_layer.cost_scaling_factor',
+    ),
+}
 
 try:
     from dwb_msgs.msg import LocalPlanEvaluation
@@ -170,6 +195,14 @@ def capture_validity_gate(*, generator_map_receipts: int,
 def utc_now() -> str:
     """Return a stable UTC timestamp for artifacts."""
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def write_csv_header_once(stream, writer) -> bool:
+    """Write a CSV header only when the target stream is still empty."""
+    if stream.tell() != 0:
+        return False
+    writer.writeheader()
+    return True
 
 
 def stamp_seconds(stamp) -> float:
@@ -550,6 +583,7 @@ class NavigationRun:
     first_odometry_motion_sim: Optional[float] = None
     distance_remaining_m: Optional[float] = None
     last_feedback_sim: Optional[float] = None
+    plan_revisions_at_request: dict = field(default_factory=dict)
 
 
 class DiagnosticNode(Node):
@@ -614,6 +648,7 @@ class DiagnosticNode(Node):
         self.local_costmaps = {robot: None for robot in ROBOTS}
         self.odom = {robot: None for robot in ROBOTS}
         self.poses = {robot: None for robot in ROBOTS}
+        self.pose_received_sim = {robot: None for robot in ROBOTS}
         self.cmd = {robot: {'nonzero': False, 'last': 0.0} for robot in ROBOTS}
         # Keep each command stage independent.  The existing `cmd` field is
         # retained for legacy mission-state reporting only.
@@ -622,7 +657,21 @@ class DiagnosticNode(Node):
             for robot in ROBOTS
         }
         self.pipeline_dwb = {robot: {} for robot in ROBOTS}
+        # Retain just the latest published evaluation object.  It is expanded
+        # only if a bounded stall event is triggered.
+        self.pipeline_dwb_message = {robot: None for robot in ROBOTS}
+        self.pipeline_dwb_received_sim = {robot: None for robot in ROBOTS}
         self.pipeline_collision = {robot: {} for robot in ROBOTS}
+        self.pipeline_plans = {
+            robot: {
+                'global': {'message': None, 'revision': 0, 'received_sim_s': None},
+                'local': {'message': None, 'revision': 0, 'received_sim_s': None},
+            }
+            for robot in ROBOTS
+        }
+        self.pipeline_dwb_stalls = {robot: DwbStallDetector() for robot in ROBOTS}
+        self.dwb_stall_events = []
+        self.dwb_stall_counts = Counter()
         self.pipeline_history = {robot: deque(maxlen=32) for robot in ROBOTS}
         self.pipeline_last_sample_sim = None
         self.pipeline_phase_seconds = {
@@ -763,6 +812,18 @@ class DiagnosticNode(Node):
                 key = (robot, name)
                 self.lifecycle_clients[key] = self.create_client(
                     GetState, f'/{robot}/{name}/get_state')
+        self.runtime_geometry_clients = {}
+        self.runtime_geometry_pending = set()
+        self.runtime_geometry = {
+            robot: {node: {'status': 'NOT_QUERIED', 'parameters': {}}
+                    for node in RUNTIME_GEOMETRY_PARAMETERS}
+            for robot in ROBOTS
+        }
+        for robot in ROBOTS:
+            for node_name in RUNTIME_GEOMETRY_PARAMETERS:
+                key = (robot, node_name)
+                self.runtime_geometry_clients[key] = self.create_client(
+                    GetParameters, f'/{robot}/{node_name}/get_parameters')
         map_qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -818,6 +879,12 @@ class DiagnosticNode(Node):
             self.create_subscription(
                 CollisionMonitorState, f'/{robot}/collision_monitor_state',
                 partial(self._pipeline_collision, robot), 10)
+            self.create_subscription(
+                NavPath, f'/{robot}/global_plan',
+                partial(self._pipeline_plan, robot, 'global'), 10)
+            self.create_subscription(
+                NavPath, f'/{robot}/local_plan',
+                partial(self._pipeline_plan, robot, 'local'), 10)
             if LocalPlanEvaluation is not None:
                 self.create_subscription(
                     LocalPlanEvaluation, f'/{robot}/evaluation',
@@ -923,7 +990,7 @@ class DiagnosticNode(Node):
         self.stationary_csv = csv.DictWriter(self.stationary_file, fieldnames=[
             'robot', 'phase', 'cause', 'start_sim_s', 'end_sim_s', 'duration_s',
             'goal_label', 'goal_kind', 'samples', 'evidence_json'])
-        self.stationary_csv.writeheader()
+        write_csv_header_once(self.stationary_file, self.stationary_csv)
         self.goal_timeline_file = (self.output / 'goal_timeline.csv').open(
             'w', encoding='utf-8', newline='', buffering=65536)
         self.goal_timeline_csv = csv.DictWriter(self.goal_timeline_file, fieldnames=[
@@ -936,11 +1003,15 @@ class DiagnosticNode(Node):
             'total_distance_m', 'average_moving_speed_mps', 'path_length_m',
             'result_status', 'result_code', 'terminal_initiator',
             'diagnostic_timeout', 'metadata_json'])
-        self.goal_timeline_csv.writeheader()
+        write_csv_header_once(self.goal_timeline_file, self.goal_timeline_csv)
+        self.dwb_stall_file = (self.output / 'dwb_stall_events.jsonl').open(
+            'w', encoding='utf-8', buffering=65536)
         self.tick_timer = self.create_timer(0.1, self._tick)
         self.sample_timer = self.create_timer(0.5, self._sample)
         self.pipeline_timer = self.create_timer(0.05, self._sample_pipeline)
         self.lifecycle_timer = self.create_timer(1.0, self._poll_lifecycle)
+        self.runtime_geometry_timer = self.create_timer(
+            1.0, self._poll_runtime_geometry)
         self.process_timer = self.create_timer(10.0, self._sample_processes)
         self.wall_watchdog_timer = self.create_timer(
             0.5, self._wall_watchdog,
@@ -1203,11 +1274,31 @@ class DiagnosticNode(Node):
             'sim_time_s': self.now_sim(),
         }
 
+    def _pipeline_plan(self, robot: str, kind: str, message: NavPath):
+        """Retain only the latest published plan for a later stall event."""
+        state = self.pipeline_plans[robot][kind]
+        poses = message.poses
+        first = poses[0].pose.position if poses else None
+        last = poses[-1].pose.position if poses else None
+        signature = (
+            message.header.frame_id, int(message.header.stamp.sec),
+            int(message.header.stamp.nanosec), len(poses),
+            None if first is None else (round(first.x, 3), round(first.y, 3)),
+            None if last is None else (round(last.x, 3), round(last.y, 3)),
+        )
+        if signature != state.get('signature'):
+            state['revision'] += 1
+            state['signature'] = signature
+        state['message'] = message
+        state['received_sim_s'] = self.now_sim()
+
     def _pipeline_dwb_evaluation(self, robot: str,
                                  message: LocalPlanEvaluation):
         # The helper retains only a bounded top-k trajectory summary.
         summary = summarize_dwb_evaluation(message)
         self.pipeline_dwb[robot] = summary
+        self.pipeline_dwb_message[robot] = message
+        self.pipeline_dwb_received_sim[robot] = self.now_sim()
         selected = summary.get('selected') or {}
         velocity = selected.get('velocity') or {}
         if not summary.get('forward_valid', False):
@@ -1396,6 +1487,64 @@ class DiagnosticNode(Node):
             future = client.call_async(GetState.Request())
             future.add_done_callback(partial(self._lifecycle_result, key))
 
+    @staticmethod
+    def _parameter_value(value):
+        """Convert a GetParameters value without serializing ROS objects."""
+        if value.type == ParameterType.PARAMETER_BOOL:
+            return bool(value.bool_value)
+        if value.type == ParameterType.PARAMETER_INTEGER:
+            return int(value.integer_value)
+        if value.type == ParameterType.PARAMETER_DOUBLE:
+            return float(value.double_value)
+        if value.type == ParameterType.PARAMETER_STRING:
+            return str(value.string_value)
+        if value.type == ParameterType.PARAMETER_BYTE_ARRAY:
+            return list(value.byte_array_value)
+        if value.type == ParameterType.PARAMETER_BOOL_ARRAY:
+            return list(value.bool_array_value)
+        if value.type == ParameterType.PARAMETER_INTEGER_ARRAY:
+            return list(value.integer_array_value)
+        if value.type == ParameterType.PARAMETER_DOUBLE_ARRAY:
+            return list(value.double_array_value)
+        if value.type == ParameterType.PARAMETER_STRING_ARRAY:
+            return list(value.string_array_value)
+        return None
+
+    def _poll_runtime_geometry(self):
+        """Fetch active Nav2 geometry/scoring values once, read-only."""
+        if self.completed or self.ready_sim is None:
+            return
+        for key, client in self.runtime_geometry_clients.items():
+            robot, node_name = key
+            state = self.runtime_geometry[robot][node_name]
+            if state['status'] != 'NOT_QUERIED' or key in self.runtime_geometry_pending:
+                continue
+            if not client.service_is_ready():
+                continue
+            request = GetParameters.Request()
+            request.names = list(RUNTIME_GEOMETRY_PARAMETERS[node_name])
+            self.runtime_geometry_pending.add(key)
+            state['status'] = 'PENDING'
+            future = client.call_async(request)
+            future.add_done_callback(partial(self._runtime_geometry_result, key))
+
+    def _runtime_geometry_result(self, key, future):
+        self.runtime_geometry_pending.discard(key)
+        robot, node_name = key
+        state = self.runtime_geometry[robot][node_name]
+        try:
+            response = future.result()
+            state['parameters'] = {
+                name: self._parameter_value(value)
+                for name, value in zip(RUNTIME_GEOMETRY_PARAMETERS[node_name],
+                                       response.values)
+            }
+            state['status'] = 'ACTIVE_PARAMETER_SERVICE'
+            state['received_sim_s'] = self.now_sim()
+        except Exception as error:
+            state['status'] = 'QUERY_FAILED'
+            state['error'] = str(error)
+
     def _lifecycle_result(self, key, future):
         self.lifecycle_pending.discard(key)
         try:
@@ -1432,6 +1581,7 @@ class DiagnosticNode(Node):
             return None
         point = transform.transform.translation
         self.poses[robot] = (point.x, point.y)
+        self.pose_received_sim[robot] = self.now_sim()
         return transform
 
     def _point_from_shared(self, grid: Optional[OccupancyGrid],
@@ -1494,6 +1644,74 @@ class DiagnosticNode(Node):
             'centre_column': cx, 'centre_row': cy,
             'rows': rows,
             'nearest_occupied': occupied[0] if occupied else None,
+        }
+
+    @staticmethod
+    def _bounded_points(points, limit=DWB_STALL_PLAN_POINT_LIMIT):
+        """Evenly retain at most ``limit`` points without changing a plan."""
+        if not points:
+            return []
+        if len(points) <= limit:
+            indices = range(len(points))
+        else:
+            indices = sorted({round(index * (len(points) - 1) / (limit - 1))
+                              for index in range(limit)})
+        return [{'x_m': float(points[index][0]), 'y_m': float(points[index][1])}
+                for index in indices]
+
+    @staticmethod
+    def _peer_distance_for_points(frame_id: str, points, peer_pose):
+        """Measure in shared_map only; otherwise retain an explicit unknown."""
+        if peer_pose is None or frame_id.lstrip('/') != 'shared_map' or not points:
+            return {'centre_distance_m': None, 'footprint_clearance_m': None,
+                    'reason': 'FRAME_OR_PEER_UNAVAILABLE'}
+        distance = min(math.dist(point, peer_pose) for point in points)
+        return {
+            'centre_distance_m': distance,
+            'footprint_clearance_m': max(0.0, distance - 0.067),
+            'reason': None,
+        }
+
+    def _plan_stall_snapshot(self, robot: str, kind: str, peer_pose) -> dict | None:
+        state = self.pipeline_plans[robot][kind]
+        message = state['message']
+        if message is None:
+            return None
+        points = [(pose.pose.position.x, pose.pose.position.y)
+                  for pose in message.poses]
+        length = sum(math.dist(left, right)
+                     for left, right in zip(points, points[1:]))
+        return {
+            'frame_id': message.header.frame_id,
+            'stamp_s': stamp_seconds(message.header.stamp),
+            'received_sim_s': state['received_sim_s'],
+            'content_revision': state['revision'],
+            'pose_count': len(points),
+            'length_m': length,
+            'points': self._bounded_points(points),
+            'peer_distance': self._peer_distance_for_points(
+                message.header.frame_id, points, peer_pose),
+        }
+
+    def _trajectory_stall_snapshot(self, robot: str, record: dict | None,
+                                   peer_pose) -> dict | None:
+        message = self.pipeline_dwb_message[robot]
+        if message is None or record is None:
+            return None
+        index = record.get('trajectory_index')
+        if index is None or index < 0 or index >= len(message.twists):
+            return None
+        trajectory = message.twists[index].traj
+        points = [(pose.x, pose.y) for pose in trajectory.poses]
+        return {
+            'trajectory_index': int(index),
+            'frame_id': message.header.frame_id,
+            'pose_count': len(points),
+            'points': self._bounded_points(points),
+            'velocity': record.get('velocity'),
+            'total_score': record.get('total_score'),
+            'peer_distance': self._peer_distance_for_points(
+                message.header.frame_id, points, peer_pose),
         }
 
     def _grid_value_from_shared(self, grid: Optional[OccupancyGrid],
@@ -1969,6 +2187,7 @@ class DiagnosticNode(Node):
             self.pipeline_file.flush()
             self.stationary_file.flush()
             self.goal_timeline_file.flush()
+            self.dwb_stall_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
@@ -2003,14 +2222,17 @@ class DiagnosticNode(Node):
             run is not None and run.last_recovery_transition_sim is not None
             and self.now_sim() - run.last_recovery_transition_sim < 2.0)
         current_start_cost = self.last_costmap_start_value[robot]
+        # `selection_started` may remain populated after a completed pass.
+        # It is intentionally excluded: only a currently prepared/requested
+        # handoff constitutes evidence of a live precheck.
         handoff_active = bool(
             self.goal_search[robot] is not None or
-            self.frontier_prepared.get(robot) is not None or
-            self.selection_started[robot] is not None)
+            self.frontier_prepared.get(robot) is not None)
         return {
             'active_goal': run is not None and run.accepted_sim is not None,
             'planner_active': self.planner_requests[robot] is not None,
             'handoff_active': handoff_active,
+            'intentional_frontier_idle': phase == 'FRONTIER_GENERATION_ONLY',
             'frontier_phase': phase in ('FRONTIER_GENERATION_ONLY',
                                         'FRONTIER_TO_NAV2'),
             'recovery_active': recovery_active,
@@ -2029,6 +2251,131 @@ class DiagnosticNode(Node):
             'peer_distance_m': peer_distance,
             'motion': moving,
         }
+
+    def _dwb_stall_evidence(self, robot: str, run: NavigationRun,
+                            trigger: str, duration_s: float) -> dict:
+        """Build one bounded forensic record from already-published data."""
+        peer = 'robot2' if robot == 'robot1' else 'robot1'
+        peer_pose = self.poses[peer]
+        now = self.now_sim()
+        x, y, yaw, linear, angular = self._odom_pose(self.odom[robot])
+        summary = self.pipeline_dwb[robot]
+        selected = summary.get('selected')
+        best_forward = summary.get('best_valid_forward')
+        plans = {
+            kind: self._plan_stall_snapshot(robot, kind, peer_pose)
+            for kind in ('global', 'local')
+        }
+        plan_revisions = {
+            kind: self.pipeline_plans[robot][kind]['revision']
+            for kind in ('global', 'local')
+        }
+        peer_age = self.pose_received_sim[peer]
+        return {
+            'event': 'DWB_STALL',
+            'trigger': trigger,
+            'robot': robot,
+            'sim_time_s': now,
+            'continuous_duration_s': duration_s,
+            'goal': {
+                'label': run.label,
+                'source': run.kind,
+                'request_sim_s': run.request_sim,
+                'accepted_sim_s': run.accepted_sim,
+                'age_s': None if run.accepted_sim is None else now - run.accepted_sim,
+                'remaining_path_length_m': run.path_length_m,
+                'distance_to_goal_m': run.distance_remaining_m,
+                'start_cost': run.start_cost,
+                'goal_cost': run.goal_cost,
+            },
+            'robot_state': {
+                'shared_map_pose': {'x_m': self.poses[robot][0],
+                                    'y_m': self.poses[robot][1]}
+                if self.poses[robot] is not None else None,
+                'odometry_pose': {'x_m': x, 'y_m': y, 'yaw_rad': yaw},
+                'odometry_velocity': {'linear_x_mps': linear,
+                                      'angular_z_radps': angular},
+            },
+            'dwb': {
+                'evaluation_received_sim_s': self.pipeline_dwb_received_sim[robot],
+                'evaluation_age_s': None if self.pipeline_dwb_received_sim[robot] is None
+                else max(0.0, now - self.pipeline_dwb_received_sim[robot]),
+                'trajectory_count': summary.get('trajectory_count'),
+                'valid_count': summary.get('valid_count'),
+                'forward_valid_count': summary.get('forward_valid_count'),
+                'invalid_count': summary.get('invalid_count'),
+                'selected': selected,
+                'best_valid_forward': best_forward,
+                'selected_trajectory': self._trajectory_stall_snapshot(
+                    robot, selected, peer_pose),
+                'best_forward_trajectory': self._trajectory_stall_snapshot(
+                    robot, best_forward, peer_pose),
+                'score_difference_forward_minus_selected': summary.get(
+                    'score_difference_forward_minus_selected'),
+                'critic_comparison': summary.get('critic_comparison', {}),
+                'valid_critic_extrema': summary.get('valid_critic_extrema', {}),
+                'invalid_rejection_counts': summary.get('invalid_rejection_counts', {}),
+            },
+            'plans': plans,
+            'path_replanned_since_goal_request': {
+                kind: plan_revisions[kind] > run.plan_revisions_at_request.get(kind, 0)
+                for kind in ('global', 'local')
+            },
+            'local_costmap': {
+                'start_cell_cost': self._grid_value_from_shared(
+                    self.local_costmaps[robot], *(self.poses[robot] or (0.0, 0.0))),
+                'patch_radius_m': DWB_STALL_COSTMAP_PATCH_RADIUS_M,
+                'patch': self._grid_patch_from_shared(
+                    self.local_costmaps[robot], self.poses[robot],
+                    radius_m=DWB_STALL_COSTMAP_PATCH_RADIUS_M),
+            },
+            'runtime_nav_geometry': self.runtime_geometry[robot],
+            'peer': {
+                'shared_map_pose': None if peer_pose is None else {
+                    'x_m': peer_pose[0], 'y_m': peer_pose[1]},
+                'pose_age_s': None if peer_age is None else max(0.0, now - peer_age),
+                'distance_m': None if self.poses[robot] is None or peer_pose is None
+                else math.dist(self.poses[robot], peer_pose),
+                'footprint_radius_m': 0.067,
+            },
+            'progress_checker': {
+                'derived_state': ('RECOVERY_TRANSITION_RECENT' if
+                                  run.last_recovery_transition_sim is not None and
+                                  now - run.last_recovery_transition_sim < 2.0 else
+                                  'ACTIVE_NO_RECENT_RECOVERY'),
+                'feedback_age_s': None if run.last_feedback_sim is None else
+                max(0.0, now - run.last_feedback_sim),
+                'recovery_count': run.recovery_count,
+                'last_recovery_transition_sim_s': run.last_recovery_transition_sim,
+                'odometry_distance_m': run.odom_distance_m,
+            },
+        }
+
+    def _record_dwb_stall(self, robot: str, run: NavigationRun,
+                          trigger: str, duration_s: float):
+        if len(self.dwb_stall_events) >= DWB_STALL_EVENT_LIMIT:
+            self.dwb_stall_counts['EVENT_LIMIT_REACHED'] += 1
+            return
+        event = self._dwb_stall_evidence(robot, run, trigger, duration_s)
+        event['sequence'] = len(self.dwb_stall_events) + 1
+        self.dwb_stall_events.append({
+            'sequence': event['sequence'], 'robot': robot,
+            'trigger': trigger, 'sim_time_s': event['sim_time_s'],
+            'goal_label': run.label, 'goal_source': run.kind,
+        })
+        self.dwb_stall_counts[trigger] += 1
+        self.dwb_stall_file.write(json.dumps(event, sort_keys=True) + '\n')
+        self._artifact_write_counts['dwb_stall_event_rows'] += 1
+
+    def _observe_dwb_stall(self, robot: str, run: Optional[NavigationRun],
+                           stages: dict):
+        goal_key = None if run is None or run.accepted_sim is None else (
+            robot, run.label, run.request_sim)
+        kind = command_kind(stages['dwb_controller'])
+        for event in self.pipeline_dwb_stalls[robot].observe(
+                self.now_sim(), goal_key, kind):
+            self._record_dwb_stall(robot, run, event['trigger'],
+                                   event['duration_s'])
 
     def _close_stationary_interval(self, robot: str, end_sim: float):
         interval = self.pipeline_active_intervals[robot]
@@ -2109,6 +2456,7 @@ class DiagnosticNode(Node):
                 self.pipeline_cause_seconds[robot][cause] += delta
             self._update_stationary_interval(robot, phase, moving, cause, context)
             run = self.active_nav[robot]
+            self._observe_dwb_stall(robot, run, stages)
             if run is not None and run.accepted_sim is not None:
                 run.pipeline_motion_seconds[moving['state']] += delta
                 if moving['state'] == 'FULLY_STATIONARY':
@@ -2877,6 +3225,9 @@ class DiagnosticNode(Node):
             last_odom=(self.odom[robot].pose.pose.position.x,
                        self.odom[robot].pose.pose.position.y)
             if self.odom[robot] is not None else None,
+            plan_revisions_at_request={
+                kind: state['revision']
+                for kind, state in self.pipeline_plans[robot].items()},
             coverage_start_cells=known_cell_count(self.shared_maps[robot]))
         self.active_nav[robot] = run
         goal = NavigateToPose.Goal()
@@ -3323,6 +3674,17 @@ class DiagnosticNode(Node):
             }
         return result
 
+    def _dwb_stall_summary(self) -> dict:
+        """Compact index of the bounded event file, without duplicating patches."""
+        return {
+            'event_limit': DWB_STALL_EVENT_LIMIT,
+            'event_count': len(self.dwb_stall_events),
+            'counts_by_trigger': dict(self.dwb_stall_counts),
+            'events': list(self.dwb_stall_events),
+            'source': ('standard /robotN/evaluation, local_plan and global_plan '
+                       'publications; no DWB debug log flood or controller hook'),
+        }
+
     def _finish(self):
         if self.completed:
             return
@@ -3340,11 +3702,16 @@ class DiagnosticNode(Node):
                 self.candidate_cpu_end[robot] = self._process_cpu(robot)
         self._emit_handoff_pipeline(force=True)
         pipeline_summary = self._pipeline_summary()
+        dwb_stall_summary = self._dwb_stall_summary()
         (self.output / 'stationary_summary.json').write_text(
             json.dumps(pipeline_summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
+        (self.output / 'dwb_stall_summary.json').write_text(
+            json.dumps(dwb_stall_summary, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
         summary = self._summary()
         summary['controller_pipeline'] = pipeline_summary
+        summary['dwb_stall_summary'] = dwb_stall_summary
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -3361,12 +3728,14 @@ class DiagnosticNode(Node):
         self.pipeline_file.flush()
         self.stationary_file.flush()
         self.goal_timeline_file.flush()
+        self.dwb_stall_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
         self.tick_timer.cancel()
         self.sample_timer.cancel()
         self.lifecycle_timer.cancel()
+        self.runtime_geometry_timer.cancel()
         self.process_timer.cancel()
         self.wall_watchdog_timer.cancel()
         # Let the final event reach rosout, then main observes completed.
@@ -3678,6 +4047,8 @@ class DiagnosticNode(Node):
             self.stationary_file.close()
         if not self.goal_timeline_file.closed:
             self.goal_timeline_file.close()
+        if not self.dwb_stall_file.closed:
+            self.dwb_stall_file.close()
 
 
 def main(args=None):

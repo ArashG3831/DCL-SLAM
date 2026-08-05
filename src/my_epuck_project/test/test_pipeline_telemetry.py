@@ -1,4 +1,5 @@
 from my_epuck_project.pipeline_telemetry import (
+    DwbStallDetector,
     StageMetrics,
     attenuation,
     command_kind,
@@ -83,3 +84,51 @@ def test_stationary_cause_distinguishes_no_goal_from_frontier_wait():
     assert stationary_cause({**base, 'frontier_phase': False}) == 'NO_ACTIVE_GOAL'
     assert stationary_cause({**base, 'frontier_phase': True}) == \
         'WAITING_FOR_FRONTIER_CANDIDATE'
+
+
+def test_no_active_goal_and_scheduled_frontier_idle_beat_retained_selector_state():
+    base = {'active_goal': False, 'planner_active': False,
+            'handoff_active': True, 'recovery_active': False,
+            'start_not_traversable': False, 'diagnostic_timeout': False,
+            'goal_transition': False, 'dwb_kind': 'MISSING_OR_STALE',
+            'smoother_attenuation': 'MISSING', 'collision_attenuation': 'MISSING',
+            'collision_action': None, 'final_linear_nonzero': False}
+    assert stationary_cause({**base, 'intentional_frontier_idle': False}) == \
+        'GOAL_PRECHECK_OR_HANDOFF'
+    assert stationary_cause({**base, 'handoff_active': False,
+                             'intentional_frontier_idle': False}) == \
+        'NO_ACTIVE_GOAL'
+    assert stationary_cause({**base, 'intentional_frontier_idle': True}) == \
+        'WAITING_FOR_FRONTIER_CANDIDATE'
+
+
+def test_active_goal_dwb_evidence_beats_retained_handoff_state():
+    context = {'active_goal': True, 'planner_active': False,
+               'handoff_active': True, 'recovery_active': False,
+               'start_not_traversable': False, 'diagnostic_timeout': False,
+               'goal_transition': False, 'dwb_kind': 'ZERO',
+               'smoother_attenuation': 'NO_PRECEDING_LINEAR_COMMAND',
+               'collision_attenuation': 'NO_PRECEDING_LINEAR_COMMAND',
+               'collision_action': None, 'final_linear_nonzero': False}
+    assert stationary_cause(context) == 'ACTIVE_GOAL_DWB_ZERO'
+
+
+def test_dwb_stall_detector_is_thresholded_and_emits_one_event_per_episode():
+    detector = DwbStallDetector()
+    goal = ('robot1', 'frontier_robot1')
+    assert detector.observe(10.0, goal, 'ANGULAR_ONLY') == []
+    assert detector.observe(11.9, goal, 'ANGULAR_ONLY') == []
+    assert detector.observe(12.0, goal, 'ANGULAR_ONLY') == [
+        {'trigger': 'ANGULAR_ONLY_CONTINUOUS', 'duration_s': 2.0}]
+    assert detector.observe(13.0, goal, 'ANGULAR_ONLY') == []
+    assert detector.observe(13.1, goal, 'ZERO') == []
+    assert detector.observe(14.1, goal, 'ZERO') == [
+        {'trigger': 'ZERO_CONTINUOUS', 'duration_s': 1.0}]
+
+
+def test_dwb_stall_detector_captures_transition_from_forward_command():
+    detector = DwbStallDetector()
+    goal = ('robot2', 'manual_medium')
+    assert detector.observe(1.0, goal, 'LINEAR') == []
+    assert detector.observe(1.1, goal, 'ZERO') == [
+        {'trigger': 'TRANSITION_FROM_FORWARD_TO_ZERO', 'duration_s': 0.0}]

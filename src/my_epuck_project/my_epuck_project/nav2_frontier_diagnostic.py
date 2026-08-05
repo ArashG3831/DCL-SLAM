@@ -76,6 +76,8 @@ ARTIFACT_NAMES = frozenset({
     'diagnostic_timeseries.csv', 'diagnostic_summary.json',
     'effective_command.txt', 'handoff_rejections.csv',
     'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
+    # These are produced by the runner's mandatory preflight steps.
+    'ros_preflight.json', 'webots_port_preflight.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (

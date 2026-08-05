@@ -29,6 +29,10 @@ from rclpy.parameter import Parameter
 PROJECT = Path(__file__).resolve().parents[1]
 
 
+def test_runner_allows_its_required_preflight_artifacts():
+    assert {'ros_preflight.json', 'webots_port_preflight.json'} <= ARTIFACT_NAMES
+
+
 def test_launch_chain_is_below_allocator_and_has_one_goal_sender():
     launch = (PROJECT / 'launch' / LAUNCH_FILE).read_text(encoding='utf-8')
     assert 'two_robots_frontier_candidates_launch.py' in launch
@@ -229,6 +233,7 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
         'diagnostic_timeseries.csv', 'diagnostic_summary.json',
         'effective_command.txt', 'handoff_rejections.csv',
         'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
+        'ros_preflight.json', 'webots_port_preflight.json',
     }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES

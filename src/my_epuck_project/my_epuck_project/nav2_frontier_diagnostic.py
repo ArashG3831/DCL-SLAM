@@ -521,6 +521,12 @@ class DiagnosticNode(Node):
     FRONTIER_STALE_S = 5.0
     FRONTIER_SLOW_S = 5.0
 
+    # These are the existing approach-clearance values passed by
+    # two_robots_frontier_candidates_launch.py.  They are copied here solely
+    # to make diagnostic provenance describe the generator configuration that
+    # was actually launched; the diagnostic handoff rule remains 0.12 m.
+    GENERATOR_APPROACH_CLEARANCE_M = {'small': 0.06, 'large': 0.15}
+
     def __init__(self, **kwargs):
         """Create the diagnostic with optional standard rclpy node options."""
         super().__init__('nav2_frontier_diagnostic', **kwargs)
@@ -539,6 +545,9 @@ class DiagnosticNode(Node):
         self.startup_timeout = float(
             self.get_parameter('startup_timeout_s').value)
         self.world_profile = str(self.get_parameter('world_profile').value)
+        self.generator_approach_clearance_m = (
+            self.GENERATOR_APPROACH_CLEARANCE_M.get(
+                self.world_profile, 0.06))
         self.phase_profile = str(self.get_parameter('phase_profile').value)
         if self.phase_profile not in PHASE_BOUNDARIES:
             raise ValueError(f'unknown phase profile: {self.phase_profile}')
@@ -981,7 +990,7 @@ class DiagnosticNode(Node):
                         self.costmaps[robot], approach.x, approach.y,
                         unknown_is_blocked=False)
                     if self.costmaps[robot] is not None else None,
-                    'required_clearance_m': 0.06,
+                    'required_clearance_m': self.generator_approach_clearance_m,
                     'map_stamp_s': source_stamp,
                     'costmap_stamp_s': self._grid_stamp(self.costmaps[robot]),
                     'robot_pose': self.poses[robot],
@@ -2135,7 +2144,9 @@ class DiagnosticNode(Node):
             disagreement = 'PEER_SAFETY_ONLY_AT_HANDOFF'
         elif generator.get('goal_cost') != global_cost['value']:
             disagreement = 'GOAL_BECAME_UNSAFE'
-        elif generator.get('clearance_m') is not None and generator.get('clearance_m') >= generator.get('required_clearance_m', 0.06):
+        elif (generator.get('clearance_m') is not None
+              and generator.get('clearance_m') >= generator.get(
+                  'required_clearance_m', self.generator_approach_clearance_m)):
             disagreement = 'HANDOFF_STRICTER_THAN_GENERATOR'
         else:
             disagreement = 'OTHER'
@@ -3001,6 +3012,9 @@ class DiagnosticNode(Node):
                  'integration_end'), PHASE_BOUNDARIES[self.phase_profile])),
             'mission_duration_observed_s': elapsed,
             'world_profile': self.world_profile,
+            'generator_approach_clearance_m':
+                self.generator_approach_clearance_m,
+            'handoff_required_clearance_m': 0.12,
             'readiness': self.readiness_report,
             'phases': self.phase_coverage,
             'filter_performance': filter_table,

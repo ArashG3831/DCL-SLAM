@@ -38,6 +38,11 @@ def test_runner_allows_its_required_preflight_artifacts():
     assert {'ros_preflight.json', 'webots_port_preflight.json'} <= ARTIFACT_NAMES
 
 
+def test_generator_clearance_provenance_matches_existing_launch_profiles():
+    assert DiagnosticNode.GENERATOR_APPROACH_CLEARANCE_M == {
+        'small': 0.06, 'large': 0.15}
+
+
 def test_launch_chain_is_below_allocator_and_has_one_goal_sender():
     launch = (PROJECT / 'launch' / LAUNCH_FILE).read_text(encoding='utf-8')
     assert 'two_robots_frontier_candidates_launch.py' in launch

@@ -35,7 +35,20 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 def test_runner_allows_its_required_preflight_artifacts():
-    assert {'ros_preflight.json', 'webots_port_preflight.json'} <= ARTIFACT_NAMES
+    assert {
+        'ros_preflight.json', 'webots_port_preflight.json',
+        'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
+        'goal_timeline.csv', 'stationary_summary.json',
+    } <= ARTIFACT_NAMES
+
+
+def test_pipeline_telemetry_is_buffered_and_not_rosout_based():
+    source = (PROJECT / 'my_epuck_project'
+              / 'nav2_frontier_diagnostic.py').read_text(encoding='utf-8')
+    assert "controller_pipeline_timeseries.csv').open(" in source
+    assert 'buffering=65536' in source
+    assert "self.create_timer(0.05, self._sample_pipeline)" in source
+    assert "text.startswith('PIPELINE" not in source
 
 
 def test_generator_clearance_provenance_matches_existing_launch_profiles():
@@ -311,6 +324,8 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
         'effective_command.txt', 'handoff_rejections.csv',
         'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
         'ros_preflight.json', 'webots_port_preflight.json',
+        'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
+        'goal_timeline.csv', 'stationary_summary.json',
     }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES

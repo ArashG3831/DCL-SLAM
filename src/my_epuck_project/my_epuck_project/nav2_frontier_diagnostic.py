@@ -39,6 +39,7 @@ from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from my_epuck_interfaces.msg import FrontierCandidateArray
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav2_msgs.msg import CollisionMonitorState
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 import psutil
 from rcl_interfaces.msg import Log
@@ -60,6 +61,18 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .cooperative_profiles import profile
+from .pipeline_telemetry import (
+    ANGULAR_COMMAND_EPS_RADPS,
+    LINEAR_COMMAND_EPS_MPS,
+    PIPELINE_STAGES,
+    PRECEDING_STAGE,
+    StageMetrics,
+    attenuation,
+    command_kind,
+    motion_state,
+    stationary_cause,
+)
+from .controller_pipeline_diagnostics import summarize_dwb_evaluation
 from .ros_runtime_preflight import (
     PreflightError, _bounded_subprocess, run_preflight,
 )
@@ -78,6 +91,9 @@ ARTIFACT_NAMES = frozenset({
     'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
     # These are produced by the runner's mandatory preflight steps.
     'ros_preflight.json', 'webots_port_preflight.json',
+    # Bounded, stage-separated command-pipeline forensic artifacts.
+    'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
+    'goal_timeline.csv', 'stationary_summary.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -119,6 +135,11 @@ HANDOFF_PIPELINE_COUNTERS = (
     'candidates_final_path_queried', 'candidates_rejected',
     'candidates_accepted', 'candidates_dispatched',
 )
+
+try:
+    from dwb_msgs.msg import LocalPlanEvaluation
+except ImportError:  # pragma: no cover - permits environments without DWB msgs
+    LocalPlanEvaluation = None
 
 
 def capture_validity_gate(*, generator_map_receipts: int,
@@ -460,6 +481,21 @@ class PlannerRequest:
 
 
 @dataclass
+class StationaryInterval:
+    """One bounded stationary span with its strongest observed cause."""
+
+    robot: str
+    phase: str
+    cause: str
+    start_sim: float
+    goal_label: Optional[str]
+    goal_kind: Optional[str]
+    samples: int = 0
+    end_sim: Optional[float] = None
+    evidence: dict = field(default_factory=dict)
+
+
+@dataclass
 class NavigationRun:
     """High-rate internal metrics for one NavigateToPose request."""
 
@@ -495,6 +531,7 @@ class NavigationRun:
     feedback_intervals: int = 0
     recovery_count: int = 0
     maximum_recovery_count: int = 0
+    last_recovery_transition_sim: Optional[float] = None
     odom_distance_m: float = 0.0
     last_odom: Optional[tuple] = None
     result_status: int = GoalStatus.STATUS_UNKNOWN
@@ -506,6 +543,13 @@ class NavigationRun:
     next_candidate_delay_s: Optional[float] = None
     cancel_requested: bool = False
     classifications: Counter = field(default_factory=Counter)
+    pipeline_motion_seconds: Counter = field(default_factory=Counter)
+    pipeline_stationary_cause_seconds: Counter = field(default_factory=Counter)
+    first_dwb_command_sim: Optional[float] = None
+    first_final_command_sim: Optional[float] = None
+    first_odometry_motion_sim: Optional[float] = None
+    distance_remaining_m: Optional[float] = None
+    last_feedback_sim: Optional[float] = None
 
 
 class DiagnosticNode(Node):
@@ -571,6 +615,25 @@ class DiagnosticNode(Node):
         self.odom = {robot: None for robot in ROBOTS}
         self.poses = {robot: None for robot in ROBOTS}
         self.cmd = {robot: {'nonzero': False, 'last': 0.0} for robot in ROBOTS}
+        # Keep each command stage independent.  The existing `cmd` field is
+        # retained for legacy mission-state reporting only.
+        self.pipeline_metrics = {
+            robot: {stage: StageMetrics() for stage in PIPELINE_STAGES}
+            for robot in ROBOTS
+        }
+        self.pipeline_dwb = {robot: {} for robot in ROBOTS}
+        self.pipeline_collision = {robot: {} for robot in ROBOTS}
+        self.pipeline_history = {robot: deque(maxlen=32) for robot in ROBOTS}
+        self.pipeline_last_sample_sim = None
+        self.pipeline_phase_seconds = {
+            robot: {phase: Counter() for _, _, phase in MISSION_PHASES}
+            for robot in ROBOTS
+        }
+        self.pipeline_cause_seconds = {
+            robot: Counter() for robot in ROBOTS}
+        self.pipeline_active_intervals = {robot: None for robot in ROBOTS}
+        self.pipeline_intervals = {robot: [] for robot in ROBOTS}
+        self.pipeline_dwb_counts = {robot: Counter() for robot in ROBOTS}
         self.candidates = {robot: None for robot in ROBOTS}
         self.candidate_received_sim = {robot: None for robot in ROBOTS}
         self.candidate_stats = {robot: Counter() for robot in ROBOTS}
@@ -737,6 +800,28 @@ class DiagnosticNode(Node):
             self.create_subscription(
                 TwistStamped, f'/{robot}/cmd_vel',
                 partial(self._cmd_vel_stamped, robot), qos_profile_sensor_data)
+            # Stage-separated observations are diagnostic-only.  They do not
+            # republish, remap, or otherwise participate in the command path.
+            self.create_subscription(
+                Twist, f'/{robot}/cmd_vel_nav',
+                partial(self._pipeline_twist, robot, 'dwb_controller'), 20)
+            self.create_subscription(
+                Twist, f'/{robot}/cmd_vel_smoothed',
+                partial(self._pipeline_twist, robot, 'velocity_smoother'), 20)
+            self.create_subscription(
+                Twist, f'/{robot}/cmd_vel_unstamped',
+                partial(self._pipeline_twist, robot, 'collision_monitor'), 20)
+            self.create_subscription(
+                TwistStamped, f'/{robot}/cmd_vel',
+                partial(self._pipeline_twist_stamped, robot,
+                        'final_stamped_command'), 20)
+            self.create_subscription(
+                CollisionMonitorState, f'/{robot}/collision_monitor_state',
+                partial(self._pipeline_collision, robot), 10)
+            if LocalPlanEvaluation is not None:
+                self.create_subscription(
+                    LocalPlanEvaluation, f'/{robot}/evaluation',
+                    partial(self._pipeline_dwb_evaluation, robot), 10)
         self.events_file = (self.output / 'diagnostic_events.jsonl').open(
             'w', encoding='utf-8', buffering=65536)
         self.handoff_file = (self.output / 'handoff_rejections.csv').open(
@@ -805,8 +890,56 @@ class DiagnosticNode(Node):
                 'tf_available',
             ])
         self.timeseries.writeheader()
+        self.pipeline_file = (self.output / 'controller_pipeline_timeseries.csv').open(
+            'w', encoding='utf-8', newline='', buffering=65536)
+        pipeline_fields = [
+            'sim_time_s', 'mission_time_s', 'phase', 'robot',
+            'motion_state', 'rolling_translation_m', 'rolling_rotation_rad',
+            'odom_linear_mps', 'odom_angular_radps', 'stationary_cause',
+            'active_goal', 'goal_label', 'goal_kind', 'goal_age_s',
+            'goal_path_length_m', 'goal_remaining_distance_m',
+            'recovery_count', 'start_cost', 'goal_cost', 'start_clearance_m',
+            'goal_clearance_m', 'candidate_age_s', 'map_revision',
+            'costmap_stamp_s', 'peer_distance_m', 'diagnostic_timeout',
+            'dwb_kind', 'dwb_valid_count', 'dwb_forward_valid_count',
+            'dwb_selected_linear_mps', 'dwb_selected_angular_radps',
+            'smoother_attenuation', 'collision_attenuation',
+            'collision_action_type',
+        ]
+        for stage in PIPELINE_STAGES:
+            prefix = stage + '_'
+            pipeline_fields.extend([
+                prefix + 'linear_mps', prefix + 'angular_radps',
+                prefix + 'message_count', prefix + 'nonzero_linear_count',
+                prefix + 'angular_only_count', prefix + 'zero_command_count',
+                prefix + 'mean_abs_linear_mps', prefix + 'mean_abs_angular_radps',
+                prefix + 'peak_abs_linear_mps', prefix + 'peak_abs_angular_radps',
+                prefix + 'age_s', prefix + 'kind',
+            ])
+        self.pipeline_csv = csv.DictWriter(self.pipeline_file, fieldnames=pipeline_fields)
+        self.pipeline_csv.writeheader()
+        self.stationary_file = (self.output / 'stationary_intervals.csv').open(
+            'w', encoding='utf-8', newline='', buffering=65536)
+        self.stationary_csv = csv.DictWriter(self.stationary_file, fieldnames=[
+            'robot', 'phase', 'cause', 'start_sim_s', 'end_sim_s', 'duration_s',
+            'goal_label', 'goal_kind', 'samples', 'evidence_json'])
+        self.stationary_csv.writeheader()
+        self.goal_timeline_file = (self.output / 'goal_timeline.csv').open(
+            'w', encoding='utf-8', newline='', buffering=65536)
+        self.goal_timeline_csv = csv.DictWriter(self.goal_timeline_file, fieldnames=[
+            'robot', 'kind', 'label', 'request_sim_s', 'accepted_sim_s',
+            'terminal_sim_s', 'candidate_receipt_to_handoff_s',
+            'handoff_to_planner_response_s', 'planner_to_first_dwb_command_s',
+            'first_dwb_to_first_final_command_s',
+            'first_final_to_odometry_motion_s', 'translating_s',
+            'rotating_only_s', 'fully_stationary_active_goal_s', 'recovery_s',
+            'total_distance_m', 'average_moving_speed_mps', 'path_length_m',
+            'result_status', 'result_code', 'terminal_initiator',
+            'diagnostic_timeout', 'metadata_json'])
+        self.goal_timeline_csv.writeheader()
         self.tick_timer = self.create_timer(0.1, self._tick)
         self.sample_timer = self.create_timer(0.5, self._sample)
+        self.pipeline_timer = self.create_timer(0.05, self._sample_pipeline)
         self.lifecycle_timer = self.create_timer(1.0, self._poll_lifecycle)
         self.process_timer = self.create_timer(10.0, self._sample_processes)
         self.wall_watchdog_timer = self.create_timer(
@@ -1054,6 +1187,36 @@ class DiagnosticNode(Node):
     def _cmd_vel(self, robot: str, message: Twist):
         self._record_cmd(robot, message)
 
+    def _pipeline_twist(self, robot: str, stage: str, message: Twist):
+        self.pipeline_metrics[robot][stage].observe(
+            message.linear.x, message.angular.z, self.now_sim())
+
+    def _pipeline_twist_stamped(self, robot: str, stage: str,
+                                message: TwistStamped):
+        self.pipeline_metrics[robot][stage].observe(
+            message.twist.linear.x, message.twist.angular.z, self.now_sim())
+
+    def _pipeline_collision(self, robot: str, message: CollisionMonitorState):
+        self.pipeline_collision[robot] = {
+            'action_type': int(message.action_type),
+            'polygon_name': message.polygon_name,
+            'sim_time_s': self.now_sim(),
+        }
+
+    def _pipeline_dwb_evaluation(self, robot: str,
+                                 message: LocalPlanEvaluation):
+        # The helper retains only a bounded top-k trajectory summary.
+        summary = summarize_dwb_evaluation(message)
+        self.pipeline_dwb[robot] = summary
+        selected = summary.get('selected') or {}
+        velocity = selected.get('velocity') or {}
+        if not summary.get('forward_valid', False):
+            self.pipeline_dwb_counts[robot]['NO_LEGAL_FORWARD_TRAJECTORY'] += 1
+        elif abs(float(velocity.get('linear_x_mps', 0.0))) <= LINEAR_COMMAND_EPS_MPS:
+            self.pipeline_dwb_counts[robot]['SELECTED_ZERO_OR_ANGULAR'] += 1
+        else:
+            self.pipeline_dwb_counts[robot]['SELECTED_LINEAR'] += 1
+
     def _record_cmd(self, robot: str, twist: Twist):
         linear_speed = math.hypot(twist.linear.x, twist.linear.y)
         angular_speed = abs(twist.angular.z)
@@ -1097,6 +1260,47 @@ class DiagnosticNode(Node):
             'last_cmd_linear_x_mps': run.last_cmd_linear_x_mps,
             'last_cmd_angular_z_radps': run.last_cmd_angular_z_radps,
         }
+
+    def _write_goal_timeline(self, run: NavigationRun):
+        """Write one bounded, stage-aware row for a terminal goal."""
+        translating = run.pipeline_motion_seconds['TRANSLATING']
+        rotating = run.pipeline_motion_seconds['ROTATING_IN_PLACE']
+        stationary = run.pipeline_motion_seconds['FULLY_STATIONARY']
+        candidate_receipt = run.metadata.get('candidate_receipt_sim_s')
+        self.goal_timeline_csv.writerow({
+            'robot': run.robot, 'kind': run.kind, 'label': run.label,
+            'request_sim_s': f'{run.request_sim:.6f}',
+            'accepted_sim_s': '' if run.accepted_sim is None else
+                f'{run.accepted_sim:.6f}',
+            'terminal_sim_s': '' if run.terminal_sim is None else
+                f'{run.terminal_sim:.6f}',
+            'candidate_receipt_to_handoff_s': '' if candidate_receipt is None
+            else f'{run.request_sim - candidate_receipt:.6f}',
+            'handoff_to_planner_response_s': f'{run.path_latency_s:.6f}',
+            'planner_to_first_dwb_command_s': '' if run.first_dwb_command_sim is None
+            else f'{run.first_dwb_command_sim - run.request_sim:.6f}',
+            'first_dwb_to_first_final_command_s': '' if (
+                run.first_dwb_command_sim is None or
+                run.first_final_command_sim is None) else
+                f'{run.first_final_command_sim - run.first_dwb_command_sim:.6f}',
+            'first_final_to_odometry_motion_s': '' if (
+                run.first_final_command_sim is None or
+                run.first_odometry_motion_sim is None) else
+                f'{run.first_odometry_motion_sim - run.first_final_command_sim:.6f}',
+            'translating_s': f'{translating:.6f}',
+            'rotating_only_s': f'{rotating:.6f}',
+            'fully_stationary_active_goal_s': f'{stationary:.6f}',
+            'recovery_s': f"{run.pipeline_stationary_cause_seconds['RECOVERY_ACTIVE']:.6f}",
+            'total_distance_m': f'{run.odom_distance_m:.6f}',
+            'average_moving_speed_mps': '' if translating <= 0.0 else
+                f'{run.odom_distance_m / translating:.6f}',
+            'path_length_m': f'{run.path_length_m:.6f}',
+            'result_status': run.result_status, 'result_code': run.result_code,
+            'terminal_initiator': 'DIAGNOSTIC' if run.cancel_requested else 'NAV2',
+            'diagnostic_timeout': int(run.cancel_requested),
+            'metadata_json': json.dumps(run.metadata, sort_keys=True),
+        })
+        self._artifact_write_counts['goal_timeline_rows'] += 1
 
     def _rosout(self, message: Log):
         name = message.name
@@ -1762,7 +1966,223 @@ class DiagnosticNode(Node):
             self.handoff_file.flush()
             self.handoff_precheck_file.flush()
             self.handoff_accept_file.flush()
+            self.pipeline_file.flush()
+            self.stationary_file.flush()
+            self.goal_timeline_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
+
+    @staticmethod
+    def _odom_pose(message: Optional[Odometry]) -> tuple[float, float, float, float, float]:
+        if message is None:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        point = message.pose.pose.position
+        orientation = message.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z))
+        return (point.x, point.y, yaw, message.twist.twist.linear.x,
+                message.twist.twist.angular.z)
+
+    def _pipeline_stage_snapshots(self, robot: str) -> dict:
+        now = self.now_sim()
+        return {stage: self.pipeline_metrics[robot][stage].snapshot(now)
+                for stage in PIPELINE_STAGES}
+
+    def _pipeline_context(self, robot: str, phase: str, stages: dict,
+                          moving: dict) -> dict:
+        run = self.active_nav[robot]
+        peer = 'robot2' if robot == 'robot1' else 'robot1'
+        peer_distance = None
+        if self.poses[robot] is not None and self.poses[peer] is not None:
+            peer_distance = math.dist(self.poses[robot], self.poses[peer])
+        collision = self.pipeline_collision[robot]
+        latest_terminal = self.last_terminal_sim[robot]
+        goal_transition = (latest_terminal is not None and
+                           self.now_sim() - latest_terminal < 2.0)
+        recovery_active = bool(
+            run is not None and run.last_recovery_transition_sim is not None
+            and self.now_sim() - run.last_recovery_transition_sim < 2.0)
+        current_start_cost = self.last_costmap_start_value[robot]
+        handoff_active = bool(
+            self.goal_search[robot] is not None or
+            self.frontier_prepared.get(robot) is not None or
+            self.selection_started[robot] is not None)
+        return {
+            'active_goal': run is not None and run.accepted_sim is not None,
+            'planner_active': self.planner_requests[robot] is not None,
+            'handoff_active': handoff_active,
+            'frontier_phase': phase in ('FRONTIER_GENERATION_ONLY',
+                                        'FRONTIER_TO_NAV2'),
+            'recovery_active': recovery_active,
+            'start_not_traversable': current_start_cost is not None
+            and current_start_cost >= 99,
+            'diagnostic_timeout': bool(run is not None and run.cancel_requested),
+            'goal_transition': goal_transition,
+            'dwb_kind': command_kind(stages['dwb_controller']),
+            'smoother_attenuation': attenuation(
+                stages['dwb_controller'], stages['velocity_smoother']).get('state'),
+            'collision_attenuation': attenuation(
+                stages['velocity_smoother'], stages['collision_monitor']).get('state'),
+            'collision_action': collision.get('action_type'),
+            'final_linear_nonzero': command_kind(
+                stages['final_stamped_command']) == 'LINEAR',
+            'peer_distance_m': peer_distance,
+            'motion': moving,
+        }
+
+    def _close_stationary_interval(self, robot: str, end_sim: float):
+        interval = self.pipeline_active_intervals[robot]
+        if interval is None:
+            return
+        interval.end_sim = end_sim
+        self.pipeline_active_intervals[robot] = None
+        if interval.end_sim - interval.start_sim < 1.0:
+            return
+        self.pipeline_intervals[robot].append(interval)
+        self.stationary_csv.writerow({
+            'robot': interval.robot, 'phase': interval.phase,
+            'cause': interval.cause, 'start_sim_s': f'{interval.start_sim:.6f}',
+            'end_sim_s': f'{interval.end_sim:.6f}',
+            'duration_s': f'{interval.end_sim - interval.start_sim:.6f}',
+            'goal_label': interval.goal_label or '',
+            'goal_kind': interval.goal_kind or '', 'samples': interval.samples,
+            'evidence_json': json.dumps(interval.evidence, sort_keys=True),
+        })
+        self._artifact_write_counts['stationary_interval_rows'] += 1
+
+    def _update_stationary_interval(self, robot: str, phase: str,
+                                    moving: dict, cause: str, context: dict):
+        run = self.active_nav[robot]
+        if moving['state'] != 'FULLY_STATIONARY':
+            self._close_stationary_interval(robot, self.now_sim())
+            return
+        key = (phase, cause, None if run is None else run.label,
+               None if run is None else run.kind)
+        interval = self.pipeline_active_intervals[robot]
+        if interval is not None and (interval.phase, interval.cause,
+                                     interval.goal_label, interval.goal_kind) != key:
+            self._close_stationary_interval(robot, self.now_sim())
+            interval = None
+        evidence = {
+            'rolling_translation_m': moving['translation_m'],
+            'rolling_rotation_rad': moving['rotation_rad'],
+            'start_cost': self.last_costmap_start_value[robot],
+            'dwb_kind': context['dwb_kind'],
+            'smoother_attenuation': context['smoother_attenuation'],
+            'collision_attenuation': context['collision_attenuation'],
+            'collision_action_type': context['collision_action'],
+            'peer_distance_m': context['peer_distance_m'],
+        }
+        if interval is None:
+            interval = StationaryInterval(
+                robot=robot, phase=phase, cause=cause,
+                start_sim=self.now_sim(),
+                goal_label=None if run is None else run.label,
+                goal_kind=None if run is None else run.kind,
+                evidence=evidence)
+            self.pipeline_active_intervals[robot] = interval
+        interval.samples += 1
+        interval.evidence = evidence
+
+    def _sample_pipeline(self):
+        """Record compact, stage-separated command and odometry evidence."""
+        if self.completed or self.ready_sim is None:
+            return
+        elapsed = min(self.mission_elapsed(), self.mission_duration)
+        delta = 0.0 if self.pipeline_last_sample_sim is None else max(
+            0.0, elapsed - self.pipeline_last_sample_sim)
+        self.pipeline_last_sample_sim = elapsed
+        phase = phase_at(elapsed, self.mission_duration, self.phase_profile)
+        for robot in ROBOTS:
+            x, y, yaw, odom_linear, odom_angular = self._odom_pose(self.odom[robot])
+            history = self.pipeline_history[robot]
+            history.append({'sim_time_s': self.now_sim(), 'x_m': x, 'y_m': y,
+                            'yaw_rad': yaw})
+            one_second = [item for item in history
+                          if self.now_sim() - item['sim_time_s'] <= 1.0]
+            moving = motion_state(one_second)
+            stages = self._pipeline_stage_snapshots(robot)
+            context = self._pipeline_context(robot, phase, stages, moving)
+            cause = stationary_cause(context)
+            self.pipeline_phase_seconds[robot][phase][moving['state']] += delta
+            if moving['state'] == 'FULLY_STATIONARY':
+                self.pipeline_cause_seconds[robot][cause] += delta
+            self._update_stationary_interval(robot, phase, moving, cause, context)
+            run = self.active_nav[robot]
+            if run is not None and run.accepted_sim is not None:
+                run.pipeline_motion_seconds[moving['state']] += delta
+                if moving['state'] == 'FULLY_STATIONARY':
+                    run.pipeline_stationary_cause_seconds[cause] += delta
+                if (run.first_dwb_command_sim is None and
+                        command_kind(stages['dwb_controller']) != 'ZERO' and
+                        command_kind(stages['dwb_controller']) != 'MISSING_OR_STALE'):
+                    run.first_dwb_command_sim = self.now_sim()
+                if (run.first_final_command_sim is None and
+                        command_kind(stages['final_stamped_command']) != 'ZERO' and
+                        command_kind(stages['final_stamped_command']) != 'MISSING_OR_STALE'):
+                    run.first_final_command_sim = self.now_sim()
+                if (run.first_odometry_motion_sim is None and
+                        moving['state'] in ('TRANSLATING', 'ROTATING_IN_PLACE')):
+                    run.first_odometry_motion_sim = self.now_sim()
+            row = {
+                'sim_time_s': f'{self.now_sim():.6f}',
+                'mission_time_s': f'{elapsed:.6f}', 'phase': phase,
+                'robot': robot, 'motion_state': moving['state'],
+                'rolling_translation_m': f"{moving['translation_m']:.6f}",
+                'rolling_rotation_rad': f"{moving['rotation_rad']:.6f}",
+                'odom_linear_mps': f'{odom_linear:.6f}',
+                'odom_angular_radps': f'{odom_angular:.6f}',
+                'stationary_cause': cause,
+                'active_goal': int(run is not None),
+                'goal_label': '' if run is None else run.label,
+                'goal_kind': '' if run is None else run.kind,
+                'goal_age_s': '' if run is None or run.accepted_sim is None else
+                    f'{self.now_sim() - run.accepted_sim:.6f}',
+                'goal_path_length_m': '' if run is None else f'{run.path_length_m:.6f}',
+                'goal_remaining_distance_m': '' if run is None or
+                    run.distance_remaining_m is None else
+                    f'{run.distance_remaining_m:.6f}',
+                'recovery_count': '' if run is None else run.recovery_count,
+                'start_cost': '' if run is None else run.start_cost,
+                'goal_cost': '' if run is None else run.goal_cost,
+                'start_clearance_m': self.latest_start_clearance[robot]['global_costmap'],
+                'goal_clearance_m': '' if run is None else run.clearance_m,
+                'candidate_age_s': self._format_age(self._age(robot, 'candidate')),
+                'map_revision': '' if self.candidates[robot] is None else
+                    int(self.candidates[robot].map_revision),
+                'costmap_stamp_s': self._grid_stamp(self.costmaps[robot]),
+                'peer_distance_m': context['peer_distance_m'],
+                'diagnostic_timeout': int(context['diagnostic_timeout']),
+                'dwb_kind': context['dwb_kind'],
+                'dwb_valid_count': self.pipeline_dwb[robot].get('valid_count', ''),
+                'dwb_forward_valid_count': self.pipeline_dwb[robot].get(
+                    'forward_valid_count', ''),
+                'dwb_selected_linear_mps': ((self.pipeline_dwb[robot].get('selected')
+                    or {}).get('velocity') or {}).get('linear_x_mps', ''),
+                'dwb_selected_angular_radps': ((self.pipeline_dwb[robot].get('selected')
+                    or {}).get('velocity') or {}).get('angular_z_radps', ''),
+                'smoother_attenuation': context['smoother_attenuation'],
+                'collision_attenuation': context['collision_attenuation'],
+                'collision_action_type': context['collision_action'],
+            }
+            for stage, snapshot in stages.items():
+                prefix = stage + '_'
+                row.update({
+                    prefix + 'linear_mps': snapshot['latest_linear_mps'],
+                    prefix + 'angular_radps': snapshot['latest_angular_radps'],
+                    prefix + 'message_count': snapshot['message_count'],
+                    prefix + 'nonzero_linear_count': snapshot['nonzero_linear_count'],
+                    prefix + 'angular_only_count': snapshot['angular_only_count'],
+                    prefix + 'zero_command_count': snapshot['zero_command_count'],
+                    prefix + 'mean_abs_linear_mps': snapshot['mean_absolute_linear_mps'],
+                    prefix + 'mean_abs_angular_radps': snapshot['mean_absolute_angular_radps'],
+                    prefix + 'peak_abs_linear_mps': snapshot['peak_absolute_linear_mps'],
+                    prefix + 'peak_abs_angular_radps': snapshot['peak_absolute_angular_radps'],
+                    prefix + 'age_s': snapshot['time_since_last_message_s'],
+                    prefix + 'kind': command_kind(snapshot),
+                })
+            self.pipeline_csv.writerow(row)
+            self._artifact_write_counts['controller_pipeline_rows'] += 1
 
     @staticmethod
     def _format_age(value):
@@ -2447,6 +2867,7 @@ class DiagnosticNode(Node):
                 **safe,
                 'selection_time_s': prepared.get('selection_time'),
                 'candidate_age_s': prepared.get('candidate_age'),
+                'candidate_receipt_sim_s': prepared.get('candidate_receipt_sim_s'),
                 'map_revision': prepared.get('map_revision'),
                 'frontier_id': prepared.get('frontier_id'),
             }, start_pose=current, start_cost=safe.get('start_cost'),
@@ -2499,11 +2920,14 @@ class DiagnosticNode(Node):
         if self.active_nav[robot] is not run:
             return
         feedback = message.feedback
+        run.distance_remaining_m = float(feedback.distance_remaining)
+        run.last_feedback_sim = self.now_sim()
         previous_recoveries = run.recovery_count
         run.recovery_count = int(feedback.number_of_recoveries)
         run.maximum_recovery_count = max(
             run.maximum_recovery_count, run.recovery_count)
         if run.recovery_count > previous_recoveries:
+            run.last_recovery_transition_sim = self.now_sim()
             self._event(
                 'NAVIGATION_RECOVERY_TRANSITION', robot,
                 label=run.label, previous_recovery_count=previous_recoveries,
@@ -2539,6 +2963,7 @@ class DiagnosticNode(Node):
             self.active_nav[robot] = None
         self.last_terminal_sim[robot] = self.now_sim()
         self.nav_runs.append(run)
+        self._write_goal_timeline(run)
         zero_percent = (100.0 * run.zero_feedback_intervals
                         / max(1, run.feedback_intervals))
         self._event(
@@ -2762,6 +3187,8 @@ class DiagnosticNode(Node):
                     'path_latency': latency, 'safe': final_safe,
                     'candidate_age': current_age, 'selection_time':
                         self.now_sim() - started,
+                    'candidate_receipt_sim_s': source_context.get(
+                        'snapshot_generation_time_s'),
                     'map_revision': int(current.map_revision),
                     'frontier_id': int(current_match.frontier_id),
                     'physical_signature': signature,
@@ -2842,11 +3269,67 @@ class DiagnosticNode(Node):
         except psutil.Error:
             return None
 
+    def _pipeline_summary(self) -> dict:
+        """Summarize only bounded command/odometry telemetry."""
+        elapsed = max(1e-9, self.mission_elapsed() or 0.0)
+        result = {
+            'thresholds': {
+                'translation_over_1s_m': 0.01,
+                'rotation_over_1s_rad': 0.04,
+                'linear_command_nonzero_mps': LINEAR_COMMAND_EPS_MPS,
+                'angular_command_nonzero_radps': ANGULAR_COMMAND_EPS_RADPS,
+                'stage_freshness_s': 0.25,
+            },
+            'sample_rate_hz_requested': 20.0,
+            'artifact_policy': 'buffered CSV; periodic five-wall-second flush; no rosout telemetry',
+            'robots': {},
+        }
+        for robot in ROBOTS:
+            stages = self._pipeline_stage_snapshots(robot)
+            stage_summary = {}
+            for stage, values in stages.items():
+                stage_summary[stage] = {
+                    **values,
+                    'message_frequency_hz': values['message_count'] / elapsed,
+                }
+            phase_summary = {}
+            for phase, counters in self.pipeline_phase_seconds[robot].items():
+                total = sum(counters.values())
+                phase_summary[phase] = {
+                    state: {'seconds': value, 'percent': 0.0 if total <= 0.0
+                            else 100.0 * value / total}
+                    for state, value in sorted(counters.items())
+                }
+            causes = self.pipeline_cause_seconds[robot]
+            total_stationary = sum(causes.values())
+            intervals = sorted(self.pipeline_intervals[robot], key=lambda item:
+                               (-(item.end_sim - item.start_sim), item.start_sim))
+            result['robots'][robot] = {
+                'stage_metrics': stage_summary,
+                'dwb_evaluation_counts': dict(self.pipeline_dwb_counts[robot]),
+                'phase_motion': phase_summary,
+                'stationary_causes': [
+                    {'cause': cause, 'seconds': seconds,
+                     'percent_of_stationary': 0.0 if total_stationary <= 0.0
+                     else 100.0 * seconds / total_stationary}
+                    for cause, seconds in causes.most_common()],
+                'longest_stationary_intervals': [
+                    {'phase': item.phase, 'cause': item.cause,
+                     'start_sim_s': item.start_sim, 'end_sim_s': item.end_sim,
+                     'duration_s': item.end_sim - item.start_sim,
+                     'goal_label': item.goal_label, 'goal_kind': item.goal_kind,
+                     'evidence': item.evidence}
+                    for item in intervals[:10]],
+            }
+        return result
+
     def _finish(self):
         if self.completed:
             return
         self.completed = True
         self._cancel_all('mission complete')
+        for robot in ROBOTS:
+            self._close_stationary_interval(robot, self.now_sim())
         for phase in self.phase_coverage:
             for robot in ROBOTS:
                 if self.phase_coverage[phase][robot]['end'] is None:
@@ -2856,7 +3339,12 @@ class DiagnosticNode(Node):
             if self.candidate_cpu_end[robot] is None:
                 self.candidate_cpu_end[robot] = self._process_cpu(robot)
         self._emit_handoff_pipeline(force=True)
+        pipeline_summary = self._pipeline_summary()
+        (self.output / 'stationary_summary.json').write_text(
+            json.dumps(pipeline_summary, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
         summary = self._summary()
+        summary['controller_pipeline'] = pipeline_summary
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -2870,6 +3358,9 @@ class DiagnosticNode(Node):
         self.handoff_file.flush()
         self.handoff_precheck_file.flush()
         self.handoff_accept_file.flush()
+        self.pipeline_file.flush()
+        self.stationary_file.flush()
+        self.goal_timeline_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
@@ -3181,6 +3672,12 @@ class DiagnosticNode(Node):
             self.handoff_precheck_file.close()
         if not self.handoff_accept_file.closed:
             self.handoff_accept_file.close()
+        if not self.pipeline_file.closed:
+            self.pipeline_file.close()
+        if not self.stationary_file.closed:
+            self.stationary_file.close()
+        if not self.goal_timeline_file.closed:
+            self.goal_timeline_file.close()
 
 
 def main(args=None):

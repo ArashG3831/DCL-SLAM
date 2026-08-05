@@ -43,6 +43,12 @@ def test_generator_clearance_provenance_matches_existing_launch_profiles():
         'small': 0.06, 'large': 0.15}
 
 
+def test_acceptance_provenance_snapshots_candidate_deque_before_iterating():
+    source = (PROJECT / 'my_epuck_project'
+              / 'nav2_frontier_diagnostic.py').read_text(encoding='utf-8')
+    assert 'for record in tuple(self.generator_approaches[robot])' in source
+
+
 def test_launch_chain_is_below_allocator_and_has_one_goal_sender():
     launch = (PROJECT / 'launch' / LAUNCH_FILE).read_text(encoding='utf-8')
     assert 'two_robots_frontier_candidates_launch.py' in launch

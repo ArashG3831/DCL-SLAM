@@ -1964,7 +1964,10 @@ class DiagnosticNode(Node):
         if any(
                 math.isclose(point.x, record['x'], abs_tol=1e-3)
                 and math.isclose(point.y, record['y'], abs_tol=1e-3)
-                for record in self.generator_approaches[robot]
+                # Candidate callbacks can append while a planner result is
+                # being handled by the multi-threaded executor.  Snapshot
+                # the bounded deque before comparing forensic provenance.
+                for record in tuple(self.generator_approaches[robot])
                 if record['accepted']):
             self.generator_handoff_joins.add((robot, signature))
 

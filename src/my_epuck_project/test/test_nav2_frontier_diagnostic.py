@@ -16,6 +16,7 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     goal_grid_sample,
     launch_command,
     LAUNCH_FILE,
+    nearest_blocked_distance,
     phase_at,
     runner_parser,
     TIME_STATES,
@@ -179,6 +180,25 @@ def test_goal_sample_supports_three_centimetre_negative_and_rotated_grid():
 def test_goal_sample_reports_boundary_as_outside():
     grid = _handoff_grid()
     assert goal_grid_sample(grid, 3.0, 0.0, costmap=True)['classification'] == 'OUTSIDE'
+
+
+def test_handoff_clearance_matches_generator_by_ignoring_nearby_unknown_cells():
+    grid = OccupancyGrid()
+    grid.info.resolution = 0.03
+    grid.info.width = grid.info.height = 9
+    grid.info.origin.orientation.w = 1.0
+    grid.data = [0] * 81
+    centre, _, _ = grid_cell(grid, 0.135, 0.135)
+    grid.data[centre + 1] = -1
+    assert nearest_blocked_distance(
+        grid, 0.135, 0.135, unknown_is_blocked=True) == 0.03
+    assert nearest_blocked_distance(
+        grid, 0.135, 0.135, unknown_is_blocked=False) == 0.5
+    # The goal cell itself remains invalid when it is unknown; only adjacent
+    # frontier unknown space is not a physical clearance obstacle.
+    grid.data[centre] = -1
+    assert goal_grid_sample(grid, 0.135, 0.135, costmap=True)[
+        'classification'] == 'UNKNOWN'
 
 
 def test_runner_supports_required_command_surface(tmp_path):

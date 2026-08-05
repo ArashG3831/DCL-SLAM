@@ -320,8 +320,9 @@ def known_cell_count(grid: Optional[OccupancyGrid]) -> int:
 
 def nearest_blocked_distance(
         grid: OccupancyGrid, x: float, y: float,
-        maximum: float = 0.5, blocked_threshold: int = 1) -> float:
-    """Measure local clearance from blocked or unknown costmap cells."""
+        maximum: float = 0.5, blocked_threshold: int = 1,
+        unknown_is_blocked: bool = True) -> float:
+    """Measure local clearance using explicit unknown-cell semantics."""
     cell = grid_cell(grid, x, y)
     if cell is None:
         return 0.0
@@ -332,7 +333,8 @@ def nearest_blocked_distance(
     for my in range(max(0, cy - radius), min(grid.info.height, cy + radius + 1)):
         for mx in range(max(0, cx - radius), min(grid.info.width, cx + radius + 1)):
             value = int(grid.data[my * grid.info.width + mx])
-            if value < 0 or value >= blocked_threshold:
+            if ((unknown_is_blocked and value < 0)
+                    or value >= blocked_threshold):
                 best = min(best, math.hypot(mx - cx, my - cy) * resolution)
     return best
 
@@ -970,7 +972,8 @@ class DiagnosticNode(Node):
                     'goal_cost': generator_goal['value'],
                     'goal_classification': generator_goal['classification'],
                     'clearance_m': nearest_blocked_distance(
-                        self.costmaps[robot], approach.x, approach.y)
+                        self.costmaps[robot], approach.x, approach.y,
+                        unknown_is_blocked=False)
                     if self.costmaps[robot] is not None else None,
                     'required_clearance_m': 0.06,
                     'map_stamp_s': source_stamp,
@@ -2023,7 +2026,8 @@ class DiagnosticNode(Node):
         candidate_age = self._age(robot, 'candidate')
         pose_age, peer_age = self._age(robot, 'odom'), self._age(peer_robot, 'odom')
         clearance = nearest_blocked_distance(
-            self.costmaps[robot], point.x, point.y) if self.costmaps[robot] else 0.0
+            self.costmaps[robot], point.x, point.y,
+            unknown_is_blocked=False) if self.costmaps[robot] else 0.0
         peer_radius, peer_separation = 0.067, 0.18
         goal_peer_distance = None if peer is None else math.dist((point.x, point.y), peer)
         corridor = [(pose[0], pose[1])] if pose is not None else []

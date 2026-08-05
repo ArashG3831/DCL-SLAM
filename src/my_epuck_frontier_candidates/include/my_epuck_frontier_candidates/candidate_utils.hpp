@@ -10,7 +10,7 @@ namespace my_epuck_frontier_candidates {
 struct ClearanceEvidence {
   bool in_bounds{false}; bool accepted{false}; int column{-1},row{-1};
   int nearest_column{-1},nearest_row{-1},nearest_cost{-1};
-  double nearest_distance_m{0.0};
+  double nearest_distance_m{0.0}; size_t examined_count{0};
   std::vector<std::string> examined_cells;
 };
 uint64_t fnv1a64(const void *data,size_t size,uint64_t seed=14695981039346656037ULL);
@@ -18,7 +18,7 @@ uint64_t map_checksum(const nav_msgs::msg::OccupancyGrid &map);
 uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate &f,const frontier_exploration_ros2::OccupancyGrid2d &map,double quantum);
 std::optional<double> path_length(const nav_msgs::msg::Path &path,double robot_x,double robot_y,double goal_x,double goal_y,double tolerance);
 bool clearance_ok(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold);
-ClearanceEvidence clearance_evidence(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold,double trace_radius=0.18);
+ClearanceEvidence clearance_evidence(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold,double trace_radius=0.18,bool capture_cells=false);
 bool inside_with_margin(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double margin);
 std::optional<std::pair<int, int>> find_safe_approach(
   const frontier_exploration_ros2::OccupancyGrid2d &map,double target_x,double target_y,

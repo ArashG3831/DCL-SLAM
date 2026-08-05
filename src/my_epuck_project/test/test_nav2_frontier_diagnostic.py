@@ -1,4 +1,6 @@
 from pathlib import Path
+from io import StringIO
+import threading
 from types import SimpleNamespace
 
 from my_epuck_project.nav2_frontier_diagnostic import (
@@ -7,6 +9,8 @@ from my_epuck_project.nav2_frontier_diagnostic import (
     deterministic_candidate_key,
     DiagnosticNode,
     _affinity_preexec,
+    _console_line,
+    _pump,
     default_cpu_core_limit,
     grid_cell,
     map_change_classification,
@@ -219,6 +223,11 @@ def test_runner_supports_required_command_surface(tmp_path):
     assert 'mission_duration_s:=600.0' in command
     assert args.fusion_cpu_quota_percent == 30.0
     assert 'fusion_cpu_quota_percent:=30' in command
+    assert 'forensic_clearance_cells:=false' in command
+    forensic = runner_parser().parse_args([
+        '--forensic-clearance-cells', 'true', '--verbose-console'])
+    assert forensic.forensic_clearance_cells is True
+    assert forensic.verbose_console is True
     assert args.cpu_core_limit == default_cpu_core_limit()
     unthrottled = runner_parser().parse_args([
         '--fusion-cpu-quota-percent', '0'])
@@ -232,6 +241,43 @@ def test_headless_profile_defaults_rendering_and_rviz_off():
     assert args.rviz is None
     assert args.fast_mode is True
     assert args.time_mode == 'sim'
+
+
+def test_runner_console_is_compact_by_default_and_verbose_on_request():
+    assert _console_line('[node] [INFO] ordinary telemetry\n', False) is False
+    assert _console_line('[node] [WARN] important telemetry\n', False) is True
+    assert _console_line('PHASE_TRANSITION to=FRONTIER\n', False) is True
+    assert _console_line('[node] [INFO] ordinary telemetry\n', True) is True
+
+
+def test_runner_pump_does_not_queue_irrelevant_launch_output():
+    source = StringIO('ordinary line\nwaiting for local connection on port 23667\n')
+    output = StringIO()
+    events = __import__('queue').Queue()
+    _pump(source, output, threading.Lock(), events, verbose_console=False)
+    assert output.getvalue().count('\n') == 2
+    assert events.qsize() == 1
+
+
+def test_logging_patch_keeps_full_handoff_evidence_out_of_ros_event():
+    source = (PROJECT / 'my_epuck_project'
+              / 'nav2_frontier_diagnostic.py').read_text(encoding='utf-8')
+    assert "'safety_result_json': '' if safe is None else json.dumps(" in source
+    assert "# Full safety/provenance evidence is intentionally CSV-only." in source
+    assert "**{key: value for key, value in row.items() if key != 'robot'}" not in source
+
+
+def test_frontier_generator_logging_is_compact_and_forensic_cells_are_opt_in():
+    source = (PROJECT.parent / 'my_epuck_frontier_candidates' / 'src'
+              / 'frontier_candidate_generator.cpp').read_text(encoding='utf-8')
+    utils = (PROJECT.parent / 'my_epuck_frontier_candidates' / 'src'
+             / 'candidate_utils.cpp').read_text(encoding='utf-8')
+    assert 'GENERATOR_INPUT_SUMMARY' in source
+    assert 'GENERATOR_APPROACH_CLEARANCE_CELLS' in source
+    assert 'P(bool,forensic_clearance_cells,false)' in source
+    assert 'capture_cells)out.examined_cells.push_back' in utils
+    assert 'out.examined_count++' in utils
+    assert 'clearance_evidence(m,wx,wy,clear,threshold,clear,false)' in utils
 
 
 def test_runner_process_affinity_limit_is_optional_and_bounded():

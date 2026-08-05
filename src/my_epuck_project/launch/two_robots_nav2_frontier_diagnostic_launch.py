@@ -39,6 +39,8 @@ def generate_launch_description():
                 'fusion_cpu_quota_percent'),
             'fusion_rebuild_period_s': LaunchConfiguration(
                 'fusion_rebuild_period_s'),
+            'forensic_clearance_cells': LaunchConfiguration(
+                'forensic_clearance_cells'),
             'nav2_autostart': 'true',
         }.items(),
     )
@@ -83,6 +85,8 @@ def generate_launch_description():
         # unthrottled comparison required by the diagnostic protocol.
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
+        DeclareLaunchArgument('forensic_clearance_cells', default_value='false',
+                              choices=['true', 'false']),
         stack,
         diagnostic,
         stop_when_finished,

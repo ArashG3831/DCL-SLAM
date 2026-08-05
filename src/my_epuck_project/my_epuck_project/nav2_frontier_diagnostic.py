@@ -1098,10 +1098,14 @@ class DiagnosticNode(Node):
         if text.startswith('FILTER_METRICS') and robot:
             for key, value in re.findall(r'(\w+)=([0-9.]+)', text):
                 self.filter_stats[robot][key] = float(value)
-        if text.startswith('GENERATOR_MAP_RECEIPT') and robot:
-            self.candidate_stats[robot]['generator_map_receipts'] += 1
-        if text.startswith('GENERATOR_COSTMAP_RECEIPT') and robot:
-            self.candidate_stats[robot]['generator_costmap_receipts'] += 1
+        if text.startswith('GENERATOR_INPUT_SUMMARY') and robot:
+            values = dict(re.findall(r'(\w+)=([0-9]+)', text))
+            self.candidate_stats[robot]['generator_map_receipts'] = max(
+                self.candidate_stats[robot]['generator_map_receipts'],
+                int(values.get('map_receipts', 0)))
+            self.candidate_stats[robot]['generator_costmap_receipts'] = max(
+                self.candidate_stats[robot]['generator_costmap_receipts'],
+                int(values.get('costmap_receipts', 0)))
         if text.startswith('GENERATOR_APPROACH_CLEARANCE') and robot:
             match = re.search(
                 r'pose=\((-?[0-9.]+),(-?[0-9.]+)\).*accepted=(true|false)',
@@ -2033,7 +2037,13 @@ class DiagnosticNode(Node):
         self.handoff_csv.writerow(row)
         self._artifact_write_counts['handoff_csv_rows'] += 1
         self.handoff_rejections[reason] += 1
-        self.handoff_records.append(row)
+        # The complete row already lives in handoff_rejections.csv.  Retain
+        # only the compact fields needed by the summary, not nested forensic
+        # JSON once per rejection in memory for the whole mission.
+        self.handoff_records.append({
+            'robot': robot, 'rejection_subreason': reason,
+            'canonical_task_id': int(candidate.frontier_id),
+        })
         self.handoff_pipeline[robot]['candidates_rejected'] += 1
         if any(
                 math.isclose(point.x, record['x'], abs_tol=1e-3)
@@ -2041,9 +2051,20 @@ class DiagnosticNode(Node):
                 for record in self.generator_approaches[robot]
                 if record['accepted']):
             self.generator_handoff_joins.add((robot, signature))
+        # Full safety/provenance evidence is intentionally CSV-only.  A
+        # compact ROS event remains useful live without duplicating nested
+        # JSON through /rosout, launch.log, and the terminal.
         self._event(
             'FRONTIER_HANDOFF_REJECTED', robot, severity='WARN',
-            **{key: value for key, value in row.items() if key != 'robot'})
+            canonical_task_id=int(candidate.frontier_id),
+            physical_signature=signature,
+            rejection_subreason=reason,
+            candidate_age_s=row['candidate_age_s'],
+            source_map_revision=row['source_map_revision'],
+            current_map_revision=row['current_map_revision'],
+            goal_cell_cost=row['goal_cell_cost'],
+            minimum_path_clearance_m=row['minimum_path_clearance_m'],
+            final_planner_result=final_result)
 
     def _evaluate_handoff_safety(self, robot: str, candidate, batch) -> dict:
         """Evaluate once; logging and acceptance consume this exact result."""
@@ -3225,6 +3246,14 @@ def runner_parser() -> argparse.ArgumentParser:
         help=('limit the diagnostic process tree to this many CPU cores; '
               '0 disables affinity; default reserves one CPU for the host'))
     result.add_argument(
+        '--verbose-console', action='store_true',
+        help=('forward all child output to the terminal; default prints only '
+              'WARN/ERROR and compact runner progress while preserving launch.log'))
+    result.add_argument(
+        '--forensic-clearance-cells', type=boolean, default=False,
+        help=('include full per-cell approach-clearance traces in launch.log; '
+              'disabled by default because it is intentionally expensive'))
+    result.add_argument(
         '--results-directory',
         default='results/nav2_frontier_diagnostic')
     result.add_argument(
@@ -3293,6 +3322,8 @@ def launch_command(args: argparse.Namespace, world: Path,
         f'startup_timeout_s:={args.startup_timeout}',
         f'phase_profile:={args.phase_profile}',
         f'fusion_cpu_quota_percent:={args.fusion_cpu_quota_percent:g}',
+        'forensic_clearance_cells:=' + str(
+            args.forensic_clearance_cells).lower(),
     ]
 
 
@@ -3304,14 +3335,29 @@ def rviz_command() -> list[str]:
             '-p', 'use_sim_time:=true']
 
 
-def _pump(stream, log, lock, events=None):
+def _console_line(line: str, verbose: bool) -> bool:
+    """Keep normal headless output useful without rendering every ROS INFO."""
+    if verbose:
+        return True
+    return (any(level in line for level in ('[WARN]', '[ERROR]', '[FATAL]'))
+            or any(marker in line for marker in (
+                'NAV2_FRONTIER_DIAGNOSTIC_READY',
+                'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE',
+                'PHASE_TRANSITION',
+                'READINESS_TIMEOUT',
+            )))
+
+
+def _pump(stream, log, lock, events=None, verbose_console: bool = False):
     try:
         for line in iter(stream.readline, ''):
             with lock:
                 log.write(line)
-                log.flush()
-                print(line, end='', flush=True)
-            if events is not None:
+                if _console_line(line, verbose_console):
+                    print(line, end='', flush=True)
+            # The startup loop needs only Webots listener/redirect lines. Do
+            # not retain the entire launch stream in an unbounded queue.
+            if events is not None and parse_webots_port_event(line) is not None:
                 events.put(line)
     finally:
         stream.close()
@@ -3450,14 +3496,17 @@ def runner_run(args: argparse.Namespace) -> int:
     lock = threading.Lock()
     started = time.monotonic()
     preexec = _affinity_preexec(args.cpu_core_limit)
-    with (attempt / 'launch.log').open('w', encoding='utf-8') as log:
+    with (attempt / 'launch.log').open(
+            'w', encoding='utf-8', buffering=65536) as log:
         try:
             launch = subprocess.Popen(
                 command, env=environment, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True, preexec_fn=preexec)
             threads.append(threading.Thread(
-                target=_pump, args=(launch.stdout, log, lock, output_events), daemon=True))
+                target=_pump,
+                args=(launch.stdout, log, lock, output_events,
+                      args.verbose_console), daemon=True))
             threads[-1].start()
             if show_rviz:
                 rviz = subprocess.Popen(
@@ -3465,13 +3514,22 @@ def runner_run(args: argparse.Namespace) -> int:
                     stderr=subprocess.STDOUT, text=True, bufsize=1,
                     start_new_session=True, preexec_fn=preexec)
                 threads.append(threading.Thread(
-                    target=_pump, args=(rviz.stdout, log, lock, None), daemon=True))
+                    target=_pump,
+                    args=(rviz.stdout, log, lock, None,
+                          args.verbose_console), daemon=True))
                 threads[-1].start()
             port_confirmed = False
             controller_confirmed = False
             startup_deadline = time.monotonic() + args.startup_timeout
             last_topic_probe = 0.0
+            next_console_progress = time.monotonic()
             while launch.poll() is None and not controller_confirmed:
+                if (not args.verbose_console
+                        and time.monotonic() >= next_console_progress):
+                    print('diagnostic_runner status=waiting_for_controllers '
+                          f'wall_elapsed_s={time.monotonic() - started:.1f}',
+                          flush=True)
+                    next_console_progress = time.monotonic() + 5.0
                 while True:
                     try:
                         line = output_events.get_nowait()
@@ -3514,6 +3572,12 @@ def runner_run(args: argparse.Namespace) -> int:
                     'launch exited before WEBOTS_PORT_CONFIRMED and controller '
                     'connection')
             while launch.poll() is None:
+                if (not args.verbose_console
+                        and time.monotonic() >= next_console_progress):
+                    print('diagnostic_runner status=mission_active '
+                          f'wall_elapsed_s={time.monotonic() - started:.1f}',
+                          flush=True)
+                    next_console_progress = time.monotonic() + 5.0
                 try:
                     owned_pids.update(
                         child.pid for child in psutil.Process(

@@ -8,7 +8,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from my_epuck_project.cooperative_profiles import profile
 
-def generator(robot, minimum_frontier_cells, approach_clearance):
+def generator(robot, minimum_frontier_cells, approach_clearance,
+              forensic_clearance_cells):
     return Node(
         package='my_epuck_frontier_candidates', executable='frontier_candidate_generator',
         name='frontier_candidate_generator', namespace=robot, output='screen',
@@ -32,6 +33,7 @@ def generator(robot, minimum_frontier_cells, approach_clearance):
             'maximum_path_queries_per_cycle': 5,
             'path_query_timeout_s': 1.0,
             'planner_id': 'GridBased',
+            'forensic_clearance_cells': forensic_clearance_cells,
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
@@ -67,9 +69,11 @@ def launch_setup(context):
     return [
         stack,
         generator('robot1', selected['minimum_frontier_cells'],
-                  0.15 if selected['name'] == 'large' else 0.06),
+                  0.15 if selected['name'] == 'large' else 0.06,
+                  LaunchConfiguration('forensic_clearance_cells')),
         generator('robot2', selected['minimum_frontier_cells'],
-                  0.15 if selected['name'] == 'large' else 0.06),
+                  0.15 if selected['name'] == 'large' else 0.06,
+                  LaunchConfiguration('forensic_clearance_cells')),
     ]
 
 
@@ -93,6 +97,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
+        DeclareLaunchArgument('forensic_clearance_cells', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),

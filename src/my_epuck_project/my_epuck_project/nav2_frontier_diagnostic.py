@@ -74,7 +74,11 @@ from .pipeline_telemetry import (
     motion_state,
     stationary_cause,
 )
-from .controller_pipeline_diagnostics import summarize_dwb_evaluation
+from .controller_pipeline_diagnostics import (
+    FullCandidateCapturePolicy,
+    serialize_full_dwb_evaluation,
+    summarize_dwb_evaluation,
+)
 from .ros_runtime_preflight import (
     PreflightError, _bounded_subprocess, run_preflight,
 )
@@ -97,6 +101,9 @@ ARTIFACT_NAMES = frozenset({
     'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
     'goal_timeline.csv', 'stationary_summary.json',
     'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
+    'dwb_full_candidate_frames.jsonl',
+    'dwb_full_candidate_configuration.json',
+    'dwb_full_candidate_capture_summary.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -145,6 +152,10 @@ RUNTIME_GEOMETRY_PARAMETERS = {
     'controller_server': (
         'FollowPath.min_vel_x', 'FollowPath.max_vel_x',
         'FollowPath.max_vel_theta', 'FollowPath.robot_radius',
+        'FollowPath.min_speed_xy', 'FollowPath.max_speed_xy',
+        'FollowPath.vx_samples', 'FollowPath.vtheta_samples',
+        'FollowPath.sim_time', 'FollowPath.short_circuit_trajectory_evaluation',
+        'FollowPath.critics', 'FollowPath.Oscillation.scale',
         'FollowPath.BaseObstacle.scale', 'FollowPath.PathAlign.scale',
         'FollowPath.GoalAlign.scale', 'FollowPath.PathDist.scale',
         'FollowPath.GoalDist.scale', 'FollowPath.RotateToGoal.scale',
@@ -584,6 +595,7 @@ class NavigationRun:
     distance_remaining_m: Optional[float] = None
     last_feedback_sim: Optional[float] = None
     plan_revisions_at_request: dict = field(default_factory=dict)
+    full_candidate_healthy_frames: list = field(default_factory=list)
 
 
 class DiagnosticNode(Node):
@@ -672,6 +684,9 @@ class DiagnosticNode(Node):
         self.pipeline_dwb_stalls = {robot: DwbStallDetector() for robot in ROBOTS}
         self.dwb_stall_events = []
         self.dwb_stall_counts = Counter()
+        self.full_candidate_capture = {
+            robot: FullCandidateCapturePolicy() for robot in ROBOTS}
+        self.full_candidate_frame_count = Counter()
         self.pipeline_history = {robot: deque(maxlen=32) for robot in ROBOTS}
         self.pipeline_last_sample_sim = None
         self.pipeline_phase_seconds = {
@@ -1006,6 +1021,9 @@ class DiagnosticNode(Node):
         write_csv_header_once(self.goal_timeline_file, self.goal_timeline_csv)
         self.dwb_stall_file = (self.output / 'dwb_stall_events.jsonl').open(
             'w', encoding='utf-8', buffering=65536)
+        self.full_candidate_file = (
+            self.output / 'dwb_full_candidate_frames.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
         self.tick_timer = self.create_timer(0.1, self._tick)
         self.sample_timer = self.create_timer(0.5, self._sample)
         self.pipeline_timer = self.create_timer(0.05, self._sample_pipeline)
@@ -2188,6 +2206,7 @@ class DiagnosticNode(Node):
             self.stationary_file.flush()
             self.goal_timeline_file.flush()
             self.dwb_stall_file.flush()
+            self.full_candidate_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
@@ -2367,6 +2386,88 @@ class DiagnosticNode(Node):
         self.dwb_stall_file.write(json.dumps(event, sort_keys=True) + '\n')
         self._artifact_write_counts['dwb_stall_event_rows'] += 1
 
+    def _full_candidate_context(self, robot: str, run: NavigationRun,
+                                phase: str) -> dict:
+        """Collect only already-observed diagnostic provenance for one frame."""
+        peer = 'robot2' if robot == 'robot1' else 'robot1'
+        x, y, yaw, linear, angular = self._odom_pose(self.odom[robot])
+        patch = self._grid_patch_from_shared(
+            self.local_costmaps[robot], self.poses[robot], radius_m=0.15)
+        nearest = None if patch is None else patch.get('nearest_occupied')
+        return {
+            'phase': phase,
+            'wall_timestamp_utc': utc_now(),
+            'robot_state': {
+                'shared_map_pose': None if self.poses[robot] is None else {
+                    'x_m': self.poses[robot][0], 'y_m': self.poses[robot][1]},
+                'odometry_pose': {'x_m': x, 'y_m': y, 'yaw_rad': yaw},
+                'odometry_velocity': {'linear_x_mps': linear,
+                                      'angular_z_radps': angular},
+            },
+            'goal': {
+                'id': run.metadata.get('frontier_id'), 'label': run.label,
+                'source': run.kind, 'action_state': 'ACTIVE',
+                'distance_to_goal_m': run.distance_remaining_m,
+                'remaining_global_path_length_m': run.path_length_m,
+            },
+            'path_revisions': {
+                kind: self.pipeline_plans[robot][kind]['revision']
+                for kind in ('global', 'local')},
+            'local_costmap': {
+                'stamp_s': self._grid_stamp(self.local_costmaps[robot]),
+                'revision': self.pipeline_plans[robot]['local']['revision'],
+                'start_cell_cost': self._grid_value_from_shared(
+                    self.local_costmaps[robot], *(self.poses[robot] or (0.0, 0.0))),
+                'goal_cell_cost': run.goal_cost,
+                'nearest_occupied_cell_distance_m': (
+                    None if nearest is None else nearest.get('distance_m')),
+            },
+            'peer': {
+                'shared_map_pose': None if self.poses[peer] is None else {
+                    'x_m': self.poses[peer][0], 'y_m': self.poses[peer][1]},
+                'age_s': None if self.pose_received_sim[peer] is None else max(
+                    0.0, self.now_sim() - self.pose_received_sim[peer]),
+                'distance_m': None if self.poses[robot] is None or self.poses[peer] is None
+                else math.dist(self.poses[robot], self.poses[peer]),
+            },
+            'recovery_state': {'count': run.recovery_count,
+                               'last_transition_sim_s': run.last_recovery_transition_sim},
+            'progress_checker_state': {
+                'feedback_age_s': None if run.last_feedback_sim is None else max(
+                    0.0, self.now_sim() - run.last_feedback_sim),
+                'derived': 'RECOVERY_RECENT' if run.last_recovery_transition_sim is not None
+                and self.now_sim() - run.last_recovery_transition_sim < 2.0 else 'ACTIVE'},
+        }
+
+    def _write_full_candidate_frame(self, robot: str, reason: str,
+                                    context: dict, evaluation: dict):
+        frame = {
+            'schema_version': 1, 'record_type': 'dwb_full_candidate_frame',
+            'robot': robot, 'simulation_timestamp_s': self.now_sim(),
+            'capture_reason': reason, **context, 'evaluation': evaluation,
+        }
+        self.full_candidate_file.write(json.dumps(frame, sort_keys=True) + '\n')
+        self.full_candidate_frame_count[robot] += 1
+        self._artifact_write_counts['dwb_full_candidate_frame_rows'] += 1
+
+    def _observe_full_candidate_capture(self, robot: str, run: NavigationRun,
+                                        phase: str, stages: dict):
+        if run is None or run.accepted_sim is None or self.pipeline_dwb_message[robot] is None:
+            return
+        evaluation = serialize_full_dwb_evaluation(self.pipeline_dwb_message[robot])
+        context = self._full_candidate_context(robot, run, phase)
+        policy = self.full_candidate_capture[robot]
+        goal_key = (robot, run.label, run.request_sim)
+        for reason, item in policy.observe_stall(
+                self.now_sim(), goal_key, command_kind(stages['dwb_controller']),
+                context, evaluation):
+            self._write_full_candidate_frame(robot, reason, context, item)
+        reason = policy.observe_healthy(context, evaluation)
+        if reason is not None:
+            # Delay publication until the action result establishes that the
+            # forward sample belongs to a successful goal.
+            run.full_candidate_healthy_frames.append((reason, context, evaluation))
+
     def _observe_dwb_stall(self, robot: str, run: Optional[NavigationRun],
                            stages: dict):
         goal_key = None if run is None or run.accepted_sim is None else (
@@ -2457,6 +2558,7 @@ class DiagnosticNode(Node):
             self._update_stationary_interval(robot, phase, moving, cause, context)
             run = self.active_nav[robot]
             self._observe_dwb_stall(robot, run, stages)
+            self._observe_full_candidate_capture(robot, run, phase, stages)
             if run is not None and run.accepted_sim is not None:
                 run.pipeline_motion_seconds[moving['state']] += delta
                 if moving['state'] == 'FULLY_STATIONARY':
@@ -3310,6 +3412,10 @@ class DiagnosticNode(Node):
         run.final_pose_error_m = None if pose is None else math.hypot(
             pose[0] - goal.x, pose[1] - goal.y)
         run.coverage_end_cells = known_cell_count(self.shared_maps[robot])
+        if (status == GoalStatus.STATUS_SUCCEEDED and
+                result_code == NavigateToPose.Result.NONE):
+            for reason, context, evaluation in run.full_candidate_healthy_frames:
+                self._write_full_candidate_frame(robot, reason, context, evaluation)
         if self.active_nav[robot] is run:
             self.active_nav[robot] = None
         self.last_terminal_sim[robot] = self.now_sim()
@@ -3685,6 +3791,22 @@ class DiagnosticNode(Node):
                        'publications; no DWB debug log flood or controller hook'),
         }
 
+    def _full_candidate_capture_summary(self) -> dict:
+        frames = {robot: int(self.full_candidate_frame_count[robot]) for robot in ROBOTS}
+        return {
+            'schema_version': 1,
+            'capture_limit_per_robot_per_kind': 10,
+            'frame_count_by_robot': frames,
+            'total_frame_count': sum(frames.values()),
+            'policy': ('triggered active-goal angular/zero/recovery frames plus '
+                       'diverse forward frames emitted only after successful goals'),
+            'message_limitations': [
+                'LocalPlanEvaluation has no explicit validity member.',
+                'LocalPlanEvaluation has no explicit invalidation reason.',
+                'LocalPlanEvaluation has no DWB internal tie-break ordering.',
+            ],
+        }
+
     def _finish(self):
         if self.completed:
             return
@@ -3703,15 +3825,30 @@ class DiagnosticNode(Node):
         self._emit_handoff_pipeline(force=True)
         pipeline_summary = self._pipeline_summary()
         dwb_stall_summary = self._dwb_stall_summary()
+        full_candidate_summary = self._full_candidate_capture_summary()
+        configuration = {
+            'schema_version': 1,
+            'source': 'read-only /robotN/controller_server/get_parameters',
+            'robots': {robot: self.runtime_geometry[robot]['controller_server']
+                       for robot in ROBOTS},
+            'message_type': 'dwb_msgs/msg/LocalPlanEvaluation',
+        }
         (self.output / 'stationary_summary.json').write_text(
             json.dumps(pipeline_summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
         (self.output / 'dwb_stall_summary.json').write_text(
             json.dumps(dwb_stall_summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
+        (self.output / 'dwb_full_candidate_configuration.json').write_text(
+            json.dumps(configuration, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
+        (self.output / 'dwb_full_candidate_capture_summary.json').write_text(
+            json.dumps(full_candidate_summary, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
         summary = self._summary()
         summary['controller_pipeline'] = pipeline_summary
         summary['dwb_stall_summary'] = dwb_stall_summary
+        summary['dwb_full_candidate_capture_summary'] = full_candidate_summary
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -3729,6 +3866,7 @@ class DiagnosticNode(Node):
         self.stationary_file.flush()
         self.goal_timeline_file.flush()
         self.dwb_stall_file.flush()
+        self.full_candidate_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
@@ -4049,6 +4187,8 @@ class DiagnosticNode(Node):
             self.goal_timeline_file.close()
         if not self.dwb_stall_file.closed:
             self.dwb_stall_file.close()
+        if not self.full_candidate_file.closed:
+            self.full_candidate_file.close()
 
 
 def main(args=None):

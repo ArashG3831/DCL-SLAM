@@ -328,9 +328,12 @@ def test_artifact_and_time_breakdown_contracts_are_complete():
         'handoff_precheck_rejections.csv', 'handoff_acceptances.csv',
         'ros_preflight.json', 'webots_port_preflight.json',
         'controller_pipeline_timeseries.csv', 'stationary_intervals.csv',
-        'goal_timeline.csv', 'stationary_summary.json',
-        'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
-    }
+            'goal_timeline.csv', 'stationary_summary.json',
+            'dwb_stall_events.jsonl', 'dwb_stall_summary.json',
+            'dwb_full_candidate_frames.jsonl',
+            'dwb_full_candidate_configuration.json',
+            'dwb_full_candidate_capture_summary.json',
+        }
     assert len(TIME_STATES) == 11
     assert 'active navigation with nonzero cmd_vel' in TIME_STATES
     assert 'active goal with zero cmd_vel' in TIME_STATES

@@ -23,6 +23,8 @@ from my_epuck_project.controller_pipeline_diagnostics import (
     command_reason,
     costmap_command_contract_evidence,
     scan_statistics,
+    FullCandidateCapturePolicy,
+    serialize_full_dwb_evaluation,
     summarize_dwb_evaluation,
 )
 
@@ -371,6 +373,45 @@ def test_jazzy_dwb_validity_selected_and_best_forward_semantics():
     assert result['valid_critic_extrema']['PathAlign'][
         'maximum_weighted_contribution'] == pytest.approx(2.0)
     assert result['top_overall'][0]['trajectory_index'] == 0
+
+
+def test_full_candidate_serializer_keeps_every_jazzy_trajectory_and_limitations():
+    evaluation = LocalPlanEvaluation()
+    evaluation.header.frame_id = 'robot1/odom'
+    evaluation.twists = [_trajectory(0.0, 1.0, [('GoalDist', 1.0, 24.0)]),
+                         _trajectory(0.026, 2.0, [('PathDist', 1.0, 24.0)]),
+                         _trajectory(0.052, -1.0, [('BaseObstacle', -1.0, 0.2)])]
+    evaluation.best_index = 1
+    serialized = serialize_full_dwb_evaluation(evaluation)
+    assert len(serialized['trajectories']) == 3
+    assert serialized['selected_index'] == 1
+    assert serialized['trajectories'][1]['selected'] is True
+    assert serialized['trajectories'][2]['valid'] is False
+    assert 'explicit_invalidation_reason' in serialized['unavailable_fields']
+
+
+def test_full_candidate_policy_is_triggered_deduplicated_and_hard_bounded():
+    policy = FullCandidateCapturePolicy(limit=1)
+    context = {'goal': {'label': 'frontier_robot1'}, 'robot_state': {'shared_map_pose': {'x_m': 0, 'y_m': 0}},
+               'path_revisions': {'global': 1, 'local': 1}, 'local_costmap': {'stamp_s': 1.0}}
+    evaluation = {'trajectories': [{'selected': True, 'valid': True,
+                                    'velocity': {'linear_x_mps': 0.0, 'angular_z_radps': 0.2},
+                                    'total_score': 1.0, 'critics': []}]}
+    goal = ('robot1', 'frontier_robot1', 1.0)
+    assert policy.observe_stall(0.0, goal, 'ANGULAR_ONLY', context, evaluation) == []
+    captures = policy.observe_stall(2.0, goal, 'ANGULAR_ONLY', context, evaluation)
+    assert captures[0][0] == 'ANGULAR_ONLY_OVER_2S'
+    assert policy.observe_stall(3.0, goal, 'ZERO', context, evaluation) == []
+    assert len(policy.captured_stall) == 1
+
+
+def test_full_candidate_policy_samples_diverse_usable_healthy_forward_only():
+    policy = FullCandidateCapturePolicy()
+    base = {'robot_state': {}, 'goal': {'source': 'manual', 'distance_to_goal_m': 2.0}}
+    forward = {'trajectories': [{'selected': True, 'valid': True,
+                                 'velocity': {'linear_x_mps': 0.026, 'angular_z_radps': 0.0}}]}
+    assert policy.observe_healthy(base, forward) == 'HEALTHY_MANUAL_FAR_STRAIGHT'
+    assert policy.observe_healthy(base, forward) is None
 
 
 def test_jazzy_dwb_invalid_best_index_and_no_forward_are_explicit():

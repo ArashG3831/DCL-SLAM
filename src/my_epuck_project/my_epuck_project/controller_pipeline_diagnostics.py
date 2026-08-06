@@ -36,6 +36,7 @@ COMMAND_STAGES = (
 
 DWB_FORWARD_THRESHOLD_MPS = 0.005
 DWB_TOP_K = 5
+DWB_FULL_CAPTURE_LIMIT_PER_KIND = 10
 SCAN_STAGES = ('scan_d500', 'scan_d500_fixed', 'scan_d500_slam')
 SCAN_SECTORS = (
     ('front', -math.pi / 4.0, math.pi / 4.0),
@@ -130,6 +131,149 @@ def _score_record(score, index, selected=False, best_forward=False,
     }
     record.update(_trajectory_geometry(score.traj))
     return record
+
+
+def serialize_full_dwb_evaluation(msg):
+    """Serialize every Jazzy-published candidate without inventing fields.
+
+    Jazzy's message has no explicit validity or invalidation-reason member.
+    DWB represents illegal trajectories with a negative total, so retain that
+    derived classification and state its provenance in the schema instead of
+    claiming an upstream reason that was never published.
+    """
+    best_index = int(msg.best_index)
+    return {
+        'schema_version': 1,
+        'message_type': 'dwb_msgs/msg/LocalPlanEvaluation',
+        'message_stamp_s': (float(msg.header.stamp.sec)
+                            + float(msg.header.stamp.nanosec) * 1e-9),
+        'frame_id': msg.header.frame_id,
+        'selected_index': best_index,
+        'worst_index': int(msg.worst_index),
+        'validity_semantics': (
+            'derived from finite total_score >= 0; Jazzy message has no '
+            'explicit validity or invalidation-reason field'),
+        'unavailable_fields': [
+            'explicit_validity', 'explicit_invalidation_reason',
+            'DWB_internal_tie_break_order',
+        ],
+        'trajectories': [_score_record(
+            score, index, selected=index == best_index)
+            for index, score in enumerate(msg.twists)],
+    }
+
+
+@dataclass
+class FullCandidateCapturePolicy:
+    """Select a small, diverse set of full DWB frames per robot.
+
+    This is intentionally a pure policy object: it observes command kinds and
+    score summaries but never participates in Nav2 command or action paths.
+    """
+
+    limit: int = DWB_FULL_CAPTURE_LIMIT_PER_KIND
+    captured_stall: list = field(default_factory=list)
+    captured_healthy: list = field(default_factory=list)
+    seen_stall: set = field(default_factory=set)
+    current_goal: object = None
+    command_kind: str = 'MISSING_OR_STALE'
+    kind_started_s: float | None = None
+    emitted: set = field(default_factory=set)
+    last_nonlinear: object = None
+
+    def _reset_goal(self, goal_key, kind, now_s):
+        self.current_goal = goal_key
+        self.command_kind = kind
+        self.kind_started_s = float(now_s)
+        self.emitted.clear()
+        self.last_nonlinear = None
+
+    @staticmethod
+    def context_key(context, evaluation):
+        selected = evaluation.get('trajectories', [])
+        selected = next((item for item in selected if item.get('selected')), {})
+        critics = tuple(sorted(
+            (item.get('name'), round(float(item.get('raw_score', 0.0)), 5),
+             round(float(item.get('scale', 0.0)), 5))
+            for item in selected.get('critics', [])))
+        pose = context.get('robot_state', {}).get('shared_map_pose') or {}
+        return (
+            context.get('goal', {}).get('label'),
+            round(float(pose.get('x_m', 0.0)) / 0.25),
+            round(float(pose.get('y_m', 0.0)) / 0.25),
+            round(float((selected.get('velocity') or {}).get('linear_x_mps', 0.0)), 4),
+            round(float((selected.get('velocity') or {}).get('angular_z_radps', 0.0)), 4),
+            round(float(selected.get('total_score', 0.0)), 4), critics,
+            context.get('path_revisions', {}).get('global'),
+            context.get('path_revisions', {}).get('local'),
+        )
+
+    def observe_stall(self, now_s, goal_key, kind, context, evaluation):
+        """Return zero or more `(reason, evaluation)` full-frame captures."""
+        if goal_key is None:
+            self._reset_goal(None, kind, now_s)
+            return []
+        if goal_key != self.current_goal:
+            self._reset_goal(goal_key, kind, now_s)
+        prior = self.command_kind
+        if kind != prior:
+            output = []
+            if prior == 'ANGULAR_ONLY' and kind == 'ZERO':
+                output.append(('ANGULAR_TO_ZERO_TRANSITION', evaluation))
+            if prior in ('ANGULAR_ONLY', 'ZERO') and kind == 'LINEAR' and self.last_nonlinear:
+                output.append(('PRE_RECOVERY', self.last_nonlinear))
+            self.command_kind = kind
+            self.kind_started_s = float(now_s)
+            self.emitted.clear()
+        else:
+            output = []
+        started = now_s if self.kind_started_s is None else self.kind_started_s
+        duration = max(0.0, float(now_s) - float(started))
+        if kind == 'ANGULAR_ONLY' and duration >= 2.0 and 'ANGULAR_CONTINUOUS' not in self.emitted:
+            self.emitted.add('ANGULAR_CONTINUOUS')
+            output.append(('ANGULAR_ONLY_OVER_2S', evaluation))
+        if kind == 'ZERO' and duration >= 1.0 and 'ZERO_CONTINUOUS' not in self.emitted:
+            self.emitted.add('ZERO_CONTINUOUS')
+            output.append(('ZERO_OVER_1S', evaluation))
+        if kind == 'ZERO' and duration >= 2.0 and 'ZERO_LATER' not in self.emitted:
+            self.emitted.add('ZERO_LATER')
+            output.append(('ZERO_ONE_SECOND_LATER', evaluation))
+        if kind in ('ANGULAR_ONLY', 'ZERO'):
+            self.last_nonlinear = evaluation
+        result = []
+        for reason, candidate in output:
+            if len(self.captured_stall) >= self.limit:
+                break
+            key = self.context_key(context, candidate)
+            if key in self.seen_stall:
+                continue
+            self.seen_stall.add(key)
+            self.captured_stall.append(reason)
+            result.append((reason, candidate))
+        return result
+
+    def observe_healthy(self, context, evaluation):
+        """Return a diverse forward frame if the global healthy bound permits."""
+        if len(self.captured_healthy) >= self.limit:
+            return None
+        selected = next((item for item in evaluation.get('trajectories', [])
+                         if item.get('selected')), None)
+        if not selected or not selected.get('valid'):
+            return None
+        velocity = selected.get('velocity') or {}
+        if float(velocity.get('linear_x_mps', 0.0)) < 0.026:
+            return None
+        goal = context.get('goal', {})
+        distance = goal.get('distance_to_goal_m')
+        source = goal.get('source', 'unknown')
+        curved = abs(float(velocity.get('angular_z_radps', 0.0))) >= 0.10
+        category = '%s_%s_%s' % (
+            source, 'near' if distance is not None and distance <= 1.0 else 'far',
+            'curved' if curved else 'straight')
+        if category in self.captured_healthy:
+            return None
+        self.captured_healthy.append(category)
+        return 'HEALTHY_%s' % category.upper()
 
 
 def summarize_dwb_evaluation(msg, forward_threshold=DWB_FORWARD_THRESHOLD_MPS,

@@ -61,3 +61,23 @@ def test_score_fingerprint_collapses_repeated_identical_score_contexts():
     first = {'selected': selected, 'forward': forward}
     second = {'selected': dict(selected), 'forward': dict(forward)}
     assert MODULE.score_fingerprint(first) == MODULE.score_fingerprint(second)
+
+
+def test_full_winner_rescores_all_valid_trajectories_and_reports_ties():
+    first = trajectory(7.0, 0.0, 0.0, 7.0, 0.0)
+    first.update({'trajectory_index': 0, 'valid': True, 'selected': True})
+    forward = trajectory(7.0, 0.0, 0.1, 6.0, 0.026)
+    forward.update({'trajectory_index': 1, 'valid': True, 'selected': False})
+    another = trajectory(7.5, 0.0, 0.0, 7.5, 0.052)
+    another.update({'trajectory_index': 2, 'valid': True, 'selected': False})
+    winners, total, margin = MODULE._winner(
+        [first, forward, another], {'path_align': 8.0, 'path_dist': 0.0, 'goal_dist': 24.0})
+    assert [item['trajectory_index'] for item in winners] == [1]
+    assert total < 7.0
+    assert margin is not None
+
+
+def test_full_scale_matrix_matches_requested_baseline_and_path_pairs():
+    configurations = {name for name, _ in MODULE.full_scale_candidates()}
+    assert 'pa8_pd24_gd24' in configurations
+    assert 'pa1_pd6_gd24' in configurations

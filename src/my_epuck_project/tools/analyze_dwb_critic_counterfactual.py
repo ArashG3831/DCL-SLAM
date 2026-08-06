@@ -22,6 +22,122 @@ EPSILON = 1.0e-9
 BASELINE = {'path_align': 8.0, 'path_dist': 24.0, 'goal_dist': 24.0}
 
 
+def full_scale_candidates():
+    """The bounded, requested joint path-critic matrix."""
+    pairs = ((8, 24), (6, 18), (4, 12), (3, 10), (2, 8), (2, 6),
+             (1, 8), (1, 6))
+    return [(f'pa{align}_pd{path}_gd24', {
+        'path_align': float(align), 'path_dist': float(path), 'goal_dist': 24.0,
+    }) for align, path in pairs]
+
+
+def _full_records(path: Path):
+    return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()
+            if line.strip()]
+
+
+def _winner(trajectories, scales):
+    """Return all tied minimum valid candidates; never invent a tie-break."""
+    scored = [(item, rescored_total(item, scales)) for item in trajectories
+              if item.get('valid')]
+    if not scored:
+        return [], None, None
+    minimum = min(value for _, value in scored)
+    winners = [item for item, value in scored if abs(value - minimum) <= EPSILON]
+    second = min((value for _, value in scored if value > minimum + EPSILON),
+                 default=None)
+    return winners, minimum, None if second is None else second - minimum
+
+
+def _winner_kind(item):
+    velocity = item.get('velocity') or {}
+    vx, wz = float(velocity.get('linear_x_mps', 0.0)), float(velocity.get('angular_z_radps', 0.0))
+    if vx < -EPSILON:
+        return 'reverse'
+    if vx >= FORWARD_THRESHOLD_MPS - EPSILON:
+        return 'forward_executable'
+    if vx > EPSILON:
+        return 'forward_below_threshold'
+    return 'angular_only' if abs(wz) > EPSILON else 'zero'
+
+
+def write_full_report(input_dir: Path, output_dir: Path) -> dict[str, Any]:
+    frames = _full_records(input_dir / 'dwb_full_candidate_frames.jsonl')
+    configurations = full_scale_candidates()
+    rows, baseline_matches = [], []
+    distinct_stalls = set()
+    for frame in frames:
+        evaluation = frame['evaluation']
+        trajectories = evaluation.get('trajectories', [])
+        selected_index = evaluation.get('selected_index')
+        winners, _, _ = _winner(trajectories, BASELINE)
+        baseline_matches.append(len(winners) == 1 and winners[0].get('trajectory_index') == selected_index)
+        if not str(frame.get('capture_reason', '')).startswith('HEALTHY_'):
+            distinct_stalls.add((frame.get('robot'), frame.get('goal', {}).get('label'),
+                                 tuple((x.get('name'), round(float(x.get('raw_score', 0)), 4))
+                                       for x in next((t for t in trajectories if t.get('selected')), {}).get('critics', []))))
+    for name, scales in configurations:
+        corrected, healthy_changed, reverse, ties = set(), 0, 0, 0
+        for index, frame in enumerate(frames):
+            trajectories = frame['evaluation'].get('trajectories', [])
+            baseline_winners, baseline_total, _ = _winner(trajectories, BASELINE)
+            winners, total, margin = _winner(trajectories, scales)
+            winner = winners[0] if len(winners) == 1 else None
+            reason = str(frame.get('capture_reason', ''))
+            if len(winners) != 1:
+                ties += 1
+            kind = 'tied' if winner is None else _winner_kind(winner)
+            selected = next((item for item in trajectories if item.get('selected')), {})
+            if reason.startswith('HEALTHY_'):
+                if kind != 'forward_executable':
+                    healthy_changed += 1
+            elif kind == 'forward_executable':
+                corrected.add((frame.get('robot'), frame.get('goal', {}).get('label'), index))
+            reverse += kind == 'reverse'
+            rows.append({
+                'configuration': name, 'robot': frame.get('robot'),
+                'capture_reason': reason, 'sim_time_s': frame.get('simulation_timestamp_s'),
+                'goal_label': frame.get('goal', {}).get('label'),
+                'baseline_selected_index': selected.get('trajectory_index'),
+                'counterfactual_selected_index': '' if winner is None else winner.get('trajectory_index'),
+                'winner_kind': kind, 'winner_vx_mps': '' if winner is None else winner.get('velocity', {}).get('linear_x_mps'),
+                'winner_wz_radps': '' if winner is None else winner.get('velocity', {}).get('angular_z_radps'),
+                'winner_total_score': total, 'margin_over_second': margin,
+                'trajectory_count': len(trajectories), 'valid_trajectory_count': sum(t.get('valid') for t in trajectories),
+                'tied_winner_indices': '|'.join(str(t.get('trajectory_index')) for t in winners),
+            })
+        # one result row per frame is deliberately retained above; aggregate below.
+        rows.append({'configuration': name, 'robot': 'ALL', 'capture_reason': 'AGGREGATE',
+                     'sim_time_s': '', 'goal_label': '', 'baseline_selected_index': '',
+                     'counterfactual_selected_index': '', 'winner_kind': '', 'winner_vx_mps': '',
+                     'winner_wz_radps': '', 'winner_total_score': '', 'margin_over_second': '',
+                     'trajectory_count': '', 'valid_trajectory_count': '', 'tied_winner_indices': '',
+                     'distinct_stall_frames_corrected': len(corrected),
+                     'healthy_nonforward_count': healthy_changed, 'reverse_count': reverse,
+                     'tie_count': ties})
+    fields = sorted({key for row in rows for key in row})
+    with (output_dir / 'dwb_full_counterfactual_results.csv').open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader(); writer.writerows(rows)
+    aggregates = [row for row in rows if row.get('capture_reason') == 'AGGREGATE']
+    summary = {
+        'schema_version': 1, 'source': str(input_dir),
+        'method': 'all retained valid LocalPlanEvaluation trajectories rescored; invalid candidates remain ineligible',
+        'baseline_scales': BASELINE, 'frame_count': len(frames),
+        'stall_frame_count': sum(not str(f.get('capture_reason', '')).startswith('HEALTHY_') for f in frames),
+        'healthy_frame_count': sum(str(f.get('capture_reason', '')).startswith('HEALTHY_') for f in frames),
+        'baseline_unique_selection_reproduced_count': sum(baseline_matches),
+        'baseline_unique_selection_mismatch_count': len(baseline_matches) - sum(baseline_matches),
+        'distinct_stall_context_count': len(distinct_stalls),
+        'configurations': aggregates,
+        'limitations': ['Tied minima are reported, not arbitrarily tie-broken.',
+                        'Validity is retained from Jazzy DWB publication; no invalid trajectory becomes eligible.'],
+    }
+    (output_dir / 'dwb_full_counterfactual_summary.json').write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    return summary
+
+
 def _contribution(record: dict[str, Any], critic: str) -> float:
     return float(record.get('critic_contributions', {}).get(critic, 0.0))
 
@@ -251,6 +367,8 @@ def _healthy_command_rows(timeseries_path: Path, goals_path: Path) -> list[dict[
 
 
 def write_report(input_dir: Path, output_dir: Path) -> dict[str, Any]:
+    if (input_dir / 'dwb_full_candidate_frames.jsonl').is_file():
+        return write_full_report(input_dir, output_dir)
     records = load_stall_records(input_dir / 'dwb_stall_events.jsonl')
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset = [_record_row(record) for record in records]
@@ -312,9 +430,12 @@ def main() -> int:
     summary = write_report(args.input_dir, output_dir)
     print(json.dumps({
         'output_dir': str(output_dir),
-        'detailed_stall_evaluations': summary['detailed_stall_evaluations'],
-        'healthy_forward_command_only_samples': summary['healthy_forward_command_only_samples'],
-        'top_configuration': summary['ranked_configurations'][0] if summary['ranked_configurations'] else None,
+        'detailed_stall_evaluations': summary.get('detailed_stall_evaluations',
+                                                   summary.get('stall_frame_count', 0)),
+        'healthy_forward_command_only_samples': summary.get(
+            'healthy_forward_command_only_samples', summary.get('healthy_frame_count', 0)),
+        'top_configuration': (summary.get('ranked_configurations') or
+                              summary.get('configurations') or [None])[0],
     }, indent=2))
     return 0
 

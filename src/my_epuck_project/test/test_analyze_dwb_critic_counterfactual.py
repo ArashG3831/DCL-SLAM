@@ -81,3 +81,20 @@ def test_full_scale_matrix_matches_requested_baseline_and_path_pairs():
     configurations = {name for name, _ in MODULE.full_scale_candidates()}
     assert 'pa8_pd24_gd24' in configurations
     assert 'pa1_pd6_gd24' in configurations
+
+
+def test_full_report_creates_requested_output_directory(tmp_path):
+    input_dir = tmp_path / 'input'
+    input_dir.mkdir()
+    frame = {
+        'robot': 'robot1', 'capture_reason': 'ZERO_OVER_1S',
+        'simulation_timestamp_s': 1.0, 'goal': {'label': 'frontier_robot1'},
+        'evaluation': {'selected_index': 0, 'trajectories': [
+            dict(trajectory(1.0, 0.0, 0.0, 1.0, 0.0), trajectory_index=0,
+                 selected=True, valid=True)]},
+    }
+    (input_dir / 'dwb_full_candidate_frames.jsonl').write_text(
+        __import__('json').dumps(frame) + '\n')
+    output = tmp_path / 'nested' / 'report'
+    MODULE.write_full_report(input_dir, output)
+    assert (output / 'dwb_full_counterfactual_summary.json').is_file()

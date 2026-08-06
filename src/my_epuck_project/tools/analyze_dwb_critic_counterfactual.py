@@ -62,16 +62,20 @@ def _winner_kind(item):
 
 
 def write_full_report(input_dir: Path, output_dir: Path) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
     frames = _full_records(input_dir / 'dwb_full_candidate_frames.jsonl')
     configurations = full_scale_candidates()
-    rows, baseline_matches = [], []
+    rows, baseline_selected_minimum, baseline_unique = [], [], []
     distinct_stalls = set()
     for frame in frames:
         evaluation = frame['evaluation']
         trajectories = evaluation.get('trajectories', [])
         selected_index = evaluation.get('selected_index')
         winners, _, _ = _winner(trajectories, BASELINE)
-        baseline_matches.append(len(winners) == 1 and winners[0].get('trajectory_index') == selected_index)
+        baseline_selected_minimum.append(any(
+            item.get('trajectory_index') == selected_index for item in winners))
+        baseline_unique.append(len(winners) == 1 and winners[0].get(
+            'trajectory_index') == selected_index)
         if not str(frame.get('capture_reason', '')).startswith('HEALTHY_'):
             distinct_stalls.add((frame.get('robot'), frame.get('goal', {}).get('label'),
                                  tuple((x.get('name'), round(float(x.get('raw_score', 0)), 4))
@@ -126,8 +130,11 @@ def write_full_report(input_dir: Path, output_dir: Path) -> dict[str, Any]:
         'baseline_scales': BASELINE, 'frame_count': len(frames),
         'stall_frame_count': sum(not str(f.get('capture_reason', '')).startswith('HEALTHY_') for f in frames),
         'healthy_frame_count': sum(str(f.get('capture_reason', '')).startswith('HEALTHY_') for f in frames),
-        'baseline_unique_selection_reproduced_count': sum(baseline_matches),
-        'baseline_unique_selection_mismatch_count': len(baseline_matches) - sum(baseline_matches),
+        'baseline_selected_among_minimum_count': sum(baseline_selected_minimum),
+        'baseline_selected_not_minimum_count': (len(baseline_selected_minimum)
+                                                - sum(baseline_selected_minimum)),
+        'baseline_unique_selection_reproduced_count': sum(baseline_unique),
+        'baseline_tied_minimum_count': len(baseline_unique) - sum(baseline_unique),
         'distinct_stall_context_count': len(distinct_stalls),
         'configurations': aggregates,
         'limitations': ['Tied minima are reported, not arbitrarily tie-broken.',

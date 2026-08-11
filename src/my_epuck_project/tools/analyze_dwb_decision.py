@@ -163,6 +163,9 @@ def _summary_rows(frames):
                 healthy_angular += 1
         winners = [o["winner"] for o in outcomes]
         margins = [o["margin"] for o in outcomes]
+        active_outcomes = [outcomes[frames.index(frame)] for frame in active_stalls]
+        active_margins = [o["margin"] for o in active_outcomes]
+        active_winners = [o["winner"] for o in active_outcomes]
         vx = [_velocity(x)[0] for x in winners]
         wz = [abs(_velocity(x)[1]) for x in winners]
         exact_ties = sum(len(o["exact"]) > 1 for o in outcomes)
@@ -199,6 +202,10 @@ def _summary_rows(frames):
             "minimum_winning_margin": min(margins) if margins else None,
             "median_positive_winning_margin": _median([x for x in margins if x > NEAR_EPS]),
             "median_selected_vx_mps": _median(vx), "median_abs_wz_radps": _median(wz),
+            "median_active_stall_vx_mps": _median([_velocity(x)[0] for x in active_winners]),
+            "median_active_stall_abs_wz_radps": _median([abs(_velocity(x)[1]) for x in active_winners]),
+            "median_active_stall_winning_margin": _median(active_margins),
+            "minimum_active_stall_winning_margin": min(active_margins) if active_margins else None,
             "median_path_align_contribution": _median(
                 [_contribution(x, "PathAlign", scales) for x in winners]),
             "median_path_dist_contribution": _median(

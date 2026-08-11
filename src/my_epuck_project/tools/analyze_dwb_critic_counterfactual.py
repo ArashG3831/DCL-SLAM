@@ -212,9 +212,11 @@ def _corrected_reports(frames, output_dir):
                 'C_INCOMPLETE_MINIMUM' if any(not _complete(item) for item in exact)
                 else 'A_FORWARD_TIED_LATER' if any(
                     _command_category(item) == 'forward_executable' for item in exact)
+                and first is not None and _command_category(first) in
+                ('zero', 'angular_only')
                 else 'D_NO_FORWARD_IN_MINIMUM' if not any(
                     _command_category(item).startswith('forward') for item in exact)
-                else 'B_FORWARD_NOT_MINIMUM'),
+                else 'FORWARD_TIED_SELECTED'),
         })
         for config_name, scales in full_scale_candidates():
             winner, winner_score = _strict_winner(trajectories, scales)

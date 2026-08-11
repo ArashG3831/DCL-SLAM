@@ -83,6 +83,28 @@ def test_full_scale_matrix_matches_requested_baseline_and_path_pairs():
     assert 'pa1_pd6_gd24' in configurations
 
 
+def test_strict_winner_preserves_first_recorded_exact_minimum():
+    first = trajectory(1.0, 0.0, 0.0, 1.0, 0.0)
+    first.update({'trajectory_index': 4, 'valid': True})
+    later = trajectory(1.0, 0.0, 0.0, 1.0, 0.026)
+    later.update({'trajectory_index': 9, 'valid': True})
+    critics = [{'name': name, 'raw_score': 0.0, 'scale': 1.0}
+               for name in MODULE.REQUIRED_ACTIVE_CRITICS]
+    first['critics'] = critics
+    later['critics'] = critics
+    winner, score = MODULE._strict_winner([first, later], MODULE.BASELINE)
+    assert winner['trajectory_index'] == 4
+    assert score == 1.0
+
+
+def test_partial_valid_trajectory_is_not_silently_complete():
+    partial = trajectory(0.5, 0.0, 0.0, 0.5, 0.026)
+    partial.update({'trajectory_index': 0, 'valid': True})
+    partial['critics'] = [{'name': name, 'raw_score': 0.0, 'scale': 1.0}
+                          for name in MODULE.REQUIRED_ACTIVE_CRITICS[:-1]]
+    assert not MODULE._complete(partial)
+
+
 def test_full_report_creates_requested_output_directory(tmp_path):
     input_dir = tmp_path / 'input'
     input_dir.mkdir()

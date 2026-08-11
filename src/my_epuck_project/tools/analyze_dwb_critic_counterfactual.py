@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 from collections import Counter
+import collections
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ from typing import Any
 FORWARD_THRESHOLD_MPS = 0.026
 EPSILON = 1.0e-9
 BASELINE = {'path_align': 8.0, 'path_dist': 24.0, 'goal_dist': 24.0}
+REQUIRED_ACTIVE_CRITICS = (
+    'BaseObstacle', 'Oscillation', 'PathAlign', 'PathDist', 'GoalDist')
+NEAR_TIE_EPSILON = 1.0e-6
 
 
 def full_scale_candidates():
@@ -61,9 +65,251 @@ def _winner_kind(item):
     return 'angular_only' if abs(wz) > EPSILON else 'zero'
 
 
+def _command_category(item):
+    """Classify a trajectory using the requested real-robot threshold."""
+    velocity = item.get('velocity') or {}
+    vx = float(velocity.get('linear_x_mps', 0.0))
+    wz = float(velocity.get('angular_z_radps', 0.0))
+    if vx < -EPSILON:
+        return 'reverse'
+    if vx >= FORWARD_THRESHOLD_MPS - EPSILON:
+        return 'forward_executable'
+    if vx > EPSILON:
+        return 'forward_below_threshold'
+    return 'angular_only' if abs(wz) >= EPSILON else 'zero'
+
+
+def _critic_names(item):
+    return [str(score.get('name', '')) for score in item.get('critics', [])]
+
+
+def _complete(item):
+    return set(REQUIRED_ACTIVE_CRITICS) <= set(_critic_names(item))
+
+
+def _weighted_sum(item, scales):
+    """Recompute a complete score from raw critic values and new scales."""
+    # CriticScore.scale in this Jazzy build is the effective normalized scale
+    # (0.08/0.24 in the captured message), while the YAML policy values are
+    # expressed as 8/24.  Rescale recorded weighted contributions by the
+    # policy ratio, preserving the exact published baseline total.
+    return rescored_total(item, scales)
+
+
+def _strict_winner(trajectories, scales, complete_only=True):
+    """Apply DWB's ordered strict-lower selection to recorded candidates."""
+    winner = None
+    winner_total = None
+    for item in trajectories:
+        if not item.get('valid') or (complete_only and not _complete(item)):
+            continue
+        score = _weighted_sum(item, scales)
+        if winner is None or score < winner_total:
+            winner, winner_total = item, score
+    return winner, winner_total
+
+
+def _lower_bound(item, scales):
+    """Minimum possible alternative score from a partial nonnegative vector."""
+    return _weighted_sum(item, scales)
+
+
+def _frame_baseline(frame):
+    trajectories = frame['evaluation'].get('trajectories', [])
+    valid = [item for item in trajectories if item.get('valid')]
+    minimum = min((float(item['total_score']) for item in valid), default=None)
+    exact = [] if minimum is None else [
+        item for item in valid if float(item['total_score']) == minimum]
+    near = [] if minimum is None else [
+        item for item in valid if (float(item['total_score']) != minimum and
+                                   abs(float(item['total_score']) - minimum)
+                                   <= NEAR_TIE_EPSILON)]
+    first = exact[0] if exact else None
+    selected_index = int(frame['evaluation'].get('selected_index', -1))
+    selected = next((item for item in trajectories
+                     if int(item.get('trajectory_index', -1)) == selected_index), None)
+    return valid, minimum, exact, near, first, selected
+
+
+def _corrected_reports(frames, output_dir):
+    completeness_rows, tie_rows, counterfactual_rows = [], [], []
+    baseline_order_pass = 0
+    exact_tie_count = near_tie_count = 0
+    incomplete_frame_count = 0
+    unresolved = {}
+    for frame_index, frame in enumerate(frames):
+        trajectories = frame['evaluation'].get('trajectories', [])
+        valid, minimum, exact, near, first, selected = _frame_baseline(frame)
+        selected_index = frame['evaluation'].get('selected_index')
+        order_pass = first is not None and int(first['trajectory_index']) == int(selected_index)
+        baseline_order_pass += bool(order_pass)
+        exact_tie_count += len(exact) > 1
+        near_tie_count += len(near) > 0
+        complete = [item for item in trajectories if _complete(item)]
+        incomplete = [item for item in trajectories if not _complete(item)]
+        valid_incomplete = [item for item in incomplete if item.get('valid')]
+        incomplete_frame_count += bool(valid_incomplete)
+        last_critics = [_critic_names(item)[-1] if _critic_names(item) else ''
+                        for item in trajectories]
+        categories = collections.Counter(_command_category(item) for item in exact)
+        complete_ties = sum(_complete(item) for item in exact)
+        complete_forward = sum(_complete(item) and _command_category(item).startswith('forward')
+                               for item in valid)
+        complete_zero_angular = sum(_complete(item) and _command_category(item) in
+                                    ('zero', 'angular_only') for item in valid)
+        missing_names = sorted(set(REQUIRED_ACTIVE_CRITICS) -
+                               set(_critic_names(item) for item in []))
+        completeness_rows.append({
+            'frame_index': frame_index, 'robot': frame.get('robot'),
+            'capture_reason': frame.get('capture_reason'),
+            'trajectory_count': len(trajectories), 'valid_count': len(valid),
+            'complete_trajectories': len(complete),
+            'incomplete_trajectories': len(incomplete),
+            'complete_tied_minimum_trajectories': complete_ties,
+            'complete_forward_trajectories': complete_forward,
+            'complete_zero_angular_trajectories': complete_zero_angular,
+            'required_active_critics': '|'.join(REQUIRED_ACTIVE_CRITICS),
+            'critic_name_vectors': '|'.join(','.join(_critic_names(item))
+                                            for item in trajectories),
+            'critic_count_by_index': '|'.join(str(len(_critic_names(item)))
+                                              for item in trajectories),
+            'complete_by_index': '|'.join('1' if _complete(item) else '0'
+                                          for item in trajectories),
+            'stored_total_status_by_index': '|'.join(
+                'COMPLETE' if _complete(item) else
+                'INVALID_OR_PARTIAL' if item.get('valid') is False else 'PARTIAL'
+                for item in trajectories),
+            'last_critic_evaluated_by_index': '|'.join(last_critics),
+            'short_circuit_apparent_count': sum(
+                bool(item.get('valid')) and not _complete(item) for item in trajectories),
+            'short_circuit_critics': '|'.join(sorted(set(
+                last_critics[index] for index, item in enumerate(trajectories)
+                if item.get('valid') and not _complete(item)))),
+            'stored_total_complete': len(incomplete) == 0,
+        })
+        tie_rows.append({
+            'frame_index': frame_index, 'robot': frame.get('robot'),
+            'capture_reason': frame.get('capture_reason'),
+            'minimum_total_exact': minimum, 'exact_minimum_count': len(exact),
+            'near_tie_count_within_1e-6': len(near),
+            'exact_minimum_indices': '|'.join(str(item['trajectory_index']) for item in exact),
+            'first_exact_minimum_index': '' if first is None else first['trajectory_index'],
+            'selected_index': selected_index,
+            'baseline_order_pass': order_pass,
+            'selected_command_category': '' if selected is None else _command_category(selected),
+            'minimum_command_categories': '|'.join(
+                f'{key}:{value}' for key, value in sorted(categories.items())),
+            'executable_forward_tied_with_zero_or_angular': bool(
+                categories['forward_executable'] and
+                (categories['zero'] or categories['angular_only'])),
+            'selection_determined_by_generator_order': bool(order_pass and len(exact) > 1),
+            'forward_tied_later_than_selected': bool(
+                first is not None and _command_category(first) in
+                ('zero', 'angular_only') and any(
+                    _command_category(item) == 'forward_executable' for item in exact[1:])),
+            'incomplete_minimum_count': sum(not _complete(item) for item in exact),
+            'case_classification': (
+                'C_INCOMPLETE_MINIMUM' if any(not _complete(item) for item in exact)
+                else 'A_FORWARD_TIED_LATER' if any(
+                    _command_category(item) == 'forward_executable' for item in exact)
+                else 'D_NO_FORWARD_IN_MINIMUM' if not any(
+                    _command_category(item).startswith('forward') for item in exact)
+                else 'B_FORWARD_NOT_MINIMUM'),
+        })
+        for config_name, scales in full_scale_candidates():
+            winner, winner_score = _strict_winner(trajectories, scales)
+            partial_bounds = [_lower_bound(item, scales) for item in valid_incomplete]
+            unresolved_frame = (winner is None or any(
+                bound <= winner_score + EPSILON for bound in partial_bounds))
+            if unresolved_frame:
+                unresolved[config_name] = unresolved.get(config_name, 0) + 1
+            counterfactual_rows.append({
+                'frame_index': frame_index, 'robot': frame.get('robot'),
+                'capture_reason': frame.get('capture_reason'), 'configuration': config_name,
+                'counterfactual_status': ('COUNTERFACTUAL_UNRESOLVED_INCOMPLETE_SCORES'
+                                           if unresolved_frame else 'RESOLVED_COMPLETE_SCORES'),
+                'winner_index': '' if winner is None or unresolved_frame else winner['trajectory_index'],
+                'winner_category': '' if winner is None else _command_category(winner),
+                'winner_vx_mps': '' if winner is None else winner['velocity']['linear_x_mps'],
+                'winner_wz_radps': '' if winner is None else winner['velocity']['angular_z_radps'],
+                'winner_score': winner_score, 'incomplete_valid_count': len(valid_incomplete),
+                'minimum_incomplete_lower_bound': min(partial_bounds, default=None),
+            })
+    fields = list(completeness_rows[0]) if completeness_rows else []
+    with (output_dir / 'dwb_full_candidate_completeness.csv').open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(completeness_rows)
+    fields = list(tie_rows[0]) if tie_rows else []
+    with (output_dir / 'dwb_tied_minimum_analysis.csv').open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(tie_rows)
+    fields = list(counterfactual_rows[0]) if counterfactual_rows else []
+    with (output_dir / 'dwb_full_counterfactual_results_corrected.csv').open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(counterfactual_rows)
+    summary = {
+        'schema_version': 1, 'source': 'existing full candidate frames',
+        'dwb_source_version': 'ros-jazzy dwb_core 1.3.10',
+        'selection_rule': 'ordered LocalPlanEvaluation.twists; replace only on strict lower total',
+        'frame_count': len(frames), 'baseline_order_pass_count': baseline_order_pass,
+        'baseline_order_all_pass': baseline_order_pass == len(frames),
+        'exact_tie_frame_count': exact_tie_count, 'near_tie_frame_count': near_tie_count,
+        'valid_incomplete_frame_count': incomplete_frame_count,
+        'complete_trajectory_count': sum(int(row['complete_trajectories']) for row in completeness_rows),
+        'incomplete_trajectory_count': sum(int(row['incomplete_trajectories']) for row in completeness_rows),
+        'unresolved_frames_by_configuration': unresolved,
+        'tied_command_category_counts': dict(collections.Counter(
+            category
+            for row in tie_rows
+            for category in str(row['minimum_command_categories']).split('|')
+            if category)),
+        'executable_forward_tied_with_zero_or_angular_frame_count': sum(
+            bool(row['executable_forward_tied_with_zero_or_angular'])
+            for row in tie_rows),
+        'short_circuit_last_critic_counts': dict(collections.Counter(
+            critic for row in completeness_rows
+            for critic in str(row['short_circuit_critics']).split('|')
+            if critic)),
+        'resolved_configuration_count': sum(
+            count == 0 for count in unresolved.values()) if unresolved else len(full_scale_candidates()),
+        'runtime_parameter_investigation': {
+            'service_targets': [
+                '/robot1/controller_server/get_parameters',
+                '/robot2/controller_server/get_parameters'],
+            'parameter_prefix': 'FollowPath.',
+            'required_names': [
+                'FollowPath.min_vel_x', 'FollowPath.max_vel_x',
+                'FollowPath.max_vel_theta', 'FollowPath.min_speed_xy',
+                'FollowPath.max_speed_xy', 'FollowPath.vx_samples',
+                'FollowPath.vtheta_samples', 'FollowPath.sim_time',
+                'FollowPath.short_circuit_trajectory_evaluation',
+                'FollowPath.critics', 'FollowPath.BaseObstacle.scale',
+                'FollowPath.Oscillation.scale', 'FollowPath.PathAlign.scale',
+                'FollowPath.PathDist.scale', 'FollowPath.GoalDist.scale'],
+            'empty_artifact_explanation': (
+                'The prior node marked ACTIVE_PARAMETER_SERVICE even when '
+                'GetParameters returned an empty values array; CriticScore '
+                'raw_score/scale and the loaded YAML remain authoritative for '
+                'the offline scoring analysis.'),
+        },
+        'source_provenance': {
+            'installed_package': 'ros-jazzy-dwb-core 1.3.10-1noble.20251108.012524',
+            'installed_header': '/opt/ros/jazzy/include/dwb_core/dwb_local_planner.hpp',
+            'source_reference': 'https://api.nav2.org/nav2-jazzy/html/dwb__local__planner_8cpp_source.html',
+            'core_scoring_rule': 'results.twists.push_back(score); update only if best.total < 0 or score.total < best.total',
+        },
+        'short_circuit_false_capture_needed': bool(unresolved),
+        'short_circuit_false_reason': ('A valid trajectory omitted GoalDist in one frame; '
+                                       'partial-score lower bounds leave counterfactuals unresolved.'
+                                       if unresolved else None),
+        'source_limitation': 'Critic vector order identifies the last evaluated critic; explicit DWB short-circuit flag is not in LocalPlanEvaluation.',
+    }
+    (output_dir / 'dwb_full_counterfactual_summary_corrected.json').write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    return summary
+
+
 def write_full_report(input_dir: Path, output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     frames = _full_records(input_dir / 'dwb_full_candidate_frames.jsonl')
+    corrected = _corrected_reports(frames, output_dir)
     configurations = full_scale_candidates()
     rows, baseline_selected_minimum, baseline_unique = [], [], []
     distinct_stalls = set()

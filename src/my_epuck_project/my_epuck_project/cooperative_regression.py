@@ -556,8 +556,13 @@ def tf_readiness(domain, timeout_s=4.0):
 
 
 def activate_nav2(domain, timeout_s=10.0):
-    """Start both Nav2 managers after the required transforms are available."""
-    started = time.monotonic()
+    """Start both Nav2 managers after the required transforms are available.
+
+    ``timeout_s`` is deliberately a *per-manager* budget.  Starting robot1
+    can legitimately take most of a minute while Nav2 plugins and costmaps
+    initialize; sharing that budget with robot2 can leave the latter only a
+    few seconds to answer its lifecycle request.
+    """
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
     os.environ['ROS_DOMAIN_ID'] = str(domain)
     context = Context()
@@ -571,9 +576,10 @@ def activate_nav2(domain, timeout_s=10.0):
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         for robot in ('robot1', 'robot2'):
+            robot_started = time.monotonic()
             service = f'/{robot}/lifecycle_manager_navigation/manage_nodes'
             client = node.create_client(ManageLifecycleNodes, service)
-            remaining = max(0.0, timeout_s - (time.monotonic() - started))
+            remaining = max(0.0, timeout_s - (time.monotonic() - robot_started))
             if not client.wait_for_service(timeout_sec=remaining):
                 details['services'][robot] = 'SERVICE_TIMEOUT'
                 return False, details
@@ -581,7 +587,7 @@ def activate_nav2(domain, timeout_s=10.0):
             request.command = ManageLifecycleNodes.Request.STARTUP
             future = client.call_async(request)
             deadline = time.monotonic() + max(
-                0.0, timeout_s - (time.monotonic() - started))
+                0.0, timeout_s - (time.monotonic() - robot_started))
             while not future.done() and time.monotonic() < deadline:
                 executor.spin_once(timeout_sec=0.1)
             if not future.done():
@@ -921,6 +927,12 @@ def required_graph_ready(nodes):
         any(node.endswith(suffix) for node in nodes)
         for suffix in EXPECTED_NODE_SUFFIXES
     )
+
+
+def mission_infrastructure_ready(clock_ok, tf_ok, nav2_started, nodes):
+    """Require both Nav2 lifecycle managers before starting mission time."""
+    return (clock_ok and tf_ok and nav2_started and
+            required_graph_ready(nodes))
 
 
 LIVE_PARAMETER_NODES = (
@@ -1307,7 +1319,8 @@ def internal_trial(args):
                 atomic_json(attempt / 'runner_metadata.json', metadata)
             if clock_ok and tf_ok and not ready:
                 nodes = status.get('nodes', [])
-                ready = required_graph_ready(nodes)
+                ready = mission_infrastructure_ready(
+                    clock_ok, tf_ok, nav2_started, nodes)
                 if ready:
                     metadata['infrastructure_ready'] = True
                     mark_startup_stage(

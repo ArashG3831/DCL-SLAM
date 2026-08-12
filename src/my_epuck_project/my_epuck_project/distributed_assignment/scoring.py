@@ -224,6 +224,32 @@ def _task_feasible(
     return True
 
 
+def _assignment_rank(item: tuple) -> tuple:
+    """Keep the deterministic pair ranking independent of selection policy."""
+    return (
+        -round(item[2].total, 12),
+        round(item[3], 12),
+        round(item[4], 12),
+        item[0], item[1],
+    )
+
+
+def _is_conflict_free_two_active_assignment(item: tuple) -> bool:
+    """Return whether a feasible pair has no cooperative-conflict signal.
+
+    Feasibility is established before this predicate is evaluated.  Exact zero
+    is intentional: the geometry helpers clamp genuinely separated work to
+    0.0, while any nonzero value represents an existing soft conflict signal.
+    """
+    first_id, second_id, score, _, _ = item
+    return bool(first_id and second_id) and (
+        score.nearby_goal_penalty == 0.0 and
+        score.route_overlap_penalty == 0.0 and
+        score.sensing_overlap_penalty == 0.0 and
+        score.hard_failure_penalty == 0.0
+    )
+
+
 def choose_pair_assignment(
         round_id: str, union: CanonicalUnion,
         robot1_bids: BidBatch, robot2_bids: BidBatch,
@@ -279,22 +305,20 @@ def choose_pair_assignment(
             candidates.append((first_id, second_id, score, combined, maximum))
     non_idle = [item for item in candidates
                 if item[0] or item[1]]
-    if non_idle:
-        selected = min(non_idle, key=lambda item: (
-            -round(item[2].total, 12),
-            round(item[3], 12),
-            round(item[4], 12),
-            item[0], item[1],
-        ))
+    conflict_free_two_active = [
+        item for item in non_idle
+        if _is_conflict_free_two_active_assignment(item)
+    ]
+    if conflict_free_two_active:
+        # Independent useful work should use both robots.  Existing soft
+        # utility and deterministic ties still select which independent pair.
+        selected = min(conflict_free_two_active, key=_assignment_rank)
+    elif non_idle:
+        selected = min(non_idle, key=_assignment_rank)
     else:
         selected = (IDLE_TASK_ID, IDLE_TASK_ID, AssignmentScore(), 0.0, 0.0)
     first_id, second_id, score, combined, maximum = selected
-    best_non_idle = min(non_idle, key=lambda item: (
-        -round(item[2].total, 12),
-        round(item[3], 12),
-        round(item[4], 12),
-        item[0], item[1],
-    )) if non_idle else None
+    best_non_idle = selected if non_idle else None
     bid_task_ids = set(first_map) | set(second_map)
     hard_rejected = bid_task_ids & hard_failed_tasks
     gain_rejected = {

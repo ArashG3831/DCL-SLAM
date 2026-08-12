@@ -310,3 +310,100 @@ def test_one_active_can_beat_conflicting_two_active_pair():
     assert (decision.robot1_task_id, decision.robot2_task_id) in {
         (ids['primary'], ''), ('', ids['primary']),
     }
+
+
+def test_conflict_free_pair_beats_numerically_better_solo_assignment():
+    """Use both robots when the second useful task has no conflict signal."""
+    first_task = make_task(
+        'robot1', 'first', (5.0, 0.0), (5.0, 0.2),
+        Bounds((4.8, 0.0), (5.2, 0.4)), gain=0.05,
+    )
+    second_task = make_task(
+        'robot2', 'second', (0.0, 5.0), (0.0, 5.2),
+        Bounds((-0.2, 4.8), (0.2, 5.2)), gain=0.05,
+    )
+    union = build_canonical_union([first_task], [second_task])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['first'], 5.0, [(0, 0), (5, 0)]),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['second'], 5.0, [(0, 1), (0, 5)]),
+        ]),
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        ids['first'], ids['second'],
+    )
+    assert decision.score.total < 0.0
+    assert decision.score.route_overlap_penalty == 0.0
+    assert decision.score.sensing_overlap_penalty == 0.0
+
+
+def test_best_conflict_free_pair_beats_higher_scoring_conflicting_pair():
+    """Filter conflict before ranking, rather than inspecting only raw best."""
+    first_task = make_task(
+        'robot1', 'first', (2.0, 0.0), (2.0, 0.2),
+        Bounds((1.8, 0.0), (2.2, 0.4)), gain=1.0,
+    )
+    independent = make_task(
+        'robot2', 'independent', (0.0, 4.0), (0.0, 4.2),
+        Bounds((-0.2, 3.8), (0.2, 4.2)), gain=0.05,
+    )
+    conflicting = make_task(
+        'robot2', 'conflicting', (2.8, 0.0), (2.8, 0.2),
+        Bounds((2.6, 0.0), (3.0, 0.4)), gain=5.0, local_id=2,
+    )
+    union = build_canonical_union([first_task], [independent, conflicting])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['first'], 2.0, [(0, 0), (2, 0)]),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['independent'], 2.0, [(0, 1), (0, 4)]),
+            bid(ids['conflicting'], 2.0, [(0, 0), (2, 0)]),
+        ]),
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        ids['first'], ids['independent'],
+    )
+    assert decision.score.nearby_goal_penalty == 0.0
+    assert decision.score.route_overlap_penalty == 0.0
+    assert decision.score.sensing_overlap_penalty == 0.0
+
+
+def test_existing_rank_selects_best_of_multiple_conflict_free_pairs():
+    """Conflict-free selection preserves the original utility ranking."""
+    first_task = make_task(
+        'robot1', 'first', (4.0, 0.0), (4.0, 0.2),
+        Bounds((3.8, 0.0), (4.2, 0.4)), gain=1.0,
+    )
+    lower = make_task(
+        'robot2', 'lower', (0.0, 4.0), (0.0, 4.2),
+        Bounds((-0.2, 3.8), (0.2, 4.2)), gain=0.1,
+    )
+    higher = make_task(
+        'robot2', 'higher', (-4.0, 0.0), (-4.0, 0.2),
+        Bounds((-4.2, 0.0), (-3.8, 0.4)), gain=2.0, local_id=2,
+    )
+    union = build_canonical_union([first_task], [lower, higher])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    decision = choose_pair_assignment(
+        'round', union,
+        batch('robot1', union.union_hash, [
+            bid(ids['first'], 2.0, [(0, 0), (4, 0)]),
+        ]),
+        batch('robot2', union.union_hash, [
+            bid(ids['lower'], 2.0, [(0, 1), (0, 4)]),
+            bid(ids['higher'], 2.0, [(0, -1), (-4, 0)]),
+        ]),
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        ids['first'], ids['higher'],
+    )

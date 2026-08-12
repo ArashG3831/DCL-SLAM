@@ -4020,15 +4020,18 @@ class DiagnosticNode(Node):
 
     def _zero_event_capture_summary(self) -> dict:
         policy = self.zero_event_policy
+        event_zero_start = None
+        if policy.events:
+            event_zero_start = policy.events[0].get('zero_started_sim_s')
         return {
             'schema_version': 1,
             'target': 'first active-goal fresh DWB selected-zero event',
             'triggered': policy.triggered,
             'robot': policy.trigger_robot,
             'trigger_sim_s': policy.trigger_sim_s,
-            'zero_started_sim_s': (
-                None if policy.trigger_robot is None else
-                policy.zero_started_sim_s.get(policy.trigger_robot)),
+            # The policy's per-robot tracker can be reset by a later stale
+            # evaluation.  The event record is the authoritative onset time.
+            'zero_started_sim_s': event_zero_start,
             'goal_key': repr(policy.trigger_goal_key),
             'closed': policy.closed,
             'finished': self.zero_event_finished,
@@ -4416,7 +4419,9 @@ class DiagnosticNode(Node):
         }
 
     def _zero_event_row(self, robot: str, run: NavigationRun, phase: str,
-                        evaluation: dict, stages: dict) -> dict:
+                        evaluation: dict, stages: dict,
+                        sample_sim_time: Optional[float] = None) -> dict:
+        sample_now = self.now_sim() if sample_sim_time is None else float(sample_sim_time)
         details = self._zero_eval_details(evaluation)
         selected = details['selected'] or {}
         forward = details['best_forward'] or {}
@@ -4429,13 +4434,13 @@ class DiagnosticNode(Node):
         goal_position = run.pose.pose.position
         goal_id = run.metadata.get('frontier_id')
         received = self.pipeline_dwb_received_sim[robot]
-        age = None if received is None else max(0.0, self.now_sim() - received)
+        age = None if received is None else max(0.0, sample_now - received)
         action_state = 'ACTIVE'
         return {
-            'sim_time_s': f'{self.now_sim():.6f}', 'wall_time_utc': utc_now(),
+            'sim_time_s': f'{sample_now:.6f}', 'wall_time_utc': utc_now(),
             'robot': robot, 'phase': phase, 'goal_label': run.label,
             'goal_source': run.kind, 'goal_id': goal_id,
-            'goal_age_s': '' if run.accepted_sim is None else f'{self.now_sim()-run.accepted_sim:.6f}',
+            'goal_age_s': '' if run.accepted_sim is None else f'{sample_now-run.accepted_sim:.6f}',
             'goal_x_m': f'{goal_position.x:.9f}', 'goal_y_m': f'{goal_position.y:.9f}',
             'goal_yaw_rad': f'{self._pose_yaw(run.pose):.9f}',
             'action_state': action_state,
@@ -4500,13 +4505,16 @@ class DiagnosticNode(Node):
         self.zero_event_costmaps_file.write(json.dumps(record, sort_keys=True) + '\n')
         self.zero_event_costmap_written.add(key)
 
-    def _zero_event_write_evaluation(self, robot: str, evaluation: dict, reason: str):
-        key = (robot, round(self.now_sim(), 6), evaluation.get('selected_index'))
+    def _zero_event_write_evaluation(self, robot: str, evaluation: dict,
+                                      reason: str,
+                                      sample_sim_time: Optional[float] = None):
+        sample_now = self.now_sim() if sample_sim_time is None else float(sample_sim_time)
+        key = (robot, round(sample_now, 6), evaluation.get('selected_index'))
         if key in self.zero_event_eval_written:
             return
         self.zero_event_evaluations_file.write(json.dumps(
             {'schema_version': 1, 'record_type': 'dwb_zero_event_evaluation',
-             'robot': robot, 'sim_time_s': self.now_sim(),
+             'robot': robot, 'sim_time_s': sample_now,
              'capture_reason': reason, 'evaluation': evaluation}, sort_keys=True) + '\n')
         self.zero_event_eval_written.add(key)
 
@@ -4553,9 +4561,11 @@ class DiagnosticNode(Node):
                     if item['sim_time_s'] < self.zero_event_policy.window_start():
                         continue
                     self.zero_event_timeseries.writerow(self._zero_event_row(
-                        robot, item['run'], item['phase'], item['evaluation'], item['stages']))
+                        robot, item['run'], item['phase'], item['evaluation'], item['stages'],
+                        item['sim_time_s']))
                     self.zero_event_sample_count += 1
-                    self._zero_event_write_evaluation(robot, item['evaluation'], 'PRE_TRIGGER_RING')
+                    self._zero_event_write_evaluation(
+                        robot, item['evaluation'], 'PRE_TRIGGER_RING', item['sim_time_s'])
                 self._zero_event_write_plans(robot, self.now_sim(), 'TRIGGER')
                 self._zero_event_write_sequences(robot, message, 'TRIGGER')
             self._zero_event_write_plans(robot, self.now_sim(), 'SAMPLE')

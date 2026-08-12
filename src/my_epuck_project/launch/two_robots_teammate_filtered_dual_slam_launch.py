@@ -113,7 +113,7 @@ def launch_setup(context):
                 'own_odom_frame': f'{robot}/odom',
                 'peer_odom_frame': f'{peer}/odom',
                 'own_odom_to_peer_odom': fixed_odom[robot],
-                'peer_radius_m': 0.035,
+                'peer_radius_m': 0.060,
                 'range_tolerance_m': 0.005,
                 'teammate_geometry_radius_m': LaunchConfiguration(
                     'teammate_geometry_radius_m'),

@@ -31,6 +31,11 @@ from tf2_ros import Buffer, TransformException, TransformListener
 # silhouette.  One mm covers the mesh/grid boundary.  The historical
 # peer_radius_m remains unchanged; this is the selected verified model.
 VERIFIED_SILHOUETTE_RADIUS_M = 0.026
+# Exact-time odometry still leaves a bounded scan-endpoint discrepancy while a
+# teammate is moving.  Live runs measured endpoint radii up to 0.0597 m about
+# the peer centre.  This 60 mm envelope is therefore an observation-exclusion
+# envelope, not a physical robot-radius estimate.
+VERIFIED_EXCLUSION_RADIUS_M = 0.060
 VERIFIED_GEOMETRY_MODEL = 'epuck_v2_pi_puck_d500_conservative_circle'
 
 
@@ -91,7 +96,7 @@ def circle_first_intersection(center_x, center_y, radius, beam_angle):
 
 def mask_teammate_returns(scan, peer_x, peer_y, peer_radius_m,
                           range_tolerance_m, geometry_radius_m=None):
-    """Replace finite returns near the teammate's first surface with NaN."""
+    """Replace finite returns inside the conservative teammate envelope."""
     if range_tolerance_m < 0.0:
         raise ValueError('range_tolerance_m must not be negative')
     geometry_radius = (peer_radius_m if geometry_radius_m is None
@@ -109,8 +114,13 @@ def mask_teammate_returns(scan, peer_x, peer_y, peer_radius_m,
         beam_angle = scan.angle_min + index * scan.angle_increment
         expected_near = circle_first_intersection(
             peer_x, peer_y, geometry_radius, beam_angle)
+        endpoint_x = measured * math.cos(beam_angle)
+        endpoint_y = measured * math.sin(beam_angle)
+        endpoint_in_envelope = math.hypot(
+            endpoint_x - peer_x, endpoint_y - peer_y) <= peer_radius_m
         if (expected_near is not None
-                and abs(measured - expected_near) <= range_tolerance_m):
+                and (abs(measured - expected_near) <= range_tolerance_m
+                     or endpoint_in_envelope)):
             output.ranges[index] = math.nan
             masked_indices.append(index)
     return output, masked_indices
@@ -178,7 +188,7 @@ class TeammateScanFilter(Node):
             'peer_base_frame': '', 'expected_lidar_frame': '',
             'own_odom_frame': '', 'peer_odom_frame': '',
             'own_odom_to_peer_odom': [0.0, 0.0, 0.0],
-            'peer_radius_m': 0.035, 'range_tolerance_m': 0.005,
+            'peer_radius_m': VERIFIED_EXCLUSION_RADIUS_M,
             'teammate_geometry_radius_m': 0.035,
             'maximum_processing_latency': 0.20,
             'pending_queue_depth': 4, 'transform_retry_period': 0.02,

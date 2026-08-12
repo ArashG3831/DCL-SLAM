@@ -12,6 +12,7 @@ from my_epuck_project.nav2_frontier_diagnostic import classify_start_cell
 from my_epuck_project.teammate_scan_filter import (
     mask_teammate_returns,
     prepare_slam_scan,
+    VERIFIED_EXCLUSION_RADIUS_M,
     VERIFIED_SILHOUETTE_RADIUS_M,
 )
 from nav_msgs.msg import OccupancyGrid
@@ -98,12 +99,20 @@ def test_measured_residual_within_uncertainty_is_masked():
     assert masked == [0] and math.isnan(output.ranges[0])
 
 
-def test_return_outside_justified_range_is_preserved():
+def test_endpoint_inside_measured_teammate_envelope_is_masked():
     output, masked = mask_teammate_returns(
-        scan_with(1.0 - VERIFIED_SILHOUETTE_RADIUS_M + 0.006),
-        1.0, 0.0, 0.035, 0.005,
+        scan_with(1.0 - VERIFIED_SILHOUETTE_RADIUS_M + 0.030),
+        1.0, 0.0, VERIFIED_EXCLUSION_RADIUS_M, 0.005,
         geometry_radius_m=VERIFIED_SILHOUETTE_RADIUS_M)
-    assert masked == [] and math.isclose(output.ranges[0], 0.980, abs_tol=1e-5)
+    assert masked == [0] and math.isnan(output.ranges[0])
+
+
+def test_wall_beyond_measured_teammate_envelope_is_preserved():
+    output, masked = mask_teammate_returns(
+        scan_with(1.0 - VERIFIED_SILHOUETTE_RADIUS_M + 0.100),
+        1.0, 0.0, VERIFIED_EXCLUSION_RADIUS_M, 0.005,
+        geometry_radius_m=VERIFIED_SILHOUETTE_RADIUS_M)
+    assert masked == [] and math.isclose(output.ranges[0], 1.074, abs_tol=1e-5)
 
 
 def test_small_odometry_timestamp_error_is_within_bound():

@@ -118,9 +118,15 @@ def mask_teammate_returns(scan, peer_x, peer_y, peer_radius_m,
         endpoint_y = measured * math.sin(beam_angle)
         endpoint_in_envelope = math.hypot(
             endpoint_x - peer_x, endpoint_y - peer_y) <= peer_radius_m
-        if (expected_near is not None
-                and (abs(measured - expected_near) <= range_tolerance_m
-                     or endpoint_in_envelope)):
+        # The exclusion envelope is intentionally independent of the ideal
+        # circle intersection.  A real D500 return can land just outside the
+        # verified circular silhouette (mesh/protrusion/beam discretisation),
+        # in which case ``expected_near`` is None even though the measured
+        # endpoint is still the teammate.  Requiring the ray to intersect the
+        # small circle here was the hole that allowed those returns into SLAM.
+        if (endpoint_in_envelope
+                or (expected_near is not None
+                    and abs(measured - expected_near) <= range_tolerance_m)):
             output.ranges[index] = math.nan
             masked_indices.append(index)
     return output, masked_indices

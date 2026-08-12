@@ -10,6 +10,7 @@ from my_epuck_project.live_map_sanitizer import (
 )
 from my_epuck_project.nav2_frontier_diagnostic import classify_start_cell
 from my_epuck_project.teammate_scan_filter import (
+    circle_first_intersection,
     mask_teammate_returns,
     prepare_slam_scan,
     VERIFIED_EXCLUSION_RADIUS_M,
@@ -104,6 +105,19 @@ def test_endpoint_inside_measured_teammate_envelope_is_masked():
         scan_with(1.0 - VERIFIED_SILHOUETTE_RADIUS_M + 0.030),
         1.0, 0.0, VERIFIED_EXCLUSION_RADIUS_M, 0.005,
         geometry_radius_m=VERIFIED_SILHOUETTE_RADIUS_M)
+    assert masked == [0] and math.isnan(output.ranges[0])
+
+
+def test_endpoint_envelope_masks_non_circular_return_without_ray_intersection():
+    """Mesh/protrusion returns must not pass the ideal-circle gate."""
+    angle = math.asin(0.040)
+    scan = scan_with(math.cos(angle))
+    scan.angle_min = angle
+    output, masked = mask_teammate_returns(
+        scan, 1.0, 0.0, VERIFIED_EXCLUSION_RADIUS_M, 0.005,
+        geometry_radius_m=VERIFIED_SILHOUETTE_RADIUS_M)
+    assert circle_first_intersection(
+        1.0, 0.0, VERIFIED_SILHOUETTE_RADIUS_M, angle) is None
     assert masked == [0] and math.isnan(output.ranges[0])
 
 

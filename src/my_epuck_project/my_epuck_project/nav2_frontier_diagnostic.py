@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import fcntl
 from functools import partial
+import hashlib
 import json
 import math
 import os
@@ -79,6 +80,13 @@ from .controller_pipeline_diagnostics import (
     serialize_full_dwb_evaluation,
     summarize_dwb_evaluation,
 )
+from .dwb_geometry_capture import (
+    GeometryCapturePolicy,
+    serialize_costmap_message,
+    serialize_path_message,
+    select_sequence_indices,
+    trajectory_sequence_record,
+)
 from .ros_runtime_preflight import (
     PreflightError, _bounded_subprocess, run_preflight,
 )
@@ -104,6 +112,10 @@ ARTIFACT_NAMES = frozenset({
     'dwb_full_candidate_frames.jsonl',
     'dwb_full_candidate_configuration.json',
     'dwb_full_candidate_capture_summary.json',
+    'dwb_geometry_timeseries.csv', 'dwb_geometry_global_plans.jsonl',
+    'dwb_geometry_transformed_plans.jsonl', 'dwb_geometry_costmaps.jsonl',
+    'dwb_geometry_trajectory_sequences.jsonl', 'dwb_geometry_events.jsonl',
+    'dwb_geometry_summary.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -148,6 +160,8 @@ HANDOFF_PIPELINE_COUNTERS = (
 DWB_STALL_EVENT_LIMIT = 32
 DWB_STALL_PLAN_POINT_LIMIT = 64
 DWB_STALL_COSTMAP_PATCH_RADIUS_M = 0.15
+GEOMETRY_RING_LIMIT = 120
+GEOMETRY_TRAJECTORY_EVENT_LIMIT = 16
 RUNTIME_GEOMETRY_PARAMETERS = {
     'controller_server': (
         'FollowPath.min_vel_x', 'FollowPath.max_vel_x',
@@ -678,15 +692,31 @@ class DiagnosticNode(Node):
             robot: {
                 'global': {'message': None, 'revision': 0, 'received_sim_s': None},
                 'local': {'message': None, 'revision': 0, 'received_sim_s': None},
+                'transformed': {
+                    'message': None, 'revision': 0, 'received_sim_s': None,
+                    'geometry_revision': 0, 'geometry_signature': None,
+                },
             }
             for robot in ROBOTS
         }
+        for robot in ROBOTS:
+            for kind in ('global', 'local'):
+                self.pipeline_plans[robot][kind].update(
+                    {'geometry_revision': 0, 'geometry_signature': None})
         self.pipeline_dwb_stalls = {robot: DwbStallDetector() for robot in ROBOTS}
         self.dwb_stall_events = []
         self.dwb_stall_counts = Counter()
         self.full_candidate_capture = {
             robot: FullCandidateCapturePolicy() for robot in ROBOTS}
         self.full_candidate_frame_count = Counter()
+        self.geometry_policy = GeometryCapturePolicy()
+        self.geometry_ring = deque(maxlen=GEOMETRY_RING_LIMIT)
+        self.geometry_active = False
+        self.geometry_finished = False
+        self.geometry_sample_count = 0
+        self.geometry_plan_written = set()
+        self.geometry_costmap_written = set()
+        self.geometry_sequence_events = 0
         self.pipeline_history = {robot: deque(maxlen=32) for robot in ROBOTS}
         self.pipeline_last_sample_sim = None
         self.pipeline_phase_seconds = {
@@ -897,9 +927,18 @@ class DiagnosticNode(Node):
             self.create_subscription(
                 NavPath, f'/{robot}/global_plan',
                 partial(self._pipeline_plan, robot, 'global'), 10)
+            # DWBPublisher names the plan it receives from the planner
+            # ``received_global_plan``; retain the compatibility alias above
+            # for project-side publishers that use ``global_plan``.
+            self.create_subscription(
+                NavPath, f'/{robot}/received_global_plan',
+                partial(self._pipeline_plan, robot, 'global'), 10)
             self.create_subscription(
                 NavPath, f'/{robot}/local_plan',
                 partial(self._pipeline_plan, robot, 'local'), 10)
+            self.create_subscription(
+                NavPath, f'/{robot}/transformed_global_plan',
+                partial(self._pipeline_plan, robot, 'transformed'), 10)
             if LocalPlanEvaluation is not None:
                 self.create_subscription(
                     LocalPlanEvaluation, f'/{robot}/evaluation',
@@ -1023,6 +1062,46 @@ class DiagnosticNode(Node):
             'w', encoding='utf-8', buffering=65536)
         self.full_candidate_file = (
             self.output / 'dwb_full_candidate_frames.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.geometry_timeseries_file = (
+            self.output / 'dwb_geometry_timeseries.csv').open(
+                'w', encoding='utf-8', newline='', buffering=65536)
+        self.geometry_timeseries = csv.DictWriter(
+            self.geometry_timeseries_file,
+            fieldnames=[
+                'sim_time_s', 'wall_time_utc', 'phase', 'goal_label',
+                'goal_source', 'goal_request_sim_s', 'goal_accepted_sim_s',
+                'goal_x_m', 'goal_y_m', 'goal_yaw_rad',
+                'shared_x_m', 'shared_y_m', 'shared_yaw_rad',
+                'odom_x_m', 'odom_y_m', 'odom_yaw_rad',
+                'odom_vx_mps', 'odom_wz_radps', 'tf_json',
+                'command_kind', 'dwb_vx_mps', 'dwb_wz_radps',
+                'dwb_selected_score', 'dwb_best_forward_score',
+                'dwb_score_gap_forward_minus_selected',
+                'pathalign_selected', 'pathdist_selected',
+                'goaldist_selected', 'pathalign_forward',
+                'pathdist_forward', 'goaldist_forward',
+                'global_plan_revision', 'transformed_plan_revision',
+                'transformed_plan_geometry_revision',
+                'transformed_plan_point_count', 'transformed_plan_length_m',
+                'local_costmap_stamp_s', 'local_costmap_revision',
+                'recovery_count',
+            ])
+        self.geometry_timeseries.writeheader()
+        self.geometry_global_plans_file = (
+            self.output / 'dwb_geometry_global_plans.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.geometry_transformed_plans_file = (
+            self.output / 'dwb_geometry_transformed_plans.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.geometry_costmaps_file = (
+            self.output / 'dwb_geometry_costmaps.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.geometry_sequences_file = (
+            self.output / 'dwb_geometry_trajectory_sequences.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.geometry_events_file = (
+            self.output / 'dwb_geometry_events.jsonl').open(
                 'w', encoding='utf-8', buffering=65536)
         self.tick_timer = self.create_timer(0.1, self._tick)
         self.sample_timer = self.create_timer(0.5, self._sample)
@@ -1307,6 +1386,16 @@ class DiagnosticNode(Node):
         if signature != state.get('signature'):
             state['revision'] += 1
             state['signature'] = signature
+        geometry_payload = [
+            (round(float(pose.pose.position.x), 5),
+             round(float(pose.pose.position.y), 5),
+             round(float(pose.pose.orientation.z), 5),
+             round(float(pose.pose.orientation.w), 5))
+            for pose in poses]
+        geometry_signature = (message.header.frame_id, tuple(geometry_payload))
+        if geometry_signature != state.get('geometry_signature'):
+            state['geometry_revision'] = int(state.get('geometry_revision', 0)) + 1
+            state['geometry_signature'] = geometry_signature
         state['message'] = message
         state['received_sim_s'] = self.now_sim()
 
@@ -2207,6 +2296,12 @@ class DiagnosticNode(Node):
             self.goal_timeline_file.flush()
             self.dwb_stall_file.flush()
             self.full_candidate_file.flush()
+            self.geometry_timeseries_file.flush()
+            self.geometry_global_plans_file.flush()
+            self.geometry_transformed_plans_file.flush()
+            self.geometry_costmaps_file.flush()
+            self.geometry_sequences_file.flush()
+            self.geometry_events_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
@@ -2220,6 +2315,13 @@ class DiagnosticNode(Node):
             1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z))
         return (point.x, point.y, yaw, message.twist.twist.linear.x,
                 message.twist.twist.angular.z)
+
+    @staticmethod
+    def _pose_yaw(pose: PoseStamped) -> float:
+        q = pose.pose.orientation
+        return math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _pipeline_stage_snapshots(self, robot: str) -> dict:
         now = self.now_sim()
@@ -2462,6 +2564,13 @@ class DiagnosticNode(Node):
                 self.now_sim(), goal_key, command_kind(stages['dwb_controller']),
                 context, evaluation):
             self._write_full_candidate_frame(robot, reason, context, item)
+            if robot == 'robot1' and run.kind == 'frontier':
+                if reason == 'ANGULAR_ONLY_OVER_2S':
+                    self.geometry_policy.observe_trigger(
+                        self.now_sim(), goal_key, run.kind, reason)
+                    self._geometry_activate(robot, run, phase, stages)
+                if self.geometry_policy.triggered:
+                    self._geometry_sequence_event(robot, run, reason)
         reason = policy.observe_healthy(context, evaluation)
         if reason is not None:
             # Delay publication until the action result establishes that the
@@ -2559,6 +2668,7 @@ class DiagnosticNode(Node):
             run = self.active_nav[robot]
             self._observe_dwb_stall(robot, run, stages)
             self._observe_full_candidate_capture(robot, run, phase, stages)
+            self._geometry_update(robot, run, phase, stages)
             if run is not None and run.accepted_sim is not None:
                 run.pipeline_motion_seconds[moving['state']] += delta
                 if moving['state'] == 'FULLY_STATIONARY':
@@ -3807,6 +3917,39 @@ class DiagnosticNode(Node):
             ],
         }
 
+    def _geometry_capture_summary(self) -> dict:
+        return {
+            'schema_version': 1,
+            'target': 'first robot1 frontier active-goal existing stall trigger',
+            'trigger_reason': self.geometry_policy.trigger_reason,
+            'target_seen': self.geometry_policy.target_seen,
+            'triggered': self.geometry_policy.triggered,
+            'trigger_sim_s': self.geometry_policy.trigger_sim_s,
+            'window_start_sim_s': self.geometry_policy.window_start(),
+            'zero_started_sim_s': self.geometry_policy.zero_started_sim_s,
+            'closed': self.geometry_policy.closed,
+            'finished': self.geometry_finished,
+            'sample_count': self.geometry_sample_count,
+            'trajectory_event_count': self.geometry_sequence_events,
+            'pre_window_s': self.geometry_policy.pre_window_s,
+            'post_zero_s': self.geometry_policy.post_zero_s,
+            'hard_window_s': self.geometry_policy.hard_window_s,
+            'events': list(self.geometry_policy.events),
+            'topics': {
+                'global_plan': '/robot1/global_plan',
+                'transformed_global_plan': '/robot1/transformed_global_plan',
+                'local_plan': '/robot1/local_plan',
+                'evaluation': '/robot1/evaluation',
+                'local_costmap': '/robot1/local_costmap/costmap',
+                'tf': '/tf and /tf_static',
+            },
+            'limitations': [
+                'DWB transformed plan source indices are not published by NavPath.',
+                'Costmap snapshots are event-triggered, not controller-rate dumps.',
+                'Trajectory sequences are recorded from LocalPlanEvaluation poses/time_offsets.',
+            ],
+        }
+
     def _finish(self):
         if self.completed:
             return
@@ -3826,6 +3969,7 @@ class DiagnosticNode(Node):
         pipeline_summary = self._pipeline_summary()
         dwb_stall_summary = self._dwb_stall_summary()
         full_candidate_summary = self._full_candidate_capture_summary()
+        geometry_summary = self._geometry_capture_summary()
         configuration = {
             'schema_version': 1,
             'source': 'read-only /robotN/controller_server/get_parameters',
@@ -3845,10 +3989,14 @@ class DiagnosticNode(Node):
         (self.output / 'dwb_full_candidate_capture_summary.json').write_text(
             json.dumps(full_candidate_summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
+        (self.output / 'dwb_geometry_summary.json').write_text(
+            json.dumps(geometry_summary, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
         summary = self._summary()
         summary['controller_pipeline'] = pipeline_summary
         summary['dwb_stall_summary'] = dwb_stall_summary
         summary['dwb_full_candidate_capture_summary'] = full_candidate_summary
+        summary['dwb_geometry_capture_summary'] = geometry_summary
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -3867,6 +4015,12 @@ class DiagnosticNode(Node):
         self.goal_timeline_file.flush()
         self.dwb_stall_file.flush()
         self.full_candidate_file.flush()
+        self.geometry_timeseries_file.flush()
+        self.geometry_global_plans_file.flush()
+        self.geometry_transformed_plans_file.flush()
+        self.geometry_costmaps_file.flush()
+        self.geometry_sequences_file.flush()
+        self.geometry_events_file.flush()
         self.get_logger().info(
             'NAV2_FRONTIER_DIAGNOSTIC_COMPLETE passed=%s output=%s'
             % (str(summary['passed']).lower(), self.output))
@@ -4064,6 +4218,236 @@ class DiagnosticNode(Node):
         }
 
     @staticmethod
+    def _geometry_yaw(transform) -> float:
+        q = transform.transform.rotation
+        return math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _geometry_tf_snapshot(self, robot: str) -> dict:
+        """Read-only latest TF samples with source timestamps and ages."""
+        pairs = {
+            'shared_map_to_base_footprint': (
+                'shared_map', f'{robot}/base_footprint'),
+            'odom_to_base_footprint': (
+                f'{robot}/odom', f'{robot}/base_footprint'),
+            'shared_map_to_odom': ('shared_map', f'{robot}/odom'),
+            'map_to_odom': (f'{robot}/map', f'{robot}/odom'),
+            'shared_map_to_base_link': (
+                'shared_map', f'{robot}/base_link'),
+        }
+        result = {}
+        now = self.now_sim()
+        for name, (target, source) in pairs.items():
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    target, source, Time(), timeout=Duration(seconds=0.0))
+                stamp = stamp_seconds(transform.header.stamp)
+                result[name] = {
+                    'target_frame': target, 'source_frame': source,
+                    'stamp_s': stamp,
+                    'age_s': None if stamp == 0.0 else max(0.0, now - stamp),
+                    'translation': {
+                        'x_m': float(transform.transform.translation.x),
+                        'y_m': float(transform.transform.translation.y),
+                        'z_m': float(transform.transform.translation.z),
+                    },
+                    'yaw_rad': self._geometry_yaw(transform),
+                }
+            except TransformException as error:
+                result[name] = {
+                    'target_frame': target, 'source_frame': source,
+                    'available': False, 'error': str(error),
+                }
+        return result
+
+    def _geometry_pose_in_costmap(self, robot: str) -> Optional[dict]:
+        pose = self.poses[robot]
+        grid = self.local_costmaps[robot]
+        if pose is None or grid is None:
+            return None
+        point = self._point_from_shared(grid, *pose)
+        if point is None:
+            return None
+        cell = grid_cell(grid, *point)
+        return {'x_m': point[0], 'y_m': point[1],
+                'column': None if cell is None else int(cell[1]),
+                'row': None if cell is None else int(cell[2])}
+
+    def _geometry_write_event(self, record: dict):
+        self.geometry_events_file.write(json.dumps(record, sort_keys=True) + '\n')
+
+    def _geometry_write_plan_snapshots(self, robot: str, sim_time: float,
+                                       reason: str):
+        for kind, stream in (
+                ('global', self.geometry_global_plans_file),
+                ('transformed', self.geometry_transformed_plans_file)):
+            state = self.pipeline_plans[robot][kind]
+            revision = int(state.get('geometry_revision', 0))
+            key = (kind, revision)
+            if state.get('message') is None or key in self.geometry_plan_written:
+                continue
+            snapshot = serialize_path_message(
+                state['message'], revision, kind)
+            snapshot.update({'robot': robot, 'sim_time_s': sim_time,
+                             'capture_reason': reason,
+                             'received_sim_s': state.get('received_sim_s')})
+            stream.write(json.dumps(snapshot, sort_keys=True) + '\n')
+            self.geometry_plan_written.add(key)
+
+    def _geometry_write_costmap(self, robot: str, sim_time: float,
+                                reason: str):
+        grid = self.local_costmaps[robot]
+        if grid is None:
+            return
+        signature = (stamp_seconds(grid.header.stamp), int(grid.info.width),
+                     int(grid.info.height), hashlib.sha1(
+                         bytes((int(value) + 1) % 256 for value in grid.data)
+                     ).hexdigest())
+        key = (reason, signature)
+        if key in self.geometry_costmap_written:
+            return
+        snapshot = serialize_costmap_message(
+            grid, reason, self._geometry_pose_in_costmap(robot))
+        snapshot.update({'robot': robot, 'sim_time_s': sim_time})
+        self.geometry_costmaps_file.write(
+            json.dumps(snapshot, sort_keys=True) + '\n')
+        self.geometry_costmap_written.add(key)
+
+    def _geometry_sequence_event(self, robot: str, run: NavigationRun,
+                                 reason: str):
+        if robot != 'robot1' or self.geometry_sequence_events >= GEOMETRY_TRAJECTORY_EVENT_LIMIT:
+            return
+        message = self.pipeline_dwb_message[robot]
+        if message is None or run is None or run.kind != 'frontier':
+            return
+        roles = select_sequence_indices(message)
+        sequences = []
+        for index, role in roles:
+            if 0 <= index < len(message.twists):
+                sequences.append(trajectory_sequence_record(
+                    message.twists[index], index, role))
+        record = {
+            'schema_version': 1, 'record_type': 'dwb_geometry_trajectory_event',
+            'robot': robot, 'sim_time_s': self.now_sim(),
+            'capture_reason': reason, 'best_index': int(message.best_index),
+            'trajectory_count': len(message.twists),
+            'message_stamp_s': stamp_seconds(message.header.stamp),
+            'frame_id': message.header.frame_id, 'sequences': sequences,
+            'evaluation': serialize_full_dwb_evaluation(message),
+        }
+        self.geometry_sequences_file.write(json.dumps(record, sort_keys=True) + '\n')
+        self.geometry_sequence_events += 1
+
+    def _geometry_snapshot_row(self, robot: str, run: NavigationRun,
+                               phase: str, stages: dict) -> dict:
+        summary = self.pipeline_dwb[robot]
+        selected = summary.get('selected') or {}
+        forward = summary.get('best_valid_forward') or {}
+        selected_critics = selected.get('critic_contributions', {})
+        forward_critics = forward.get('critic_contributions', {})
+        shared_tf = self._geometry_tf_snapshot(robot)
+        shared_pose = shared_tf.get('shared_map_to_base_footprint', {})
+        translation = shared_pose.get('translation', {})
+        x, y, yaw, vx, wz = self._odom_pose(self.odom[robot])
+        transformed = self.pipeline_plans[robot]['transformed']
+        message = transformed.get('message')
+        points = [] if message is None else message.poses
+        length = sum(math.hypot(
+            right.pose.position.x - left.pose.position.x,
+            right.pose.position.y - left.pose.position.y)
+                     for left, right in zip(points, points[1:]))
+        goal = run.pose.pose.position
+        local_grid = self.local_costmaps[robot]
+        return {
+            'sim_time_s': f'{self.now_sim():.6f}',
+            'wall_time_utc': utc_now(), 'phase': phase,
+            'goal_label': run.label, 'goal_source': run.kind,
+            'goal_request_sim_s': f'{run.request_sim:.6f}',
+            'goal_accepted_sim_s': '' if run.accepted_sim is None else f'{run.accepted_sim:.6f}',
+            'goal_x_m': f'{goal.x:.9f}', 'goal_y_m': f'{goal.y:.9f}',
+            'goal_yaw_rad': f'{self._pose_yaw(run.pose):.9f}',
+            'shared_x_m': translation.get('x_m', ''),
+            'shared_y_m': translation.get('y_m', ''),
+            'shared_yaw_rad': shared_pose.get('yaw_rad', ''),
+            'odom_x_m': f'{x:.9f}', 'odom_y_m': f'{y:.9f}',
+            'odom_yaw_rad': f'{yaw:.9f}',
+            'odom_vx_mps': f'{vx:.9f}', 'odom_wz_radps': f'{wz:.9f}',
+            'tf_json': json.dumps(shared_tf, sort_keys=True),
+            'command_kind': command_kind(stages['dwb_controller']),
+            'dwb_vx_mps': selected.get('velocity', {}).get('linear_x_mps', ''),
+            'dwb_wz_radps': selected.get('velocity', {}).get('angular_z_radps', ''),
+            'dwb_selected_score': selected.get('total_score', ''),
+            'dwb_best_forward_score': forward.get('total_score', ''),
+            'dwb_score_gap_forward_minus_selected': summary.get(
+                'score_difference_forward_minus_selected', ''),
+            'pathalign_selected': selected_critics.get('PathAlign', ''),
+            'pathdist_selected': selected_critics.get('PathDist', ''),
+            'goaldist_selected': selected_critics.get('GoalDist', ''),
+            'pathalign_forward': forward_critics.get('PathAlign', ''),
+            'pathdist_forward': forward_critics.get('PathDist', ''),
+            'goaldist_forward': forward_critics.get('GoalDist', ''),
+            'global_plan_revision': self.pipeline_plans[robot]['global']['revision'],
+            'transformed_plan_revision': self.pipeline_plans[robot]['transformed']['revision'],
+            'transformed_plan_geometry_revision': transformed.get('geometry_revision', 0),
+            'transformed_plan_point_count': len(points),
+            'transformed_plan_length_m': f'{length:.9f}',
+            'local_costmap_stamp_s': self._grid_stamp(local_grid),
+            'local_costmap_revision': self.pipeline_plans[robot]['local'].get('geometry_revision', 0),
+            'recovery_count': run.recovery_count,
+        }
+
+    def _geometry_activate(self, robot: str, run: NavigationRun,
+                           phase: str, stages: dict):
+        if robot != 'robot1' or self.geometry_active or run.kind != 'frontier':
+            return
+        self.geometry_active = True
+        self._geometry_write_event({
+            'event': 'GEOMETRY_CAPTURE_ACTIVATED', 'sim_time_s': self.now_sim(),
+            'robot': robot, 'goal_label': run.label,
+            'trigger_reason': self.geometry_policy.trigger_reason,
+            'window_start_sim_s': self.geometry_policy.window_start(),
+            'hard_window_s': self.geometry_policy.hard_window_s,
+        })
+        for item in tuple(self.geometry_ring):
+            if item['sim_time_s'] >= self.geometry_policy.window_start():
+                self.geometry_timeseries.writerow(item['row'])
+                self.geometry_sample_count += 1
+        self._geometry_write_plan_snapshots(robot, self.now_sim(), 'TRIGGER')
+        self._geometry_write_costmap(robot, self.now_sim(), 'TRIGGER')
+
+    def _geometry_update(self, robot: str, run: Optional[NavigationRun],
+                         phase: str, stages: dict):
+        if (robot != 'robot1' or self.geometry_finished or run is None or
+                run.accepted_sim is None or run.kind != 'frontier'):
+            return
+        goal_key = (robot, run.label, run.request_sim)
+        kind = command_kind(stages['dwb_controller'])
+        state = self.geometry_policy.observe_state(
+            self.now_sim(), goal_key, kind, run.recovery_count,
+            goal_active=self.active_nav[robot] is run)
+        row = self._geometry_snapshot_row(robot, run, phase, stages)
+        if not self.geometry_policy.triggered:
+            self.geometry_ring.append({'sim_time_s': self.now_sim(), 'row': row})
+            return
+        if not self.geometry_active:
+            self._geometry_activate(robot, run, phase, stages)
+        self._geometry_write_plan_snapshots(robot, self.now_sim(), 'SAMPLE')
+        if kind == 'ZERO' and self.geometry_policy.zero_started_sim_s == self.now_sim():
+            self._geometry_write_costmap(robot, self.now_sim(), 'ANGULAR_TO_ZERO')
+        if run.recovery_count > 0:
+            self._geometry_write_costmap(robot, self.now_sim(), 'RECOVERY')
+        self.geometry_timeseries.writerow(row)
+        self.geometry_sample_count += 1
+        if state == 'END':
+            self.geometry_finished = True
+            self._geometry_write_event({
+                'event': 'GEOMETRY_CAPTURE_CLOSED', 'sim_time_s': self.now_sim(),
+                'reason': 'BOUNDED_WINDOW_OR_GOAL_END',
+                'samples': self.geometry_sample_count,
+            })
+
+    @staticmethod
     def _run_summary(run: NavigationRun):
         duration = None if run.terminal_sim is None \
             or run.accepted_sim is None else run.terminal_sim - run.accepted_sim
@@ -4189,6 +4573,15 @@ class DiagnosticNode(Node):
             self.dwb_stall_file.close()
         if not self.full_candidate_file.closed:
             self.full_candidate_file.close()
+        for stream in (
+                self.geometry_timeseries_file,
+                self.geometry_global_plans_file,
+                self.geometry_transformed_plans_file,
+                self.geometry_costmaps_file,
+                self.geometry_sequences_file,
+                self.geometry_events_file):
+            if not stream.closed:
+                stream.close()
 
 
 def main(args=None):

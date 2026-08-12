@@ -86,6 +86,12 @@ from .dwb_geometry_capture import (
     serialize_path_message,
     select_sequence_indices,
     trajectory_sequence_record,
+    select_sequence_indices,
+)
+from .dwb_zero_event_capture import (
+    ZeroEventCapturePolicy,
+    evaluation_event_record,
+    sequence_records,
 )
 from .ros_runtime_preflight import (
     PreflightError, _bounded_subprocess, run_preflight,
@@ -116,6 +122,10 @@ ARTIFACT_NAMES = frozenset({
     'dwb_geometry_transformed_plans.jsonl', 'dwb_geometry_costmaps.jsonl',
     'dwb_geometry_trajectory_sequences.jsonl', 'dwb_geometry_events.jsonl',
     'dwb_geometry_summary.json',
+    'dwb_zero_event_timeseries.csv', 'dwb_zero_event_evaluations.jsonl',
+    'dwb_zero_event_global_plans.jsonl', 'dwb_zero_event_transformed_plans.jsonl',
+    'dwb_zero_event_costmaps.jsonl', 'dwb_zero_event_trajectories.jsonl',
+    'dwb_zero_event_summary.json',
 })
 ROBOTS = ('robot1', 'robot2')
 NAV2_NODES = (
@@ -717,6 +727,15 @@ class DiagnosticNode(Node):
         self.geometry_plan_written = set()
         self.geometry_costmap_written = set()
         self.geometry_sequence_events = 0
+        self.zero_event_policy = ZeroEventCapturePolicy()
+        self.zero_event_ring = deque(maxlen=120)
+        self.zero_event_active = False
+        self.zero_event_finished = False
+        self.zero_event_sample_count = 0
+        self.zero_event_eval_written = set()
+        self.zero_event_plan_written = set()
+        self.zero_event_costmap_written = set()
+        self.zero_event_sequence_count = 0
         self.pipeline_history = {robot: deque(maxlen=32) for robot in ROBOTS}
         self.pipeline_last_sample_sim = None
         self.pipeline_phase_seconds = {
@@ -1102,6 +1121,48 @@ class DiagnosticNode(Node):
                 'w', encoding='utf-8', buffering=65536)
         self.geometry_events_file = (
             self.output / 'dwb_geometry_events.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.zero_event_timeseries_file = (
+            self.output / 'dwb_zero_event_timeseries.csv').open(
+                'w', encoding='utf-8', newline='', buffering=65536)
+        self.zero_event_timeseries = csv.DictWriter(
+            self.zero_event_timeseries_file, fieldnames=[
+                'sim_time_s', 'wall_time_utc', 'robot', 'phase',
+                'goal_label', 'goal_source', 'goal_id', 'goal_age_s',
+                'goal_x_m', 'goal_y_m', 'goal_yaw_rad', 'action_state',
+                'shared_x_m', 'shared_y_m', 'shared_yaw_rad',
+                'odom_x_m', 'odom_y_m', 'odom_yaw_rad', 'odom_vx_mps',
+                'odom_wz_radps', 'tf_json', 'evaluation_age_s',
+                'selected_vx_mps', 'selected_vy_mps', 'selected_wz_radps',
+                'selected_total', 'best_forward_vx_mps',
+                'best_forward_wz_radps', 'best_forward_total',
+                'score_gap_forward_minus_selected', 'forward_valid_count',
+                'angular_only_count', 'zero_count', 'exact_tie_count',
+                'exact_minimum_indices', 'selected_index',
+                'pathalign_selected', 'pathdist_selected', 'goaldist_selected',
+                'baseobstacle_selected', 'oscillation_selected',
+                'pathalign_forward', 'pathdist_forward', 'goaldist_forward',
+                'baseobstacle_forward', 'oscillation_forward',
+                'global_plan_revision', 'local_plan_revision',
+                'transformed_plan_revision', 'recovery_count',
+                'progress_checker_state', 'local_costmap_stamp_s',
+                'local_costmap_revision', 'intentional_idle',
+            ])
+        self.zero_event_timeseries.writeheader()
+        self.zero_event_evaluations_file = (
+            self.output / 'dwb_zero_event_evaluations.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.zero_event_global_plans_file = (
+            self.output / 'dwb_zero_event_global_plans.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.zero_event_transformed_plans_file = (
+            self.output / 'dwb_zero_event_transformed_plans.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.zero_event_costmaps_file = (
+            self.output / 'dwb_zero_event_costmaps.jsonl').open(
+                'w', encoding='utf-8', buffering=65536)
+        self.zero_event_trajectories_file = (
+            self.output / 'dwb_zero_event_trajectories.jsonl').open(
                 'w', encoding='utf-8', buffering=65536)
         self.tick_timer = self.create_timer(0.1, self._tick)
         self.sample_timer = self.create_timer(0.5, self._sample)
@@ -2302,6 +2363,12 @@ class DiagnosticNode(Node):
             self.geometry_costmaps_file.flush()
             self.geometry_sequences_file.flush()
             self.geometry_events_file.flush()
+            self.zero_event_timeseries_file.flush()
+            self.zero_event_evaluations_file.flush()
+            self.zero_event_global_plans_file.flush()
+            self.zero_event_transformed_plans_file.flush()
+            self.zero_event_costmaps_file.flush()
+            self.zero_event_trajectories_file.flush()
             self._last_artifact_flush_wall = time.monotonic()
 
     @staticmethod
@@ -2668,6 +2735,7 @@ class DiagnosticNode(Node):
             run = self.active_nav[robot]
             self._observe_dwb_stall(robot, run, stages)
             self._observe_full_candidate_capture(robot, run, phase, stages)
+            self._zero_event_update(robot, run, phase, stages)
             self._geometry_update(robot, run, phase, stages)
             if run is not None and run.accepted_sim is not None:
                 run.pipeline_motion_seconds[moving['state']] += delta
@@ -3950,6 +4018,40 @@ class DiagnosticNode(Node):
             ],
         }
 
+    def _zero_event_capture_summary(self) -> dict:
+        policy = self.zero_event_policy
+        return {
+            'schema_version': 1,
+            'target': 'first active-goal fresh DWB selected-zero event',
+            'triggered': policy.triggered,
+            'robot': policy.trigger_robot,
+            'trigger_sim_s': policy.trigger_sim_s,
+            'zero_started_sim_s': (
+                None if policy.trigger_robot is None else
+                policy.zero_started_sim_s.get(policy.trigger_robot)),
+            'goal_key': repr(policy.trigger_goal_key),
+            'closed': policy.closed,
+            'finished': self.zero_event_finished,
+            'sample_count': self.zero_event_sample_count,
+            'evaluation_count': len(self.zero_event_eval_written),
+            'trajectory_sequence_count': self.zero_event_sequence_count,
+            'pre_window_s': policy.pre_window_s,
+            'post_zero_s': policy.post_zero_s,
+            'hard_window_s': policy.hard_window_s,
+            'zero_tolerance': policy.zero_tolerance,
+            'evaluation_freshness_s': policy.evaluation_freshness_s,
+            'events': list(policy.events),
+            'topics': {
+                'evaluation': 'robotN/evaluation',
+                'dwb_command': 'robotN/cmd_vel_nav',
+                'received_global_plan': 'robotN/received_global_plan',
+                'transformed_global_plan': 'robotN/transformed_global_plan',
+                'local_costmap': 'robotN/local_costmap/costmap',
+            },
+            'selection_source': 'LocalPlanEvaluation.best_index and selected trajectory velocity',
+            'downstream_cmd_vel_not_used_for_trigger': True,
+        }
+
     def _finish(self):
         if self.completed:
             return
@@ -3970,6 +4072,7 @@ class DiagnosticNode(Node):
         dwb_stall_summary = self._dwb_stall_summary()
         full_candidate_summary = self._full_candidate_capture_summary()
         geometry_summary = self._geometry_capture_summary()
+        zero_event_summary = self._zero_event_capture_summary()
         configuration = {
             'schema_version': 1,
             'source': 'read-only /robotN/controller_server/get_parameters',
@@ -3992,11 +4095,15 @@ class DiagnosticNode(Node):
         (self.output / 'dwb_geometry_summary.json').write_text(
             json.dumps(geometry_summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
+        (self.output / 'dwb_zero_event_summary.json').write_text(
+            json.dumps(zero_event_summary, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
         summary = self._summary()
         summary['controller_pipeline'] = pipeline_summary
         summary['dwb_stall_summary'] = dwb_stall_summary
         summary['dwb_full_candidate_capture_summary'] = full_candidate_summary
         summary['dwb_geometry_capture_summary'] = geometry_summary
+        summary['dwb_zero_event_capture_summary'] = zero_event_summary
         (self.output / 'diagnostic_summary.json').write_text(
             json.dumps(summary, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -4276,6 +4383,192 @@ class DiagnosticNode(Node):
 
     def _geometry_write_event(self, record: dict):
         self.geometry_events_file.write(json.dumps(record, sort_keys=True) + '\n')
+
+    @staticmethod
+    def _zero_eval_details(evaluation: dict) -> dict:
+        trajectories = evaluation.get('trajectories', [])
+        valid = [item for item in trajectories
+                 if item.get('valid') and math.isfinite(float(item.get('total_score', -1.0)))]
+        forward = [item for item in valid
+                   if float((item.get('velocity') or {}).get('linear_x_mps', 0.0)) >= 0.026]
+        angular = [item for item in valid
+                   if abs(float((item.get('velocity') or {}).get('linear_x_mps', 0.0))) <= 1e-9
+                   and abs(float((item.get('velocity') or {}).get('angular_z_radps', 0.0))) > 1e-9]
+        zero = [item for item in valid
+                if abs(float((item.get('velocity') or {}).get('linear_x_mps', 0.0))) <= 1e-9
+                and abs(float((item.get('velocity') or {}).get('angular_z_radps', 0.0))) <= 1e-9]
+        minimum = min((float(item['total_score']) for item in valid), default=None)
+        minima = [item for item in valid if minimum is not None
+                  and float(item['total_score']) == minimum]
+        best_forward = min(forward, key=lambda item: (float(item['total_score']),
+                                                       int(item['trajectory_index'])),
+                           default=None)
+        selected = next((item for item in trajectories if item.get('selected')), None)
+        return {
+            'selected': selected, 'best_forward': best_forward,
+            'forward_valid_count': len(forward), 'angular_only_count': len(angular),
+            'zero_count': len(zero), 'exact_minimum_count': len(minima),
+            'exact_minimum_indices': [int(item['trajectory_index']) for item in minima],
+            'minimum_total': minimum,
+            'score_gap_forward_minus_selected': (
+                None if best_forward is None or selected is None else
+                float(best_forward['total_score']) - float(selected['total_score'])),
+        }
+
+    def _zero_event_row(self, robot: str, run: NavigationRun, phase: str,
+                        evaluation: dict, stages: dict) -> dict:
+        details = self._zero_eval_details(evaluation)
+        selected = details['selected'] or {}
+        forward = details['best_forward'] or {}
+        sc = selected.get('critic_contributions') or {}
+        fc = forward.get('critic_contributions') or {}
+        x, y, yaw, vx, wz = self._odom_pose(self.odom[robot])
+        tf = self._geometry_tf_snapshot(robot)
+        shared = tf.get('shared_map_to_base_footprint', {})
+        translation = shared.get('translation', {})
+        goal_position = run.pose.pose.position
+        goal_id = run.metadata.get('frontier_id')
+        received = self.pipeline_dwb_received_sim[robot]
+        age = None if received is None else max(0.0, self.now_sim() - received)
+        action_state = 'ACTIVE'
+        return {
+            'sim_time_s': f'{self.now_sim():.6f}', 'wall_time_utc': utc_now(),
+            'robot': robot, 'phase': phase, 'goal_label': run.label,
+            'goal_source': run.kind, 'goal_id': goal_id,
+            'goal_age_s': '' if run.accepted_sim is None else f'{self.now_sim()-run.accepted_sim:.6f}',
+            'goal_x_m': f'{goal_position.x:.9f}', 'goal_y_m': f'{goal_position.y:.9f}',
+            'goal_yaw_rad': f'{self._pose_yaw(run.pose):.9f}',
+            'action_state': action_state,
+            'shared_x_m': translation.get('x_m', ''), 'shared_y_m': translation.get('y_m', ''),
+            'shared_yaw_rad': shared.get('yaw_rad', ''),
+            'odom_x_m': f'{x:.9f}', 'odom_y_m': f'{y:.9f}', 'odom_yaw_rad': f'{yaw:.9f}',
+            'odom_vx_mps': f'{vx:.9f}', 'odom_wz_radps': f'{wz:.9f}',
+            'tf_json': json.dumps(tf, sort_keys=True), 'evaluation_age_s': age,
+            'selected_vx_mps': (selected.get('velocity') or {}).get('linear_x_mps', ''),
+            'selected_vy_mps': (selected.get('velocity') or {}).get('linear_y_mps', ''),
+            'selected_wz_radps': (selected.get('velocity') or {}).get('angular_z_radps', ''),
+            'selected_total': selected.get('total_score', ''),
+            'best_forward_vx_mps': (forward.get('velocity') or {}).get('linear_x_mps', ''),
+            'best_forward_wz_radps': (forward.get('velocity') or {}).get('angular_z_radps', ''),
+            'best_forward_total': forward.get('total_score', ''),
+            'score_gap_forward_minus_selected': details['score_gap_forward_minus_selected'],
+            'forward_valid_count': details['forward_valid_count'],
+            'angular_only_count': details['angular_only_count'], 'zero_count': details['zero_count'],
+            'exact_tie_count': details['exact_minimum_count'],
+            'exact_minimum_indices': '|'.join(map(str, details['exact_minimum_indices'])),
+            'selected_index': evaluation.get('selected_index', ''),
+            'pathalign_selected': sc.get('PathAlign', ''), 'pathdist_selected': sc.get('PathDist', ''),
+            'goaldist_selected': sc.get('GoalDist', ''), 'baseobstacle_selected': sc.get('BaseObstacle', ''),
+            'oscillation_selected': sc.get('Oscillation', ''),
+            'pathalign_forward': fc.get('PathAlign', ''), 'pathdist_forward': fc.get('PathDist', ''),
+            'goaldist_forward': fc.get('GoalDist', ''), 'baseobstacle_forward': fc.get('BaseObstacle', ''),
+            'oscillation_forward': fc.get('Oscillation', ''),
+            'global_plan_revision': self.pipeline_plans[robot]['global']['revision'],
+            'local_plan_revision': self.pipeline_plans[robot]['local']['revision'],
+            'transformed_plan_revision': self.pipeline_plans[robot]['transformed']['revision'],
+            'recovery_count': run.recovery_count,
+            'progress_checker_state': 'RECOVERY_RECENT' if run.last_recovery_transition_sim is not None else 'ACTIVE',
+            'local_costmap_stamp_s': self._grid_stamp(self.local_costmaps[robot]),
+            'local_costmap_revision': self.pipeline_plans[robot]['local'].get('geometry_revision', 0),
+            'intentional_idle': int(phase == 'FRONTIER_GENERATION_ONLY'),
+        }
+
+    def _zero_event_write_plans(self, robot: str, sim_time: float, reason: str):
+        for kind, stream in (('global', self.zero_event_global_plans_file),
+                             ('transformed', self.zero_event_transformed_plans_file)):
+            state = self.pipeline_plans[robot][kind]
+            revision = int(state.get('geometry_revision', 0))
+            key = (kind, revision)
+            if state.get('message') is None or key in self.zero_event_plan_written:
+                continue
+            record = serialize_path_message(state['message'], revision, kind)
+            record.update({'robot': robot, 'sim_time_s': sim_time,
+                           'capture_reason': reason,
+                           'received_sim_s': state.get('received_sim_s')})
+            stream.write(json.dumps(record, sort_keys=True) + '\n')
+            self.zero_event_plan_written.add(key)
+
+    def _zero_event_write_costmap(self, robot: str, sim_time: float, reason: str):
+        grid = self.local_costmaps[robot]
+        if grid is None:
+            return
+        key = (reason, stamp_seconds(grid.header.stamp), int(grid.info.width), int(grid.info.height))
+        if key in self.zero_event_costmap_written:
+            return
+        record = serialize_costmap_message(grid, reason, self._geometry_pose_in_costmap(robot))
+        record.update({'robot': robot, 'sim_time_s': sim_time})
+        self.zero_event_costmaps_file.write(json.dumps(record, sort_keys=True) + '\n')
+        self.zero_event_costmap_written.add(key)
+
+    def _zero_event_write_evaluation(self, robot: str, evaluation: dict, reason: str):
+        key = (robot, round(self.now_sim(), 6), evaluation.get('selected_index'))
+        if key in self.zero_event_eval_written:
+            return
+        self.zero_event_evaluations_file.write(json.dumps(
+            {'schema_version': 1, 'record_type': 'dwb_zero_event_evaluation',
+             'robot': robot, 'sim_time_s': self.now_sim(),
+             'capture_reason': reason, 'evaluation': evaluation}, sort_keys=True) + '\n')
+        self.zero_event_eval_written.add(key)
+
+    def _zero_event_write_sequences(self, robot: str, message, reason: str):
+        if message is None or self.zero_event_sequence_count >= 16:
+            return
+        roles = select_sequence_indices(message)
+        self.zero_event_trajectories_file.write(json.dumps({
+            'schema_version': 1, 'record_type': 'dwb_zero_event_trajectory_sequences',
+            'robot': robot, 'sim_time_s': self.now_sim(), 'capture_reason': reason,
+            'best_index': int(message.best_index), 'trajectory_count': len(message.twists),
+            'sequences': sequence_records(message, roles)}, sort_keys=True) + '\n')
+        self.zero_event_sequence_count += 1
+
+    def _zero_event_update(self, robot: str, run: Optional[NavigationRun],
+                           phase: str, stages: dict):
+        message = self.pipeline_dwb_message[robot]
+        received = self.pipeline_dwb_received_sim[robot]
+        fresh = (message is not None and received is not None and
+                 self.now_sim() - received <= self.zero_event_policy.evaluation_freshness_s)
+        evaluation = serialize_full_dwb_evaluation(message) if fresh else None
+        selected = None if evaluation is None else next(
+            (item for item in evaluation['trajectories'] if item.get('selected')), None)
+        active = run is not None and run.accepted_sim is not None and self.active_nav[robot] is run
+        goal_key = None if not active else (robot, run.label, run.request_sim)
+        idle = phase == 'FRONTIER_GENERATION_ONLY'
+        if active and fresh:
+            self.zero_event_ring.append({
+                'sim_time_s': self.now_sim(), 'robot': robot, 'phase': phase,
+                'goal_key': goal_key, 'run': run, 'stages': stages,
+                'evaluation': evaluation,
+            })
+        status = self.zero_event_policy.observe(
+            self.now_sim(), robot, goal_key,
+            '' if run is None else run.kind, active, idle, fresh, selected)
+        if (status == 'TRIGGERED' and self.zero_event_policy.trigger_robot == robot
+                and evaluation is not None and run is not None):
+            if not self.zero_event_active:
+                self.zero_event_active = True
+                self._zero_event_write_costmap(robot, self.now_sim(), 'ZERO_ONSET')
+                for item in tuple(self.zero_event_ring):
+                    if item['robot'] != robot or item['goal_key'] != goal_key:
+                        continue
+                    if item['sim_time_s'] < self.zero_event_policy.window_start():
+                        continue
+                    self.zero_event_timeseries.writerow(self._zero_event_row(
+                        robot, item['run'], item['phase'], item['evaluation'], item['stages']))
+                    self.zero_event_sample_count += 1
+                    self._zero_event_write_evaluation(robot, item['evaluation'], 'PRE_TRIGGER_RING')
+                self._zero_event_write_plans(robot, self.now_sim(), 'TRIGGER')
+                self._zero_event_write_sequences(robot, message, 'TRIGGER')
+            self._zero_event_write_plans(robot, self.now_sim(), 'SAMPLE')
+            self._zero_event_write_evaluation(robot, evaluation, 'SAMPLE')
+            self.zero_event_timeseries.writerow(self._zero_event_row(robot, run, phase, evaluation, stages))
+            self.zero_event_sample_count += 1
+            if run.recovery_count > 0:
+                self._zero_event_write_costmap(robot, self.now_sim(), 'RECOVERY')
+            state = self.zero_event_policy.should_close(
+                self.now_sim(), goal_key, selected, active, run.recovery_count)
+            if state == 'END':
+                self.zero_event_finished = True
+                self._zero_event_write_costmap(robot, self.now_sim(), 'WINDOW_END')
 
     def _geometry_write_plan_snapshots(self, robot: str, sim_time: float,
                                        reason: str):
@@ -4580,6 +4873,15 @@ class DiagnosticNode(Node):
                 self.geometry_costmaps_file,
                 self.geometry_sequences_file,
                 self.geometry_events_file):
+            if not stream.closed:
+                stream.close()
+        for stream in (
+                self.zero_event_timeseries_file,
+                self.zero_event_evaluations_file,
+                self.zero_event_global_plans_file,
+                self.zero_event_transformed_plans_file,
+                self.zero_event_costmaps_file,
+                self.zero_event_trajectories_file):
             if not stream.closed:
                 stream.close()
 

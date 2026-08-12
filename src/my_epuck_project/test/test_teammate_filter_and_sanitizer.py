@@ -197,6 +197,16 @@ def test_production_stack_uses_verified_silhouette_and_live_sanitization():
     assert "'teammate_geometry_radius_m', default_value='0.026'" in dual_slam
 
 
+def test_filter_default_parameters_keep_the_range_tolerance_declared():
+    """Changing the conservative envelope must not break node startup."""
+    source = (
+        Path(__file__).parents[1] / 'my_epuck_project' /
+        'teammate_scan_filter.py'
+    ).read_text()
+    assert "'peer_radius_m': VERIFIED_EXCLUSION_RADIUS_M," in source
+    assert "'range_tolerance_m': 0.005," in source
+
+
 def test_local_source_grid_is_not_mutated_by_sanitization():
     source = grid()
     original = list(source.data)

@@ -189,6 +189,7 @@ class TeammateScanFilter(Node):
             'own_odom_frame': '', 'peer_odom_frame': '',
             'own_odom_to_peer_odom': [0.0, 0.0, 0.0],
             'peer_radius_m': VERIFIED_EXCLUSION_RADIUS_M,
+            'range_tolerance_m': 0.005,
             'teammate_geometry_radius_m': 0.035,
             'maximum_processing_latency': 0.20,
             'pending_queue_depth': 4, 'transform_retry_period': 0.02,

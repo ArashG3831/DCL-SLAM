@@ -209,7 +209,22 @@ class CooperativeExperimentLogger(Node):
     def plan(self,r,msg): self.mark(r,'plan',msg); self.latest[r]['path_length']=sum(math.hypot(b.pose.position.x-a.pose.position.x,b.pose.position.y-a.pose.position.y) for a,b in zip(msg.poses,msg.poses[1:]))
     def candidates(self,r,msg):
         old=self.latest[r].get('candidate_count'); count=len(msg.candidates); self.mark(r,'frontier_candidates',msg); self.latest[r]['candidate_count']=count
-        self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count)
+        # Keep the observer passive, but retain the bounded candidate evidence
+        # needed to audit one distributed-assignment round after a live run.
+        candidates=[{'frontier_id':item.frontier_id,
+                     'centroid':[item.centroid.x,item.centroid.y],
+                     'bounds':[item.bounding_box_min.x,item.bounding_box_min.y,
+                               item.bounding_box_max.x,item.bounding_box_max.y],
+                     'approach':[item.approach_pose.pose.position.x,
+                                 item.approach_pose.pose.position.y],
+                     'visible_reveal_gain':item.information_gain,
+                     'score':item.score,
+                     'reachability_state':item.reachability_state,
+                     'path_length_m':item.path_length_m,
+                     'local_path_length_m':item.local_path_length_m,
+                     'local_path_samples':len(item.local_path_samples)}
+                    for item in msg.candidates]
+        self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count,candidates=candidates)
         if old is not None and old!=count:self.event('CANDIDATE_COUNT_CHANGED',f'{old} -> {count}',r)
         if not count:self.event('NO_REACHABLE_CANDIDATES','candidate batch empty',r)
     @staticmethod

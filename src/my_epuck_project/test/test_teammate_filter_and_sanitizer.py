@@ -1,6 +1,7 @@
 """Focused evidence-based tests for teammate exclusion and start gating."""
 
 import math
+from pathlib import Path
 
 from my_epuck_project.live_map_sanitizer import (
     apply_incremental_patch,
@@ -173,6 +174,18 @@ def test_successive_current_own_footprints_clear_while_moving():
     assert details['cleared_by_role']['own'] > 0
     assert second.data[15 * 30 + 11] == 0
     assert second.data[15 * 30 + 19] == 0
+
+
+def test_production_stack_uses_verified_silhouette_and_live_sanitization():
+    """Prevent a peer return from trapping the robot at its live pose."""
+    launch = Path(__file__).parents[1] / 'launch'
+    stack = (launch / 'two_robots_teammate_filtered_stack_launch.py').read_text()
+    dual_slam = (
+        launch / 'two_robots_teammate_filtered_dual_slam_launch.py'
+    ).read_text()
+    assert "'teammate_geometry_radius_m': '0.026'" in stack
+    assert "'sanitize_live_footprints': True" in stack
+    assert "'teammate_geometry_radius_m', default_value='0.026'" in dual_slam
 
 
 def test_local_source_grid_is_not_mutated_by_sanitization():

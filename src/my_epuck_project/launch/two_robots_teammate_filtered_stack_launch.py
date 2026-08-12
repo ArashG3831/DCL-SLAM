@@ -128,8 +128,9 @@ def launch_setup(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
-            'teammate_geometry_radius_m': (
-                '0.026' if diagnostic_mode else '0.035'),
+            # The D500 scan-plane silhouette is the measured 26 mm housing,
+            # not the historical 35 mm body-radius approximation.
+            'teammate_geometry_radius_m': '0.026',
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
@@ -201,7 +202,11 @@ def launch_setup(context):
                     # The allocator-free diagnostic uses the bounded timer so
                     # fusion cannot starve Nav2/controller execution.
                     'publish_on_callback': not diagnostic_mode,
-                    'sanitize_live_footprints': diagnostic_mode,
+                    # A peer silhouette can be observed while its scan-frame
+                    # transform is delayed.  Clear both fresh live robot
+                    # footprints in every shared map so that transient peer
+                    # evidence cannot make either robot its own obstacle.
+                    'sanitize_live_footprints': True,
                 }],
                 prefix=(
                     'systemd-run --user --scope --quiet '

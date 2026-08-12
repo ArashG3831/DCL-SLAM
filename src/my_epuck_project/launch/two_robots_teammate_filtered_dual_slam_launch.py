@@ -150,6 +150,6 @@ def generate_launch_description():
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument(
-            'teammate_geometry_radius_m', default_value='0.035'),
+            'teammate_geometry_radius_m', default_value='0.026'),
         OpaqueFunction(function=launch_setup),
     ])

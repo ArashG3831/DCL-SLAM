@@ -1,0 +1,53 @@
+<?xml version="1.0" ?>
+<robot name="Epuck motion characterization">
+  <webots>
+    <device reference="d500_lidar" type="Lidar">
+      <ros>
+        <topicName>/scan_d500</topicName>
+        <enabled>true</enabled>
+        <alwaysOn>true</alwaysOn>
+      </ros>
+    </device>
+    <plugin type="webots_ros2_control::Ros2Control" />
+  </webots>
+  <link name="base_link" />
+  <link name="base_footprint" />
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint" />
+    <child link="base_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <link name="d500_lidar" />
+  <joint name="d500_lidar_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="d500_lidar" />
+    <origin xyz="0 0 0.055" rpy="0 0 0" />
+  </joint>
+  <joint name="left wheel motor" type="continuous">
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="0 1 0" />
+  </joint>
+  <link name="left_wheel_link" />
+  <joint name="right wheel motor" type="continuous">
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="0 1 0" />
+  </joint>
+  <link name="right_wheel_link" />
+  <ros2_control name="WebotsControl" type="system">
+    <hardware>
+      <plugin>webots_ros2_control::Ros2ControlSystem</plugin>
+    </hardware>
+    <joint name="right wheel motor">
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <command_interface name="velocity" />
+    </joint>
+    <joint name="left wheel motor">
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <command_interface name="velocity" />
+    </joint>
+  </ros2_control>
+</robot>

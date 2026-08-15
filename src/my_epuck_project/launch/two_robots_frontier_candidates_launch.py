@@ -64,6 +64,7 @@ def launch_setup(context):
             'fusion_rebuild_period_s': LaunchConfiguration(
                 'fusion_rebuild_period_s'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
+            'controller_variant': LaunchConfiguration('controller_variant'),
         }.items(),
     )
     return [
@@ -101,5 +102,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('controller_variant', default_value='rpp',
+                              choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         OpaqueFunction(function=launch_setup),
     ])

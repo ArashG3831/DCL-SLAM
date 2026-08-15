@@ -3,6 +3,8 @@
 
 import json
 import os
+import shutil
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -25,6 +27,33 @@ def launch_setup(context):
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
     summary = profile_summary(selected)
+    forensic_enabled = (
+        LaunchConfiguration('enable_forensic_capture').perform(context).lower()
+        == 'true')
+    contact_enabled = (
+        LaunchConfiguration('enable_contact_capture').perform(context).lower()
+        == 'true')
+    launch_world_path = world_path or selected['world_path']
+    if forensic_enabled or contact_enabled:
+        # Keep the source/production world untouched.  Webots requires every
+        # external controller to have a corresponding Robot node, so the
+        # read-only Supervisor gets one temporary diagnostic-only node.
+        source_for_copy = launch_world_path
+        forensic_world_dir = tempfile.mkdtemp(
+            prefix=f'my_epuck_forensic_{os.getpid()}_')
+        # Preserve the profile's expected basename in the temporary directory;
+        # nested launch files resolve the large/small profile from its parent.
+        forensic_world = os.path.join(
+            forensic_world_dir, os.path.basename(source_for_copy))
+        shutil.copyfile(source_for_copy, forensic_world)
+        with open(forensic_world, 'a', encoding='utf-8') as stream:
+            stream.write(
+                '\nRobot {\n'
+                '  name "ForensicGroundTruthSupervisor"\n'
+                '  controller "<extern>"\n'
+                '  supervisor TRUE\n'
+                '}\n')
+        launch_world_path = forensic_world
     dispatch_enabled = (
         LaunchConfiguration('dispatch_enabled').perform(context).lower()
         == 'true'
@@ -36,7 +65,7 @@ def launch_setup(context):
         launch_arguments={
             'world_profile': selected['name'],
             'webots_port': LaunchConfiguration('webots_port'),
-            'world_path': world_path,
+            'world_path': launch_world_path,
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -44,6 +73,7 @@ def launch_setup(context):
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'dispatch_enabled': str(dispatch_enabled).lower(),
+            'controller_variant': LaunchConfiguration('controller_variant'),
         }.items(),
     )
     observer = Node(
@@ -83,6 +113,24 @@ def launch_setup(context):
             }, sort_keys=True),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'enable_console_status': LaunchConfiguration('logger_console_status'),
+            'enable_rosout_collection': LaunchConfiguration(
+                'enable_rosout_collection'),
+            'enable_coverage_attribution': LaunchConfiguration(
+                'enable_coverage_attribution'),
+            'enable_trajectory_overlap': LaunchConfiguration(
+                'enable_trajectory_overlap'),
+            # Diagnostic-only, passive forensic capture.  It is disabled for
+            # the normal production launch and does not alter the control
+            # graph, motion limits, SLAM, fusion, or allocation.
+            'enable_forensic_capture': LaunchConfiguration(
+                'enable_forensic_capture'),
+            'enable_contact_capture': LaunchConfiguration(
+                'enable_contact_capture'),
+            'contact_sampling_period_ms': LaunchConfiguration(
+                'contact_sampling_period_ms'),
+            'forensic_snapshot_interval_s': LaunchConfiguration(
+                'forensic_snapshot_interval_s'),
+            'webots_port': LaunchConfiguration('webots_port'),
         }],
     )
     return [assignment, observer]
@@ -116,5 +164,19 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('logger_console_status', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('enable_rosout_collection', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('enable_coverage_attribution', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('enable_trajectory_overlap', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('enable_forensic_capture', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('enable_contact_capture', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('contact_sampling_period_ms', default_value='20'),
+        DeclareLaunchArgument('controller_variant', default_value='rpp',
+                              choices=['dwb', 'rotation_shim_dwb', 'rpp']),
+        DeclareLaunchArgument('forensic_snapshot_interval_s', default_value='15.0'),
         OpaqueFunction(function=launch_setup),
     ])

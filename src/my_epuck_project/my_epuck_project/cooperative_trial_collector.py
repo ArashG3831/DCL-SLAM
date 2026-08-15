@@ -9,7 +9,11 @@ import threading
 import time
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from my_epuck_interfaces.msg import ExplorationClaim, ExplorationStatus
+from my_epuck_interfaces.msg import (
+    DistributedExplorationStatus,
+    ExplorationClaim,
+    ExplorationStatus,
+)
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy
@@ -138,6 +142,31 @@ def claim_dict(message, received_monotonic, now_monotonic=None):
     }
 
 
+def distributed_status_dict(message, received_monotonic, now_monotonic=None):
+    """Serialize the final status from the replicated pair-assignment peer."""
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    return {
+        'source_robot_id': message.source_robot_id,
+        'source_session_id': bytes(message.source_session_id.uuid).hex(),
+        'state': int(message.state),
+        'round_id': message.round_id,
+        'union_hash': message.union_hash,
+        'decision_hash': message.decision_hash,
+        'active_canonical_task_id': message.active_canonical_task_id,
+        'local_nav_goal_active': bool(message.local_nav_goal_active),
+        'nav2_healthy': bool(message.nav2_healthy),
+        'tf_healthy': bool(message.tf_healthy),
+        'candidate_source_healthy': bool(message.candidate_source_healthy),
+        'peer_communication_healthy': bool(message.peer_communication_healthy),
+        'reason': message.reason,
+        'validity': duration_dict(message.validity),
+        'ros_timestamp': stamp_dict(message.header.stamp),
+        'frame_id': message.header.frame_id,
+        'collector_receive_monotonic_s': received_monotonic,
+        'age_at_write_s': max(0.0, now - received_monotonic),
+    }
+
+
 def validate_map_message(message, expected_frame='shared_map'):
     """Return a list of lossless-map validation errors."""
     errors = []
@@ -237,7 +266,7 @@ class CooperativeTrialCollector(Node):
         self.lock = threading.RLock()
         self.finalized = False
         self.messages = {
-            robot: {'status': None, 'claim': None, 'shared_map': None,
+            robot: {'status': None, 'distributed_status': None, 'claim': None, 'shared_map': None,
                     'local_map': None, 'navigate_status': None}
             for robot in ('robot1', 'robot2')
         }
@@ -261,6 +290,10 @@ class CooperativeTrialCollector(Node):
                 ExplorationStatus, f'/cslam/{robot}/exploration_status',
                 lambda message, item=robot:
                     self.store(item, 'status', message), reliable)
+            self.create_subscription(
+                DistributedExplorationStatus, f'/{robot}/distributed_status',
+                lambda message, item=robot:
+                    self.store(item, 'distributed_status', message), reliable)
             self.create_subscription(
                 ExplorationClaim, f'/cslam/{robot}/exploration_claim',
                 lambda message, item=robot:
@@ -309,6 +342,14 @@ class CooperativeTrialCollector(Node):
 
     def complete_and_fresh(self, now):
         for robot in self.messages:
+            distributed = self.messages[robot]['distributed_status']
+            distributed_received = self.received[robot].get('distributed_status')
+            if distributed is not None:
+                if (distributed.state != DistributedExplorationStatus.COMPLETE
+                        or distributed_received is None
+                        or now - distributed_received > self.status_fresh_s):
+                    return False
+                continue
             status = self.messages[robot]['status']
             received = self.received[robot].get('status')
             if status is None or received is None:
@@ -320,11 +361,19 @@ class CooperativeTrialCollector(Node):
         return True
 
     def readiness(self):
-        required = ('status', 'claim', 'shared_map')
-        return all(
-            all(self.messages[robot][kind] is not None for kind in required)
-            for robot in self.messages
-        )
+        for robot in self.messages:
+            if self.messages[robot]['shared_map'] is None:
+                return False
+            has_legacy = (
+                self.messages[robot]['status'] is not None
+                and self.messages[robot]['claim'] is not None
+            )
+            has_distributed = (
+                self.messages[robot]['distributed_status'] is not None
+            )
+            if not (has_legacy or has_distributed):
+                return False
+        return True
 
     def navigation_active(self, robot):
         message = self.messages[robot]['navigate_status']
@@ -393,8 +442,20 @@ class CooperativeTrialCollector(Node):
                     claim_dict(claim, self.received[robot]['claim'], now)
                     if claim is not None else None
                 ),
+                'distributed_status': (
+                    distributed_status_dict(
+                        values['distributed_status'],
+                        self.received[robot]['distributed_status'], now)
+                    if values['distributed_status'] is not None else None
+                ),
                 'navigation_active': self.navigation_active(robot),
             }
+            if robots[robot]['navigation_active'] is None:
+                distributed = values['distributed_status']
+                robots[robot]['navigation_active'] = (
+                    bool(distributed.local_nav_goal_active)
+                    if distributed is not None else None
+                )
             if self.settled_snapshot is not None:
                 robots[robot]['status']['age_at_collection_s'] = (
                     self.settled_snapshot[robot])

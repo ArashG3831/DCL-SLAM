@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+import tempfile
+
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -24,10 +27,115 @@ LIFECYCLE_NODES = [
 ]
 
 
-def nav2_nodes(package_dir, robot, selected):
+# Historical diagnostic baseline.  Production YAML now contains RPP; keeping
+# this block here preserves explicit ``controller_variant:=dwb`` reproduction
+# without reintroducing DWB into the active production configuration.
+_DWB_DIAGNOSTIC_FOLLOW_PATH = {
+    'plugin': 'dwb_core::DWBLocalPlanner',
+    'debug_trajectory_details': True,
+    'min_vel_x': 0.0,
+    'min_vel_y': 0.0,
+    'max_vel_x': 0.13,
+    'max_vel_y': 0.0,
+    'max_vel_theta': 0.35,
+    'min_speed_xy': 0.0,
+    'max_speed_xy': 0.13,
+    'min_speed_theta': 0.0,
+    'acc_lim_x': 0.20,
+    'acc_lim_y': 0.0,
+    'acc_lim_theta': 1.2,
+    'decel_lim_x': -0.20,
+    'decel_lim_y': 0.0,
+    'decel_lim_theta': -1.2,
+    'vx_samples': 6,
+    'vy_samples': 5,
+    'vtheta_samples': 21,
+    'sim_time': 1.7,
+    'linear_granularity': 0.01,
+    'angular_granularity': 0.025,
+    'transform_tolerance': 1.5,
+    'xy_goal_tolerance': 0.06,
+    'trans_stopped_velocity': 0.04,
+    'short_circuit_trajectory_evaluation': True,
+    'stateful': True,
+    'critics': [
+        'RotateToGoal', 'Oscillation', 'BaseObstacle', 'GoalAlign',
+        'PathAlign', 'PathDist', 'GoalDist',
+    ],
+    'BaseObstacle.scale': 0.20,
+    'PathAlign.scale': 8.0,
+    'PathAlign.forward_point_distance': 0.0025,
+    'GoalAlign.scale': 0.0,
+    'GoalAlign.forward_point_distance': 0.0025,
+    'PathDist.scale': 24.0,
+    'GoalDist.scale': 24.0,
+    'RotateToGoal.scale': 0.0,
+    'RotateToGoal.slowing_factor': 5.0,
+    'RotateToGoal.lookahead_time': -1.0,
+}
+
+
+def _diagnostic_params(source, robot, variant):
+    """Create a temporary controller variant; production YAML stays untouched."""
+    # RPP is the authoritative production YAML.  Returning it directly keeps
+    # the normal launch free of generated diagnostic files or overrides.
+    if variant == 'rpp':
+        return source
+    with open(source, encoding='utf-8') as stream:
+        document = yaml.safe_load(stream)
+    controller = document['controller_server']['ros__parameters']
+    original = dict(controller['FollowPath'])
+    if variant == 'dwb':
+        controller['FollowPath'] = dict(_DWB_DIAGNOSTIC_FOLLOW_PATH)
+    elif variant == 'rotation_shim_dwb':
+        primary = dict(_DWB_DIAGNOSTIC_FOLLOW_PATH)
+        primary.pop('plugin', None)
+        shim = {
+            'plugin': 'nav2_rotation_shim_controller::RotationShimController',
+            'primary_controller': 'dwb_core::DWBLocalPlanner',
+            'angular_dist_threshold': 0.785,
+            'angular_disengage_threshold': 0.3925,
+            'forward_sampling_distance': 0.20,
+            'rotate_to_heading_angular_vel': 0.35,
+            'max_angular_accel': 0.20,
+            'simulate_ahead_time': 1.0,
+            'rotate_to_goal_heading': False,
+            'rotate_to_heading_once': False,
+            'closed_loop': True,
+        }
+        # The Jazzy RotationShim creates the primary controller with the same
+        # plugin name (FollowPath).  Keep the primary DWB parameters at that
+        # namespace; only the wrapper's plugin and primary_controller fields
+        # are special.  A nested mapping is not a ROS parameter namespace.
+        shim.update(primary)
+        controller['FollowPath'] = shim
+    else:
+        raise ValueError(f'unknown controller_variant={variant}')
+    handle = tempfile.NamedTemporaryFile(
+        mode='w', suffix=f'_{robot}_{variant}.yaml', delete=False,
+        encoding='utf-8')
+    with handle:
+        yaml.safe_dump(document, handle, sort_keys=False)
+    return handle.name
+
+
+def nav2_nodes(package_dir, robot, selected, controller_variant):
     source = os.path.join(
         package_dir, 'resource', f'nav2_{robot}_shared_map.yaml'
     )
+    source = _diagnostic_params(source, robot, controller_variant)
+    diagnostic_rewrites = {
+        'controller_server.ros__parameters.FollowPath.publish_evaluation':
+            LaunchConfiguration('diagnostic_mode'),
+        'controller_server.ros__parameters.FollowPath.publish_local_plan':
+            LaunchConfiguration('diagnostic_mode'),
+        'controller_server.ros__parameters.FollowPath.publish_global_plan':
+            LaunchConfiguration('diagnostic_mode'),
+        'controller_server.ros__parameters.FollowPath.publish_transformed_global_plan':
+            LaunchConfiguration('diagnostic_mode'),
+        'controller_server.ros__parameters.FollowPath.publish_cost_grid_pc':
+            LaunchConfiguration('diagnostic_mode'),
+    } if controller_variant == 'dwb' else {}
     parameters = ParameterFile(
         RewrittenYaml(
             source_file=source,
@@ -42,18 +150,9 @@ def nav2_nodes(package_dir, robot, selected):
                     '0.08' if selected['name'] == 'large' else '0.5',
                 'controller_server.ros__parameters.progress_checker.movement_time_allowance':
                     '18.0' if selected['name'] == 'large' else '10.0',
-                'controller_server.ros__parameters.FollowPath.publish_evaluation':
-                    LaunchConfiguration('diagnostic_mode'),
-                'controller_server.ros__parameters.FollowPath.publish_local_plan':
-                    LaunchConfiguration('diagnostic_mode'),
-                'controller_server.ros__parameters.FollowPath.publish_global_plan':
-                    LaunchConfiguration('diagnostic_mode'),
-                'controller_server.ros__parameters.FollowPath.publish_transformed_global_plan':
-                    LaunchConfiguration('diagnostic_mode'),
-                'controller_server.ros__parameters.FollowPath.publish_cost_grid_pc':
-                    LaunchConfiguration('diagnostic_mode'),
                 'collision_monitor.ros__parameters.state_topic':
                     'collision_monitor_state',
+                **diagnostic_rewrites,
             },
             convert_types=True,
         ),
@@ -219,8 +318,10 @@ def launch_setup(context):
         filtered_slam,
         *alignment,
         *exchange,
-        *nav2_nodes(package_dir, 'robot1', selected),
-        *nav2_nodes(package_dir, 'robot2', selected),
+        *nav2_nodes(package_dir, 'robot1', selected,
+                    LaunchConfiguration('controller_variant').perform(context)),
+        *nav2_nodes(package_dir, 'robot2', selected,
+                    LaunchConfiguration('controller_variant').perform(context)),
     ]
 
 
@@ -246,5 +347,7 @@ def generate_launch_description():
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('controller_variant', default_value='rpp',
+                              choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         OpaqueFunction(function=launch_setup),
     ])

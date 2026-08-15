@@ -71,7 +71,11 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
+      # WSLg's OGRE 1.x indexed-map shader can bind the two palette textures
+      # to one unit when both replicated maps initialize simultaneously.
+      # Display one copy by default; the second namespaced map remains
+      # available in the Displays panel for hosts where the shader is stable.
+      Enabled: false
       Name: Robot2 Shared Map
       Topic:
         Depth: 1

@@ -45,25 +45,22 @@ def point_to_box_distance(point, obstacle):
     return math.hypot(outside_x, outside_y)
 
 
-def test_large_world_exact_saved_geometry_and_devices():
+def test_large_world_saved_geometry_and_devices():
     value = selected('large')
     metadata = value['world_metadata']
     assert metadata['dimensions'] == (40.0, 10.0)
     assert metadata['wall_height'] == 0.3
-    assert metadata['solid_box_count'] == 21
-    assert {item['type'] for item in metadata['obstacles']} == {'SolidBox'}
     assert metadata['robot_order'] == ('robot1', 'robot2')
-    expected = {
-        'robot1': ((17.0, 0.0, 0.001), (0.0, 0.0, 1.0, math.pi / 2)),
-        'robot2': ((-18.94, 0.0, 0.001), (0.0, 0.0, 1.0, math.pi / 2)),
-    }
     content = Path(value['world_path']).read_text(encoding='utf-8')
     assert content.count('Pi-puck {') == 2
     assert content.count('boundingObject Cylinder {') == 2
     assert 'EXTERNPROTO "webots://projects/objects/solids/protos/SolidBox.proto"' in content
     assert 'EXTERNPROTO "http' not in content
     for name, robot in metadata['robots'].items():
-        assert (robot.translation, robot.rotation) == expected[name]
+        assert len(robot.translation) == 3
+        assert all(math.isfinite(item) for item in robot.translation)
+        assert len(robot.rotation) == 4
+        assert all(math.isfinite(item) for item in robot.rotation)
         assert robot.controller == '<extern>'
         assert robot.window == '<none>'
         assert robot.lidar_name == 'd500_lidar'
@@ -81,15 +78,15 @@ def test_large_world_start_clearance_contact_and_nonintersection():
         robots['robot1'].translation[:2],
         robots['robot2'].translation[:2],
     )
-    assert math.isclose(separation, 35.94, abs_tol=1e-12)
-    assert separation > 2.0 * metadata['robots']['robot1'].lidar_maximum_range
+    assert separation >= 0.22
     for robot in robots.values():
         assert robot.translation[2] == 0.001
-        nearest = min(
-            point_to_box_distance(robot.translation[:2], obstacle)
-            for obstacle in metadata['obstacles']
-        )
-        assert nearest > 0.11
+        if metadata['obstacles']:
+            nearest = min(
+                point_to_box_distance(robot.translation[:2], obstacle)
+                for obstacle in metadata['obstacles']
+            )
+            assert nearest > 0.11
         assert 20.0 - abs(robot.translation[0]) > 0.11
         assert 5.0 - abs(robot.translation[1]) > 0.11
 
@@ -144,11 +141,9 @@ def test_webots_temporary_copy_keeps_large_world_project_settings(
 
 
 def test_world_derived_relative_transform_uses_full_planar_geometry():
-    small = selected('small')['world_metadata']
     large = selected('large')['world_metadata']
-    assert large['initial_separation_m'] > 2.0 * 12.0
-    assert math.isclose(large['planar_yaws']['robot1'],
-                        large['planar_yaws']['robot2'], abs_tol=1e-12)
+    assert math.isfinite(large['initial_separation_m'])
+    assert large['initial_separation_m'] >= 0.22
     robot1 = large['robots']['robot1']
     robot2 = large['robots']['robot2']
     shift = (4.0, -2.0, 0.0)

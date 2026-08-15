@@ -1,5 +1,5 @@
 """Strictly passive structured observer for two-robot exploration experiments."""
-import csv, hashlib, json, math, os, signal, socket, statistics, subprocess, threading, time, uuid
+import csv, hashlib, json, math, os, signal, socket, statistics, subprocess, sys, threading, time, uuid
 from collections import Counter, deque
 from dataclasses import asdict
 from pathlib import Path
@@ -34,6 +34,7 @@ from my_epuck_interfaces.msg import (
     TaskSnapshot,
 )
 from .experiment_metrics import CoverageAttribution, Grid, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
+from .forensic_evidence import ForensicEvidenceWriter
 
 SCHEMA='1.1.0'; STATES={0:'UNKNOWN',1:'PROPOSING',2:'NAVIGATING',3:'SUCCEEDED',4:'FAILED',5:'RELEASED',6:'CANCELED'}; STATUS_STATES={0:'STARTING',1:'ACTIVE',2:'NAVIGATING',3:'NO_ELIGIBLE_CANDIDATES',4:'COMPLETE',5:'STOPPED',6:'ERROR'}
 TIME_FIELDS=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','wall_elapsed_s','event_sequence']
@@ -57,7 +58,7 @@ def default_run_id(): return time.strftime('%Y-%m-%dT%H%M%SZ',time.gmtime())+'_'
 class CooperativeExperimentLogger(Node):
     def __init__(self, **node_kwargs):
         super().__init__('cooperative_experiment_logger', **node_kwargs)
-        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.}
+        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000}
         defaults.update({
             'world_profile': 'small',
             'source_world_path': '',
@@ -92,6 +93,20 @@ class CooperativeExperimentLogger(Node):
         self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
         self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.files=[]; self.writers={}
+        forensic_enabled = self.p['enable_forensic_capture']
+        if isinstance(forensic_enabled, str):
+            forensic_enabled = forensic_enabled.lower() == 'true'
+        contact_enabled = self.p.get('enable_contact_capture', False)
+        if isinstance(contact_enabled, str):
+            contact_enabled = contact_enabled.lower() == 'true'
+        self.contact_capture = bool(contact_enabled)
+        self.forensic = (ForensicEvidenceWriter(
+            self.directory, self.robots, self.p['forensic_snapshot_interval_s'])
+            if forensic_enabled else None)
+        self.ground_truth_process = None
+        self.ground_truth_log = None
+        if self.forensic is not None or self.contact_capture:
+            self.start_forensic_ground_truth()
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}
         self.tf_buffer=Buffer(); self.tf_listener=TransformListener(self.tf_buffer,self)
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
@@ -104,6 +119,11 @@ class CooperativeExperimentLogger(Node):
         self._observer_timers.append(self.create_timer(self.p['console_summary_period_s'],lambda:self.safe_call('console_status',self.console)))
         self._observer_timers.append(self.create_timer(1.,lambda:self.safe_call('process_resources',self.sample_process_resources)))
         self._observer_timers.append(self.create_timer(5.,lambda:self.safe_call('file_flush',self.flush)))
+        if self.forensic is not None:
+            self._observer_timers.append(self.create_timer(
+                float(self.p['forensic_snapshot_interval_s']),
+                lambda: self.safe_call('forensic_snapshot',
+                                       self.forensic_snapshot)))
 
     def csv_file(self,name,fields):
         f=open(self.directory/name,'w',newline='',encoding='utf-8'); self.files.append(f); w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); return w
@@ -114,6 +134,108 @@ class CooperativeExperimentLogger(Node):
     def qos(self,reliable=True,transient=False,depth=10): return QoSProfile(history=HistoryPolicy.KEEP_LAST,depth=depth,reliability=ReliabilityPolicy.RELIABLE if reliable else ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.TRANSIENT_LOCAL if transient else DurabilityPolicy.VOLATILE)
     def observe(self,message_type,topic,callback,qos,subsystem):
         return self.create_subscription(message_type,topic,lambda message:self.safe_call(subsystem,callback,message),qos)
+    def start_forensic_ground_truth(self):
+        """Start an external read-only Webots Supervisor observer.
+
+        The observer is diagnostic-only and retries its controller connection
+        while Webots is starting.  It never publishes ROS data or commands.
+        """
+        forensic_dir = self.directory / 'forensic'
+        forensic_dir.mkdir(parents=True, exist_ok=True)
+        output = forensic_dir / 'supervisor_ground_truth.csv'
+        contact_output = forensic_dir / 'contact_points.csv'
+        log_path = forensic_dir / 'supervisor_ground_truth.log'
+        environment = os.environ.copy()
+        try:
+            from ament_index_python.packages import get_package_prefix
+            driver_prefix = get_package_prefix('webots_ros2_driver')
+            python_version = f'python{sys.version_info.major}.{sys.version_info.minor}'
+            controller_python = os.path.join(
+                driver_prefix, 'lib', 'controller', 'python')
+            driver_site = os.path.join(
+                driver_prefix, 'lib', python_version, 'site-packages')
+            environment['WEBOTS_HOME'] = driver_prefix
+            environment['PYTHONPATH'] = os.pathsep.join(
+                p for p in (controller_python, driver_site,
+                            environment.get('PYTHONPATH', '')) if p)
+        except Exception as exc:
+            self.event('FORENSIC_SUPERVISOR_START_FAILED', str(exc),
+                       severity='WARN', allow_during_shutdown=True)
+            return
+        environment['WEBOTS_CONTROLLER_URL'] = (
+            f"tcp://127.0.0.1:{self.p['webots_port']}/"
+            'ForensicGroundTruthSupervisor')
+        command = [sys.executable, '-m',
+                   'my_epuck_project.cooperative_ground_truth_observer',
+                   '--output', str(output), '--robot-def', 'robot1',
+                   '--robot-def', 'robot2', '--sample-period-s', '0.10']
+        if self.contact_capture:
+            command.extend([
+                '--contact-output', str(contact_output),
+                '--contact-sampling-period-ms', str(int(
+                    self.p.get('contact_sampling_period_ms', 20))),
+            ])
+        try:
+            self.ground_truth_log = log_path.open('w', encoding='utf-8')
+            self.ground_truth_process = subprocess.Popen(
+                command, env=environment, stdout=self.ground_truth_log,
+                stderr=subprocess.STDOUT, start_new_session=True)
+            self.event('FORENSIC_SUPERVISOR_STARTED',
+                       'external Webots ground-truth observer started',
+                       supervisor_pid=self.ground_truth_process.pid,
+                       output=str(output), allow_during_shutdown=True)
+        except OSError as exc:
+            self.event('FORENSIC_SUPERVISOR_START_FAILED', str(exc),
+                       severity='WARN', allow_during_shutdown=True)
+
+    def stop_forensic_ground_truth(self):
+        process = self.ground_truth_process
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=8.0)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                    process.wait(timeout=3.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if self.ground_truth_log is not None:
+            try:
+                self.ground_truth_log.flush()
+                self.ground_truth_log.close()
+            except OSError:
+                pass
+        self.event('FORENSIC_SUPERVISOR_STOPPED',
+                   'external ground-truth observer stopped',
+                   return_code=process.returncode, allow_during_shutdown=True)
+
+    def forensic_snapshot(self, force=False):
+        if self.forensic is None:
+            return
+        now_ros = self.ros_seconds()
+        now_wall = time.monotonic() - self.start
+        if force:
+            self.forensic.save_final_maps(self.latest, now_ros, now_wall)
+        else:
+            self.forensic.capture_maps(self.latest, now_ros, now_wall)
+        for robot in self.robots:
+            for target, source in (
+                    (self.p['global_frame'], f'{robot}/map'),
+                    (self.p['global_frame'], f'{robot}/odom'),
+                    (f'{robot}/odom', f'{robot}/base_footprint')):
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        target, source, Time(),
+                        timeout=Duration(seconds=0.03))
+                    self.forensic.record_transform(
+                        now_ros, now_wall, target, source, transform=transform)
+                except TransformException as exc:
+                    self.forensic.record_transform(
+                        now_ros, now_wall, target, source, error=str(exc))
+        self.forensic.flush()
     def subscribe(self):
         for r in self.robots:
             self.observe(Odometry,f'/{r}/odom',lambda m,x=r:self.odom(x,m),qos_profile_sensor_data,f'{r}.odom')
@@ -182,10 +304,16 @@ class CooperativeExperimentLogger(Node):
         now=self.ros_seconds()
         with self._state_lock:
             self.last[(r,key)]=now; self.windows.setdefault((r,key),deque()).append(now); self.latest[r][key]=msg
+        if self.forensic is not None and key == 'peer_map':
+            self.forensic.record_peer_map(
+                r, msg, now, time.monotonic() - self.start)
     def age(self,r,key):
         value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):
         self.mark(r,'odom',msg)
+        if self.forensic is not None:
+            self.forensic.record_odom(
+                r, msg, self.ros_seconds(), time.monotonic() - self.start)
         p=msg.pose.pose.position
         local_yaw=yaw(msg.pose.pose.orientation)
         try:
@@ -517,6 +645,13 @@ class CooperativeExperimentLogger(Node):
             except Exception as exc:self.record_internal_error('timer_cancel',exc)
         if self.context.ok():
             self.event('RUN_END' if clean else 'RUN_INTERRUPTED','observer shutting down',console=True,allow_during_shutdown=True)
+        if self.forensic is not None or self.contact_capture:
+            if self.forensic is not None:
+                self.forensic_snapshot(force=True)
+            self.stop_forensic_ground_truth()
+            if self.forensic is not None:
+                atomic_json(self.directory / 'forensic' / 'manifest.json',
+                            self.forensic.manifest())
         self.flush()
         successful=False
         try:
@@ -541,6 +676,8 @@ class CooperativeExperimentLogger(Node):
                     except Exception as exc:
                         if self.context.ok():
                             self.get_logger().error(f'file close failed: {exc}')
+            if self.forensic is not None:
+                self.forensic.close()
             with self._lifecycle_lock:self.finalized=True; self._finalizing=False
         return successful
 

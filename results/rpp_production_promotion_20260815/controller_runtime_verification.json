@@ -1,0 +1,19 @@
+{
+  "default_launch_controller_variant": "rpp",
+  "wrapper_launch_defaults_verified": [
+    "two_robots_frontier_candidates_launch.py",
+    "two_robots_decentralized_exploration_launch.py",
+    "two_robots_distributed_assignment_launch.py"
+  ],
+  "controller_override_argument_supplied": false,
+  "robot1": {
+    "created_controller_type": "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+    "activated_controller_type": "regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+  },
+  "robot2": {
+    "created_controller_type": "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+    "activated_controller_type": "regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+  },
+  "evidence": "rpp_production_promotion_20260815/rpp_production_promotion_20260815/attempts/trial_01_attempt_01/launch.log",
+  "dwb_runtime_evidence_found": false
+}

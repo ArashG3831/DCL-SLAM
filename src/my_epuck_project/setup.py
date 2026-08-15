@@ -40,6 +40,10 @@ setup(
             'my_epuck_project.cooperative_trial_collector:main',
             'run_cooperative_regression = '
             'my_epuck_project.cooperative_regression:main',
+            'run_cooperative_trial_fast = '
+            'my_epuck_project.cooperative_trial_fast:main',
+            'nav2_frontier_diagnostic = '
+            'my_epuck_project.nav2_frontier_diagnostic:main',
             'export_cooperative_maps_png = '
             'my_epuck_project.cooperative_map_png_export:main',
             'controller_pipeline_diagnostics = '
@@ -50,6 +54,16 @@ setup(
             'my_epuck_project.distributed_frontier_assignment:main',
             'fixed_task_snapshot_source = '
             'my_epuck_project.fixed_task_snapshot_source:main',
+            'motion_characterization_node = '
+            'my_epuck_project.motion_characterization_node:main',
+            'motion_course_node = '
+            'my_epuck_project.motion_course_node:main',
+            'motion_course_supervisor = '
+            'my_epuck_project.motion_course_supervisor:main',
+            'fixed_follow_path_driver = '
+            'my_epuck_project.fixed_follow_path_driver:main',
+            'motion_scan_branch_relay = '
+            'my_epuck_project.motion_scan_branch_relay:main',
         ],
     },
 )

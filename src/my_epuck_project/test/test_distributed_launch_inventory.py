@@ -33,8 +33,11 @@ def test_common_launch_has_two_equal_peers_and_no_central_allocator():
 def test_full_launch_enables_only_the_common_local_dispatch_boundary():
     """The stable final launch switches the replicated graph to dispatch mode."""
     text = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
-    assert "'dispatch_enabled': 'true'" in text
+    assert "DeclareLaunchArgument('dispatch_enabled', default_value='true'" in text
     assert 'cooperative_frontier_coordinator' not in text
+    assignment_text = (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text()
+    assert "'maximum_tasks_per_source': 5" in assignment_text
+    assert "'maximum_union_tasks': 10" in assignment_text
 
 
 def test_legacy_baseline_remains_explicitly_reachable():

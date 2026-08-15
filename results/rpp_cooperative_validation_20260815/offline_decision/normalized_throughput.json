@@ -1,0 +1,548 @@
+[
+  {
+    "controller": "dwb",
+    "trial": "trial_01",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 11.22,
+        "common_end_s": 630.96,
+        "samples": 22300,
+        "initial_gt": [
+          16.000000000003634,
+          -7.497307225485257e-10,
+          1.5707963269653962
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269653962,
+          "tx_m": 3.477723573662816e-09,
+          "ty_m": 16.000000000003634
+        },
+        "gt_distance_m": 33.359408387348374,
+        "odom_distance_m": 33.44295918139851,
+        "translation_rmse_m": 0.24644753933091468,
+        "translation_final_m": 1.0412911984721882,
+        "translation_max_m": 1.0412911984721882,
+        "yaw_rmse_rad": 0.05700517462970593,
+        "yaw_final_rad": 0.09747184362417016,
+        "yaw_max_rad": 0.11882862449369469
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 14.72,
+        "common_end_s": 630.94,
+        "samples": 25357,
+        "initial_gt": [
+          18.500000000003627,
+          -7.432022581190423e-10,
+          1.5707963269656067
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656067,
+          "tx_m": 3.901338210501018e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 27.636952913413303,
+        "odom_distance_m": 27.62003652083465,
+        "translation_rmse_m": 0.3708430990895857,
+        "translation_final_m": 0.5912691801227243,
+        "translation_max_m": 0.5956813407045477,
+        "yaw_rmse_rad": 0.04142218091278699,
+        "yaw_final_rad": 0.030081347568702732,
+        "yaw_max_rad": 0.07892399293074703
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 59368500.0,
+      "mean_known_cells_0_600": 98947.5,
+      "known_cells_at_s": {
+        "120": 75261.0,
+        "240": 88505.0,
+        "360": 122173.0,
+        "480": 135196.0,
+        "600": 142719.0
+      },
+      "milestone_time_s": {
+        "100000": 252.0,
+        "150000": null,
+        "200000": null
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 142719.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 60.99636130076168,
+      "known_cells_gain": 161202,
+      "known_cells_per_combined_m": 2642.813383656494,
+      "known_cells_per_100_s": 26867.0,
+      "mean_known_cells_auc": 98947.5,
+      "successful_goals": 11,
+      "successful_goals_per_100_s": 1.8333333333333333
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_02",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 9.08,
+        "common_end_s": 613.56,
+        "samples": 23771,
+        "initial_gt": [
+          16.000000000003627,
+          -7.438810981923887e-10,
+          1.5707963269658214
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658214,
+          "tx_m": 3.4786773960015824e-09,
+          "ty_m": 16.000000000003627
+        },
+        "gt_distance_m": 59.863656804707844,
+        "odom_distance_m": 59.83079542510049,
+        "translation_rmse_m": 1.196873810495919,
+        "translation_final_m": 3.2082313095984762,
+        "translation_max_m": 3.208473571321242,
+        "yaw_rmse_rad": 0.08130716236357274,
+        "yaw_final_rad": 0.09941153813777248,
+        "yaw_max_rad": 0.13201102035833756
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 5.34,
+        "common_end_s": 613.56,
+        "samples": 20955,
+        "initial_gt": [
+          18.500000000003624,
+          -7.492832229807422e-10,
+          1.5707963269668832
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269668832,
+          "tx_m": 3.931035062386432e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 28.514498961070604,
+        "odom_distance_m": 28.54380108778341,
+        "translation_rmse_m": 0.5071719546727365,
+        "translation_final_m": 0.9121866625682649,
+        "translation_max_m": 0.9133346379945935,
+        "yaw_rmse_rad": 0.0674101957032485,
+        "yaw_final_rad": 0.08971923278291172,
+        "yaw_max_rad": 0.12221828936160506
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 92752728.0,
+      "mean_known_cells_0_600": 154587.88,
+      "known_cells_at_s": {
+        "120": 79011.0,
+        "240": 118972.0,
+        "360": 187580.0,
+        "480": 230056.0,
+        "600": 263503.0
+      },
+      "milestone_time_s": {
+        "100000": 194.0,
+        "150000": 284.0,
+        "200000": 390.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 263503.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 88.37815576577844,
+      "known_cells_gain": 254638,
+      "known_cells_per_combined_m": 2881.232333868187,
+      "known_cells_per_100_s": 42439.666666666664,
+      "mean_known_cells_auc": 154587.88,
+      "successful_goals": 16,
+      "successful_goals_per_100_s": 2.6666666666666665
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_03",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 4.88,
+        "common_end_s": 603.02,
+        "samples": 24229,
+        "initial_gt": [
+          16.00000000000363,
+          -7.438811257446764e-10,
+          1.5707963269658092
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658092,
+          "tx_m": 3.4784820243015365e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 35.53564827449953,
+        "odom_distance_m": 35.5294695879883,
+        "translation_rmse_m": 0.510481145824615,
+        "translation_final_m": 0.792678015871706,
+        "translation_max_m": 0.7952078230704671,
+        "yaw_rmse_rad": 0.04571514800578362,
+        "yaw_final_rad": 0.06247583883729746,
+        "yaw_max_rad": 0.07663789601494031
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 8.7,
+        "common_end_s": 603.02,
+        "samples": 21154,
+        "initial_gt": [
+          18.500000000003627,
+          -7.438810960510894e-10,
+          1.5707963269657417
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657417,
+          "tx_m": 3.904514606149262e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 44.06274485250462,
+        "odom_distance_m": 44.06589939817951,
+        "translation_rmse_m": 1.333397215188086,
+        "translation_final_m": 3.898832982662162,
+        "translation_max_m": 3.898832982662162,
+        "yaw_rmse_rad": 0.1045999944334153,
+        "yaw_final_rad": 0.18275448167923614,
+        "yaw_max_rad": 0.18746169395857848
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 91689871.0,
+      "mean_known_cells_0_600": 152816.45166666666,
+      "known_cells_at_s": {
+        "120": 83741.0,
+        "240": 107383.0,
+        "360": 186884.0,
+        "480": 238124.0,
+        "600": 279266.0
+      },
+      "milestone_time_s": {
+        "100000": 210.0,
+        "150000": 340.0,
+        "200000": 366.0
+      },
+      "initial_known_cells": 11033.0,
+      "final_known_cells_600": 279266.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 79.59839312700416,
+      "known_cells_gain": 265454,
+      "known_cells_per_combined_m": 3334.916567680603,
+      "known_cells_per_100_s": 44242.333333333336,
+      "mean_known_cells_auc": 152816.45166666666,
+      "successful_goals": 6,
+      "successful_goals_per_100_s": 1.0
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_01",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 14.26,
+        "common_end_s": 628.88,
+        "samples": 18411,
+        "initial_gt": [
+          16.00000000000363,
+          -7.433714824229372e-10,
+          1.5707963269657594
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657594,
+          "tx_m": 3.477176573115746e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 33.42484391139957,
+        "odom_distance_m": 33.40843158333681,
+        "translation_rmse_m": 0.35522253934328835,
+        "translation_final_m": 0.4280812474611877,
+        "translation_max_m": 0.5254594008028564,
+        "yaw_rmse_rad": 0.03140071531340946,
+        "yaw_final_rad": 0.03551062911953462,
+        "yaw_max_rad": 0.047236717379789184
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 11.72,
+        "common_end_s": 629.02,
+        "samples": 20795,
+        "initial_gt": [
+          18.500000000003624,
+          -7.434263722070613e-10,
+          1.5707963269656948
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656948,
+          "tx_m": 3.903193131189909e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 27.783641166247524,
+        "odom_distance_m": 27.78302438059802,
+        "translation_rmse_m": 0.0504737795760147,
+        "translation_final_m": 0.056990492150946134,
+        "translation_max_m": 0.12236078543394503,
+        "yaw_rmse_rad": 0.013267217683457995,
+        "yaw_final_rad": 0.04858681233898077,
+        "yaw_max_rad": 0.04969548201723528
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 92678177.0,
+      "mean_known_cells_0_600": 154463.62833333333,
+      "known_cells_at_s": {
+        "120": 78238.0,
+        "240": 163941.0,
+        "360": 204710.0,
+        "480": 221697.0,
+        "600": 221914.0
+      },
+      "milestone_time_s": {
+        "100000": 158.0,
+        "150000": 230.0,
+        "200000": 358.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 221914.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 61.2084850776471,
+      "known_cells_gain": 209180,
+      "known_cells_per_combined_m": 3417.500036712901,
+      "known_cells_per_100_s": 34863.333333333336,
+      "mean_known_cells_auc": 154463.62833333333,
+      "successful_goals": 13,
+      "successful_goals_per_100_s": 2.1666666666666665
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_02",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 5.06,
+        "common_end_s": 617.18,
+        "samples": 21287,
+        "initial_gt": [
+          16.00000000000363,
+          -7.433714831683262e-10,
+          1.5707963269656766
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656766,
+          "tx_m": 3.4758514116589418e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 31.473119958813005,
+        "odom_distance_m": 31.45322965385561,
+        "translation_rmse_m": 0.3488771242440656,
+        "translation_final_m": 0.5015746555853318,
+        "translation_max_m": 0.5415801604126903,
+        "yaw_rmse_rad": 0.03465400709015424,
+        "yaw_final_rad": 0.04833729297894074,
+        "yaw_max_rad": 0.04946474012882973
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 10.84,
+        "common_end_s": 617.18,
+        "samples": 24108,
+        "initial_gt": [
+          18.500000000003627,
+          -7.432395047665945e-10,
+          1.5707963269656295
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656295,
+          "tx_m": 3.901798563143255e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 49.84408258655405,
+        "odom_distance_m": 49.82365139892197,
+        "translation_rmse_m": 0.17915740039501932,
+        "translation_final_m": 0.49853148035535894,
+        "translation_max_m": 0.49894116130335203,
+        "yaw_rmse_rad": 0.014341700425228126,
+        "yaw_final_rad": 0.019536904562425406,
+        "yaw_max_rad": 0.02947590322502691
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 86134041.0,
+      "mean_known_cells_0_600": 143556.735,
+      "known_cells_at_s": {
+        "120": 78572.0,
+        "240": 103608.0,
+        "360": 173809.0,
+        "480": 225338.0,
+        "600": 255156.0
+      },
+      "milestone_time_s": {
+        "100000": 192.0,
+        "150000": 314.0,
+        "200000": 418.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 255156.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 81.31720254536705,
+      "known_cells_gain": 246843,
+      "known_cells_per_combined_m": 3035.556958102263,
+      "known_cells_per_100_s": 41140.5,
+      "mean_known_cells_auc": 143556.735,
+      "successful_goals": 18,
+      "successful_goals_per_100_s": 3.0
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_03",
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 8.4,
+        "common_end_s": 603.98,
+        "samples": 23497,
+        "initial_gt": [
+          16.000000000003627,
+          -7.438811125919488e-10,
+          1.5707963269658314
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658314,
+          "tx_m": 3.4788372825166886e-09,
+          "ty_m": 16.000000000003627
+        },
+        "gt_distance_m": 26.979379812053075,
+        "odom_distance_m": 26.956245525022986,
+        "translation_rmse_m": 0.2578018531786417,
+        "translation_final_m": 0.3876270306758764,
+        "translation_max_m": 0.3876275419047561,
+        "yaw_rmse_rad": 0.02872901823893015,
+        "yaw_final_rad": 0.03990853352457879,
+        "yaw_max_rad": 0.048999779126718046
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 4.28,
+        "common_end_s": 603.96,
+        "samples": 20679,
+        "initial_gt": [
+          18.500000000003624,
+          -7.438810926358526e-10,
+          1.5707963269657292
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657292,
+          "tx_m": 3.904284564523323e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 31.55529503231201,
+        "odom_distance_m": 31.51386135146327,
+        "translation_rmse_m": 0.19206746161214053,
+        "translation_final_m": 0.2673222874258275,
+        "translation_max_m": 0.26732239902619187,
+        "yaw_rmse_rad": 0.012074280701173381,
+        "yaw_final_rad": 0.014330283988003956,
+        "yaw_max_rad": 0.02188812527752404
+      }
+    },
+    "coverage": {
+      "auc_known_cells_s": 84314502.0,
+      "mean_known_cells_0_600": 140524.17,
+      "known_cells_at_s": {
+        "120": 87527.0,
+        "240": 124161.0,
+        "360": 174925.0,
+        "480": 201471.0,
+        "600": 201471.0
+      },
+      "milestone_time_s": {
+        "100000": 192.0,
+        "150000": 286.0,
+        "200000": 404.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 201471.0
+    },
+    "throughput": {
+      "combined_gt_distance_m": 58.534674844365085,
+      "known_cells_gain": 189249,
+      "known_cells_per_combined_m": 3233.1092724643077,
+      "known_cells_per_100_s": 31541.5,
+      "mean_known_cells_auc": 140524.17,
+      "successful_goals": 11,
+      "successful_goals_per_100_s": 1.8333333333333333
+    }
+  }
+]

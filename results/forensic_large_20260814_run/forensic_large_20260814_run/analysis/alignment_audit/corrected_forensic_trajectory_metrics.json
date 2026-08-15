@@ -1,0 +1,68 @@
+{
+  "method": "raw Supervisor world pose + odom header_stamp; one GT-to-odom SE(2) alignment using initial yaw difference and translation; linear interpolation; no later realignment",
+  "metrics": {
+    "robot1": {
+      "robot": "robot1",
+      "odom_samples": 22362,
+      "time_start_s": 3.84,
+      "time_end_s": 707.9,
+      "gt_odom_alignment": {
+        "rotation_rad": -1.5707963269656728,
+        "translation_x_m": 3.4756590622740956e-09,
+        "translation_y_m": 16.00000000000363
+      },
+      "gt_odom_translation_rmse_m": 0.4445595107630659,
+      "gt_odom_final_translation_m": 1.3316125839547786,
+      "gt_odom_yaw_rmse_rad": 0.03376530533812104,
+      "gt_odom_final_abs_yaw_rad": 0.06318779927138607,
+      "gt_distance_m": 59.02609491372251,
+      "gt_slam_alignment": {
+        "rotation_rad": -1.5628179813015597,
+        "translation_x_m": -0.1473035909164312,
+        "translation_y_m": 15.999594607354283
+      },
+      "slam_samples": 48,
+      "slam_time_start_s": 15.000000000000002,
+      "slam_time_end_s": 708.0,
+      "gt_slam_translation_rmse_m": 0.41165956736324805,
+      "gt_slam_final_translation_m": 0.9243477619931917,
+      "gt_slam_yaw_rmse_rad": 0.05483002731577658,
+      "gt_slam_final_abs_yaw_rad": 0.060290793754385064
+    },
+    "robot2": {
+      "robot": "robot2",
+      "odom_samples": 24739,
+      "time_start_s": 9.3,
+      "time_end_s": 707.96,
+      "gt_odom_alignment": {
+        "rotation_rad": -1.5707963269657483,
+        "translation_x_m": 3.883654376183346e-09,
+        "translation_y_m": 18.500000000003627
+      },
+      "gt_odom_translation_rmse_m": 0.23294486576372703,
+      "gt_odom_final_translation_m": 0.3370404253792553,
+      "gt_odom_yaw_rmse_rad": 0.0361888311653547,
+      "gt_odom_final_abs_yaw_rad": 0.03363093578084886,
+      "gt_distance_m": 27.739727592782707,
+      "gt_slam_alignment": {
+        "rotation_rad": -1.5135208012833863,
+        "translation_x_m": -1.058955107515828,
+        "translation_y_m": 15.96965636456973
+      },
+      "slam_samples": 48,
+      "slam_time_start_s": 15.000000000000002,
+      "slam_time_end_s": 708.0,
+      "gt_slam_translation_rmse_m": 0.22395421447848643,
+      "gt_slam_final_translation_m": 0.31651930722569505,
+      "gt_slam_yaw_rmse_rad": 0.05039229167665919,
+      "gt_slam_final_abs_yaw_rad": 0.02364458990150453
+    }
+  },
+  "previous_reported": {
+    "robot1_gt_odom_rmse_m": 0.525,
+    "robot1_gt_odom_final_m": 1.32,
+    "robot2_gt_odom_rmse_m": 0.248,
+    "robot2_gt_odom_final_m": 0.337
+  },
+  "note": "Previous large trajectory values were produced by an initial-frame transformation that did not map initial Supervisor orientation to initial odometry orientation."
+}

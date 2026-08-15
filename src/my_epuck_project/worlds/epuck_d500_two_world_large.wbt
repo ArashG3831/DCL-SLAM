@@ -15,8 +15,8 @@ WorldInfo {
   basicTimeStep 20
 }
 Viewpoint {
-  orientation -0.5798542462666977 0.5798827027742318 0.572280616576983 2.1064376010010615
-  position 0.09358337476747501 3.433990762034121 67.7065534222092
+  orientation 0.5785561120896737 -0.5767592529883621 -0.5767335513527782 4.180700949830244
+  position -0.08562331275546686 2.4565357895600832 49.80362977360843
 }
 TexturedBackground {
 }
@@ -96,9 +96,29 @@ SolidBox {
   }
 }
 SolidBox {
-  translation 2 3.75 0.5
+  translation 0 3.5 0.5
   name "box(20)"
-  size 1 2.5 1
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 2 3 0.5
+  name "box(21)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 2 4.5 0.5
+  name "box(22)"
+  size 1 1 1
   appearance PBRAppearance {
     baseColor 0.184314 0.184314 0.184314
     roughness 0.5
@@ -239,7 +259,7 @@ SolidBox {
   }
 }
 E-puck {
-  translation 17 0 0.001
+  translation 16 0 0.001
   rotation 0 0 1 1.5707963267948966
   name "robot1"
   controller "<extern>"
@@ -298,7 +318,7 @@ E-puck {
   ]
 }
 E-puck {
-  translation -18.94 0 0.001
+  translation 18.5 0 0.001
   rotation 0 0 1 1.5707963267948966
   name "robot2"
   controller "<extern>"

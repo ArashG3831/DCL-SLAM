@@ -1,0 +1,92 @@
+{
+  "map_alignment_audit": {
+    "world_to_shared_formula": {
+      "x_shared": "world_y",
+      "y_shared": "-(world_x - 16.0)",
+      "yaw_shared": "world_yaw - pi/2"
+    },
+    "robot1_start_world": [
+      16.0,
+      0.0
+    ],
+    "robot2_start_world": [
+      18.5,
+      0.0
+    ],
+    "robot1_start_maps_to_shared": [
+      0.0,
+      0.0
+    ],
+    "robot2_start_maps_to_shared": [
+      0.0,
+      -2.5
+    ],
+    "production_source_transforms": {
+      "shared_map_from_robot1_map": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "shared_map_from_robot2_map": [
+        1.5308084989341916e-16,
+        -2.5,
+        0.0
+      ]
+    },
+    "transformed_npz_metadata": "analysis/transformed_local_maps_shared_grid.npz",
+    "supervisor_alignment_independent": true,
+    "conclusion": "The world-reference and source-map transforms use the known initial world/start geometry and production map-frame transform; they do not consume the corrected/incorrect GT-odom trajectory alignment."
+  },
+  "source_vs_fusion_invariants": {
+    "robot1_transformed_occupied": 14663,
+    "robot2_transformed_occupied": 6100,
+    "source_union": 19687,
+    "source_intersection": 1076,
+    "source_jaccard": 0.05465535632650988,
+    "robot1_shared_vs_union_jaccard": 0.9939584708331218,
+    "robot2_shared_vs_union_jaccard": 0.988635787123941,
+    "fused_extra_cells": 10,
+    "source_union_missing_from_fused": 109,
+    "source_disagreement_area_m2": 16.74989925122113
+  },
+  "reference_geometry_metrics": {
+    "robot1_local_transformed": {
+      "occupied_count": 14663,
+      "mean_distance_m": 0.10702891710354742,
+      "median_distance_m": 0.02651872609700945,
+      "p95_distance_m": 0.5465188809945797,
+      "max_distance_m": 1.3165186402663198,
+      "ghost_over_0p15m_count": 2620,
+      "ghost_over_0p15m_area_m2": 2.3579998945891867
+    },
+    "robot2_local_transformed": {
+      "occupied_count": 6100,
+      "mean_distance_m": 0.058871723995833965,
+      "median_distance_m": 0.008109510815181853,
+      "p95_distance_m": 0.251890452974997,
+      "max_distance_m": 0.7318903852492193,
+      "ghost_over_0p15m_count": 906,
+      "ghost_over_0p15m_area_m2": 0.8153999635487799
+    },
+    "source_union": {
+      "occupied_count": 20763,
+      "mean_distance_m": 0.09288072667070764,
+      "median_distance_m": 0.024218122074028403,
+      "p95_distance_m": 0.39651888434734117,
+      "max_distance_m": 1.3165186402663198,
+      "ghost_over_0p15m_count": 3526,
+      "ghost_over_0p15m_area_m2": 3.1733998581379668
+    },
+    "fused_shared": {
+      "occupied_count": 19588,
+      "mean_distance_m": 0.09900923940003185,
+      "median_distance_m": 0.03499989975243789,
+      "p95_distance_m": 0.40500025112181837,
+      "max_distance_m": 1.3050002310052498,
+      "ghost_over_0p15m_count": 3937,
+      "ghost_over_0p15m_area_m2": 3.5432998416021486
+    },
+    "definition": "Distance to nearest filled SolidBox rectangle or RectangleArena wall proxy; source world transformed by initial robot1 frame (x_shared=world_y, y_shared=-(world_x-16))."
+  },
+  "note": "These map metrics remain valid as source-local-versus-fusion comparisons, subject to the documented SolidBox/RectangleArena reference geometry and occupancy visibility limitations."
+}

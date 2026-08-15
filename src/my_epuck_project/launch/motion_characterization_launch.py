@@ -56,6 +56,11 @@ def generate_launch_description():
         DeclareLaunchArgument('profile', default_value='speed_0p10'),
         DeclareLaunchArgument('target_speed', default_value='0.10'),
         DeclareLaunchArgument('acceleration', default_value='0.20'),
+        DeclareLaunchArgument('course_mode', default_value='false'),
+        DeclareLaunchArgument('course_name', default_value='short'),
+        DeclareLaunchArgument('course_max_sim_time', default_value='180.0'),
+        DeclareLaunchArgument('course_gate_file', default_value=''),
+        DeclareLaunchArgument('course_command_file', default_value=''),
         OpaqueFunction(function=_launch_setup),
     ])
 
@@ -86,6 +91,12 @@ def _launch_setup(context):
         ground_truth_output = os.path.join(output_root, 'supervisor_ground_truth.csv')
     robot = 'robot1'
     enable_slam = LaunchConfiguration('enable_slam').perform(context).lower() == 'true'
+    course_mode = LaunchConfiguration('course_mode').perform(context).lower() == 'true'
+    course_gate_file = LaunchConfiguration('course_gate_file').perform(context)
+    course_command_file = LaunchConfiguration('course_command_file').perform(context)
+    if course_mode:
+        course_gate_file = course_gate_file or os.path.join(output_root, 'course_gate.json')
+        course_command_file = course_command_file or os.path.join(output_root, 'course_command.json')
 
     webots = WebotsLauncher(
         world=world_path,
@@ -192,15 +203,29 @@ def _launch_setup(context):
              '-p', 'child_frame:=base_footprint'],
         name='motion_odom_tf_bridge', output='screen', respawn=False,
     )
-    motion_node = Node(
-        package='my_epuck_project', executable='motion_characterization_node',
-        name='motion_characterization_node', output='screen',
-        parameters=[{'use_sim_time': use_sim_time,
-                     'output_root': LaunchConfiguration('output_root'),
-                     'profile': LaunchConfiguration('profile'),
-                     'target_speed': LaunchConfiguration('target_speed'),
-                     'acceleration': LaunchConfiguration('acceleration')}],
-    )
+    if course_mode:
+        motion_node = Node(
+            package='my_epuck_project', executable='motion_course_node',
+            name='motion_course_node', output='screen',
+            parameters=[{'use_sim_time': use_sim_time,
+                         'output_root': LaunchConfiguration('output_root'),
+                         'profile': LaunchConfiguration('profile'),
+                         'target_speed': LaunchConfiguration('target_speed'),
+                         'acceleration': LaunchConfiguration('acceleration'),
+                         'course_name': LaunchConfiguration('course_name'),
+                         'gate_file': course_gate_file,
+                         'command_file': course_command_file}],
+        )
+    else:
+        motion_node = Node(
+            package='my_epuck_project', executable='motion_characterization_node',
+            name='motion_characterization_node', output='screen',
+            parameters=[{'use_sim_time': use_sim_time,
+                         'output_root': LaunchConfiguration('output_root'),
+                         'profile': LaunchConfiguration('profile'),
+                         'target_speed': LaunchConfiguration('target_speed'),
+                         'acceleration': LaunchConfiguration('acceleration')}],
+        )
 
     # This process talks directly to the diagnostic Supervisor robot. It is
     # intentionally outside ROS and only records world pose/velocity.
@@ -210,10 +235,21 @@ def _launch_setup(context):
     inherited_pythonpath = os.environ.get('PYTHONPATH', '')
     observer_pythonpath = os.pathsep.join(
         p for p in (observer_python, inherited_pythonpath) if p)
+    observer_module = ('my_epuck_project.motion_course_supervisor'
+                       if course_mode else 'my_epuck_project.motion_supervisor_observer')
+    observer_cmd = [sys.executable, '-m', observer_module,
+                    '--output', ground_truth_output, '--robot-def', 'ROBOT1']
+    if course_mode:
+        observer_cmd += ['--command-file', course_command_file,
+                          '--gate-file', course_gate_file,
+                          '--max-sim-time', LaunchConfiguration(
+                              'course_max_sim_time').perform(context),
+                          '--course-name', LaunchConfiguration(
+                              'course_name').perform(context)]
+    else:
+        observer_cmd += ['--max-sim-time', '40.0']
     observer = ExecuteProcess(
-        cmd=[sys.executable, '-m', 'my_epuck_project.motion_supervisor_observer',
-             '--output', ground_truth_output, '--robot-def', 'ROBOT1',
-             '--max-sim-time', '40.0'],
+        cmd=observer_cmd,
         name='motion_supervisor_observer', output='screen', respawn=False,
         additional_env={
             'WEBOTS_HOME': driver_prefix,
@@ -235,6 +271,14 @@ def _launch_setup(context):
         target_action=diffdrive,
         on_exit=lambda event, context: [joints] if event.returncode == 0 else [],
     ))
+    # A failed controller spawner must terminate the diagnostic immediately;
+    # otherwise the external Supervisor keeps Webots alive until the full
+    # course timeout and the artifact can be mistaken for a motion result.
+    stop_on_diffdrive_failure = RegisterEventHandler(OnProcessExit(
+        target_action=diffdrive,
+        on_exit=lambda event, context: (
+            [EmitEvent(event=Shutdown(reason='motion diffdrive spawner failed'))]
+            if event.returncode != 0 else [])))
     # Do not start the motion profile while ros2_control is still waiting for
     # its robot description or controller services. Otherwise the initial
     # command step is silently dropped and acceleration measurements are false.
@@ -242,7 +286,14 @@ def _launch_setup(context):
         target_action=joints,
         on_exit=lambda event, context: [motion_node] if event.returncode == 0 else [],
     ))
+    stop_on_joints_failure = RegisterEventHandler(OnProcessExit(
+        target_action=joints,
+        on_exit=lambda event, context: (
+            [EmitEvent(event=Shutdown(reason='motion joint-state spawner failed'))]
+            if event.returncode != 0 else [])))
 
+    slam_scan_topic = (f'/{robot}/scan_d500_slam' if course_mode
+                       else f'/{robot}/scan_d500_fixed')
     slam = LifecycleNode(
         package='slam_toolbox', executable='async_slam_toolbox_node',
         name='slam_toolbox', namespace=robot, output='screen',
@@ -261,8 +312,13 @@ def _launch_setup(context):
             'odom_frame': f'{robot}/odom',
             'map_frame': f'{robot}/map',
             'base_frame': 'base_footprint',
-            'scan_topic': f'/{robot}/scan_d500_fixed',
+            'scan_topic': slam_scan_topic,
         }],
+    )
+    scan_branch_relay = Node(
+        package='my_epuck_project', executable='motion_scan_branch_relay',
+        name='motion_scan_branch_relay', output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
     )
     configure_slam = EmitEvent(event=ChangeState(
         lifecycle_node_matcher=matches_action(slam),
@@ -281,14 +337,18 @@ def _launch_setup(context):
     start_slam = RegisterEventHandler(OnProcessExit(
         target_action=joints,
         on_exit=lambda event, context: (
-            [slam, configure_slam, activate_slam, slam_recorder]
+            ([scan_branch_relay, slam, configure_slam, activate_slam, slam_recorder]
+             if course_mode else [slam, configure_slam, activate_slam, slam_recorder])
             if event.returncode == 0 else [])))
 
     actions = [
-        webots, webots._supervisor, robot_state_publisher, driver, stamper,
-        scan_fix, odom_tf_bridge, wait, start_joints, start_motion, start_observer,
-        stop_launch_on_observer_complete,
+        webots, webots._supervisor, robot_state_publisher, driver,
+        scan_fix, odom_tf_bridge, wait, start_joints, start_motion,
+        stop_on_diffdrive_failure, stop_on_joints_failure,
+        start_observer, stop_launch_on_observer_complete,
     ]
+    if not course_mode:
+        actions.insert(4, stamper)
     if enable_slam:
         actions.append(start_slam)
     return actions

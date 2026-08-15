@@ -1,0 +1,4791 @@
+[
+  {
+    "controller": "dwb",
+    "trial": "trial_01",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 39,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 37,
+        "stuck_episodes": 21,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 19,
+        "dispatch_attempts": 19,
+        "goals_terminal": 18,
+        "unique_agreed_decisions": 10,
+        "unique_agreed_rounds": 10
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 270,
+        "CANDIDATE_COUNT_CHANGED": 103,
+        "CORNER_TRAP_SUSPECTED": 20,
+        "DECISION_AGREED": 19,
+        "DISTRIBUTED_BID_ARRAY": 145,
+        "DISTRIBUTED_PAIR_DECISION": 24,
+        "DISTRIBUTED_STATUS": 233,
+        "DISTRIBUTED_TASK_FAILURE": 7,
+        "DISTRIBUTED_TASK_SNAPSHOT": 270,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 7,
+        "NAVIGATION_PROGRESS": 157,
+        "NAVIGATION_SUCCEEDED": 11,
+        "NAV_GOAL_ACCEPTED": 19,
+        "NAV_GOAL_SENT": 19,
+        "NO_PROGRESS_CLEARED": 39,
+        "NO_PROGRESS_STARTED": 39,
+        "RECOVERY_COUNT_CHANGED": 27,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 19,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 418,
+        "STUCK_CLEARED": 21,
+        "STUCK_STARTED": 21,
+        "TOPIC_RECOVERED": 60,
+        "TOPIC_STALE": 37
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 161202,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.3701867696698435,
+        "final_known_cells": 172223,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 17844,
+          "robot2": 45608
+        },
+        "simultaneously_observed_cells": 1143,
+        "total_known_union_cells": 174493,
+        "unique_first_seen_cells": {
+          "robot1": 124405,
+          "robot2": 50088
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 7,
+        "goals_accepted": 19,
+        "goals_sent": 19,
+        "recoveries": 27,
+        "successes": 11,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "WAITING_FOR_INPUTS",
+          "frontier_id": null,
+          "navigation_active": false
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 671.9891411770077,
+        "end_time": "2026-08-15T08:14:45.431Z",
+        "run_id": "trial_01_attempt_01",
+        "start_time": "2026-08-15T08:03:33.442Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 89.33095621933099,
+          "median_percent": 92.88028925709057,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 100.51247985416421,
+          "peak_percent": 106.34477740495775,
+          "sample_count": 628,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 89.33095621933099,
+        "logger_pid": 228401,
+        "logger_rss_bytes": 260448256,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 67334,
+          "events.jsonl": 3273548,
+          "robot1_timeseries.csv": 223863,
+          "robot2_timeseries.csv": 226566,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 466930,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 214747005.96825397,
+        "rss_peak_bytes": 267292672,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 59368500.0,
+      "mean_known_cells_0_600": 98947.5,
+      "known_cells_at_s": {
+        "120": 75261.0,
+        "240": 88505.0,
+        "360": 122173.0,
+        "480": 135196.0,
+        "600": 142719.0
+      },
+      "milestone_time_s": {
+        "100000": 252.0,
+        "150000": null,
+        "200000": null
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 142719.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "b04fd7fbfe43d6913d0f97f5f07b2e8afda42e62b3132eef05d624e5032e59aa",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 53.78,
+        "end_s": 63.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 11.731124877929688,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "65e43bf8540ff6ccb4386f8c9019bceb2f4336d7643c5f2fba8cd3f7920c60ea",
+        "canonical_task_id": "8cc9c32851b98017224f016d",
+        "start_s": 67.98,
+        "end_s": 116.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 50.55764389038086,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "27928f468877f67483d0be7cc569c0bfe9fda6bebf5a980a08cc6ac572934099",
+        "canonical_task_id": "c05ea2838c0c59659b62dcc3",
+        "start_s": 122.64,
+        "end_s": 151.84,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.107078552246094,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "8605c12a97cd03b98ff6e140ac9444d0c12b309a615394a60efc978cdda05f46",
+        "canonical_task_id": "1c5d07ead93b2557436077bd",
+        "start_s": 153.48,
+        "end_s": 182.66,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.157493591308594,
+        "recovery_change_events": 2
+      },
+      {
+        "robot": "robot1",
+        "round_id": "138c6e56db8cdf174575b601e1f5693072522afb8e9fe88fdb4a780fa74d1d89",
+        "canonical_task_id": "fdd12f36cc940f087366ace5",
+        "start_s": 187.26,
+        "end_s": 203.28,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 5,
+        "goal_duration_s": 16.545379638671875,
+        "recovery_change_events": 4
+      },
+      {
+        "robot": "robot1",
+        "round_id": "b03851db9c50b59b875d636314c48072f197db0a01049fa535c662d71743dc41",
+        "canonical_task_id": "b3a95f8d6448fbc9f0e7138b",
+        "start_s": 205.74,
+        "end_s": 295.24,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 2,
+        "goal_duration_s": 92.391845703125,
+        "recovery_change_events": 3
+      },
+      {
+        "robot": "robot1",
+        "round_id": "b50f9ffd3ea0de70cdf2ef56732614125cfc5b86fed288dd824ac3b84bec03a0",
+        "canonical_task_id": "3ee121da47c0427d45c7e726",
+        "start_s": 297.2,
+        "end_s": 412.9,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 6,
+        "goal_duration_s": 119.23702239990234,
+        "recovery_change_events": 6
+      },
+      {
+        "robot": "robot1",
+        "round_id": "6c4beaa273d64043ad06203d5a3b9ee1ec7ddf7785ffc1a4e4e2202cd32ceeee",
+        "canonical_task_id": "86fe7620e75e05f2335240ca",
+        "start_s": 467.36,
+        "end_s": 546.06,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 5,
+        "goal_duration_s": 81.2750473022461,
+        "recovery_change_events": 4
+      },
+      {
+        "robot": "robot1",
+        "round_id": "312fac1e78ad21b02f7eb3e65eb77b022c9eede9a835fb7d332f37ebb62c7cc5",
+        "canonical_task_id": "4816d342b4ad59a5fbe80695",
+        "start_s": 548.6,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 0,
+        "goal_duration_s": null,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b04fd7fbfe43d6913d0f97f5f07b2e8afda42e62b3132eef05d624e5032e59aa",
+        "canonical_task_id": "0baa2f99b0129ae3470fcc7d",
+        "start_s": 53.68,
+        "end_s": 64.76,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.740180969238281,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "65e43bf8540ff6ccb4386f8c9019bceb2f4336d7643c5f2fba8cd3f7920c60ea",
+        "canonical_task_id": "cfb51c2ef3c16e333f9fb12c",
+        "start_s": 67.98,
+        "end_s": 97.12,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.10655403137207,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "27928f468877f67483d0be7cc569c0bfe9fda6bebf5a980a08cc6ac572934099",
+        "canonical_task_id": "cfb51c2ef3c16e333f9fb12c",
+        "start_s": 122.64,
+        "end_s": 151.82,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.101078033447266,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "8605c12a97cd03b98ff6e140ac9444d0c12b309a615394a60efc978cdda05f46",
+        "canonical_task_id": "1dbea53acb1b7536644db13b",
+        "start_s": 153.68,
+        "end_s": 185.28,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 32.764854431152344,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "138c6e56db8cdf174575b601e1f5693072522afb8e9fe88fdb4a780fa74d1d89",
+        "canonical_task_id": "2cc3370e4fec92e0048cf48f",
+        "start_s": 187.18,
+        "end_s": 199.18,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.322479248046875,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b03851db9c50b59b875d636314c48072f197db0a01049fa535c662d71743dc41",
+        "canonical_task_id": "f904f0f481a5eafcfa931c0b",
+        "start_s": 205.68,
+        "end_s": 284.24,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 81.15550231933594,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b50f9ffd3ea0de70cdf2ef56732614125cfc5b86fed288dd824ac3b84bec03a0",
+        "canonical_task_id": "f7f0a42e29cc77d4f59a91cc",
+        "start_s": 297.24,
+        "end_s": 311.46,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 14.67485523223877,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "ef870dc5621654c6586e1b063a3d5039e5c2ceda555de0ca2d44cb5476f9308b",
+        "canonical_task_id": "6d2cd7e95e0cb66a21820136",
+        "start_s": 414.78,
+        "end_s": 463.58,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 50.624290466308594,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "6c4beaa273d64043ad06203d5a3b9ee1ec7ddf7785ffc1a4e4e2202cd32ceeee",
+        "canonical_task_id": "2fc9b441ce1fcd655a2650d2",
+        "start_s": 467.26,
+        "end_s": 486.82,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 20.262792587280273,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "312fac1e78ad21b02f7eb3e65eb77b022c9eede9a835fb7d332f37ebb62c7cc5",
+        "canonical_task_id": "e348fe57fd559dbae035bacf",
+        "start_s": 548.52,
+        "end_s": 567.56,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 19.591039657592773,
+        "recovery_change_events": 0
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.164077750952196,
+          "y": -4.54613687518144,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 8435,
+        "occupied_area_m2": 7.591499660633509,
+        "mean_distance_m": 0.3184350078749235,
+        "median_distance_m": 0.10092219842110861,
+        "p90_distance_m": 1.0990777747568004,
+        "p95_distance_m": 1.3390777693923823,
+        "p99_distance_m": 1.6990777613457544,
+        "rms_distance_m": 0.545271606182747,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 5357,
+            "area_m2": 4.821299784471097,
+            "fraction": 0.6350918790752815
+          },
+          "gt_0.10_m": {
+            "cells": 4252,
+            "area_m2": 3.826799828928711,
+            "fraction": 0.5040901007705987
+          },
+          "gt_0.15_m": {
+            "cells": 3584,
+            "area_m2": 3.225599855804445,
+            "fraction": 0.42489626556016596
+          },
+          "gt_0.25_m": {
+            "cells": 2731,
+            "area_m2": 2.457899890123309,
+            "fraction": 0.3237700059276823
+          },
+          "gt_0.50_m": {
+            "cells": 1842,
+            "area_m2": 1.6577999258905658,
+            "fraction": 0.21837581505631298
+          }
+        },
+        "known_cells": 141596,
+        "free_cells": 133161,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.1204406888437266,
+        "boundary_unknown_fraction": 0.701893250615039,
+        "boundary_free_fraction": 0.17766606054123435
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.17,
+          "y": -6.6899999999999995,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14389,
+        "occupied_area_m2": 12.950099421085424,
+        "mean_distance_m": 0.26945338390971574,
+        "median_distance_m": 0.12500010158866592,
+        "p90_distance_m": 0.7550000875070683,
+        "p95_distance_m": 1.1449999259039774,
+        "p99_distance_m": 1.585000013075768,
+        "rms_distance_m": 0.44518524048889824,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 10298,
+            "area_m2": 9.268199585679177,
+            "fraction": 0.7156855931614428
+          },
+          "gt_0.10_m": {
+            "cells": 7874,
+            "area_m2": 7.086599683204297,
+            "fraction": 0.5472235735631386
+          },
+          "gt_0.15_m": {
+            "cells": 6721,
+            "area_m2": 6.048899729593101,
+            "fraction": 0.46709291820140386
+          },
+          "gt_0.25_m": {
+            "cells": 4862,
+            "area_m2": 4.3757998043864985,
+            "fraction": 0.3378970046563347
+          },
+          "gt_0.50_m": {
+            "cells": 2244,
+            "area_m2": 2.0195999097168458,
+            "fraction": 0.1559524636875391
+          }
+        },
+        "known_cells": 172223,
+        "free_cells": 157834,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.15755695796341854,
+        "boundary_unknown_fraction": 0.6011338111027917,
+        "boundary_free_fraction": 0.2413092309337897
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.1092966880940205,
+          "y": -4.189220180269528,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 6799,
+        "occupied_area_m2": 6.119099726454917,
+        "mean_distance_m": 0.1850957230189562,
+        "median_distance_m": 0.12429678029495528,
+        "p90_distance_m": 0.4342967031814462,
+        "p95_distance_m": 0.5242967011697885,
+        "p99_distance_m": 0.6742966978170273,
+        "rms_distance_m": 0.25100572161892104,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 4896,
+            "area_m2": 4.406399803018572,
+            "fraction": 0.7201058979261656
+          },
+          "gt_0.10_m": {
+            "cells": 3796,
+            "area_m2": 3.4163998472750206,
+            "fraction": 0.5583173996175909
+          },
+          "gt_0.15_m": {
+            "cells": 3114,
+            "area_m2": 2.8025998747140184,
+            "fraction": 0.45800853066627445
+          },
+          "gt_0.25_m": {
+            "cells": 2238,
+            "area_m2": 2.0141999099582444,
+            "fraction": 0.3291660538314458
+          },
+          "gt_0.50_m": {
+            "cells": 351,
+            "area_m2": 0.3158999858781697,
+            "fraction": 0.05162523900573614
+          }
+        },
+        "known_cells": 95319,
+        "free_cells": 88520,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.07412557492779977,
+        "boundary_unknown_fraction": 0.7514172638784897,
+        "boundary_free_fraction": 0.17445716119371055
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.17,
+          "y": -6.6899999999999995,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14331,
+        "occupied_area_m2": 12.897899423418945,
+        "mean_distance_m": 0.2659358293623319,
+        "median_distance_m": 0.12500010158866592,
+        "p90_distance_m": 0.7450000318512311,
+        "p95_distance_m": 1.1350000231340518,
+        "p99_distance_m": 1.585000013075768,
+        "rms_distance_m": 0.43917035470256244,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 10240,
+            "area_m2": 9.2159995880127,
+            "fraction": 0.7145349242900007
+          },
+          "gt_0.10_m": {
+            "cells": 7816,
+            "area_m2": 7.034399685537819,
+            "fraction": 0.5453911101807271
+          },
+          "gt_0.15_m": {
+            "cells": 6663,
+            "area_m2": 5.996699731926623,
+            "fraction": 0.46493615239690184
+          },
+          "gt_0.25_m": {
+            "cells": 4805,
+            "area_m2": 4.324499806679787,
+            "fraction": 0.3352871397669388
+          },
+          "gt_0.50_m": {
+            "cells": 2195,
+            "area_m2": 1.9754999116882692,
+            "fraction": 0.15316446863442887
+          }
+        },
+        "known_cells": 169663,
+        "free_cells": 155332,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.15755695796341854,
+        "boundary_unknown_fraction": 0.604770563696652,
+        "boundary_free_fraction": 0.2376724783399294
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14455,
+        "fused_occupied_cells": 14389,
+        "occupied_iou": 0.9686049686049686,
+        "fused_additional_cells": 197,
+        "source_union_missing_cells": 263,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14455,
+        "fused_occupied_cells": 14331,
+        "occupied_iou": 0.9631726113346518,
+        "fused_additional_cells": 208,
+        "source_union_missing_cells": 332,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 1.0,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 1.0,
+      "common_grid": {
+        "height": 1125,
+        "origin_x": -7.199999839067459,
+        "origin_y": -6.719999849796295,
+        "resolution": 0.029999999329447746,
+        "width": 465
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 152.69669317392567,
+      "coverage_area_b_m2": 152.69669317392567,
+      "coverage_area_difference_m2": 0.0,
+      "coverage_area_relative_difference": 0.0,
+      "dimensions_a": [
+        464,
+        1124
+      ],
+      "dimensions_b": [
+        464,
+        1124
+      ],
+      "free_area_difference_m2": 0.0,
+      "free_area_relative_difference": 0.0,
+      "free_iou": 1.0,
+      "geometry_equal": true,
+      "jointly_known_cell_count": 169663,
+      "known_cell_agreement": 1.0,
+      "known_iou": 1.0,
+      "known_union_count": 169663,
+      "occupied_area_difference_m2": 0.0,
+      "occupied_area_relative_difference": 0.0,
+      "occupied_free_conflict_rate": 0.0,
+      "occupied_iou": 1.0,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 1.0,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 155332,
+        "free/occupied": 0,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 0,
+        "occupied/occupied": 14331,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 0,
+        "unknown/occupied": 0,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 353462
+      },
+      "unknown_mismatch_rate": 0.0,
+      "zero_shift_correlation": 1.0
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 11.22,
+        "common_end_s": 630.96,
+        "samples": 22300,
+        "initial_gt": [
+          16.000000000003634,
+          -7.497307225485257e-10,
+          1.5707963269653962
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269653962,
+          "tx_m": 3.477723573662816e-09,
+          "ty_m": 16.000000000003634
+        },
+        "gt_distance_m": 33.359408387348374,
+        "odom_distance_m": 33.44295918139851,
+        "translation_rmse_m": 0.24644753933091468,
+        "translation_final_m": 1.0412911984721882,
+        "translation_max_m": 1.0412911984721882,
+        "yaw_rmse_rad": 0.05700517462970593,
+        "yaw_final_rad": 0.09747184362417016,
+        "yaw_max_rad": 0.11882862449369469
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 14.72,
+        "common_end_s": 630.94,
+        "samples": 25357,
+        "initial_gt": [
+          18.500000000003627,
+          -7.432022581190423e-10,
+          1.5707963269656067
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656067,
+          "tx_m": 3.901338210501018e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 27.636952913413303,
+        "odom_distance_m": 27.62003652083465,
+        "translation_rmse_m": 0.3708430990895857,
+        "translation_final_m": 0.5912691801227243,
+        "translation_max_m": 0.5956813407045477,
+        "yaw_rmse_rad": 0.04142218091278699,
+        "yaw_final_rad": 0.030081347568702732,
+        "yaw_max_rad": 0.07892399293074703
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 60.99636130076168,
+      "known_cells_gain": 161202,
+      "known_cells_per_combined_m": 2642.813383656494,
+      "known_cells_per_100_s": 26867.0,
+      "mean_known_cells_auc": 98947.5,
+      "successful_goals": 11,
+      "successful_goals_per_100_s": 1.8333333333333333
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_02",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 18,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 48,
+        "stuck_episodes": 3,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 22,
+        "dispatch_attempts": 22,
+        "goals_terminal": 20,
+        "unique_agreed_decisions": 11,
+        "unique_agreed_rounds": 11
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 123,
+        "CANDIDATE_COUNT_CHANGED": 25,
+        "CORNER_TRAP_SUSPECTED": 3,
+        "DECISION_AGREED": 22,
+        "DISTRIBUTED_BID_ARRAY": 49,
+        "DISTRIBUTED_PAIR_DECISION": 23,
+        "DISTRIBUTED_STATUS": 161,
+        "DISTRIBUTED_TASK_FAILURE": 4,
+        "DISTRIBUTED_TASK_SNAPSHOT": 123,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 4,
+        "NAVIGATION_PROGRESS": 172,
+        "NAVIGATION_SUCCEEDED": 16,
+        "NAV_GOAL_ACCEPTED": 22,
+        "NAV_GOAL_SENT": 22,
+        "NO_PROGRESS_CLEARED": 18,
+        "NO_PROGRESS_STARTED": 18,
+        "RECOVERY_COUNT_CHANGED": 6,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 21,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 212,
+        "STUCK_CLEARED": 3,
+        "STUCK_STARTED": 3,
+        "TOPIC_RECOVERED": 74,
+        "TOPIC_STALE": 48
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 254638,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.269248856714373,
+        "final_known_cells": 265659,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 17498,
+          "robot2": 54160
+        },
+        "simultaneously_observed_cells": 1054,
+        "total_known_union_cells": 270055,
+        "unique_first_seen_cells": {
+          "robot1": 224405,
+          "robot2": 45650
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 4,
+        "goals_accepted": 22,
+        "goals_sent": 22,
+        "recoveries": 6,
+        "successes": 16,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 650.2473081259959,
+        "end_time": "2026-08-15T08:32:56.030Z",
+        "run_id": "trial_02_attempt_02",
+        "start_time": "2026-08-15T08:22:05.783Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 87.67139951869002,
+          "median_percent": 91.8335033728066,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 99.42823712802011,
+          "peak_percent": 104.12036685564263,
+          "sample_count": 610,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 87.67139951869002,
+        "logger_pid": 237721,
+        "logger_rss_bytes": 340455424,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 66705,
+          "events.jsonl": 1715709,
+          "robot1_timeseries.csv": 224515,
+          "robot2_timeseries.csv": 223532,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 456125,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 257997651.94127244,
+        "rss_peak_bytes": 345919488,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 92752728.0,
+      "mean_known_cells_0_600": 154587.88,
+      "known_cells_at_s": {
+        "120": 79011.0,
+        "240": 118972.0,
+        "360": 187580.0,
+        "480": 230056.0,
+        "600": 263503.0
+      },
+      "milestone_time_s": {
+        "100000": 194.0,
+        "150000": 284.0,
+        "200000": 390.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 263503.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "cc17040384740edaeb580e1ac4a1d986d7b0c8d39bd7f6e434b39538b9be679c",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 33.18,
+        "end_s": 43.24,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 11.783117294311523,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "062e59445b099a8ac3318290a156aa93e7ec75b017f2637d37db3e9be1264389",
+        "canonical_task_id": "5f221356dd657c35e07780f2",
+        "start_s": 46.04,
+        "end_s": 82.16,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 37.266632080078125,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "16edb29bd72bb858bedfcadf401cf620ccfd93e2931117982135210481de91bf",
+        "canonical_task_id": "38329b0235d69b16ee8349fc",
+        "start_s": 84.04,
+        "end_s": 95.5,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.116738319396973,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "8a2ce0ca6810cc6ea811ee93572d31503e1278e84eba6a393cfe00c5ed07cb9e",
+        "canonical_task_id": "a503156b68c87434208a7bc2",
+        "start_s": 115.06,
+        "end_s": 134.84,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 20.343307495117188,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "4de436aa79846f82ddeb8af8a952be2dad45650258c84cf74a9afd821c8255f3",
+        "canonical_task_id": "b7cae2fa3b7080b637057563",
+        "start_s": 148.42,
+        "end_s": 232.08,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 86.7335205078125,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "1fc81b95ecb4835f341573b0db3c01beeaaa1df042249f26711ffb1e98e0a0c4",
+        "canonical_task_id": "1aa60c2fb3212d58a414caa6",
+        "start_s": 237.48,
+        "end_s": 318.02,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 83.11316680908203,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "81faebaa436ab173783a554affdaad50402c387b6ba68211fd3f5e73bb397370",
+        "canonical_task_id": "0c1e40c7aa7927c2bdc1ed38",
+        "start_s": 324.88,
+        "end_s": 401.1,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 78.53034973144531,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "bb8c019646e51076e87c31a21d70d5d090a3b4907d13c88752a72906eee39114",
+        "canonical_task_id": "d9b508eee8181bcd6273a2a2",
+        "start_s": 411.6,
+        "end_s": 441.74,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 31.195587158203125,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "0ac31a1355b0d35f87f727a8c02fbfecc5a0be9808c042c204922618317869d8",
+        "canonical_task_id": "cd36dc6cfdf5606f56ff7eff",
+        "start_s": 449.62,
+        "end_s": 573.78,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 127.8075942993164,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "3dfa1bf2da6f3dd9923091469210e8d8c090acb444b6d23cf68313ed430b87cf",
+        "canonical_task_id": "f08cca8c1fdad0f1b4a7606d",
+        "start_s": 576.1,
+        "end_s": 603.28,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 0,
+        "goal_duration_s": 28.120933532714844,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "2c16fc6bad72d081baeda083303a4990a334f745c76a2c9dfa7fd23a349fdf58",
+        "canonical_task_id": "243bc9943c0ac620ade9a1e5",
+        "start_s": 607.22,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 0,
+        "goal_duration_s": null,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "cc17040384740edaeb580e1ac4a1d986d7b0c8d39bd7f6e434b39538b9be679c",
+        "canonical_task_id": "0baa2f99b0129ae3470fcc7d",
+        "start_s": 33.18,
+        "end_s": 44.42,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.989497184753418,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "062e59445b099a8ac3318290a156aa93e7ec75b017f2637d37db3e9be1264389",
+        "canonical_task_id": "16f8a91e545bf1bf693ce27f",
+        "start_s": 46.06,
+        "end_s": 75.16,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.05791664123535,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "16edb29bd72bb858bedfcadf401cf620ccfd93e2931117982135210481de91bf",
+        "canonical_task_id": "88703bfaa9b88ebcb2e0dff2",
+        "start_s": 84.06,
+        "end_s": 110.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 27.919681549072266,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "8a2ce0ca6810cc6ea811ee93572d31503e1278e84eba6a393cfe00c5ed07cb9e",
+        "canonical_task_id": "6106b2934fae0eb9d4eae697",
+        "start_s": 115.0,
+        "end_s": 144.78,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 30.65709114074707,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "4de436aa79846f82ddeb8af8a952be2dad45650258c84cf74a9afd821c8255f3",
+        "canonical_task_id": "7ceaf17d3a42a15e649a74fa",
+        "start_s": 148.58,
+        "end_s": 223.7,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 77.8622055053711,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "1fc81b95ecb4835f341573b0db3c01beeaaa1df042249f26711ffb1e98e0a0c4",
+        "canonical_task_id": "cd80bb9d2217b02c85fc9abf",
+        "start_s": 237.58,
+        "end_s": 251.2,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 14.073503494262695,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "81faebaa436ab173783a554affdaad50402c387b6ba68211fd3f5e73bb397370",
+        "canonical_task_id": "0ebd4298e742732a961b8531",
+        "start_s": 324.86,
+        "end_s": 365.2,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 41.77402114868164,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "bb8c019646e51076e87c31a21d70d5d090a3b4907d13c88752a72906eee39114",
+        "canonical_task_id": "8efdd7d9ff674e45d3b544da",
+        "start_s": 411.62,
+        "end_s": 441.52,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 30.922941207885742,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "0ac31a1355b0d35f87f727a8c02fbfecc5a0be9808c042c204922618317869d8",
+        "canonical_task_id": "e3da6d1144bfcfe885eb40de",
+        "start_s": 449.54,
+        "end_s": 521.36,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 73.81886291503906,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "3dfa1bf2da6f3dd9923091469210e8d8c090acb444b6d23cf68313ed430b87cf",
+        "canonical_task_id": "67e5cc543b9864418e632e91",
+        "start_s": 576.1,
+        "end_s": 605.14,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 30.067550659179688,
+        "recovery_change_events": 2
+      },
+      {
+        "robot": "robot2",
+        "round_id": "2c16fc6bad72d081baeda083303a4990a334f745c76a2c9dfa7fd23a349fdf58",
+        "canonical_task_id": "694121753646abe367a7df33",
+        "start_s": 607.3,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 0,
+        "goal_duration_s": null,
+        "recovery_change_events": 1
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.290788959039185,
+          "y": -5.215127629076976,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 15179,
+        "occupied_area_m2": 13.661099389301247,
+        "mean_distance_m": 0.6038994340063227,
+        "median_distance_m": 0.3457890807444186,
+        "p90_distance_m": 1.775788992902073,
+        "p95_distance_m": 2.1763686749876765,
+        "p99_distance_m": 2.4357891457879863,
+        "rms_distance_m": 0.9032577611463293,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 12314,
+            "area_m2": 11.082599504569178,
+            "fraction": 0.8112523881678635
+          },
+          "gt_0.10_m": {
+            "cells": 10926,
+            "area_m2": 9.833399560412769,
+            "fraction": 0.7198102641807761
+          },
+          "gt_0.15_m": {
+            "cells": 9989,
+            "area_m2": 8.990099598111216,
+            "fraction": 0.6580802424402135
+          },
+          "gt_0.25_m": {
+            "cells": 8585,
+            "area_m2": 7.726499654598538,
+            "fraction": 0.5655840305685487
+          },
+          "gt_0.50_m": {
+            "cells": 6140,
+            "area_m2": 5.525999752968552,
+            "fraction": 0.4045062257065683
+          }
+        },
+        "known_cells": 238937,
+        "free_cells": 223758,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.10803294469996791,
+        "boundary_unknown_fraction": 0.5536421007594395,
+        "boundary_free_fraction": 0.3383249545405926
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.31,
+          "y": -5.22,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 21541,
+        "occupied_area_m2": 19.386899133338044,
+        "mean_distance_m": 0.49764797185516324,
+        "median_distance_m": 0.27499955307692403,
+        "p90_distance_m": 1.3850007674470532,
+        "p95_distance_m": 2.0050001968070856,
+        "p99_distance_m": 2.3950001880899063,
+        "rms_distance_m": 0.7743452152120018,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 17993,
+            "area_m2": 16.193699276085205,
+            "fraction": 0.8352908407223434
+          },
+          "gt_0.10_m": {
+            "cells": 15273,
+            "area_m2": 13.745699385519332,
+            "fraction": 0.709020008356158
+          },
+          "gt_0.15_m": {
+            "cells": 13752,
+            "area_m2": 12.37679944671393,
+            "fraction": 0.6384104730513904
+          },
+          "gt_0.25_m": {
+            "cells": 11190,
+            "area_m2": 10.070999549791221,
+            "fraction": 0.519474490506476
+          },
+          "gt_0.50_m": {
+            "cells": 6975,
+            "area_m2": 6.277499719373885,
+            "fraction": 0.32380112343902323
+          }
+        },
+        "known_cells": 265659,
+        "free_cells": 244118,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.12996042357471388,
+        "boundary_unknown_fraction": 0.4657182586372874,
+        "boundary_free_fraction": 0.40432131778799874
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.548155396448572,
+          "y": -2.5539378465246916,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 7268,
+        "occupied_area_m2": 6.541199707585577,
+        "mean_distance_m": 0.22642435135830313,
+        "median_distance_m": 0.16876643715818407,
+        "p90_distance_m": 0.523155492002268,
+        "p95_distance_m": 0.6131556073372553,
+        "p99_distance_m": 0.883155601302285,
+        "rms_distance_m": 0.3052958518615442,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 5689,
+            "area_m2": 5.120099771113696,
+            "fraction": 0.7827462850853054
+          },
+          "gt_0.10_m": {
+            "cells": 4676,
+            "area_m2": 4.208399811869862,
+            "fraction": 0.64336818932306
+          },
+          "gt_0.15_m": {
+            "cells": 3908,
+            "area_m2": 3.5171998427689095,
+            "fraction": 0.5376995046780407
+          },
+          "gt_0.25_m": {
+            "cells": 2722,
+            "area_m2": 2.4497998904854072,
+            "fraction": 0.37451843698403964
+          },
+          "gt_0.50_m": {
+            "cells": 781,
+            "area_m2": 0.7028999685779217,
+            "fraction": 0.10745734727572923
+          }
+        },
+        "known_cells": 98893,
+        "free_cells": 91625,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.05872285805968553,
+        "boundary_unknown_fraction": 0.7554818697186865,
+        "boundary_free_fraction": 0.18579527222162798
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.31,
+          "y": -5.22,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 21541,
+        "occupied_area_m2": 19.386899133338044,
+        "mean_distance_m": 0.49764797185516324,
+        "median_distance_m": 0.27499955307692403,
+        "p90_distance_m": 1.3850007674470532,
+        "p95_distance_m": 2.0050001968070856,
+        "p99_distance_m": 2.3950001880899063,
+        "rms_distance_m": 0.7743452152120018,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 17993,
+            "area_m2": 16.193699276085205,
+            "fraction": 0.8352908407223434
+          },
+          "gt_0.10_m": {
+            "cells": 15273,
+            "area_m2": 13.745699385519332,
+            "fraction": 0.709020008356158
+          },
+          "gt_0.15_m": {
+            "cells": 13752,
+            "area_m2": 12.37679944671393,
+            "fraction": 0.6384104730513904
+          },
+          "gt_0.25_m": {
+            "cells": 11190,
+            "area_m2": 10.070999549791221,
+            "fraction": 0.519474490506476
+          },
+          "gt_0.50_m": {
+            "cells": 6975,
+            "area_m2": 6.277499719373885,
+            "fraction": 0.32380112343902323
+          }
+        },
+        "known_cells": 265659,
+        "free_cells": 244118,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.12996042357471388,
+        "boundary_unknown_fraction": 0.4657182586372874,
+        "boundary_free_fraction": 0.40432131778799874
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 21638,
+        "fused_occupied_cells": 21541,
+        "occupied_iou": 0.9951483227058497,
+        "fused_additional_cells": 4,
+        "source_union_missing_cells": 101,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 21638,
+        "fused_occupied_cells": 21541,
+        "occupied_iou": 0.9951483227058497,
+        "fused_additional_cells": 4,
+        "source_union_missing_cells": 101,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 0.9999999999999999,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 1.0,
+      "common_grid": {
+        "height": 1392,
+        "origin_x": -8.339999813586473,
+        "origin_y": -5.249999882653356,
+        "resolution": 0.029999999329447746,
+        "width": 492
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 239.09308931170565,
+      "coverage_area_b_m2": 239.09308931170565,
+      "coverage_area_difference_m2": 0.0,
+      "coverage_area_relative_difference": 0.0,
+      "dimensions_a": [
+        491,
+        1391
+      ],
+      "dimensions_b": [
+        491,
+        1391
+      ],
+      "free_area_difference_m2": 0.0,
+      "free_area_relative_difference": 0.0,
+      "free_iou": 1.0,
+      "geometry_equal": true,
+      "jointly_known_cell_count": 265659,
+      "known_cell_agreement": 1.0,
+      "known_iou": 1.0,
+      "known_union_count": 265659,
+      "occupied_area_difference_m2": 0.0,
+      "occupied_area_relative_difference": 0.0,
+      "occupied_free_conflict_rate": 0.0,
+      "occupied_iou": 1.0,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 0.9999999999999999,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 244118,
+        "free/occupied": 0,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 0,
+        "occupied/occupied": 21541,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 0,
+        "unknown/occupied": 0,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 419205
+      },
+      "unknown_mismatch_rate": 0.0,
+      "zero_shift_correlation": 0.9999999999999999
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 9.08,
+        "common_end_s": 613.56,
+        "samples": 23771,
+        "initial_gt": [
+          16.000000000003627,
+          -7.438810981923887e-10,
+          1.5707963269658214
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658214,
+          "tx_m": 3.4786773960015824e-09,
+          "ty_m": 16.000000000003627
+        },
+        "gt_distance_m": 59.863656804707844,
+        "odom_distance_m": 59.83079542510049,
+        "translation_rmse_m": 1.196873810495919,
+        "translation_final_m": 3.2082313095984762,
+        "translation_max_m": 3.208473571321242,
+        "yaw_rmse_rad": 0.08130716236357274,
+        "yaw_final_rad": 0.09941153813777248,
+        "yaw_max_rad": 0.13201102035833756
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 5.34,
+        "common_end_s": 613.56,
+        "samples": 20955,
+        "initial_gt": [
+          18.500000000003624,
+          -7.492832229807422e-10,
+          1.5707963269668832
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269668832,
+          "tx_m": 3.931035062386432e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 28.514498961070604,
+        "odom_distance_m": 28.54380108778341,
+        "translation_rmse_m": 0.5071719546727365,
+        "translation_final_m": 0.9121866625682649,
+        "translation_max_m": 0.9133346379945935,
+        "yaw_rmse_rad": 0.0674101957032485,
+        "yaw_final_rad": 0.08971923278291172,
+        "yaw_max_rad": 0.12221828936160506
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 88.37815576577844,
+      "known_cells_gain": 254638,
+      "known_cells_per_combined_m": 2881.232333868187,
+      "known_cells_per_100_s": 42439.666666666664,
+      "mean_known_cells_auc": 154587.88,
+      "successful_goals": 16,
+      "successful_goals_per_100_s": 2.6666666666666665
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_03",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 6,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 30,
+        "stuck_episodes": 4,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 14,
+        "dispatch_attempts": 14,
+        "goals_terminal": 13,
+        "unique_agreed_decisions": 7,
+        "unique_agreed_rounds": 7
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 102,
+        "CANDIDATE_COUNT_CHANGED": 17,
+        "CORNER_TRAP_SUSPECTED": 2,
+        "DECISION_AGREED": 14,
+        "DISTRIBUTED_BID_ARRAY": 69,
+        "DISTRIBUTED_PAIR_DECISION": 19,
+        "DISTRIBUTED_STATUS": 136,
+        "DISTRIBUTED_TASK_FAILURE": 5,
+        "DISTRIBUTED_TASK_SNAPSHOT": 102,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 7,
+        "NAVIGATION_PROGRESS": 154,
+        "NAVIGATION_SUCCEEDED": 6,
+        "NAV_GOAL_ACCEPTED": 14,
+        "NAV_GOAL_SENT": 14,
+        "NO_PROGRESS_CLEARED": 6,
+        "NO_PROGRESS_STARTED": 6,
+        "NO_REACHABLE_CANDIDATES": 1,
+        "RECOVERY_COUNT_CHANGED": 30,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 19,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 246,
+        "STUCK_CLEARED": 4,
+        "STUCK_STARTED": 4,
+        "TOPIC_RECOVERED": 50,
+        "TOPIC_STALE": 30
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 265454,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.466395796747415,
+        "final_known_cells": 276487,
+        "initial_known_cells": 11033,
+        "later_duplicated_cells": {
+          "robot1": 57478,
+          "robot2": 71608
+        },
+        "simultaneously_observed_cells": 1315,
+        "total_known_union_cells": 279593,
+        "unique_first_seen_cells": {
+          "robot1": 129690,
+          "robot2": 149903
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 7,
+        "goals_accepted": 14,
+        "goals_sent": 14,
+        "recoveries": 30,
+        "successes": 6,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "WAITING_FOR_INPUTS",
+          "frontier_id": null,
+          "navigation_active": false
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 638.3232952809922,
+        "end_time": "2026-08-15T08:44:44.279Z",
+        "run_id": "trial_03_attempt_01",
+        "start_time": "2026-08-15T08:34:05.955Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 88.53177714911699,
+          "median_percent": 90.94578663084897,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 99.06042800315412,
+          "peak_percent": 105.69940477556045,
+          "sample_count": 602,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 88.53177714911699,
+        "logger_pid": 243172,
+        "logger_rss_bytes": 363347968,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 65044,
+          "events.jsonl": 1747378,
+          "robot1_timeseries.csv": 220216,
+          "robot2_timeseries.csv": 219328,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 444913,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 256800234.77280265,
+        "rss_peak_bytes": 372273152,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 91689871.0,
+      "mean_known_cells_0_600": 152816.45166666666,
+      "known_cells_at_s": {
+        "120": 83741.0,
+        "240": 107383.0,
+        "360": 186884.0,
+        "480": 238124.0,
+        "600": 279266.0
+      },
+      "milestone_time_s": {
+        "100000": 210.0,
+        "150000": 340.0,
+        "200000": 366.0
+      },
+      "initial_known_cells": 11033.0,
+      "final_known_cells_600": 279266.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "b74241f13bcac2c00a7272b2b1ad306dcf47c0d051e21aae45bd2cc24f612052",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 26.74,
+        "end_s": 36.82,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 10.211050033569336,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "392ee021d9064da40724b57cac12cf5720e2c61b435f0a15926549276835beb6",
+        "canonical_task_id": "9fec37c6b34461c05421c23b",
+        "start_s": 38.98,
+        "end_s": 46.68,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 7.932655334472656,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "8799639443f69d269220ffb0af01b20bde43ff204bfdb8aa6231c0dfdf8b7e9e",
+        "canonical_task_id": "519ef899c46146b4a1e516a0",
+        "start_s": 76.62,
+        "end_s": 107.34,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 1,
+        "goal_duration_s": 31.72266387939453,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "5d8352b7c4513e24a4252fd2d06be932525309a9af6ff183d208e7ea76c6165e",
+        "canonical_task_id": "f7feb946f4f8cbf7a6a1a8de",
+        "start_s": 109.32,
+        "end_s": 179.04,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 71.49608612060547,
+        "recovery_change_events": 2
+      },
+      {
+        "robot": "robot1",
+        "round_id": "ad4580e3a614e19fbf37a8c4e3453333518ed2ab61932905eccf933fe0dba64d",
+        "canonical_task_id": "16b738b4d449e652b3e46868",
+        "start_s": 181.52,
+        "end_s": 230.12,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 49.92702865600586,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "32dbdf436d6ee5e73ce7384c126192e85d2299a00729d8a08746d2e381347b97",
+        "canonical_task_id": "d94518d6dbe2185dd891db7d",
+        "start_s": 287.16,
+        "end_s": 427.84,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 14,
+        "goal_duration_s": 145.5546112060547,
+        "recovery_change_events": 10
+      },
+      {
+        "robot": "robot1",
+        "round_id": "fb67505f97aee9b3f6162a410eac57e1c6a9e4ddac91497ab224b2e50535a282",
+        "canonical_task_id": "aaf8339e93d6a775c95815b3",
+        "start_s": 429.98,
+        "end_s": 466.62,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 3,
+        "goal_duration_s": 37.7116813659668,
+        "recovery_change_events": 2
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b74241f13bcac2c00a7272b2b1ad306dcf47c0d051e21aae45bd2cc24f612052",
+        "canonical_task_id": "49d4b44b2b62ecf7cf4aaa0a",
+        "start_s": 26.84,
+        "end_s": 31.02,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 0,
+        "goal_duration_s": 4.176705360412598,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "392ee021d9064da40724b57cac12cf5720e2c61b435f0a15926549276835beb6",
+        "canonical_task_id": "2ca04d3be0985f1912c3e3d5",
+        "start_s": 38.98,
+        "end_s": 73.24,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 35.20777893066406,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "8799639443f69d269220ffb0af01b20bde43ff204bfdb8aa6231c0dfdf8b7e9e",
+        "canonical_task_id": "45174b3618af10ad5dd0cec7",
+        "start_s": 76.58,
+        "end_s": 88.68,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.616537094116211,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "5d8352b7c4513e24a4252fd2d06be932525309a9af6ff183d208e7ea76c6165e",
+        "canonical_task_id": "ab62d05f8431b816393e4ba8",
+        "start_s": 109.3,
+        "end_s": 121.8,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.675777435302734,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "ad4580e3a614e19fbf37a8c4e3453333518ed2ab61932905eccf933fe0dba64d",
+        "canonical_task_id": "787374737b5d2f4dc313efa0",
+        "start_s": 181.62,
+        "end_s": 284.86,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 106.46611022949219,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "32dbdf436d6ee5e73ce7384c126192e85d2299a00729d8a08746d2e381347b97",
+        "canonical_task_id": "63ab1d50475e9886dde9aad4",
+        "start_s": 287.28,
+        "end_s": 362.2,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 0,
+        "goal_duration_s": 77.43315887451172,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "fb67505f97aee9b3f6162a410eac57e1c6a9e4ddac91497ab224b2e50535a282",
+        "canonical_task_id": "0dcad53e4c1ba565f35c5d6c",
+        "start_s": 429.98,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 11,
+        "goal_duration_s": null,
+        "recovery_change_events": 9
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.724783290046137,
+          "y": -5.324602511250839,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 11416,
+        "occupied_area_m2": 10.274399540698534,
+        "mean_distance_m": 0.3276513663701832,
+        "median_distance_m": 0.12039733351631376,
+        "p90_distance_m": 0.9997835297685667,
+        "p95_distance_m": 1.1397833450314208,
+        "p99_distance_m": 1.3497834409203924,
+        "rms_distance_m": 0.5111385890009775,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 8073,
+            "area_m2": 7.265699675197903,
+            "fraction": 0.7071653819201121
+          },
+          "gt_0.10_m": {
+            "cells": 6238,
+            "area_m2": 5.614199749025706,
+            "fraction": 0.5464260686755431
+          },
+          "gt_0.15_m": {
+            "cells": 5208,
+            "area_m2": 4.687199790465834,
+            "fraction": 0.4562018220042046
+          },
+          "gt_0.25_m": {
+            "cells": 3992,
+            "area_m2": 3.592799839389326,
+            "fraction": 0.3496846531184303
+          },
+          "gt_0.50_m": {
+            "cells": 3172,
+            "area_m2": 2.8547998723804966,
+            "fraction": 0.27785564120532585
+          }
+        },
+        "known_cells": 184490,
+        "free_cells": 173074,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.13958712161728526,
+        "boundary_unknown_fraction": 0.586158947481014,
+        "boundary_free_fraction": 0.2742539309017007
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.16,
+          "y": -5.34,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 23094,
+        "occupied_area_m2": 20.784599070855986,
+        "mean_distance_m": 0.46706422059150865,
+        "median_distance_m": 0.21499955173581853,
+        "p90_distance_m": 1.205000267215072,
+        "p95_distance_m": 1.7350000318512313,
+        "p99_distance_m": 2.4550000157579763,
+        "rms_distance_m": 0.7371813957706755,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 18404,
+            "area_m2": 16.563599259549388,
+            "fraction": 0.7969169481250541
+          },
+          "gt_0.10_m": {
+            "cells": 14927,
+            "area_m2": 13.434299399439997,
+            "fraction": 0.646358361479172
+          },
+          "gt_0.15_m": {
+            "cells": 13065,
+            "area_m2": 11.758499474354094,
+            "fraction": 0.5657313587944921
+          },
+          "gt_0.25_m": {
+            "cells": 10744,
+            "area_m2": 9.6695995677352,
+            "fraction": 0.465229063826102
+          },
+          "gt_0.50_m": {
+            "cells": 7800,
+            "area_m2": 7.019999686181548,
+            "fraction": 0.33775006495193555
+          }
+        },
+        "known_cells": 276814,
+        "free_cells": 253720,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.1842977858594502,
+        "boundary_unknown_fraction": 0.43298748529254466,
+        "boundary_free_fraction": 0.3827147288480051
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.142602916667276,
+          "y": -2.217497104304053,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 12810,
+        "occupied_area_m2": 11.528999484613543,
+        "mean_distance_m": 0.5576973210783182,
+        "median_distance_m": 0.2923970065544932,
+        "p90_distance_m": 1.6339074648785927,
+        "p95_distance_m": 2.167602938460222,
+        "p99_distance_m": 2.617602928401938,
+        "rms_distance_m": 0.8683423428093011,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 10422,
+            "area_m2": 9.37979958069027,
+            "fraction": 0.8135831381733021
+          },
+          "gt_0.10_m": {
+            "cells": 9033,
+            "area_m2": 8.129699636574093,
+            "fraction": 0.705152224824356
+          },
+          "gt_0.15_m": {
+            "cells": 7959,
+            "area_m2": 7.16309967978448,
+            "fraction": 0.6213114754098361
+          },
+          "gt_0.25_m": {
+            "cells": 6772,
+            "area_m2": 6.094799727541211,
+            "fraction": 0.5286494925839188
+          },
+          "gt_0.50_m": {
+            "cells": 4669,
+            "area_m2": 4.202099812151494,
+            "fraction": 0.3644808743169399
+          }
+        },
+        "known_cells": 220718,
+        "free_cells": 207908,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.08920740186116162,
+        "boundary_unknown_fraction": 0.5935394159803188,
+        "boundary_free_fraction": 0.3172531821585196
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -8.16,
+          "y": -5.34,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 23070,
+        "occupied_area_m2": 20.762999071821582,
+        "mean_distance_m": 0.4670407188516643,
+        "median_distance_m": 0.21499955173581853,
+        "p90_distance_m": 1.205000267215072,
+        "p95_distance_m": 1.7350000318512313,
+        "p99_distance_m": 2.4550000157579763,
+        "rms_distance_m": 0.7372545653475477,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 18385,
+            "area_m2": 16.546499260313816,
+            "fraction": 0.7969224100563502
+          },
+          "gt_0.10_m": {
+            "cells": 14907,
+            "area_m2": 13.41629940024466,
+            "fraction": 0.6461638491547465
+          },
+          "gt_0.15_m": {
+            "cells": 13047,
+            "area_m2": 11.74229947507829,
+            "fraction": 0.5655396618985695
+          },
+          "gt_0.25_m": {
+            "cells": 10727,
+            "area_m2": 9.654299568419164,
+            "fraction": 0.46497615951452104
+          },
+          "gt_0.50_m": {
+            "cells": 7792,
+            "area_m2": 7.0127996865034135,
+            "fraction": 0.3377546597312527
+          }
+        },
+        "known_cells": 276487,
+        "free_cells": 253417,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.18397689592469782,
+        "boundary_unknown_fraction": 0.4348058615894748,
+        "boundary_free_fraction": 0.38121724248582733
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 23106,
+        "fused_occupied_cells": 23094,
+        "occupied_iou": 0.9990480723465016,
+        "fused_additional_cells": 5,
+        "source_union_missing_cells": 17,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 23106,
+        "fused_occupied_cells": 23070,
+        "occupied_iou": 0.9972318339100346,
+        "fused_additional_cells": 14,
+        "source_union_missing_cells": 50,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 0.9992191644683951,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 0.9998481924052829,
+      "common_grid": {
+        "height": 1405,
+        "origin_x": -8.189999816939235,
+        "origin_y": -5.369999879971147,
+        "resolution": 0.029999999329447746,
+        "width": 454
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 248.61058888624024,
+      "coverage_area_b_m2": 248.83828887606126,
+      "coverage_area_difference_m2": 0.22769998982101924,
+      "coverage_area_relative_difference": 0.0009150520639306825,
+      "dimensions_a": [
+        453,
+        1404
+      ],
+      "dimensions_b": [
+        453,
+        1404
+      ],
+      "free_area_difference_m2": 0.20159999098777348,
+      "free_area_relative_difference": 0.0008839186005674252,
+      "free_iou": 0.9989031107463582,
+      "geometry_equal": true,
+      "jointly_known_cell_count": 276234,
+      "known_cell_agreement": 0.9998805360672474,
+      "known_iou": 0.9990849479360693,
+      "known_union_count": 276487,
+      "occupied_area_difference_m2": 0.02609999883324221,
+      "occupied_area_relative_difference": 0.001257043779800757,
+      "occupied_free_conflict_rate": 0.00011946393275266622,
+      "occupied_iou": 0.9982232622638239,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 0.9992191644683951,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 253166,
+        "free/occupied": 27,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 6,
+        "occupied/occupied": 23035,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 245,
+        "unknown/occupied": 8,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 361383
+      },
+      "unknown_mismatch_rate": 0.000915052063930673,
+      "zero_shift_correlation": 0.9992191644683951
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 4.88,
+        "common_end_s": 603.02,
+        "samples": 24229,
+        "initial_gt": [
+          16.00000000000363,
+          -7.438811257446764e-10,
+          1.5707963269658092
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658092,
+          "tx_m": 3.4784820243015365e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 35.53564827449953,
+        "odom_distance_m": 35.5294695879883,
+        "translation_rmse_m": 0.510481145824615,
+        "translation_final_m": 0.792678015871706,
+        "translation_max_m": 0.7952078230704671,
+        "yaw_rmse_rad": 0.04571514800578362,
+        "yaw_final_rad": 0.06247583883729746,
+        "yaw_max_rad": 0.07663789601494031
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 8.7,
+        "common_end_s": 603.02,
+        "samples": 21154,
+        "initial_gt": [
+          18.500000000003627,
+          -7.438810960510894e-10,
+          1.5707963269657417
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657417,
+          "tx_m": 3.904514606149262e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 44.06274485250462,
+        "odom_distance_m": 44.06589939817951,
+        "translation_rmse_m": 1.333397215188086,
+        "translation_final_m": 3.898832982662162,
+        "translation_max_m": 3.898832982662162,
+        "yaw_rmse_rad": 0.1045999944334153,
+        "yaw_final_rad": 0.18275448167923614,
+        "yaw_max_rad": 0.18746169395857848
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 79.59839312700416,
+      "known_cells_gain": 265454,
+      "known_cells_per_combined_m": 3334.916567680603,
+      "known_cells_per_100_s": 44242.333333333336,
+      "mean_known_cells_auc": 152816.45166666666,
+      "successful_goals": 6,
+      "successful_goals_per_100_s": 1.0
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_01",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 12,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 38,
+        "stuck_episodes": 0,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 25,
+        "dispatch_attempts": 19,
+        "goals_terminal": 18,
+        "unique_agreed_decisions": 13,
+        "unique_agreed_rounds": 13
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 207,
+        "CANDIDATE_COUNT_CHANGED": 78,
+        "DECISION_AGREED": 25,
+        "DISTRIBUTED_BID_ARRAY": 164,
+        "DISTRIBUTED_PAIR_DECISION": 29,
+        "DISTRIBUTED_STATUS": 260,
+        "DISTRIBUTED_TASK_FAILURE": 5,
+        "DISTRIBUTED_TASK_SNAPSHOT": 207,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 5,
+        "NAVIGATION_PROGRESS": 147,
+        "NAVIGATION_SUCCEEDED": 13,
+        "NAV_GOAL_ACCEPTED": 19,
+        "NAV_GOAL_SENT": 19,
+        "NO_PROGRESS_CLEARED": 12,
+        "NO_PROGRESS_STARTED": 12,
+        "RECOVERY_COUNT_CHANGED": 91,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 15,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 548,
+        "TOPIC_RECOVERED": 65,
+        "TOPIC_STALE": 38
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 209180,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.2741151977793199,
+        "final_known_cells": 220201,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 16252,
+          "robot2": 43518
+        },
+        "simultaneously_observed_cells": 1060,
+        "total_known_union_cells": 221914,
+        "unique_first_seen_cells": {
+          "robot1": 175620,
+          "robot2": 46294
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 5,
+        "goals_accepted": 19,
+        "goals_sent": 19,
+        "recoveries": 91,
+        "successes": 13,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "BIDDING",
+          "frontier_id": null,
+          "navigation_active": false
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 669.8031395180005,
+        "end_time": "2026-08-15T08:57:29.902Z",
+        "run_id": "trial_01_attempt_01",
+        "start_time": "2026-08-15T08:46:20.099Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 88.37473539422403,
+          "median_percent": 92.28009977636349,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 100.48899272253327,
+          "peak_percent": 106.52148928194798,
+          "sample_count": 626,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 88.37473539422403,
+        "logger_pid": 248423,
+        "logger_rss_bytes": 316321792,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 67743,
+          "events.jsonl": 3360673,
+          "robot1_timeseries.csv": 224613,
+          "robot2_timeseries.csv": 224115,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 466819,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 257108189.75796178,
+        "rss_peak_bytes": 326881280,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 92678177.0,
+      "mean_known_cells_0_600": 154463.62833333333,
+      "known_cells_at_s": {
+        "120": 78238.0,
+        "240": 163941.0,
+        "360": 204710.0,
+        "480": 221697.0,
+        "600": 221914.0
+      },
+      "milestone_time_s": {
+        "100000": 158.0,
+        "150000": 230.0,
+        "200000": 358.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 221914.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "17c8432552f4f196b5949280bcee92b757d449f31bc583687eb68606750d7338",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 47.44,
+        "end_s": 58.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 13.276093482971191,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "2dc17d127e543dcb1d56a22adcba916dab3404a9e7472476ae1873cb3c7aa1ad",
+        "canonical_task_id": "a4976236916efdf994c08e9f",
+        "start_s": 66.22,
+        "end_s": 124.78,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 60.50724792480469,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "c51113b664a637ed94b61265ab2628f4e85b762e7f2fb544472499b9e5ae83c5",
+        "canonical_task_id": "576a171782b12d2919d32f0a",
+        "start_s": 127.06,
+        "end_s": 150.0,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 23.70626449584961,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "1f165dcb99ec1b646f4df8eeda2dacc0052adaade6a200793e3f01f79df17b69",
+        "canonical_task_id": "e8e99aab00dbd772e31307c5",
+        "start_s": 154.82,
+        "end_s": 243.78,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 92.36904907226562,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "ef4e3c2fb8845e764f943ede4fd4644a3b9adacd411d86d9f616e85240d2e1f1",
+        "canonical_task_id": "775630122f0d3b161e490037",
+        "start_s": 257.76,
+        "end_s": 318.7,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 63.072364807128906,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "ef50526f55174b1b6fac1b3276c4938236f7dea93bb8b2b2bd8996348f00aee7",
+        "canonical_task_id": "0e02ef6054f2548111840117",
+        "start_s": 345.44,
+        "end_s": 365.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 21.16448402404785,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "b586a0296bf95e9f3df3dc5fd4b18ab2de9994b1b6262edfb160c2066d58066e",
+        "canonical_task_id": "5b8a82a28c0648b4c40afaaf",
+        "start_s": 382.28,
+        "end_s": 431.02,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 50.57888412475586,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "17c8432552f4f196b5949280bcee92b757d449f31bc583687eb68606750d7338",
+        "canonical_task_id": "0baa2f99b0129ae3470fcc7d",
+        "start_s": 47.46,
+        "end_s": 64.16,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 18.762531280517578,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "2dc17d127e543dcb1d56a22adcba916dab3404a9e7472476ae1873cb3c7aa1ad",
+        "canonical_task_id": "086f6c3f6e5265e64f37dd52",
+        "start_s": 66.22,
+        "end_s": 108.38,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 43.642845153808594,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "c51113b664a637ed94b61265ab2628f4e85b762e7f2fb544472499b9e5ae83c5",
+        "canonical_task_id": "4e4b4e27566ab1080681dc7d",
+        "start_s": 127.06,
+        "end_s": 141.26,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 14.626588821411133,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "1f165dcb99ec1b646f4df8eeda2dacc0052adaade6a200793e3f01f79df17b69",
+        "canonical_task_id": "fd0874d241de9cfa2454611f",
+        "start_s": 154.76,
+        "end_s": 210.18,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 57.810447692871094,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "ef4e3c2fb8845e764f943ede4fd4644a3b9adacd411d86d9f616e85240d2e1f1",
+        "canonical_task_id": "cf18de91849907eb7bf27c83",
+        "start_s": 257.68,
+        "end_s": 278.42,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 21.56804656982422,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "ef50526f55174b1b6fac1b3276c4938236f7dea93bb8b2b2bd8996348f00aee7",
+        "canonical_task_id": "815a97b5ec052d5cc5dc6398",
+        "start_s": 345.36,
+        "end_s": 374.26,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 29.97316551208496,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b586a0296bf95e9f3df3dc5fd4b18ab2de9994b1b6262edfb160c2066d58066e",
+        "canonical_task_id": "f40648f0f3d251ab9fb2cb7e",
+        "start_s": 382.22,
+        "end_s": 510.68,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 22,
+        "goal_duration_s": 133.15057373046875,
+        "recovery_change_events": 17
+      },
+      {
+        "robot": "robot2",
+        "round_id": "19770d63f7263e26177be4a6c641093ec194205730843d76ef4d35eddbe27218",
+        "canonical_task_id": "c988d0c3f1781b3f4d87fe53",
+        "start_s": 512.26,
+        "end_s": 534.1,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 20,
+        "goal_duration_s": 22.572521209716797,
+        "recovery_change_events": 15
+      },
+      {
+        "robot": "robot2",
+        "round_id": "519b8125161fc8e88886bf3ebff9895e8b9fc669bb5019427056db968a57df8c",
+        "canonical_task_id": "c988d0c3f1781b3f4d87fe53",
+        "start_s": 536.78,
+        "end_s": 558.18,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 21,
+        "goal_duration_s": 22.016145706176758,
+        "recovery_change_events": 15
+      },
+      {
+        "robot": "robot2",
+        "round_id": "88cec3d76dd8e7cb61d3f35cfca2756aff7bdb3a5b3c6b144cb56c7f05c45ef7",
+        "canonical_task_id": "c988d0c3f1781b3f4d87fe53",
+        "start_s": 560.08,
+        "end_s": 582.08,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 20,
+        "goal_duration_s": 22.883403778076172,
+        "recovery_change_events": 15
+      },
+      {
+        "robot": "robot2",
+        "round_id": "4515bbf413848b3c3105ab3af896f41c69c9b0bdca85822cf994455b639f5647",
+        "canonical_task_id": "c988d0c3f1781b3f4d87fe53",
+        "start_s": 585.28,
+        "end_s": 607.14,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 20,
+        "goal_duration_s": 22.7228946685791,
+        "recovery_change_events": 15
+      },
+      {
+        "robot": "robot2",
+        "round_id": "dc165530fb7a03132b56c9f4848907df82fe133aa92a7e65b56f210d9c170ab3",
+        "canonical_task_id": "c988d0c3f1781b3f4d87fe53",
+        "start_s": 609.8,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 19,
+        "goal_duration_s": null,
+        "recovery_change_events": 14
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -10.393328296000915,
+          "y": -4.611112364799864,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 9685,
+        "occupied_area_m2": 8.71649961034209,
+        "mean_distance_m": 0.24359259593746282,
+        "median_distance_m": 0.15832841301228306,
+        "p90_distance_m": 0.6483284579392827,
+        "p95_distance_m": 0.738328455927626,
+        "p99_distance_m": 0.8783283969190272,
+        "rms_distance_m": 0.34720465126176336,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 6492,
+            "area_m2": 5.842799738806489,
+            "fraction": 0.6703149199793496
+          },
+          "gt_0.10_m": {
+            "cells": 5498,
+            "area_m2": 4.948199778798225,
+            "fraction": 0.5676819824470831
+          },
+          "gt_0.15_m": {
+            "cells": 4905,
+            "area_m2": 4.414499802656474,
+            "fraction": 0.5064532782653588
+          },
+          "gt_0.25_m": {
+            "cells": 3689,
+            "area_m2": 3.320099851579966,
+            "fraction": 0.3808982963345379
+          },
+          "gt_0.50_m": {
+            "cells": 1815,
+            "area_m2": 1.6334999269768604,
+            "fraction": 0.1874032008260196
+          }
+        },
+        "known_cells": 189626,
+        "free_cells": 179941,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.1417263878489678,
+        "boundary_unknown_fraction": 0.6128997753770457,
+        "boundary_free_fraction": 0.24537383677398653
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -10.41,
+          "y": -5.3999999999999995,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14207,
+        "occupied_area_m2": 12.786299428407855,
+        "mean_distance_m": 0.18562653682181232,
+        "median_distance_m": 0.08500011902302518,
+        "p90_distance_m": 0.545000332258641,
+        "p95_distance_m": 0.6850001056119783,
+        "p99_distance_m": 0.8350001022592171,
+        "rms_distance_m": 0.28554847810329287,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 9065,
+            "area_m2": 8.158499635286633,
+            "fraction": 0.638065742239741
+          },
+          "gt_0.10_m": {
+            "cells": 6428,
+            "area_m2": 5.78519974138141,
+            "fraction": 0.45245301611881467
+          },
+          "gt_0.15_m": {
+            "cells": 5375,
+            "area_m2": 4.8374997837469005,
+            "fraction": 0.3783346237770113
+          },
+          "gt_0.25_m": {
+            "cells": 3695,
+            "area_m2": 3.325499851338567,
+            "fraction": 0.2600830576476385
+          },
+          "gt_0.50_m": {
+            "cells": 1814,
+            "area_m2": 1.6325999270170934,
+            "fraction": 0.12768353628492995
+          }
+        },
+        "known_cells": 220201,
+        "free_cells": 205994,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.21510321959567869,
+        "boundary_unknown_fraction": 0.44785538560273824,
+        "boundary_free_fraction": 0.33704139480158307
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -5.204940591298734,
+          "y": -2.8995936267735987,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 6148,
+        "occupied_area_m2": 5.533199752646688,
+        "mean_distance_m": 0.05441874853844692,
+        "median_distance_m": 0.035406079189238326,
+        "p90_distance_m": 0.13005917769601538,
+        "p95_distance_m": 0.19005917635491087,
+        "p99_distance_m": 0.25005917501380726,
+        "rms_distance_m": 0.07891476547106901,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 2320,
+            "area_m2": 2.0879999066591273,
+            "fraction": 0.37735849056603776
+          },
+          "gt_0.10_m": {
+            "cells": 1045,
+            "area_m2": 0.9404999579563742,
+            "fraction": 0.16997397527651267
+          },
+          "gt_0.15_m": {
+            "cells": 470,
+            "area_m2": 0.42299998109042664,
+            "fraction": 0.07644762524398178
+          },
+          "gt_0.25_m": {
+            "cells": 127,
+            "area_m2": 0.11429999489039189,
+            "fraction": 0.02065712426805465
+          },
+          "gt_0.50_m": {
+            "cells": 0,
+            "area_m2": 0.0,
+            "fraction": 0.0
+          }
+        },
+        "known_cells": 90263,
+        "free_cells": 84115,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.14108460797946304,
+        "boundary_unknown_fraction": 0.7236068028666167,
+        "boundary_free_fraction": 0.13530858915392022
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -10.41,
+          "y": -5.3999999999999995,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14207,
+        "occupied_area_m2": 12.786299428407855,
+        "mean_distance_m": 0.18562653682181232,
+        "median_distance_m": 0.08500011902302518,
+        "p90_distance_m": 0.545000332258641,
+        "p95_distance_m": 0.6850001056119783,
+        "p99_distance_m": 0.8350001022592171,
+        "rms_distance_m": 0.28554847810329287,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 9065,
+            "area_m2": 8.158499635286633,
+            "fraction": 0.638065742239741
+          },
+          "gt_0.10_m": {
+            "cells": 6428,
+            "area_m2": 5.78519974138141,
+            "fraction": 0.45245301611881467
+          },
+          "gt_0.15_m": {
+            "cells": 5375,
+            "area_m2": 4.8374997837469005,
+            "fraction": 0.3783346237770113
+          },
+          "gt_0.25_m": {
+            "cells": 3695,
+            "area_m2": 3.325499851338567,
+            "fraction": 0.2600830576476385
+          },
+          "gt_0.50_m": {
+            "cells": 1814,
+            "area_m2": 1.6325999270170934,
+            "fraction": 0.12768353628492995
+          }
+        },
+        "known_cells": 220201,
+        "free_cells": 205994,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.21510321959567869,
+        "boundary_unknown_fraction": 0.44785538560273824,
+        "boundary_free_fraction": 0.33704139480158307
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14207,
+        "fused_occupied_cells": 14207,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14207,
+        "fused_occupied_cells": 14207,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 1.0,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 1.0,
+      "common_grid": {
+        "height": 1126,
+        "origin_x": -10.439999766647816,
+        "origin_y": -5.429999878630042,
+        "resolution": 0.029999999329447746,
+        "width": 556
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 198.1808911406235,
+      "coverage_area_b_m2": 198.1808911406235,
+      "coverage_area_difference_m2": 0.0,
+      "coverage_area_relative_difference": 0.0,
+      "dimensions_a": [
+        555,
+        1125
+      ],
+      "dimensions_b": [
+        555,
+        1125
+      ],
+      "free_area_difference_m2": 0.0,
+      "free_area_relative_difference": 0.0,
+      "free_iou": 1.0,
+      "geometry_equal": true,
+      "jointly_known_cell_count": 220201,
+      "known_cell_agreement": 1.0,
+      "known_iou": 1.0,
+      "known_union_count": 220201,
+      "occupied_area_difference_m2": 0.0,
+      "occupied_area_relative_difference": 0.0,
+      "occupied_free_conflict_rate": 0.0,
+      "occupied_iou": 1.0,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 1.0,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 205994,
+        "free/occupied": 0,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 0,
+        "occupied/occupied": 14207,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 0,
+        "unknown/occupied": 0,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 405855
+      },
+      "unknown_mismatch_rate": 0.0,
+      "zero_shift_correlation": 1.0
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 14.26,
+        "common_end_s": 628.88,
+        "samples": 18411,
+        "initial_gt": [
+          16.00000000000363,
+          -7.433714824229372e-10,
+          1.5707963269657594
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657594,
+          "tx_m": 3.477176573115746e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 33.42484391139957,
+        "odom_distance_m": 33.40843158333681,
+        "translation_rmse_m": 0.35522253934328835,
+        "translation_final_m": 0.4280812474611877,
+        "translation_max_m": 0.5254594008028564,
+        "yaw_rmse_rad": 0.03140071531340946,
+        "yaw_final_rad": 0.03551062911953462,
+        "yaw_max_rad": 0.047236717379789184
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 11.72,
+        "common_end_s": 629.02,
+        "samples": 20795,
+        "initial_gt": [
+          18.500000000003624,
+          -7.434263722070613e-10,
+          1.5707963269656948
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656948,
+          "tx_m": 3.903193131189909e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 27.783641166247524,
+        "odom_distance_m": 27.78302438059802,
+        "translation_rmse_m": 0.0504737795760147,
+        "translation_final_m": 0.056990492150946134,
+        "translation_max_m": 0.12236078543394503,
+        "yaw_rmse_rad": 0.013267217683457995,
+        "yaw_final_rad": 0.04858681233898077,
+        "yaw_max_rad": 0.04969548201723528
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 61.2084850776471,
+      "known_cells_gain": 209180,
+      "known_cells_per_combined_m": 3417.500036712901,
+      "known_cells_per_100_s": 34863.333333333336,
+      "mean_known_cells_auc": 154463.62833333333,
+      "successful_goals": 13,
+      "successful_goals_per_100_s": 2.1666666666666665
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_02",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 8,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 47,
+        "stuck_episodes": 0,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 22,
+        "dispatch_attempts": 20,
+        "goals_terminal": 19,
+        "unique_agreed_decisions": 11,
+        "unique_agreed_rounds": 11
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 161,
+        "CANDIDATE_COUNT_CHANGED": 36,
+        "DECISION_AGREED": 22,
+        "DISTRIBUTED_BID_ARRAY": 90,
+        "DISTRIBUTED_PAIR_DECISION": 23,
+        "DISTRIBUTED_STATUS": 197,
+        "DISTRIBUTED_TASK_FAILURE": 1,
+        "DISTRIBUTED_TASK_SNAPSHOT": 161,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 1,
+        "NAVIGATION_PROGRESS": 161,
+        "NAVIGATION_SUCCEEDED": 18,
+        "NAV_GOAL_ACCEPTED": 20,
+        "NAV_GOAL_SENT": 20,
+        "NO_PROGRESS_CLEARED": 8,
+        "NO_PROGRESS_STARTED": 8,
+        "NO_REACHABLE_CANDIDATES": 1,
+        "RECOVERY_COUNT_CHANGED": 5,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 20,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 322,
+        "TOPIC_RECOVERED": 76,
+        "TOPIC_STALE": 47
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 246843,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.4568798449612403,
+        "final_known_cells": 257864,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 15266,
+          "robot2": 102727
+        },
+        "simultaneously_observed_cells": 825,
+        "total_known_union_cells": 260064,
+        "unique_first_seen_cells": {
+          "robot1": 173734,
+          "robot2": 86330
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 1,
+        "goals_accepted": 20,
+        "goals_sent": 20,
+        "recoveries": 5,
+        "successes": 18,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "WAITING_FOR_INPUTS",
+          "frontier_id": null,
+          "navigation_active": false
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 658.9787778220052,
+        "end_time": "2026-08-15T09:09:40.369Z",
+        "run_id": "trial_02_attempt_01",
+        "start_time": "2026-08-15T08:58:40.904Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 88.89227043903949,
+          "median_percent": 92.69281290251982,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 100.29399267336655,
+          "peak_percent": 107.25001939636896,
+          "sample_count": 616,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 88.89227043903949,
+        "logger_pid": 254378,
+        "logger_rss_bytes": 345280512,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 66089,
+          "events.jsonl": 2338400,
+          "robot1_timeseries.csv": 222308,
+          "robot2_timeseries.csv": 228026,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 455148,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 253177384.66126418,
+        "rss_peak_bytes": 355065856,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 86134041.0,
+      "mean_known_cells_0_600": 143556.735,
+      "known_cells_at_s": {
+        "120": 78572.0,
+        "240": 103608.0,
+        "360": 173809.0,
+        "480": 225338.0,
+        "600": 255156.0
+      },
+      "milestone_time_s": {
+        "100000": 192.0,
+        "150000": 314.0,
+        "200000": 418.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 255156.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "19402b3471f927ffce62115767f62be19577bc67cda4d43511cf39e04dd9927b",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 38.96,
+        "end_s": 50.48,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.462569236755371,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "90ff56cfe031e5628fe1ac64b64ccc462366d8ac089d85dba2a4932c3860161b",
+        "canonical_task_id": "62a74336a701bc07c6e0ce08",
+        "start_s": 57.54,
+        "end_s": 114.92,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 59.107967376708984,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "06557ee538ea68b8744a34ff9dff5f019e8d51f5fd59da65f77920bf8cbb4786",
+        "canonical_task_id": "29c49012492d88b7a52fd264",
+        "start_s": 116.26,
+        "end_s": 142.12,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 26.518516540527344,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "4fb441be47c7aea7b83e6468c43f903fa6c546edca6c0cef252a006176830a6a",
+        "canonical_task_id": "e7ae297b30c85314a3575669",
+        "start_s": 187.24,
+        "end_s": 202.28,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 15.210088729858398,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "34faa776db83835907c28bb2122925c25562474f4e0619074714f19108fd68af",
+        "canonical_task_id": "1a0b1a7f4a3f2dd170213ba4",
+        "start_s": 243.1,
+        "end_s": 325.06,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 1,
+        "goal_duration_s": 84.79824829101562,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "ed527e3c26e595c49ca93497a23cc0c79ebc0d51e0516c1189f7ce6dbfe8a026",
+        "canonical_task_id": "c75adada8db556872da4951d",
+        "start_s": 341.26,
+        "end_s": 392.1,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 52.68436813354492,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot1",
+        "round_id": "47e1f4b1c64ef749123a247ea5e2ef8978d12458629ca22527ae702c1e69674b",
+        "canonical_task_id": "c734ef96521aa4453f89a109",
+        "start_s": 401.56,
+        "end_s": 434.6,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 34.124549865722656,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "e11dcdea4596b538bc8bbc49577bb33a22637654fa0d0a90ecf8799322e7183b",
+        "canonical_task_id": "fe368260f0f737125d093bbd",
+        "start_s": 441.38,
+        "end_s": 456.28,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 15.574563026428223,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "b7001729f9eeca0bfc62bc54d67c98ba1f7e47b6d82a24dc016b7cd9b91c4086",
+        "canonical_task_id": "227bbef1bdb3bd2bfc09d676",
+        "start_s": 463.12,
+        "end_s": 473.12,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 1,
+        "goal_duration_s": 10.301706314086914,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "19402b3471f927ffce62115767f62be19577bc67cda4d43511cf39e04dd9927b",
+        "canonical_task_id": "0baa2f99b0129ae3470fcc7d",
+        "start_s": 39.12,
+        "end_s": 55.88,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 17.5887508392334,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "90ff56cfe031e5628fe1ac64b64ccc462366d8ac089d85dba2a4932c3860161b",
+        "canonical_task_id": "50a978ba330e7d1a5df91c3c",
+        "start_s": 57.52,
+        "end_s": 100.62,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 44.311668395996094,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "06557ee538ea68b8744a34ff9dff5f019e8d51f5fd59da65f77920bf8cbb4786",
+        "canonical_task_id": "19732e9e02f8456401113563",
+        "start_s": 116.4,
+        "end_s": 185.52,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 71.30814361572266,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "4fb441be47c7aea7b83e6468c43f903fa6c546edca6c0cef252a006176830a6a",
+        "canonical_task_id": "9ccc6b46c630a0b903f972bf",
+        "start_s": 187.24,
+        "end_s": 241.08,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 55.45830535888672,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "34faa776db83835907c28bb2122925c25562474f4e0619074714f19108fd68af",
+        "canonical_task_id": "67e6d2df13c232b7be676430",
+        "start_s": 243.08,
+        "end_s": 330.96,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 90.90486907958984,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "ed527e3c26e595c49ca93497a23cc0c79ebc0d51e0516c1189f7ce6dbfe8a026",
+        "canonical_task_id": "d42ec3856441b73392653710",
+        "start_s": 341.18,
+        "end_s": 383.16,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 43.5204963684082,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "47e1f4b1c64ef749123a247ea5e2ef8978d12458629ca22527ae702c1e69674b",
+        "canonical_task_id": "a43f0ee0b4f4b5d19b4a109f",
+        "start_s": 401.58,
+        "end_s": 423.76,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 1,
+        "goal_duration_s": 22.92891502380371,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "e11dcdea4596b538bc8bbc49577bb33a22637654fa0d0a90ecf8799322e7183b",
+        "canonical_task_id": "64ba5824ef5cb42ffb5c9f1d",
+        "start_s": 441.36,
+        "end_s": 451.42,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 10.430052757263184,
+        "recovery_change_events": 1
+      },
+      {
+        "robot": "robot2",
+        "round_id": "b7001729f9eeca0bfc62bc54d67c98ba1f7e47b6d82a24dc016b7cd9b91c4086",
+        "canonical_task_id": "2c863e7a3a8979694332daee",
+        "start_s": 462.98,
+        "end_s": 484.68,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 22.278093338012695,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "e72914f02813c2aedd378d3bc50d9fa3fe157544ad3ea4420a117663253976ab",
+        "canonical_task_id": "370fc63523d8d3c4b7b24326",
+        "start_s": 490.62,
+        "end_s": 557.86,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 69.47193908691406,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "1eb530b64ce1d221432aa8fb818c8c502d9674ae077339f9aa755476504d1cb1",
+        "canonical_task_id": "b8f5709e818c5fdb7956391f",
+        "start_s": 559.92,
+        "end_s": null,
+        "outcome": "NO_TERMINAL",
+        "recoveries": 0,
+        "goal_duration_s": null,
+        "recovery_change_events": 0
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.971261352772835,
+          "y": -5.299985505890691,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 9994,
+        "occupied_area_m2": 8.994599597910051,
+        "mean_distance_m": 0.2745465581859906,
+        "median_distance_m": 0.16501398080156093,
+        "p90_distance_m": 0.696261548909368,
+        "p95_distance_m": 0.7862613792596473,
+        "p99_distance_m": 0.906261544215502,
+        "rms_distance_m": 0.38784334877416454,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 6664,
+            "area_m2": 5.99759973188639,
+            "fraction": 0.6668000800480288
+          },
+          "gt_0.10_m": {
+            "cells": 5750,
+            "area_m2": 5.174999768659475,
+            "fraction": 0.5753452071242746
+          },
+          "gt_0.15_m": {
+            "cells": 5117,
+            "area_m2": 4.605299794127049,
+            "fraction": 0.5120072043225935
+          },
+          "gt_0.25_m": {
+            "cells": 4135,
+            "area_m2": 3.721499833635988,
+            "fraction": 0.4137482489493696
+          },
+          "gt_0.50_m": {
+            "cells": 2594,
+            "area_m2": 2.3345998956352485,
+            "fraction": 0.25955573344006405
+          }
+        },
+        "known_cells": 186824,
+        "free_cells": 176830,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.14707455342817413,
+        "boundary_unknown_fraction": 0.624986629586052,
+        "boundary_free_fraction": 0.22793881698577387
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.109999999999999,
+          "y": -5.31,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 19272,
+        "occupied_area_m2": 17.344799224627028,
+        "mean_distance_m": 0.23066487765200303,
+        "median_distance_m": 0.12499978240579468,
+        "p90_distance_m": 0.5750002578273401,
+        "p95_distance_m": 0.6895001490972988,
+        "p99_distance_m": 0.8508001868426951,
+        "rms_distance_m": 0.3269508729516177,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 13751,
+            "area_m2": 12.375899446754163,
+            "fraction": 0.7135222083852221
+          },
+          "gt_0.10_m": {
+            "cells": 10474,
+            "area_m2": 9.426599578598147,
+            "fraction": 0.5434827729348277
+          },
+          "gt_0.15_m": {
+            "cells": 9101,
+            "area_m2": 8.19089963383824,
+            "fraction": 0.4722395184723952
+          },
+          "gt_0.25_m": {
+            "cells": 6917,
+            "area_m2": 6.225299721707406,
+            "fraction": 0.3589144873391449
+          },
+          "gt_0.50_m": {
+            "cells": 3319,
+            "area_m2": 2.9870998664662256,
+            "fraction": 0.17221876297218763
+          }
+        },
+        "known_cells": 258243,
+        "free_cells": 238971,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.2168146325810247,
+        "boundary_unknown_fraction": 0.3828216921595893,
+        "boundary_free_fraction": 0.40036367525938604
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.094701177784347,
+          "y": -2.233412238215765,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 11608,
+        "occupied_area_m2": 10.447199532973771,
+        "mean_distance_m": 0.14969160337230308,
+        "median_distance_m": 0.07029855030671417,
+        "p90_distance_m": 0.4402985979159255,
+        "p95_distance_m": 0.5002985965748215,
+        "p99_distance_m": 0.5802985389073276,
+        "rms_distance_m": 0.22301031789444592,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 6921,
+            "area_m2": 6.228899721546474,
+            "fraction": 0.5962267401791868
+          },
+          "gt_0.10_m": {
+            "cells": 4803,
+            "area_m2": 4.322699806760253,
+            "fraction": 0.41376636802205374
+          },
+          "gt_0.15_m": {
+            "cells": 3922,
+            "area_m2": 3.5297998422056454,
+            "fraction": 0.33787043418332185
+          },
+          "gt_0.25_m": {
+            "cells": 2845,
+            "area_m2": 2.5604998855367316,
+            "fraction": 0.24508959338387318
+          },
+          "gt_0.50_m": {
+            "cells": 656,
+            "area_m2": 0.5903999736070635,
+            "fraction": 0.05651274982770503
+          }
+        },
+        "known_cells": 188959,
+        "free_cells": 177351,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.18536741897529146,
+        "boundary_unknown_fraction": 0.5477591186223125,
+        "boundary_free_fraction": 0.26687346240239596
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -7.109999999999999,
+          "y": -5.31,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 19249,
+        "occupied_area_m2": 17.324099225552388,
+        "mean_distance_m": 0.23046370686644524,
+        "median_distance_m": 0.12499978240579468,
+        "p90_distance_m": 0.5750002578273401,
+        "p95_distance_m": 0.691000132299943,
+        "p99_distance_m": 0.8554001353308622,
+        "rms_distance_m": 0.3267587551947522,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 13729,
+            "area_m2": 12.356099447639293,
+            "fraction": 0.7132318562003221
+          },
+          "gt_0.10_m": {
+            "cells": 10453,
+            "area_m2": 9.407699579443042,
+            "fraction": 0.5430411969452958
+          },
+          "gt_0.15_m": {
+            "cells": 9085,
+            "area_m2": 8.17649963448197,
+            "fraction": 0.47197257000363657
+          },
+          "gt_0.25_m": {
+            "cells": 6902,
+            "area_m2": 6.211799722310904,
+            "fraction": 0.35856408125097405
+          },
+          "gt_0.50_m": {
+            "cells": 3308,
+            "area_m2": 2.9771998669087902,
+            "fraction": 0.17185308327705334
+          }
+        },
+        "known_cells": 257864,
+        "free_cells": 238615,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.21670766926944057,
+        "boundary_unknown_fraction": 0.3829286554711734,
+        "boundary_free_fraction": 0.40036367525938604
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 19295,
+        "fused_occupied_cells": 19272,
+        "occupied_iou": 0.9981866224547951,
+        "fused_additional_cells": 6,
+        "source_union_missing_cells": 29,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 19295,
+        "fused_occupied_cells": 19249,
+        "occupied_iou": 0.9963743719894339,
+        "fused_additional_cells": 12,
+        "source_union_missing_cells": 58,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 0.9987915683369941,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 0.9994541200935794,
+      "common_grid": {
+        "height": 1375,
+        "origin_x": -7.139999840408564,
+        "origin_y": -5.339999880641699,
+        "resolution": 0.029999999329447746,
+        "width": 487
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 231.57088964797418,
+      "coverage_area_b_m2": 232.07758962532293,
+      "coverage_area_difference_m2": 0.5066999773487453,
+      "coverage_area_relative_difference": 0.002183321440759471,
+      "dimensions_a": [
+        486,
+        1373
+      ],
+      "dimensions_b": [
+        486,
+        1374
+      ],
+      "free_area_difference_m2": 0.48149997847528425,
+      "free_area_relative_difference": 0.0022421054837290723,
+      "free_iou": 0.9975234974417855,
+      "geometry_equal": false,
+      "jointly_known_cell_count": 257301,
+      "known_cell_agreement": 0.9998328805562356,
+      "known_iou": 0.9978166785592405,
+      "known_union_count": 257864,
+      "occupied_area_difference_m2": 0.025199998873471685,
+      "occupied_area_relative_difference": 0.0014546210192736973,
+      "occupied_free_conflict_rate": 0.00016711944376430717,
+      "occupied_iou": 0.9969892026578073,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 0.9987915683369941,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 238052,
+        "free/occupied": 28,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 15,
+        "occupied/occupied": 19206,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 548,
+        "unknown/occupied": 15,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 411761
+      },
+      "unknown_mismatch_rate": 0.00218332144075947,
+      "zero_shift_correlation": 0.9987915683369941
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 5.06,
+        "common_end_s": 617.18,
+        "samples": 21287,
+        "initial_gt": [
+          16.00000000000363,
+          -7.433714831683262e-10,
+          1.5707963269656766
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656766,
+          "tx_m": 3.4758514116589418e-09,
+          "ty_m": 16.00000000000363
+        },
+        "gt_distance_m": 31.473119958813005,
+        "odom_distance_m": 31.45322965385561,
+        "translation_rmse_m": 0.3488771242440656,
+        "translation_final_m": 0.5015746555853318,
+        "translation_max_m": 0.5415801604126903,
+        "yaw_rmse_rad": 0.03465400709015424,
+        "yaw_final_rad": 0.04833729297894074,
+        "yaw_max_rad": 0.04946474012882973
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 10.84,
+        "common_end_s": 617.18,
+        "samples": 24108,
+        "initial_gt": [
+          18.500000000003627,
+          -7.432395047665945e-10,
+          1.5707963269656295
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269656295,
+          "tx_m": 3.901798563143255e-09,
+          "ty_m": 18.500000000003627
+        },
+        "gt_distance_m": 49.84408258655405,
+        "odom_distance_m": 49.82365139892197,
+        "translation_rmse_m": 0.17915740039501932,
+        "translation_final_m": 0.49853148035535894,
+        "translation_max_m": 0.49894116130335203,
+        "yaw_rmse_rad": 0.014341700425228126,
+        "yaw_final_rad": 0.019536904562425406,
+        "yaw_max_rad": 0.02947590322502691
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 81.31720254536705,
+      "known_cells_gain": 246843,
+      "known_cells_per_combined_m": 3035.556958102263,
+      "known_cells_per_100_s": 41140.5,
+      "mean_known_cells_auc": 143556.735,
+      "successful_goals": 18,
+      "successful_goals_per_100_s": 3.0
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_03",
+    "attempt": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01",
+    "observer": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01",
+    "forensic": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic",
+    "summary": {
+      "anomalies": {
+        "no_progress_episodes": 4,
+        "oscillation_episodes": 0,
+        "stale_topic_episodes": 31,
+        "stuck_episodes": 1,
+        "warning_occurrences": 0
+      },
+      "continuous_exploration": {
+        "robot1": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        },
+        "robot2": {
+          "average_cycle_duration_s": 0.0,
+          "completed_goals": 0,
+          "exploration_cycles": 0,
+          "failed_goals": 0,
+          "locally_exhausted_duration_s": 0.0,
+          "maximum_equivalent_region_attempt_count": 0,
+          "repeated_region_attempts": 0,
+          "suppression_creations": 0
+        }
+      },
+      "coordination": {
+        "agreement_publications": 12,
+        "dispatch_attempts": 12,
+        "goals_terminal": 12,
+        "unique_agreed_decisions": 6,
+        "unique_agreed_rounds": 6
+      },
+      "events": {
+        "CANDIDATE_BATCH_RECEIVED": 311,
+        "CANDIDATE_COUNT_CHANGED": 11,
+        "DECISION_AGREED": 12,
+        "DISTRIBUTED_BID_ARRAY": 256,
+        "DISTRIBUTED_PAIR_DECISION": 12,
+        "DISTRIBUTED_STATUS": 330,
+        "DISTRIBUTED_TASK_SNAPSHOT": 311,
+        "FORENSIC_SUPERVISOR_STARTED": 1,
+        "FORENSIC_SUPERVISOR_STOPPED": 1,
+        "NAVIGATION_FAILED": 1,
+        "NAVIGATION_PROGRESS": 145,
+        "NAVIGATION_SUCCEEDED": 11,
+        "NAV_GOAL_ACCEPTED": 12,
+        "NAV_GOAL_SENT": 12,
+        "NO_PROGRESS_CLEARED": 4,
+        "NO_PROGRESS_STARTED": 4,
+        "RUN_END": 1,
+        "RUN_START": 1,
+        "SHARED_MAP_DIVERGENCE": 11,
+        "STACK_READY": 1,
+        "STATE_TRANSITION": 719,
+        "STUCK_CLEARED": 1,
+        "STUCK_STARTED": 1,
+        "TOPIC_RECOVERED": 50,
+        "TOPIC_STALE": 31
+      },
+      "frames": {
+        "coverage_source_frame": "robot_local_map",
+        "coverage_target_frame": "robot1_initial",
+        "global_frame": "shared_map",
+        "initial_transform_source": "WORLD_DERIVED",
+        "known_initial_relative_transform": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "trajectory_source_frame": "global_frame"
+      },
+      "mapping": {
+        "coverage_gain_cells": 189249,
+        "coverage_gain_per_metre_travelled": 0.0,
+        "duplicated_known_fraction": 0.8007355897374808,
+        "final_known_cells": 200270,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 101247,
+          "robot2": 58377
+        },
+        "simultaneously_observed_cells": 1701,
+        "total_known_union_cells": 201471,
+        "unique_first_seen_cells": {
+          "robot1": 74290,
+          "robot2": 127181
+        }
+      },
+      "mission_completion_time_s": null,
+      "motion": {
+        "bins_per_robot": {},
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {},
+        "repeated_visit_distance_m": {}
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 1,
+        "goals_accepted": 12,
+        "goals_sent": 12,
+        "recoveries": 0,
+        "successes": 11,
+        "timeouts": 0
+      },
+      "robot_terminal_state": {
+        "robot1": {
+          "claim_id": null,
+          "claim_state": "NAVIGATING",
+          "frontier_id": null,
+          "navigation_active": true
+        },
+        "robot2": {
+          "claim_id": null,
+          "claim_state": "BIDDING",
+          "frontier_id": null,
+          "navigation_active": false
+        }
+      },
+      "run": {
+        "clean_shutdown": true,
+        "elapsed_duration_s": 639.3737355600024,
+        "end_time": "2026-08-15T09:21:31.384Z",
+        "run_id": "trial_03_attempt_01",
+        "start_time": "2026-08-15T09:10:52.010Z"
+      },
+      "schema_version": "1.1.0",
+      "system": {
+        "cpu_measurement": {
+          "mean_percent": 90.23868045642125,
+          "median_percent": 92.30022139716945,
+          "normalization": "one CPU core equals 100 percent",
+          "p95_percent": 100.47251370108299,
+          "peak_percent": 106.97746301700558,
+          "sample_count": 600,
+          "sampling_interval_s": 1.0,
+          "scope": "logger process only",
+          "warmup_s": 10.0
+        },
+        "dropped_logger_samples": 0,
+        "internal_logger_error_count": 0,
+        "internal_logger_errors": {},
+        "logger_cpu_percent": 90.23868045642125,
+        "logger_pid": 259920,
+        "logger_rss_bytes": 344739840,
+        "output_file_sizes": {
+          "README.txt": 91,
+          "coverage.csv": 65618,
+          "events.jsonl": 4544017,
+          "robot1_timeseries.csv": 222790,
+          "robot2_timeseries.csv": 220061,
+          "run_manifest.json": 5705,
+          "topic_health.csv": 448013,
+          "warnings.jsonl": 0
+        },
+        "rss_mean_bytes": 272947169.4328358,
+        "rss_peak_bytes": 350691328,
+        "write_failures": 0
+      }
+    },
+    "maps": {
+      "robot1_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+      "robot1_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+      "robot2_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+      "robot2_shared_map": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz"
+    },
+    "coverage": {
+      "auc_known_cells_s": 84314502.0,
+      "mean_known_cells_0_600": 140524.17,
+      "known_cells_at_s": {
+        "120": 87527.0,
+        "240": 124161.0,
+        "360": 174925.0,
+        "480": 201471.0,
+        "600": 201471.0
+      },
+      "milestone_time_s": {
+        "100000": 192.0,
+        "150000": 286.0,
+        "200000": 404.0
+      },
+      "initial_known_cells": 11021.0,
+      "final_known_cells_600": 201471.0
+    },
+    "goals": [
+      {
+        "robot": "robot1",
+        "round_id": "e9e1f4b42955115cdc399a0294fc7d08d9f3770bb5bb5be14dce0711f0bbf98c",
+        "canonical_task_id": "aa07c247f42a10f144ff98ea",
+        "start_s": 24.18,
+        "end_s": 35.68,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 12.97049331665039,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "c054e1e0a6cd437aea8727a1443ef4cb224107828856c08a16017479bd7da77a",
+        "canonical_task_id": "01d33eee00152f705b6a9944",
+        "start_s": 41.52,
+        "end_s": 71.66,
+        "outcome": "NAVIGATION_FAILED",
+        "recoveries": 0,
+        "goal_duration_s": 30.944456100463867,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "dcc093257ff882895e8b55597083748ffa145accab986b5a17357a48c450a7fb",
+        "canonical_task_id": "9b6eb9409aad83dfa7f1db32",
+        "start_s": 80.18,
+        "end_s": 118.22,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 39.06774139404297,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "d11c8114a67bdf1ba00412022fad82efc7041da21f407871ea58e9c44e5fd1c8",
+        "canonical_task_id": "25655640d0dfc9d89d46bb72",
+        "start_s": 123.9,
+        "end_s": 158.2,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 35.46099090576172,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "6091aaf4f6252b39493ea6b6468a6093ae5b26d60d2ab26736f58b3036ac9894",
+        "canonical_task_id": "9c567db260bceec8043bd32f",
+        "start_s": 263.24,
+        "end_s": 338.78,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 78.0742416381836,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot1",
+        "round_id": "01a1e004f933913b79ad0df2244082761b7972c93188ff46326df7274c84b96b",
+        "canonical_task_id": "84bf9e278992bf721533ad5e",
+        "start_s": 340.22,
+        "end_s": 405.76,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 67.64916229248047,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "e9e1f4b42955115cdc399a0294fc7d08d9f3770bb5bb5be14dce0711f0bbf98c",
+        "canonical_task_id": "0baa2f99b0129ae3470fcc7d",
+        "start_s": 24.18,
+        "end_s": 39.7,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 17.061906814575195,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "c054e1e0a6cd437aea8727a1443ef4cb224107828856c08a16017479bd7da77a",
+        "canonical_task_id": "0dc8451827a91f4aaec13ab1",
+        "start_s": 41.42,
+        "end_s": 75.16,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 34.55542755126953,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "dcc093257ff882895e8b55597083748ffa145accab986b5a17357a48c450a7fb",
+        "canonical_task_id": "7ab56e88f390e9158977cb0d",
+        "start_s": 80.06,
+        "end_s": 96.3,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 16.76158332824707,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "d11c8114a67bdf1ba00412022fad82efc7041da21f407871ea58e9c44e5fd1c8",
+        "canonical_task_id": "5a0a73ab424cd54d7a8b492b",
+        "start_s": 124.12,
+        "end_s": 261.16,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 141.22706604003906,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "6091aaf4f6252b39493ea6b6468a6093ae5b26d60d2ab26736f58b3036ac9894",
+        "canonical_task_id": "b32cc7c2d31a1b2a59ddf76b",
+        "start_s": 263.22,
+        "end_s": 305.94,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 44.259521484375,
+        "recovery_change_events": 0
+      },
+      {
+        "robot": "robot2",
+        "round_id": "01a1e004f933913b79ad0df2244082761b7972c93188ff46326df7274c84b96b",
+        "canonical_task_id": "87e9f2eac2346e8341a01c15",
+        "start_s": 340.22,
+        "end_s": 370.38,
+        "outcome": "NAVIGATION_SUCCEEDED",
+        "recoveries": 0,
+        "goal_duration_s": 30.98006820678711,
+        "recovery_change_events": 0
+      }
+    ],
+    "map_accuracy": {
+      "robot1_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+        "robot": "robot1",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.939008022491171,
+          "y": -5.88213764104932,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 8759,
+        "occupied_area_m2": 7.883099647597972,
+        "mean_distance_m": 0.187600159559936,
+        "median_distance_m": 0.11599193157599963,
+        "p90_distance_m": 0.4840080550129535,
+        "p95_distance_m": 0.5540082769657504,
+        "p99_distance_m": 0.7040082736129882,
+        "rms_distance_m": 0.26355262250989414,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 5829,
+            "area_m2": 5.246099765481057,
+            "fraction": 0.6654869277314762
+          },
+          "gt_0.10_m": {
+            "cells": 4665,
+            "area_m2": 4.198499812312426,
+            "fraction": 0.5325950450964722
+          },
+          "gt_0.15_m": {
+            "cells": 3905,
+            "area_m2": 3.5144998428896086,
+            "fraction": 0.44582714921794725
+          },
+          "gt_0.25_m": {
+            "cells": 2757,
+            "area_m2": 2.4812998890772473,
+            "fraction": 0.3147619591277543
+          },
+          "gt_0.50_m": {
+            "cells": 716,
+            "area_m2": 0.6443999711930755,
+            "fraction": 0.08174449138029455
+          }
+        },
+        "known_cells": 174968,
+        "free_cells": 166209,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.12268691838699326,
+        "boundary_unknown_fraction": 0.6763290191464327,
+        "boundary_free_fraction": 0.20098406246657397
+      },
+      "robot1_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+        "robot": "robot1",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.96,
+          "y": -5.91,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14852,
+        "occupied_area_m2": 13.366799402457483,
+        "mean_distance_m": 0.1671854195415146,
+        "median_distance_m": 0.11500004123896268,
+        "p90_distance_m": 0.38500020284205494,
+        "p95_distance_m": 0.4850002564862361,
+        "p99_distance_m": 0.6550000291690212,
+        "rms_distance_m": 0.2298423924365668,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 10449,
+            "area_m2": 9.404099579603974,
+            "fraction": 0.7035416105575006
+          },
+          "gt_0.10_m": {
+            "cells": 7732,
+            "area_m2": 6.958799688917402,
+            "fraction": 0.5206032857527606
+          },
+          "gt_0.15_m": {
+            "cells": 6480,
+            "area_m2": 5.831999739289286,
+            "fraction": 0.4363048747643415
+          },
+          "gt_0.25_m": {
+            "cells": 3852,
+            "area_m2": 3.466799845021965,
+            "fraction": 0.25935900888769187
+          },
+          "gt_0.50_m": {
+            "cells": 719,
+            "area_m2": 0.647099971072376,
+            "fraction": 0.048410988419068136
+          }
+        },
+        "known_cells": 200270,
+        "free_cells": 185418,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.19039469461974542,
+        "boundary_unknown_fraction": 0.5891539202053696,
+        "boundary_free_fraction": 0.22045138517488502
+      },
+      "robot2_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+        "robot": "robot2",
+        "kind": "map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -5.473498143203837,
+          "y": -2.01306475676315,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          1.5308084989341916e-16,
+          -2.5,
+          0.0
+        ],
+        "map_to_world": [
+          18.5,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 8680,
+        "occupied_area_m2": 7.81199965077639,
+        "mean_distance_m": 0.11621885781796755,
+        "median_distance_m": 0.06849815225629197,
+        "p90_distance_m": 0.2884983708563258,
+        "p95_distance_m": 0.3384981462213208,
+        "p99_distance_m": 0.4084983681741168,
+        "rms_distance_m": 0.16216229020814174,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 4947,
+            "area_m2": 4.452299800966682,
+            "fraction": 0.5699308755760368
+          },
+          "gt_0.10_m": {
+            "cells": 3541,
+            "area_m2": 3.1868998575344696,
+            "fraction": 0.40794930875576035
+          },
+          "gt_0.15_m": {
+            "cells": 2969,
+            "area_m2": 2.672099880547823,
+            "fraction": 0.34205069124423965
+          },
+          "gt_0.25_m": {
+            "cells": 1388,
+            "area_m2": 1.249199944156409,
+            "fraction": 0.15990783410138248
+          },
+          "gt_0.50_m": {
+            "cells": 3,
+            "area_m2": 0.0026999998793005957,
+            "fraction": 0.0003456221198156682
+          }
+        },
+        "known_cells": 185432,
+        "free_cells": 176752,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.17189004171569153,
+        "boundary_unknown_fraction": 0.6238100331586266,
+        "boundary_free_fraction": 0.2042999251256819
+      },
+      "robot2_shared_map": {
+        "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+        "robot": "robot2",
+        "kind": "shared_map",
+        "resolution_m": 0.029999999329447746,
+        "origin": {
+          "x": -6.96,
+          "y": -5.91,
+          "yaw": 0.0
+        },
+        "map_to_shared": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "map_to_world": [
+          16.0,
+          0.0,
+          1.5707963267948966
+        ],
+        "occupied_cells": 14852,
+        "occupied_area_m2": 13.366799402457483,
+        "mean_distance_m": 0.1671854195415146,
+        "median_distance_m": 0.11500004123896268,
+        "p90_distance_m": 0.38500020284205494,
+        "p95_distance_m": 0.4850002564862361,
+        "p99_distance_m": 0.6550000291690212,
+        "rms_distance_m": 0.2298423924365668,
+        "off_geometry": {
+          "gt_0.05_m": {
+            "cells": 10449,
+            "area_m2": 9.404099579603974,
+            "fraction": 0.7035416105575006
+          },
+          "gt_0.10_m": {
+            "cells": 7732,
+            "area_m2": 6.958799688917402,
+            "fraction": 0.5206032857527606
+          },
+          "gt_0.15_m": {
+            "cells": 6480,
+            "area_m2": 5.831999739289286,
+            "fraction": 0.4363048747643415
+          },
+          "gt_0.25_m": {
+            "cells": 3852,
+            "area_m2": 3.466799845021965,
+            "fraction": 0.25935900888769187
+          },
+          "gt_0.50_m": {
+            "cells": 719,
+            "area_m2": 0.647099971072376,
+            "fraction": 0.048410988419068136
+          }
+        },
+        "known_cells": 200270,
+        "free_cells": 185418,
+        "boundary_samples": 9349,
+        "boundary_occupied_fraction": 0.19039469461974542,
+        "boundary_unknown_fraction": 0.5891539202053696,
+        "boundary_free_fraction": 0.22045138517488502
+      }
+    },
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14852,
+        "fused_occupied_cells": 14852,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14852,
+        "fused_occupied_cells": 14852,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      }
+    },
+    "shared_replica": {
+      "best_shift_correlation": 1.0,
+      "best_shift_dx_cells": 0,
+      "best_shift_dx_m": 0.0,
+      "best_shift_dy_cells": 0,
+      "best_shift_dy_m": 0.0,
+      "boundary_tolerant_occupied_agreement": 1.0,
+      "common_grid": {
+        "height": 1200,
+        "origin_x": -6.989999843761325,
+        "origin_y": -5.939999867230654,
+        "resolution": 0.029999999329447746,
+        "width": 441
+      },
+      "comparison_resolution": 0.029999999329447746,
+      "correlation_improvement": 0.0,
+      "coverage_area_a_m2": 180.2429919425101,
+      "coverage_area_b_m2": 180.2429919425101,
+      "coverage_area_difference_m2": 0.0,
+      "coverage_area_relative_difference": 0.0,
+      "dimensions_a": [
+        440,
+        1199
+      ],
+      "dimensions_b": [
+        440,
+        1199
+      ],
+      "free_area_difference_m2": 0.0,
+      "free_area_relative_difference": 0.0,
+      "free_iou": 1.0,
+      "geometry_equal": true,
+      "jointly_known_cell_count": 200270,
+      "known_cell_agreement": 1.0,
+      "known_iou": 1.0,
+      "known_union_count": 200270,
+      "occupied_area_difference_m2": 0.0,
+      "occupied_area_relative_difference": 0.0,
+      "occupied_free_conflict_rate": 0.0,
+      "occupied_iou": 1.0,
+      "origin_position_difference_m": 0.0,
+      "origin_yaw_difference_rad": 0.0,
+      "raw_occupancy_correlation": 1.0,
+      "resolution_equal": true,
+      "semantic_confusion_matrix": {
+        "free/free": 185418,
+        "free/occupied": 0,
+        "free/uncertain": 0,
+        "free/unknown": 0,
+        "occupied/free": 0,
+        "occupied/occupied": 14852,
+        "occupied/uncertain": 0,
+        "occupied/unknown": 0,
+        "uncertain/free": 0,
+        "uncertain/occupied": 0,
+        "uncertain/uncertain": 0,
+        "uncertain/unknown": 0,
+        "unknown/free": 0,
+        "unknown/occupied": 0,
+        "unknown/uncertain": 0,
+        "unknown/unknown": 328930
+      },
+      "unknown_mismatch_rate": 0.0,
+      "zero_shift_correlation": 1.0
+    },
+    "trajectory": {
+      "robot1": {
+        "valid": true,
+        "common_start_s": 8.4,
+        "common_end_s": 603.98,
+        "samples": 23497,
+        "initial_gt": [
+          16.000000000003627,
+          -7.438811125919488e-10,
+          1.5707963269658314
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269658314,
+          "tx_m": 3.4788372825166886e-09,
+          "ty_m": 16.000000000003627
+        },
+        "gt_distance_m": 26.979379812053075,
+        "odom_distance_m": 26.956245525022986,
+        "translation_rmse_m": 0.2578018531786417,
+        "translation_final_m": 0.3876270306758764,
+        "translation_max_m": 0.3876275419047561,
+        "yaw_rmse_rad": 0.02872901823893015,
+        "yaw_final_rad": 0.03990853352457879,
+        "yaw_max_rad": 0.048999779126718046
+      },
+      "robot2": {
+        "valid": true,
+        "common_start_s": 4.28,
+        "common_end_s": 603.96,
+        "samples": 20679,
+        "initial_gt": [
+          18.500000000003624,
+          -7.438810926358526e-10,
+          1.5707963269657292
+        ],
+        "initial_odom": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "alignment": {
+          "theta_yaw_rad": -1.5707963269657292,
+          "tx_m": 3.904284564523323e-09,
+          "ty_m": 18.500000000003624
+        },
+        "gt_distance_m": 31.55529503231201,
+        "odom_distance_m": 31.51386135146327,
+        "translation_rmse_m": 0.19206746161214053,
+        "translation_final_m": 0.2673222874258275,
+        "translation_max_m": 0.26732239902619187,
+        "yaw_rmse_rad": 0.012074280701173381,
+        "yaw_final_rad": 0.014330283988003956,
+        "yaw_max_rad": 0.02188812527752404
+      }
+    },
+    "throughput": {
+      "combined_gt_distance_m": 58.534674844365085,
+      "known_cells_gain": 189249,
+      "known_cells_per_combined_m": 3233.1092724643077,
+      "known_cells_per_100_s": 31541.5,
+      "mean_known_cells_auc": 140524.17,
+      "successful_goals": 11,
+      "successful_goals_per_100_s": 1.8333333333333333
+    }
+  }
+]

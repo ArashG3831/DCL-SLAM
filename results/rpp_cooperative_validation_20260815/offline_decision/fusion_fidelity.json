@@ -1,0 +1,146 @@
+[
+  {
+    "controller": "dwb",
+    "trial": "trial_01",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14455,
+        "fused_occupied_cells": 14389,
+        "occupied_iou": 0.9686049686049686,
+        "fused_additional_cells": 197,
+        "source_union_missing_cells": 263,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14455,
+        "fused_occupied_cells": 14331,
+        "occupied_iou": 0.9631726113346518,
+        "fused_additional_cells": 208,
+        "source_union_missing_cells": 332,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_02",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 21638,
+        "fused_occupied_cells": 21541,
+        "occupied_iou": 0.9951483227058497,
+        "fused_additional_cells": 4,
+        "source_union_missing_cells": 101,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 21638,
+        "fused_occupied_cells": 21541,
+        "occupied_iou": 0.9951483227058497,
+        "fused_additional_cells": 4,
+        "source_union_missing_cells": 101,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  },
+  {
+    "controller": "dwb",
+    "trial": "trial_03",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 23106,
+        "fused_occupied_cells": 23094,
+        "occupied_iou": 0.9990480723465016,
+        "fused_additional_cells": 5,
+        "source_union_missing_cells": 17,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 23106,
+        "fused_occupied_cells": 23070,
+        "occupied_iou": 0.9972318339100346,
+        "fused_additional_cells": 14,
+        "source_union_missing_cells": 50,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_01",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14207,
+        "fused_occupied_cells": 14207,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14207,
+        "fused_occupied_cells": 14207,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_02",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 19295,
+        "fused_occupied_cells": 19272,
+        "occupied_iou": 0.9981866224547951,
+        "fused_additional_cells": 6,
+        "source_union_missing_cells": 29,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 19295,
+        "fused_occupied_cells": 19249,
+        "occupied_iou": 0.9963743719894339,
+        "fused_additional_cells": 12,
+        "source_union_missing_cells": 58,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  },
+  {
+    "controller": "rpp",
+    "trial": "trial_03",
+    "fusion": {
+      "robot1": {
+        "shared_replica": "robot1",
+        "source_union_occupied_cells": 14852,
+        "fused_occupied_cells": 14852,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      },
+      "robot2": {
+        "shared_replica": "robot2",
+        "source_union_occupied_cells": 14852,
+        "fused_occupied_cells": 14852,
+        "occupied_iou": 1.0,
+        "fused_additional_cells": 0,
+        "source_union_missing_cells": 0,
+        "resolution_m": 0.029999999329447746
+      }
+    }
+  }
+]

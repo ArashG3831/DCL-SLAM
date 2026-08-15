@@ -93,50 +93,26 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.06
       yaw_goal_tolerance: 6.28
-    # DWB parameters
+    # Production FollowPath controller: frozen validated RPP configuration.
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: True
-      min_vel_x: 0.0
-      min_vel_y: 0.0
-      max_vel_x: 0.13
-      max_vel_y: 0.0
-      max_vel_theta: 0.35
-      min_speed_xy: 0.0
-      max_speed_xy: 0.13
-      min_speed_theta: 0.0
-      # Add high threshold velocity for turtlebot 3 issue.
-      # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
-      acc_lim_x: 0.20
-      acc_lim_y: 0.0
-      acc_lim_theta: 1.2
-      decel_lim_x: -0.20
-      decel_lim_y: 0.0
-      decel_lim_theta: -1.2
-      # Keep the first positive sample above the measured base response floor.
-      vx_samples: 6
-      vy_samples: 5
-      # Odd sampling preserves exact zero and avoids sub-response turns.
-      vtheta_samples: 21
-      sim_time: 1.7
-      linear_granularity: 0.01
-      angular_granularity: 0.025
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.13
+      lookahead_dist: 0.20
+      min_lookahead_dist: 0.12
+      max_lookahead_dist: 0.30
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: true
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.50
+      regulated_linear_scaling_min_speed: 0.026
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.785
+      rotate_to_heading_angular_vel: 0.35
+      max_angular_accel: 0.20
+      allow_reversing: false
+      use_collision_detection: true
       transform_tolerance: 1.5
-      xy_goal_tolerance: 0.06
-      trans_stopped_velocity: 0.04
-      short_circuit_trajectory_evaluation: True
       stateful: True
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.20
-      PathAlign.scale: 8.0
-      PathAlign.forward_point_distance: 0.0025
-      GoalAlign.scale: 0.0
-      GoalAlign.forward_point_distance: 0.0025
-      PathDist.scale: 24.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 0.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
 
 local_costmap:
   local_costmap:

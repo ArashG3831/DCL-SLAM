@@ -1,0 +1,316 @@
+{
+  "run_id": "forensic_large_20260814_run",
+  "maps": {
+    "robot1_header_stamp_s": 705.16,
+    "robot2_header_stamp_s": 707.5,
+    "robot1_shared_header_stamp_s": 703.6,
+    "robot2_shared_header_stamp_s": 705.28,
+    "grid_resolution_m": 0.029999999329447746,
+    "source_transforms": {
+      "shared_map_from_robot1_map": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "shared_map_from_robot2_map": [
+        1.5308084989341916e-16,
+        -2.5,
+        0.0
+      ]
+    }
+  },
+  "occupancy_counts": {
+    "robot1_transformed": 14663,
+    "robot2_transformed": 6100,
+    "source_union": 19687,
+    "source_intersection": 1076,
+    "source_disagreement": 18611,
+    "robot1_shared": 19588,
+    "robot2_shared": 19511,
+    "fused_shared": 19588,
+    "fused_minus_source_union": 10,
+    "source_union_minus_fused": 109
+  },
+  "source_overlap": {
+    "jaccard": 0.05465535632650988,
+    "robot1_to_robot2_nearest": {
+      "count": 14663,
+      "mean_m": 6.685918826658046,
+      "median_m": 4.083748186957664,
+      "p95_m": 22.256803148000245,
+      "max_m": 25.83391898580778
+    },
+    "robot2_to_robot1_nearest": {
+      "count": 6100,
+      "mean_m": 0.4775166171276599,
+      "median_m": 0.09486832768457898,
+      "p95_m": 2.1602082750029443,
+      "max_m": 2.7133005124558096
+    }
+  },
+  "fused_comparison": {
+    "robot1_shared_vs_union": {
+      "jaccard": 0.9939584708331218,
+      "extra_area_m2": 0.008999999597668652,
+      "missing_area_m2": 0.0980999956145883
+    },
+    "robot2_shared_vs_union": {
+      "jaccard": 0.988635787123941,
+      "extra_area_m2": 0.021599999034404765,
+      "missing_area_m2": 0.17999999195337305
+    }
+  },
+  "wall_thickness_proxy_m": {
+    "robot1_transformed": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.16970562369155506
+    },
+    "robot2_transformed": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.17999999597668648
+    },
+    "source_union": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.17999999597668648
+    },
+    "robot1_shared": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.17999999597668648
+    },
+    "robot2_shared": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.17999999597668648
+    },
+    "fused": {
+      "median_m": 0.05999999865889549,
+      "p95_m": 0.11999999731779099,
+      "max_m": 0.17999999597668648
+    }
+  },
+  "source_disagreement_area_m2": 16.74989925122113,
+  "fused_extra_area_m2": 0.008999999597668652,
+  "ground_truth_geometry": {
+    "robot1_local_transformed": {
+      "occupied_count": 14663,
+      "mean_distance_m": 0.10702891710354742,
+      "median_distance_m": 0.02651872609700945,
+      "p95_distance_m": 0.5465188809945797,
+      "max_distance_m": 1.3165186402663198,
+      "ghost_over_0p15m_count": 2620,
+      "ghost_over_0p15m_area_m2": 2.3579998945891867
+    },
+    "robot2_local_transformed": {
+      "occupied_count": 6100,
+      "mean_distance_m": 0.058871723995833965,
+      "median_distance_m": 0.008109510815181853,
+      "p95_distance_m": 0.251890452974997,
+      "max_distance_m": 0.7318903852492193,
+      "ghost_over_0p15m_count": 906,
+      "ghost_over_0p15m_area_m2": 0.8153999635487799
+    },
+    "source_union": {
+      "occupied_count": 20763,
+      "mean_distance_m": 0.09288072667070764,
+      "median_distance_m": 0.024218122074028403,
+      "p95_distance_m": 0.39651888434734117,
+      "max_distance_m": 1.3165186402663198,
+      "ghost_over_0p15m_count": 3526,
+      "ghost_over_0p15m_area_m2": 3.1733998581379668
+    },
+    "fused_shared": {
+      "occupied_count": 19588,
+      "mean_distance_m": 0.09900923940003185,
+      "median_distance_m": 0.03499989975243789,
+      "p95_distance_m": 0.40500025112181837,
+      "max_distance_m": 1.3050002310052498,
+      "ghost_over_0p15m_count": 3937,
+      "ghost_over_0p15m_area_m2": 3.5432998416021486
+    },
+    "definition": "Distance to nearest filled SolidBox rectangle or RectangleArena wall proxy; source world transformed by initial robot1 frame (x_shared=world_y, y_shared=-(world_x-16))."
+  },
+  "trajectories": {
+    "robot1": {
+      "gt_odom": {
+        "translation_rmse_m": 0.5245482361205311,
+        "yaw_rmse_rad": 0.03749118842564083,
+        "final_translation_m": 1.3203480869565285,
+        "final_yaw_abs_rad": 0.06606330854469711,
+        "samples": 5000
+      },
+      "time_range_s": [
+        3.8600000000000003,
+        708.0
+      ],
+      "gt_slam": {
+        "translation_rmse_m": 1.051736369388104,
+        "yaw_rmse_rad": 0.07504700554678316,
+        "final_translation_m": 2.135574046910291,
+        "final_yaw_abs_rad": 0.09473910763152382,
+        "samples": 48
+      },
+      "slam_samples": 48,
+      "slam_query_times_s": [
+        15.000000000000002,
+        30.000000000000004,
+        45.0,
+        60.00000000000001,
+        75.0,
+        90.0,
+        105.0,
+        120.00000000000001,
+        135.02,
+        150.0,
+        165.0,
+        180.0,
+        195.0,
+        210.0,
+        225.04000000000002,
+        240.00000000000003,
+        255.00000000000003,
+        270.0,
+        285.0,
+        300.0,
+        315.0,
+        330.0,
+        345.0,
+        360.0,
+        375.0,
+        390.0,
+        405.0,
+        420.0,
+        435.0,
+        450.0,
+        465.00000000000006,
+        480.00000000000006,
+        495.00000000000006,
+        510.00000000000006,
+        525.0,
+        540.0,
+        555.0,
+        570.0,
+        585.0400000000001,
+        600.0,
+        615.0600000000001,
+        630.0,
+        645.0,
+        660.2,
+        675.0,
+        690.0,
+        705.0,
+        708.0
+      ],
+      "gt_final_shared_initial_frame": [
+        4.312181238297278,
+        33.578189211249295,
+        -9.954050426578709
+      ],
+      "odom_final_initial_frame": [
+        3.014290551790036,
+        33.5743138893562,
+        -9.89094485423259
+      ],
+      "gt_slam_corrected": {
+        "translation_rmse_m": 0.5407349759579902,
+        "yaw_rmse_rad": 0.054830027315776554,
+        "final_translation_m": 1.1897677404413118,
+        "final_yaw_abs_rad": 0.06029079375438329,
+        "samples": 48,
+        "alignment": "GT and SLAM each anchored once at first common transform query"
+      }
+    },
+    "robot2": {
+      "gt_odom": {
+        "translation_rmse_m": 0.24792958067342075,
+        "yaw_rmse_rad": 0.03681324196667465,
+        "final_translation_m": 0.33704042286842256,
+        "final_yaw_abs_rad": 0.03363093560599495,
+        "samples": 5000
+      },
+      "time_range_s": [
+        9.34,
+        708.0
+      ],
+      "gt_slam": {
+        "translation_rmse_m": 0.987217660840761,
+        "yaw_rmse_rad": 0.14687836300769463,
+        "final_translation_m": 1.3655057044488912,
+        "final_yaw_abs_rad": 0.12406999426423937,
+        "samples": 48
+      },
+      "slam_samples": 48,
+      "slam_query_times_s": [
+        15.000000000000002,
+        30.000000000000004,
+        45.0,
+        60.00000000000001,
+        75.0,
+        90.0,
+        105.0,
+        120.00000000000001,
+        135.02,
+        150.0,
+        165.0,
+        180.0,
+        195.0,
+        210.0,
+        225.04000000000002,
+        240.00000000000003,
+        255.00000000000003,
+        270.0,
+        285.0,
+        300.0,
+        315.0,
+        330.0,
+        345.0,
+        360.0,
+        375.0,
+        390.0,
+        405.0,
+        420.0,
+        435.0,
+        450.0,
+        465.00000000000006,
+        480.00000000000006,
+        495.00000000000006,
+        510.00000000000006,
+        525.0,
+        540.0,
+        555.0,
+        570.0,
+        585.0400000000001,
+        600.0,
+        615.0600000000001,
+        630.0,
+        645.0,
+        660.2,
+        675.0,
+        690.0,
+        705.0,
+        708.0
+      ],
+      "gt_final_shared_initial_frame": [
+        2.9827748925438806,
+        10.977140895117044,
+        -21.097108280179707
+      ],
+      "odom_final_initial_frame": [
+        2.6624321421920656,
+        11.081910971686453,
+        -21.06347734457371
+      ],
+      "gt_slam_corrected": {
+        "translation_rmse_m": 0.2488380109460617,
+        "yaw_rmse_rad": 0.05039229167665917,
+        "final_translation_m": 0.33710209326135154,
+        "final_yaw_abs_rad": 0.02364458990150453,
+        "samples": 48,
+        "alignment": "GT and SLAM each anchored once at first common transform query"
+      }
+    }
+  }
+}

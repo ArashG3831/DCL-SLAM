@@ -65,8 +65,8 @@ REQUIRED_OBSERVER_FILES = (
     'coverage.csv', 'robot1_timeseries.csv', 'robot2_timeseries.csv',
 )
 EXPECTED_NODE_SUFFIXES = (
-    '/robot1/cooperative_frontier_coordinator',
-    '/robot2/cooperative_frontier_coordinator',
+    '/robot1/distributed_frontier_assignment',
+    '/robot2/distributed_frontier_assignment',
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
@@ -196,6 +196,7 @@ def windows_port_pid(port):
     return int(match.group(1)) if match else None
 
 
+
 def manual_rviz_command(world_profile='small', use_sim_time=False):
     """Return the installed passive RViz command with explicit ROS time."""
     package = Path(get_package_share_directory('my_epuck_project'))
@@ -205,6 +206,89 @@ def manual_rviz_command(world_profile='small', use_sim_time=False):
         'rviz2', '-d', str(config), '--ros-args',
         '-p', f'use_sim_time:={str(bool(use_sim_time)).lower()}',
     ]
+
+
+def rviz_gui_environment(environment):
+    """Prepare a WSLg-safe environment for the external RViz window.
+
+    RViz's OGRE backend in the installed Jazzy build requires X11/XCB under
+    WSLg.  Letting Qt choose Wayland can create a taskbar entry but fail to
+    create the GLX render window.  The software-rasterizer override is also
+    intentionally removed because it breaks RViz's indexed occupancy-map
+    shader on this host.
+    """
+    result = dict(environment)
+    result.pop('LIBGL_ALWAYS_SOFTWARE', None)
+    if result.get('DISPLAY'):
+        result['QT_QPA_PLATFORM'] = 'xcb'
+        result['QT_X11_NO_MITSHM'] = '1'
+    return result
+
+
+def activate_rviz_window(pid=None, timeout_s=5.0):
+    """Raise the RViz top-level X11 window when running under WSLg.
+
+    ``Popen`` succeeding only proves that the process exists.  WSLg can leave
+    a newly-created Qt window behind the taskbar or on an inactive surface.
+    This best-effort helper uses only standard X11 utilities/library calls and
+    silently does nothing on non-X11 hosts.
+    """
+    if not os.environ.get('DISPLAY'):
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        lib = ctypes.CDLL(ctypes.util.find_library('X11') or 'libX11.so.6')
+        lib.XOpenDisplay.restype = ctypes.c_void_p
+        lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        display = lib.XOpenDisplay(os.environ['DISPLAY'].encode())
+        if not display:
+            return False
+        lib.XMapRaised.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XRaiseWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XSetInputFocus.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        lib.XFlush.argtypes = [ctypes.c_void_p]
+        lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    except (AttributeError, OSError, TypeError):
+        return False
+
+    pattern = re.compile(r'^\s*(0x[0-9a-fA-F]+) "[^"]* - RViz"')
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(
+                    ['xwininfo', '-root', '-tree'],
+                    check=False, capture_output=True, text=True, timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            for line in result.stdout.splitlines():
+                match = pattern.match(line)
+                if not match:
+                    continue
+                window = int(match.group(1), 16)
+                if pid is not None:
+                    try:
+                        properties = subprocess.run(
+                            ['xprop', '-id', match.group(1), '_NET_WM_PID'],
+                            check=False, capture_output=True, text=True,
+                            timeout=1.0).stdout
+                    except (OSError, subprocess.TimeoutExpired):
+                        properties = ''
+                    if not re.search(rf'\b{int(pid)}\b', properties):
+                        continue
+                lib.XMapRaised(display, window)
+                lib.XRaiseWindow(display, window)
+                # RevertToParent=2 and CurrentTime=0.
+                lib.XSetInputFocus(display, window, 2, 0)
+                lib.XFlush(display)
+                return True
+            time.sleep(0.1)
+        return False
+    finally:
+        lib.XCloseDisplay(display)
 
 
 def resolve_runner_profile(args):
@@ -864,6 +948,10 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             robots.get(robot, {}).get('status') for robot in (
                 'robot1', 'robot2')
         ]
+        distributed_statuses = [
+            robots.get(robot, {}).get('distributed_status') for robot in (
+                'robot1', 'robot2')
+        ]
         claims = [
             robots.get(robot, {}).get('claim') for robot in (
                 'robot1', 'robot2')
@@ -873,8 +961,20 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             for robot in ('robot1', 'robot2')
         ]
         system = observer_summary.get('system', {})
-        passed = (
-            all(status and status.get('state') == 'MISSION_COMPLETE'
+        distributed_protocol = all(item is not None
+                                   for item in distributed_statuses)
+        if distributed_protocol:
+            status_complete = all(
+                item.get('state') == 5
+                and item.get('age_at_write_s', 1e9) <= 4.0
+                for item in distributed_statuses
+            )
+            claims_terminal = all(claim is None or
+                                  not claim.get('reserving', True)
+                                  for claim in claims)
+        else:
+            status_complete = all(
+                status and status.get('state') == 'MISSION_COMPLETE'
                 and (
                     status.get(
                         'age_at_collection_s',
@@ -882,8 +982,11 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
                     or settled_observed
                 )
                 for status in statuses)
-            and all(claim and not claim.get('reserving', True)
-                    for claim in claims)
+            claims_terminal = all(claim and not claim.get('reserving', True)
+                                  for claim in claims)
+        passed = (
+            status_complete
+            and claims_terminal
             and all(active is False for active in navigation)
             and system.get('internal_logger_error_count', 0) == 0
             and system.get('write_failures', 0) == 0
@@ -1143,9 +1246,9 @@ def internal_trial(args):
     })
     launch_command = [
         'ros2', 'launch', 'my_epuck_project',
-        'two_robots_observed_continuous_exploration_launch.py',
+        'two_robots_decentralized_exploration_launch.py',
         f'world_profile:={args.world_profile}',
-        f'source_world_path:={args.source_world_path}',
+        f'world_path:={args.source_world_path}',
         f'run_id:={args.run_id}',
         f'output_root:={attempt / "observer"}',
         f'mission_timeout_s:='
@@ -1160,6 +1263,14 @@ def internal_trial(args):
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         'logger_console_status:=false',
+        f'enable_rosout_collection:={str(args.enable_rosout_collection).lower()}',
+        f'enable_coverage_attribution:={str(args.enable_coverage_attribution).lower()}',
+        f'enable_trajectory_overlap:={str(args.enable_trajectory_overlap).lower()}',
+        f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
+        f'forensic_snapshot_interval_s:={args.forensic_snapshot_interval_s}',
+        f'enable_contact_capture:={str(args.enable_contact_capture).lower()}',
+        f'contact_sampling_period_ms:={args.contact_sampling_period_ms}',
+        f'controller_variant:={args.controller_variant}',
     ]
     collector_command = [
         'ros2', 'run', 'my_epuck_project', 'cooperative_trial_collector',
@@ -1178,6 +1289,8 @@ def internal_trial(args):
         collector_command, env=environment, stdout=collector_log,
         stderr=subprocess.STDOUT, text=True, preexec_fn=os.setpgrp)
     processes = [launch, collector]
+    diagnostic_processes = []
+    diagnostic_logs = []
     mark_startup_stage('launch_process_started', pid=launch.pid)
     mark_startup_stage('collector_process_started', pid=collector.pid)
     ps_processes = [psutil.Process(process.pid) for process in processes]
@@ -1196,6 +1309,39 @@ def internal_trial(args):
     rviz_log = None
     rviz_attempted = False
 
+    def start_high_rate_diagnostics():
+        """Start passive command/wheel/odom capture after readiness only."""
+        if (not args.enable_forensic_capture
+                or not args.enable_high_rate_forensic_diagnostics
+                or diagnostic_processes):
+            return
+        tool = Path(args.workspace) / 'src' / 'my_epuck_project' / 'tools' / (
+            'turn_motion_diagnostics.py')
+        output_dir = attempt / 'forensic' / 'high_rate'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for robot in ('robot1', 'robot2'):
+            output = output_dir / f'{robot}_command_wheel_odom.csv'
+            log_path = output_dir / f'{robot}_diagnostic.log'
+            log = log_path.open('w', encoding='utf-8')
+            command = [
+                sys.executable, str(tool), '--robot', robot,
+                '--output', str(output), '--duration-s',
+                str(args.mission_timeout or 600.0), '--max-rows', '400000',
+            ]
+            process = subprocess.Popen(
+                command, env=environment, stdout=log,
+                stderr=subprocess.STDOUT, text=True, preexec_fn=os.setpgrp)
+            diagnostic_processes.append(process)
+            diagnostic_logs.append(log)
+            processes.append(process)
+            ps_processes.append(psutil.Process(process.pid))
+            metadata.setdefault('diagnostic_processes', []).append({
+                'robot': robot, 'pid': process.pid,
+                'command': command, 'output': str(output),
+                'start_stage': 'infrastructure_readiness_declared',
+            })
+        atomic_json(attempt / 'runner_metadata.json', metadata)
+
     def start_rviz():
         nonlocal rviz, rviz_log, rviz_attempted
         if not args.launch_rviz or rviz is not None or rviz_attempted:
@@ -1203,8 +1349,7 @@ def internal_trial(args):
         rviz_attempted = True
         rviz_command = manual_rviz_command(
             args.world_profile, use_sim_time=args.time_mode == 'sim')
-        rviz_environment = environment.copy()
-        rviz_environment['LIBGL_ALWAYS_SOFTWARE'] = 'true'
+        rviz_environment = rviz_gui_environment(environment)
         rviz_log = (attempt / 'rviz.log').open('w', encoding='utf-8')
         metadata['rviz_start_attempted_utc'] = utc_now()
         metadata['rviz_command'] = rviz_command
@@ -1228,6 +1373,12 @@ def internal_trial(args):
         rviz_process = psutil.Process(rviz.pid)
         rviz_process.cpu_percent(None)
         ps_processes.append(rviz_process)
+        # Popen only proves that the process exists.  WSLg may leave the Qt
+        # surface behind the taskbar; raise it asynchronously without making
+        # RViz startup part of the simulation readiness critical path.
+        threading.Thread(
+            target=activate_rviz_window, name='rviz-window-activation',
+            args=(rviz.pid,), daemon=True).start()
         metadata.update({
             'rviz_pid': rviz.pid,
             'rviz_started_utc': utc_now(),
@@ -1322,6 +1473,7 @@ def internal_trial(args):
                 ready = mission_infrastructure_ready(
                     clock_ok, tf_ok, nav2_started, nodes)
                 if ready:
+                    start_high_rate_diagnostics()
                     metadata['infrastructure_ready'] = True
                     mark_startup_stage(
                         'infrastructure_readiness_declared',
@@ -1461,6 +1613,19 @@ def internal_trial(args):
             append_shutdown_event(
                 shutdown_events, 'signal_sent', process='rviz', signal='SIGINT')
             signal_process(rviz, signal.SIGINT)
+        for process in diagnostic_processes:
+            append_shutdown_event(
+                shutdown_events, 'signal_sent', process=f'diagnostic_{process.pid}',
+                signal='SIGINT')
+            signal_process(process, signal.SIGINT)
+        if diagnostic_processes:
+            wait_processes(diagnostic_processes, args.graceful_shutdown_timeout)
+            for process in diagnostic_processes:
+                if process.poll() is None:
+                    scoped_shutdown(
+                        [process], args.graceful_shutdown_timeout,
+                        args.hard_shutdown_timeout, process_group=process.pid,
+                        send_initial_sigint=False)
         # Then let the launch's passive observer finalize its own outputs.
         append_shutdown_event(
             shutdown_events, 'signal_sent', process='launch', signal='SIGINT')
@@ -1487,6 +1652,8 @@ def internal_trial(args):
         collector_log.close()
         if rviz_log is not None:
             rviz_log.close()
+        for log in diagnostic_logs:
+            log.close()
     port_clean = False
     for _ in range(30):
         if (not linux_port_used(args.webots_port)
@@ -1660,6 +1827,18 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             ('throughput' if getattr(args, 'execution_profile', None) ==
              'throughput' else 'full')),
         diagnostic_mode=getattr(args, 'diagnostic_mode', False),
+        enable_rosout_collection=getattr(args, 'enable_rosout_collection', True),
+        enable_coverage_attribution=getattr(args, 'enable_coverage_attribution', True),
+        enable_trajectory_overlap=getattr(args, 'enable_trajectory_overlap', True),
+        enable_forensic_capture=getattr(args, 'enable_forensic_capture', False),
+        enable_high_rate_forensic_diagnostics=getattr(
+            args, 'enable_high_rate_forensic_diagnostics', True),
+        enable_contact_capture=getattr(args, 'enable_contact_capture', False),
+        contact_sampling_period_ms=getattr(
+            args, 'contact_sampling_period_ms', 20),
+        controller_variant=getattr(args, 'controller_variant', 'rpp'),
+        forensic_snapshot_interval_s=getattr(
+            args, 'forensic_snapshot_interval_s', 15.0),
         hold_open_after_completion=args.hold_open_after_completion,
         startup_timeout=args.startup_timeout,
         mission_timeout=args.mission_timeout,
@@ -2105,12 +2284,12 @@ def create_manifest(args, campaign, workspace):
                 args.profile_metadata['map_comparison_shift_window'],
         },
         'launch_file':
-            'two_robots_observed_continuous_exploration_launch.py',
+            'two_robots_decentralized_exploration_launch.py',
         'launch_arguments': {
             'world_profile': args.world_profile,
             'use_sim_time': args.time_mode == 'sim',
-            'coordinator_mode': 'continuous',
-            'one_goal_only': False,
+            'assignment_mode': 'replicated_two_robot_pair',
+            'dispatch_enabled': True,
             'launch_rviz': args.rviz,
             'hold_open_after_completion':
                 args.hold_open_after_completion,
@@ -2482,6 +2661,15 @@ def parser():
         '--logger-console-status', type=boolean, default=False,
         metavar='BOOL', help='Enable periodic logger console status output.')
     result.add_argument(
+        '--enable-rosout-collection', type=boolean, default=True,
+        metavar='BOOL', help='Diagnostic observer: subscribe to /rosout.')
+    result.add_argument(
+        '--enable-coverage-attribution', type=boolean, default=True,
+        metavar='BOOL', help='Diagnostic observer: retain transformed coverage cells.')
+    result.add_argument(
+        '--enable-trajectory-overlap', type=boolean, default=True,
+        metavar='BOOL', help='Diagnostic observer: retain trajectory bins.')
+    result.add_argument(
         '--rendering', type=boolean, default=None, metavar='BOOL')
     result.add_argument(
         '--execution-profile',
@@ -2535,6 +2723,28 @@ def parser():
     result.add_argument(
         '--diagnostic-mode', type=boolean, default=False, metavar='BOOL',
         help='Enable bounded Nav2 command-pipeline diagnostics.')
+    result.add_argument(
+        '--enable-forensic-capture', type=boolean, default=False, metavar='BOOL',
+        help='Enable passive Supervisor/map forensic capture in the trial.')
+    result.add_argument(
+        '--enable-high-rate-forensic-diagnostics', type=boolean, default=True,
+        metavar='BOOL',
+        help=('Enable the optional high-rate command/wheel/odom logger. '
+              'Forensic Supervisor and map capture are independent.'))
+    result.add_argument(
+        '--enable-contact-capture', type=boolean, default=False, metavar='BOOL',
+        help='Enable passive Webots contact-point capture in the trial.')
+    result.add_argument(
+        '--contact-sampling-period-ms', type=int, default=20,
+        help='Sampling period for optional passive Webots contact capture.')
+    result.add_argument(
+        '--controller-variant',
+        choices=['dwb', 'rotation_shim_dwb', 'rpp'], default='rpp',
+        help='Optional controller variant; production default is frozen RPP. '
+             'Use dwb or rotation_shim_dwb only for explicit diagnostics.')
+    result.add_argument(
+        '--forensic-snapshot-interval-s', type=float, default=15.0,
+        help='Interval for bounded passive forensic map snapshots.')
     return result
 
 

@@ -57,6 +57,7 @@ WoodenBox {
 # Starts left of center, facing left / away from robot2.
 E-puck {
   name "robot1"
+  window "<none>"
   translation -0.15 0.0 0.001
   rotation 0 0 1 3.1415
   controller "<extern>"
@@ -98,6 +99,7 @@ E-puck {
 # Starts right of center, 30 cm from robot1, facing right / away from robot1.
 E-puck {
   name "robot2"
+  window "<none>"
   translation 0.15 0.0 0.001
   rotation 0 0 1 0
   controller "<extern>"

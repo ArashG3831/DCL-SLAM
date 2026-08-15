@@ -120,10 +120,26 @@ def _attempts(campaign):
 
 
 def _status_value(final_state, robot, field, default=None):
-    return (
-        final_state.get('robots', {}).get(robot, {})
-        .get('status', {}).get(field, default)
-    )
+    robot_state = (final_state.get('robots', {}).get(robot, {}) or {})
+    status = robot_state.get('status') or {}
+    if field in status:
+        return status[field]
+    # The replicated pair allocator intentionally does not publish the
+    # legacy claim/status pair.  Its collector record is authoritative for
+    # those fields when a distributed status is present.
+    distributed = robot_state.get('distributed_status') or {}
+    if field == 'state' and distributed:
+        state_names = {
+            0: 'WAITING_FOR_INPUTS',
+            1: 'BIDDING',
+            2: 'WAITING_FOR_MATCHING_DECISION',
+            3: 'NAVIGATING',
+            4: 'DEGRADED_SOLO',
+            5: 'COMPLETE',
+            6: 'BLOCKED',
+        }
+        return state_names.get(distributed.get('state'), default)
+    return default
 
 
 def _claim_value(final_state, robot, field, default=None):

@@ -61,7 +61,7 @@ def test_clean_robot_pose_axes_replace_initial_full_tf_tree():
     enabled = {
         display['Name'] for display in displays if display['Enabled']}
     assert enabled == {
-        'Grid', 'Robot1 Shared Map', 'Robot2 Shared Map',
+        'Grid', 'Robot1 Shared Map',
         'Robot1 Pose Axes', 'Robot2 Pose Axes',
     }
     transform = by_name['TF']

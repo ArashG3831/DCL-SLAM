@@ -1,0 +1,230 @@
+{
+  "aggregate_launch_log_error_lines": 797,
+  "aggregate_robot_metrics": {
+    "cancellations": 0,
+    "distance_travelled_m": 54.694371279041775,
+    "failures": 5,
+    "goals": 20,
+    "goals_accepted": 20,
+    "recoveries": 21,
+    "rejections": 0,
+    "successes": 15,
+    "timeouts": 0
+  },
+  "aggregate_warning_metrics": {
+    "CONTROLLER_WARNING": 79,
+    "COSTMAP_WARNING": 23,
+    "PROCESS_WARNING": 225,
+    "SCAN_WARNING": 10,
+    "TF_WARNING": 5
+  },
+  "all_processes_clean_boolean": true,
+  "all_trials_complete_boolean": true,
+  "artifact_paths": {
+    "consensus_map": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/aggregate/consensus_map.npz",
+    "disagreement_map": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/aggregate/disagreement_frequency.npz",
+    "pairwise_csv": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/pairwise_map_metrics.csv",
+    "report": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/campaign_report.md",
+    "trials_csv": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/trials.csv"
+  },
+  "attempt_classification_counts": {
+    "BOUNDED_DIAGNOSTIC": 1
+  },
+  "attempt_cleanup_failure_count": 0,
+  "best_pair": null,
+  "campaign_id": "regression_20260814T143359Z",
+  "chosen_concurrency": 1,
+  "code_commit": "84586dab1056810a43101671ac7f65fa985b7221",
+  "consensus_map_summary": {
+    "cells_known_in_all_trials": 219794,
+    "cells_with_any_disagreement": 0,
+    "cells_with_disagreement_at_least_0_2": 0,
+    "majority_semantic_cell_counts": {
+      "free": 202964,
+      "occupied": 16830,
+      "uncertain": 0,
+      "unknown": 218126
+    },
+    "maximum_disagreement_frequency": 0.0,
+    "mean_disagreement_frequency": 0.0,
+    "mean_known_frequency": 0.501904457435148
+  },
+  "coverage_area_coefficient_of_variation": 0.0,
+  "crash_count": 0,
+  "cross_correlation_diagnostics": {
+    "material_improvement_pair_count": 0,
+    "maximum_correlation_improvement": 0.0,
+    "nonzero_best_shift_pair_count": 0,
+    "possible_systematic_alignment_problem": false,
+    "repeated_nonzero_shift_patterns": []
+  },
+  "diagnostic_count": 1,
+  "failure_count": 0,
+  "infrastructure_retry_count": 0,
+  "limitations": [
+    "Process launch, startup, clock-stall, and emergency limits use wall time; mission timers use ROS simulation time when time_mode=sim."
+  ],
+  "map_metric_aggregates": {
+    "best_shift_correlation": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "free_iou": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "known_cell_agreement": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "known_iou": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "occupied_free_conflict_rate": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "occupied_iou": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "raw_occupancy_correlation": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    },
+    "unknown_mismatch_rate": {
+      "maximum": null,
+      "mean": null,
+      "median": null,
+      "minimum": null,
+      "p10": null,
+      "p90": null,
+      "standard_deviation": null
+    }
+  },
+  "map_metric_sensitivity_excluding_flagged_outliers": {
+    "excluded_trials": [],
+    "metrics": {
+      "best_shift_correlation": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "free_iou": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "known_cell_agreement": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "known_iou": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "occupied_free_conflict_rate": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "occupied_iou": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "raw_occupancy_correlation": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      },
+      "unknown_mismatch_rate": {
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "p10": null,
+        "p90": null,
+        "standard_deviation": null
+      }
+    },
+    "remaining_pair_count": 0
+  },
+  "mission_completion_rate": 0.0,
+  "outlier_trials": {},
+  "output_size_bytes": 47930446,
+  "pass_count": 0,
+  "repeatability_classification": "UNAVAILABLE",
+  "schema_version": "1.0.0",
+  "timeout_count": 0,
+  "total_wall_time_s": 405.040807,
+  "trial_count_requested": 1,
+  "valid_trial_count": 1,
+  "worst_pair": null
+}

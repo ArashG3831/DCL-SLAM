@@ -1,0 +1,49 @@
+{
+  "run": "rpp_production_promotion_20260815/rpp_production_promotion_20260815/attempts/trial_01_attempt_01",
+  "classification": "BOUNDED_DIAGNOSTIC",
+  "interpretation": "Healthy bounded regression; mission timeout ended the run after usable operation, not startup or controller failure.",
+  "simulation_duration_s": 242.98,
+  "wall_duration_s": 311.31,
+  "robot1": {
+    "gt_distance_m": 17.23696,
+    "gt_odom_translation_rmse_m": 0.01643,
+    "gt_odom_final_translation_error_m": 0.04002,
+    "gt_odom_yaw_rmse_rad": 0.00338,
+    "gt_odom_final_yaw_error_rad": 0.00038,
+    "final_local_known_cells": 106880,
+    "final_shared_known_cells": 122586,
+    "goals_accepted": 5,
+    "goals_succeeded": 4,
+    "goals_failed": 0,
+    "recovery_count_changes": 0,
+    "no_progress_events": 1
+  },
+  "robot2": {
+    "gt_distance_m": 11.48021,
+    "gt_odom_translation_rmse_m": 0.00464,
+    "gt_odom_final_translation_error_m": 0.01141,
+    "gt_odom_yaw_rmse_rad": 0.00260,
+    "gt_odom_final_yaw_error_rad": 0.00570,
+    "final_local_known_cells": 70764,
+    "final_shared_known_cells": 119360,
+    "goals_accepted": 4,
+    "goals_succeeded": 4,
+    "goals_failed": 0,
+    "recovery_count_changes": 0,
+    "no_progress_events": 1
+  },
+  "team": {
+    "unique_agreed_rounds": 5,
+    "decision_agreements": 9,
+    "goals_accepted": 9,
+    "goals_succeeded": 8,
+    "goals_failed": 0,
+    "recovery_count_changes": 0,
+    "shared_map_replica_known_cells": [122586, 119360],
+    "ready_gate": true,
+    "clean_shutdown": true,
+    "processes_clean": true,
+    "webots_port_released": true
+  },
+  "note": "The collector's BOUNDED_DIAGNOSTIC label reflects the requested 240 s simulation bound; it is not an infrastructure-invalid classification."
+}

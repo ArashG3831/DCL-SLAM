@@ -3,10 +3,10 @@
 import math
 
 from my_epuck_project.distributed_assignment.canonical import (
-    TaskIdentity,
     build_canonical_union,
     canonical_round_id,
     equivalent_tasks,
+    TaskIdentity,
     world_from_rotated_grid_cell,
 )
 from my_epuck_project.distributed_assignment.models import Bounds, PhysicalTask

@@ -22,6 +22,7 @@ from my_epuck_project.cooperative_regression import (
     readiness_probe_due,
     required_graph_ready,
     resolved_trial_resources,
+    rviz_gui_environment,
     scoped_shutdown,
     update_progress,
     validate_cli_options,
@@ -32,6 +33,7 @@ from my_epuck_project.cooperative_regression import (
 )
 from my_epuck_project.cooperative_regression_report import (
     _claim_value,
+    _status_value,
     analyze_campaign,
 )
 from my_epuck_project.occupancy_map_comparison import (
@@ -80,6 +82,15 @@ def test_filter_output_stall_requires_fresh_fixed_input(tmp_path):
 def test_claim_report_handles_missing_claim_during_startup_failure():
     assert _claim_value({'robots': {'robot2': {'claim': None}}},
                         'robot2', 'state', 'UNKNOWN') == 'UNKNOWN'
+
+
+def test_report_reads_distributed_state_when_legacy_status_is_null():
+    """Interrupted final-launch artifacts remain reportable."""
+    final = {'robots': {'robot1': {
+        'status': None,
+        'distributed_status': {'state': 0},
+    }}}
+    assert _status_value(final, 'robot1', 'state') == 'WAITING_FOR_INPUTS'
 
 
 def test_trial_resources_are_unique_and_configurable(tmp_path):
@@ -201,6 +212,20 @@ def test_manual_rviz_uses_installed_cooperative_config():
         '-p', 'use_sim_time:=true']
 
 
+def test_rviz_gui_environment_selects_wslg_xcb_without_software_gl():
+    """The WSLg RViz process uses the working XCB/GL path."""
+    environment = {
+        'DISPLAY': ':0',
+        'WAYLAND_DISPLAY': 'wayland-0',
+        'LIBGL_ALWAYS_SOFTWARE': '1',
+    }
+    configured = rviz_gui_environment(environment)
+    assert configured['QT_QPA_PLATFORM'] == 'xcb'
+    assert configured['QT_X11_NO_MITSHM'] == '1'
+    assert 'LIBGL_ALWAYS_SOFTWARE' not in configured
+    assert environment['LIBGL_ALWAYS_SOFTWARE'] == '1'
+
+
 def test_external_rviz_is_started_after_readiness_and_has_explicit_time():
     """The runner owns RViz startup after infrastructure readiness."""
     source = (
@@ -219,8 +244,8 @@ def test_external_rviz_is_started_after_readiness_and_has_explicit_time():
 def test_graph_readiness_does_not_require_frontier_claims():
     """A live graph is infrastructure-ready before either claim exists."""
     nodes = [
-        '/robot1/cooperative_frontier_coordinator',
-        '/robot2/cooperative_frontier_coordinator',
+        '/robot1/distributed_frontier_assignment',
+        '/robot2/distributed_frontier_assignment',
         '/robot1/map_fusion',
         '/robot2/map_fusion',
     ]

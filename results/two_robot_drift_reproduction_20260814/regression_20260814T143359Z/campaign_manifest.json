@@ -1,0 +1,989 @@
+{
+  "active_execution_wall_time_s": 403.25208901600126,
+  "adaptive_reductions": [],
+  "calibration_result": {
+    "attempt_id": "trial_01_attempt_01",
+    "classification": "BOUNDED_DIAGNOSTIC",
+    "classification_details": {
+      "cleanup_quality": "CLEAN",
+      "log_review": {
+        "error_line_count": 797,
+        "error_lines": [
+          "[bt_navigator-28] Make sure these match your BT and there are not other sources of error codes youreported to your application",
+          "[frontier_candidate_generator-41] [INFO] [1786718121.304319407] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=5211234025863519271 goal=(1.155,-0.285) result_code=4 error_code=0 ok=true error=",
+          "[planner_server-23] [ERROR] [1786718121.310634394] [robot1.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[frontier_candidate_generator-41] [INFO] [1786718121.311777228] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=6545584777295457725 goal=(-0.045,-1.485) result_code=6 error_code=208 ok=false error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718121.315634283] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=7102330630905887383 goal=(0.735,-0.615) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718121.319366513] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=14119240196562832460 goal=(-0.975,0.825) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718121.326044334] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=1753105081605351068 goal=(0.555,0.735) result_code=4 error_code=0 ok=true error=",
+          "[cooperative_experiment_logger-47] [ERROR] [1786718121.332046698] [cooperative_experiment_logger]: [53.6s][-] PROCESS_WARNING Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[bt_navigator-38] Make sure these match your BT and there are not other sources of error codes youreported to your application",
+          "[frontier_candidate_generator-41] [INFO] [1786718123.077943171] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=5211234025863519271 goal=(1.155,-0.285) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718123.082115094] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=7102330630905887383 goal=(0.735,-0.615) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718123.084913029] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=14119240196562832460 goal=(-0.975,0.825) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718123.087177862] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=1753105081605351068 goal=(0.555,0.735) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718123.088928667] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=2482226375650560311 goal=(0.585,-0.615) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718125.410850824] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=5211234025863519271 goal=(1.155,-0.285) result_code=4 error_code=0 ok=true error=",
+          "[planner_server-23] [ERROR] [1786718125.415982022] [robot1.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[frontier_candidate_generator-41] [INFO] [1786718125.416749049] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=6545584777295457725 goal=(-0.045,-1.485) result_code=6 error_code=208 ok=false error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718125.420511272] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=7102330630905887383 goal=(0.735,-0.615) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718125.431232117] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=14119240196562832460 goal=(-0.975,0.825) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718125.437494971] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=1753105081605351068 goal=(0.555,0.735) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718125.489753852] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=6545584777295457725 goal=(-0.045,-1.485) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718125.497131271] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=11636889136646497034 goal=(-0.105,-3.435) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718125.502468284] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=5211234025863519271 goal=(1.155,-0.285) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718125.514362307] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=17721343147810957546 goal=(0.855,-3.315) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718125.519526630] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=1 id=7236939769574459510 goal=(0.495,-3.135) result_code=4 error_code=0 ok=true error=",
+          "[planner_server-23] [ERROR] [1786718125.594296663] [robot1.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[planner_server-23] [ERROR] [1786718125.683746639] [robot1.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[planner_server-33] [ERROR] [1786718125.699236929] [robot2.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[cooperative_experiment_logger-47] [ERROR] [1786718125.706320602] [cooperative_experiment_logger]: [64.6s][-] PROCESS_WARNING Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[frontier_candidate_generator-41] [INFO] [1786718129.227109573] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=4 id=11434928553454371255 goal=(3.345,1.965) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718129.234615761] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=4 id=17149488894039345321 goal=(-2.595,-1.245) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718129.240923535] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=4 id=17673731087332118003 goal=(-3.435,0.225) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718129.246712753] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=4 id=15103010781164390621 goal=(-2.295,-2.475) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718129.254558607] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=4 id=4225030036475278564 goal=(-1.875,-2.895) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718129.322258314] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=3 id=4122000994733399258 goal=(-2.685,-1.305) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718139.090944213] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=13953534279863828897 goal=(3.855,-2.685) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718139.104949818] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=18136316019053171228 goal=(-3.735,3.045) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718139.115006588] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5156484144900711251 goal=(2.925,2.955) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718139.123834484] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7455635966934456614 goal=(4.575,-0.675) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718139.130720665] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=6657324329643737268 goal=(-2.865,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718139.243926150] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=15197467616899075075 goal=(3.795,-2.625) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718139.250450000] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7060940399549776353 goal=(-4.605,-2.655) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718139.254053376] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5598436914306232352 goal=(-3.015,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718139.258089599] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7089476586653800028 goal=(-2.745,-1.125) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718139.263166944] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=2036640122891234330 goal=(-2.865,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718141.075955823] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9435377160835981632 goal=(-3.615,2.985) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718141.088753449] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=15508132675709392941 goal=(3.795,-2.535) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718141.095831211] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=13888922685675081675 goal=(-3.465,0.195) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718141.105008311] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=18185039677658021189 goal=(-2.865,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718141.115153887] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5598436914306232352 goal=(-3.015,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718141.264963510] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7060940399549776353 goal=(-4.605,-2.655) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718141.271887490] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5598436914306232352 goal=(-3.015,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718141.278534451] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9870176833761724510 goal=(-3.825,-3.285) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718141.289124541] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9435377160835981632 goal=(-3.615,2.985) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718141.295439642] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=18185039677658021189 goal=(-2.865,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718143.111950588] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9435377160835981632 goal=(-3.615,2.985) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718143.118755502] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=15508132675709392941 goal=(3.795,-2.535) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718143.127135278] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7550102750321011257 goal=(2.895,2.955) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718143.135823526] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7060940399549776353 goal=(-4.605,-2.655) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718143.143030551] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5598436914306232352 goal=(-3.015,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718143.192272201] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9870176833761724510 goal=(-3.825,-3.285) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718143.196366733] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=7060940399549776353 goal=(-4.605,-2.655) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718143.206448363] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=9435377160835981632 goal=(-3.615,2.985) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718143.213009297] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=5598436914306232352 goal=(-3.015,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718143.219451899] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=11 id=15508132675709392941 goal=(3.795,-2.535) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718145.083986318] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=12 id=7191032242463122147 goal=(-3.045,-1.185) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718145.101530170] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=12 id=9435377160835981632 goal=(-3.615,2.985) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718145.108567278] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=12 id=7550102750321011257 goal=(2.895,2.955) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718145.115617167] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=12 id=15508132675709392941 goal=(3.795,-2.535) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718145.126248930] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=12 id=13888922685675081675 goal=(-3.465,0.195) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718146.980161039] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=14 id=17199660386586111849 goal=(-3.465,0.135) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718146.986814124] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=14 id=6420820984080506212 goal=(-3.945,3.585) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718146.991822101] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=14 id=1693800288320442200 goal=(-2.895,-1.095) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718147.237608475] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=15 id=12155784126058325270 goal=(3.735,-2.535) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718147.244410324] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=15 id=6536780919337191171 goal=(-3.945,-3.255) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718147.250057831] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=15 id=4518991482025606433 goal=(-2.835,-1.875) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718147.263004304] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=15 id=10209075986633756397 goal=(-4.425,3.315) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718147.270911337] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=15 id=3911253628974840163 goal=(-3.045,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718149.226420952] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=15981486608081312243 goal=(-4.785,3.345) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718149.230420879] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=8536757148160273483 goal=(-2.745,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718149.234069503] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=4655448911896419680 goal=(-3.885,0.045) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718149.238678236] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=8799001164613557426 goal=(-2.115,0.225) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718149.245602621] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=10073983011061437236 goal=(2.805,3.225) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718149.379989431] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=6536780919337191171 goal=(-3.945,-3.255) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718149.384012819] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=18279712680621717297 goal=(3.765,-2.385) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718149.389806444] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=11168946774555470014 goal=(-2.925,-2.745) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718149.400928785] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=17 id=3059531345425896838 goal=(3.225,4.095) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718151.176892424] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=19 id=3639909906434237591 goal=(-4.065,-0.045) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718151.183160447] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=19 id=17482710596789471605 goal=(-2.625,-1.905) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718151.195004780] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=19 id=15688837089639557673 goal=(-3.135,2.265) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718151.203311322] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=19 id=7461839185908948161 goal=(-4.935,3.225) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718151.212352015] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=19 id=18039444777552444348 goal=(-2.955,-1.125) result_code=4 error_code=0 ok=true error=",
+          "[planner_server-23] [ERROR] [1786718157.219126484] [robot1.planner_server]: Failed to create a plan from potential when a legal potential was found. This shouldn't happen.",
+          "[frontier_candidate_generator-41] [INFO] [1786718157.221135661] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=25 id=15368657217349337388 goal=(-4.575,5.055) result_code=6 error_code=208 ok=false error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718157.230279295] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=25 id=8157812704449687040 goal=(-3.855,4.095) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718157.236223207] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=25 id=15091913862749785159 goal=(-3.195,3.225) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718157.244768047] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=25 id=18385570005569605959 goal=(-3.225,-3.045) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-41] [INFO] [1786718157.258916443] [robot1.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=25 id=6906911067987729321 goal=(-4.605,-2.655) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718165.627173729] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=31 id=6743791643054582806 goal=(2.895,3.465) result_code=4 error_code=0 ok=true error=",
+          "[frontier_candidate_generator-42] [INFO] [1786718165.635414460] [robot2.frontier_candidate_generator]: CANDIDATE_PATH_RESULT revision=31 id=15177660524676189341 goal=(4.635,-1.305) result_code=4 error_code=0 ok=true error="
+        ],
+        "first_error": "[bt_navigator-28] Make sure these match your BT and there are not other sources of error codes youreported to your application",
+        "last_error": "[ERROR] [collision_monitor-27]: process has died [pid 119270, exit code -11, cmd '/opt/ros/jazzy/lib/nav2_collision_monitor/collision_monitor --ros-args -r __node:=collision_monitor -r __ns:=/robot1 --params-file /home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/tmp/launch_params_we1azrf5 -r tf:=/tf -r tf_static:=/tf_static'].",
+        "pre_shutdown_traceback": false,
+        "shutdown_traceback_count": 4,
+        "traceback": false
+      },
+      "map_validation_errors": [],
+      "observer_artifacts": {
+        "coverage.csv": true,
+        "events.jsonl": true,
+        "robot1_timeseries.csv": true,
+        "robot2_timeseries.csv": true,
+        "summary.json": true,
+        "topic_health.csv": true,
+        "warnings.jsonl": true
+      },
+      "observer_summary_path": "observer/trial_01_attempt_01/summary.json",
+      "primary_outcome": "BOUNDED_DIAGNOSTIC",
+      "ready": true,
+      "settled_observed": false,
+      "shutdown_time_nonzero_exits": {},
+      "slam_filter_output_stall": {},
+      "timed_out": true,
+      "unexpected_exit": false
+    },
+    "cleanup": {
+      "all_exited": true,
+      "graceful": false,
+      "kill_required": false,
+      "port_released": true,
+      "remaining_tracked_pids": [],
+      "terminate_succeeded": true
+    },
+    "cleanup_complete": true,
+    "clock_error": null,
+    "clock_readiness": {
+      "context_identity": 124269414788000,
+      "domain_id": 228,
+      "max_inter_sample_wall_gap_s": 0.0070195240041357465,
+      "probe_pid": 119123,
+      "probe_start_wall_monotonic": 48079.779139315,
+      "publisher_count_samples": [
+        {
+          "count": 0,
+          "wall_elapsed_s": 3.1837422490061726
+        },
+        {
+          "count": 0,
+          "wall_elapsed_s": 3.28421186900232
+        },
+        {
+          "count": 0,
+          "wall_elapsed_s": 3.3845912650067476
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.4849977379999473
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.586293968000973
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.6866644660040038
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.787512320006499
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.8878644640062703
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 3.988541279002675
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 4.089055107004242
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 4.189512003002164
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 4.2903835010001785
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 4.390809991004062
+        },
+        {
+          "count": 1,
+          "wall_elapsed_s": 4.4155070390042965
+        }
+      ],
+      "publishers": 1,
+      "qos": {
+        "depth": 10,
+        "durability": "VOLATILE",
+        "history": "KEEP_LAST",
+        "reliability": "BEST_EFFORT"
+      },
+      "reason": "READY",
+      "rmw_implementation": "rmw_fastrtps_cpp",
+      "sample_count": 2,
+      "sample_wall_times": [
+        4.415083667001454,
+        4.42210319100559
+      ],
+      "samples": [
+        19.7,
+        19.72
+      ],
+      "setup_wall_elapsed_s": 3.1836984000037774,
+      "topic": "/clock",
+      "topic_type": "rosgraph_msgs/msg/Clock"
+    },
+    "collector_command": [
+      "ros2",
+      "run",
+      "my_epuck_project",
+      "cooperative_trial_collector",
+      "--ros-args",
+      "-p",
+      "output_dir:=/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01",
+      "-p",
+      "run_id:=trial_01_attempt_01",
+      "-p",
+      "settling_period_s:=4.0",
+      "-p",
+      "use_sim_time:=true"
+    ],
+    "collector_pid": 119142,
+    "diagnostic_processes": [
+      {
+        "command": [
+          "/usr/bin/python3",
+          "/home/arash/webots_ws/src/my_epuck_project/tools/turn_motion_diagnostics.py",
+          "--robot",
+          "robot1",
+          "--output",
+          "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/forensic/high_rate/robot1_command_wheel_odom.csv",
+          "--duration-s",
+          "600.0",
+          "--max-rows",
+          "400000"
+        ],
+        "output": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/forensic/high_rate/robot1_command_wheel_odom.csv",
+        "pid": 120878,
+        "robot": "robot1",
+        "start_stage": "infrastructure_readiness_declared"
+      },
+      {
+        "command": [
+          "/usr/bin/python3",
+          "/home/arash/webots_ws/src/my_epuck_project/tools/turn_motion_diagnostics.py",
+          "--robot",
+          "robot2",
+          "--output",
+          "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/forensic/high_rate/robot2_command_wheel_odom.csv",
+          "--duration-s",
+          "600.0",
+          "--max-rows",
+          "400000"
+        ],
+        "output": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/forensic/high_rate/robot2_command_wheel_odom.csv",
+        "pid": 120879,
+        "robot": "robot2",
+        "start_stage": "infrastructure_readiness_declared"
+      }
+    ],
+    "hold_open_after_completion": false,
+    "hold_open_entered": false,
+    "hold_open_requested": false,
+    "hold_open_user_shutdown": false,
+    "infrastructure_ready": true,
+    "interrupted": false,
+    "launch_arguments": {
+      "diagnostic_mode": true,
+      "enable_mission_timeout": false,
+      "launch_rviz": "false",
+      "logger_console_status": false,
+      "mission_timeout_s": 634.0,
+      "output_root": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/observer",
+      "rmw_fastdds_use_shm": "0",
+      "rmw_implementation": "rmw_fastrtps_cpp",
+      "run_id": "trial_01_attempt_01",
+      "sensor_profile": "full",
+      "source_world_path": "/home/arash/webots_ws/src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+      "use_sim_time": true,
+      "webots_gui": "false",
+      "webots_mode": "fast",
+      "webots_port": 23660,
+      "world_profile": "large"
+    },
+    "launch_command": [
+      "ros2",
+      "launch",
+      "my_epuck_project",
+      "two_robots_decentralized_exploration_launch.py",
+      "world_profile:=large",
+      "world_path:=/home/arash/webots_ws/src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+      "run_id:=trial_01_attempt_01",
+      "output_root:=/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/observer",
+      "mission_timeout_s:=634.0",
+      "webots_port:=23660",
+      "webots_mode:=fast",
+      "webots_gui:=false",
+      "sensor_profile:=full",
+      "diagnostic_mode:=true",
+      "nav2_autostart:=false",
+      "launch_rviz:=false",
+      "enable_mission_timeout:=false",
+      "use_sim_time:=true",
+      "logger_console_status:=false",
+      "enable_forensic_capture:=true",
+      "forensic_snapshot_interval_s:=15.0"
+    ],
+    "launch_pid": 119141,
+    "live_parameter_snapshot": {
+      "bounded": true,
+      "conclusion": "EXPECTED_IDENTITY_FIELDS_ONLY",
+      "expected_identity_only": true,
+      "feature_version": "2.0.0",
+      "missing_live_parameter_services": [],
+      "nodes": [
+        "controller_server",
+        "velocity_smoother",
+        "local_costmap/local_costmap",
+        "global_costmap/global_costmap",
+        "planner_server"
+      ],
+      "normalized_hash": "39ec0bfaef7abf0c732da5e99c71e4a4176b0d2edc0dc4e6c4a7cc60e3c84b3c",
+      "robot1_parameter_hash": "39ec0bfaef7abf0c732da5e99c71e4a4176b0d2edc0dc4e6c4a7cc60e3c84b3c",
+      "robot2_parameter_hash": "39ec0bfaef7abf0c732da5e99c71e4a4176b0d2edc0dc4e6c4a7cc60e3c84b3c",
+      "schema_version": "2.0.0",
+      "snapshots": [
+        {
+          "node": "/robot1/controller_server",
+          "parsed": true,
+          "raw_file": "robot1__controller_server.json",
+          "returncode": 0,
+          "robot": "robot1",
+          "status": "OK"
+        },
+        {
+          "node": "/robot1/velocity_smoother",
+          "parsed": true,
+          "raw_file": "robot1__velocity_smoother.json",
+          "returncode": 0,
+          "robot": "robot1",
+          "status": "OK"
+        },
+        {
+          "node": "/robot1/local_costmap/local_costmap",
+          "parsed": true,
+          "raw_file": "robot1__local_costmap__local_costmap.json",
+          "returncode": 0,
+          "robot": "robot1",
+          "status": "OK"
+        },
+        {
+          "node": "/robot1/global_costmap/global_costmap",
+          "parsed": true,
+          "raw_file": "robot1__global_costmap__global_costmap.json",
+          "returncode": 0,
+          "robot": "robot1",
+          "status": "OK"
+        },
+        {
+          "node": "/robot1/planner_server",
+          "parsed": true,
+          "raw_file": "robot1__planner_server.json",
+          "returncode": 0,
+          "robot": "robot1",
+          "status": "OK"
+        },
+        {
+          "node": "/robot2/controller_server",
+          "parsed": true,
+          "raw_file": "robot2__controller_server.json",
+          "returncode": 0,
+          "robot": "robot2",
+          "status": "OK"
+        },
+        {
+          "node": "/robot2/velocity_smoother",
+          "parsed": true,
+          "raw_file": "robot2__velocity_smoother.json",
+          "returncode": 0,
+          "robot": "robot2",
+          "status": "OK"
+        },
+        {
+          "node": "/robot2/local_costmap/local_costmap",
+          "parsed": true,
+          "raw_file": "robot2__local_costmap__local_costmap.json",
+          "returncode": 0,
+          "robot": "robot2",
+          "status": "OK"
+        },
+        {
+          "node": "/robot2/global_costmap/global_costmap",
+          "parsed": true,
+          "raw_file": "robot2__global_costmap__global_costmap.json",
+          "returncode": 0,
+          "robot": "robot2",
+          "status": "OK"
+        },
+        {
+          "node": "/robot2/planner_server",
+          "parsed": true,
+          "raw_file": "robot2__planner_server.json",
+          "returncode": 0,
+          "robot": "robot2",
+          "status": "OK"
+        }
+      ],
+      "unexpected_behavioral_differences": []
+    },
+    "maximum_process_count": 55,
+    "mission_inputs_ready": true,
+    "nav2_activation": {
+      "domain_id": 228,
+      "services": {
+        "robot1": "STARTED",
+        "robot2": "STARTED"
+      },
+      "status": "READY"
+    },
+    "output_directory": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01",
+    "preflight": {
+      "expected_feature_version": "2.0.0",
+      "installed_config_hash": "8fe21f636777dfb15e868bf6337076697d8ea6cdc3c3d574d1aee6aa0a4188d0",
+      "installed_feature_version": "2.0.0",
+      "installed_hash": "3d686a056125341dd3fff2562467e414fa9d14b1670f8626440f763f841a6e6c",
+      "installed_module_path": "/home/arash/webots_ws/build/my_epuck_project/my_epuck_project/navigation_live_parameters.py",
+      "passed": true,
+      "source_config_hash": "8fe21f636777dfb15e868bf6337076697d8ea6cdc3c3d574d1aee6aa0a4188d0",
+      "source_hash": "3d686a056125341dd3fff2562467e414fa9d14b1670f8626440f763f841a6e6c"
+    },
+    "process_exit_codes": {
+      "collector": 0,
+      "launch": 0,
+      "rviz": null
+    },
+    "process_group_id": 119123,
+    "process_tree_peak_cpu_percent": 105.4,
+    "process_tree_peak_rss_bytes": 4857069568,
+    "readiness_elapsed_s": 82.85374403100286,
+    "readiness_graph_nodes": [
+      "/Ros2Supervisor/Ros2Supervisor",
+      "/cooperative_experiment_logger",
+      "/cooperative_trial_collector",
+      "/epuck_imu_webots_plugin",
+      "/launch_ros_119141",
+      "/robot1/behavior_server",
+      "/robot1/bt_navigator",
+      "/robot1/collision_monitor",
+      "/robot1/controller_manager",
+      "/robot1/controller_server",
+      "/robot1/distributed_frontier_assignment",
+      "/robot1/frontier_candidate_generator",
+      "/robot1/frontier_proposal_adapter",
+      "/robot1/global_costmap/global_costmap",
+      "/robot1/lifecycle_manager_navigation",
+      "/robot1/local_costmap/local_costmap",
+      "/robot1/map_exporter",
+      "/robot1/map_fusion",
+      "/robot1/planner_server",
+      "/robot1/robot1",
+      "/robot1/robot1_d500_scan_fix",
+      "/robot1/robot_state_publisher",
+      "/robot1/route_server",
+      "/robot1/slam_toolbox",
+      "/robot1/smoother_server",
+      "/robot1/teammate_scan_filter",
+      "/robot1/transform_listener_impl_56aea7995ce0",
+      "/robot1/transform_listener_impl_60d32cbe4f10",
+      "/robot1/twist_stamper",
+      "/robot1/velocity_smoother",
+      "/robot1/waypoint_follower",
+      "/robot2/behavior_server",
+      "/robot2/bt_navigator",
+      "/robot2/collision_monitor",
+      "/robot2/controller_manager",
+      "/robot2/controller_server",
+      "/robot2/distributed_frontier_assignment",
+      "/robot2/frontier_candidate_generator",
+      "/robot2/frontier_proposal_adapter",
+      "/robot2/global_costmap/global_costmap",
+      "/robot2/lifecycle_manager_navigation",
+      "/robot2/local_costmap/local_costmap",
+      "/robot2/map_exporter",
+      "/robot2/map_fusion",
+      "/robot2/planner_server",
+      "/robot2/robot2",
+      "/robot2/robot2_d500_scan_fix",
+      "/robot2/robot_state_publisher",
+      "/robot2/route_server",
+      "/robot2/slam_toolbox",
+      "/robot2/smoother_server",
+      "/robot2/teammate_scan_filter",
+      "/robot2/transform_listener_impl_5d2af5ea4850",
+      "/robot2/transform_listener_impl_618bd79d5f10",
+      "/robot2/twist_stamper",
+      "/robot2/velocity_smoother",
+      "/robot2/waypoint_follower",
+      "/shared_to_robot1_map",
+      "/shared_to_robot2_map"
+    ],
+    "ros_domain_id": 228,
+    "ros_log_directory": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/ros_logs",
+    "run_id": "trial_01_attempt_01",
+    "rviz_requested": false,
+    "schema_version": "1.0.0",
+    "settled_observed": false,
+    "shutdown_events_path": "shutdown_events.jsonl",
+    "shutdown_reason": "simulated_mission_timeout",
+    "startup_timeline": {
+      "collector_process_started": {
+        "pid": 119142,
+        "wall_elapsed_s": 0.014649470998847391
+      },
+      "first_clock_probe": {
+        "wall_elapsed_s": 4.217682422000507
+      },
+      "first_clock_sample": {
+        "probe_wall_elapsed_s": 4.415083667001454,
+        "wall_elapsed_s": 64.63129839199974
+      },
+      "first_increasing_clock_pair": {
+        "samples": [
+          19.7,
+          19.72
+        ],
+        "wall_elapsed_s": 64.63130074900255
+      },
+      "infrastructure_readiness_declared": {
+        "readiness_graph_nodes": [
+          "/Ros2Supervisor/Ros2Supervisor",
+          "/cooperative_experiment_logger",
+          "/cooperative_trial_collector",
+          "/epuck_imu_webots_plugin",
+          "/launch_ros_119141",
+          "/robot1/behavior_server",
+          "/robot1/bt_navigator",
+          "/robot1/collision_monitor",
+          "/robot1/controller_manager",
+          "/robot1/controller_server",
+          "/robot1/distributed_frontier_assignment",
+          "/robot1/frontier_candidate_generator",
+          "/robot1/frontier_proposal_adapter",
+          "/robot1/global_costmap/global_costmap",
+          "/robot1/lifecycle_manager_navigation",
+          "/robot1/local_costmap/local_costmap",
+          "/robot1/map_exporter",
+          "/robot1/map_fusion",
+          "/robot1/planner_server",
+          "/robot1/robot1",
+          "/robot1/robot1_d500_scan_fix",
+          "/robot1/robot_state_publisher",
+          "/robot1/route_server",
+          "/robot1/slam_toolbox",
+          "/robot1/smoother_server",
+          "/robot1/teammate_scan_filter",
+          "/robot1/transform_listener_impl_56aea7995ce0",
+          "/robot1/transform_listener_impl_60d32cbe4f10",
+          "/robot1/twist_stamper",
+          "/robot1/velocity_smoother",
+          "/robot1/waypoint_follower",
+          "/robot2/behavior_server",
+          "/robot2/bt_navigator",
+          "/robot2/collision_monitor",
+          "/robot2/controller_manager",
+          "/robot2/controller_server",
+          "/robot2/distributed_frontier_assignment",
+          "/robot2/frontier_candidate_generator",
+          "/robot2/frontier_proposal_adapter",
+          "/robot2/global_costmap/global_costmap",
+          "/robot2/lifecycle_manager_navigation",
+          "/robot2/local_costmap/local_costmap",
+          "/robot2/map_exporter",
+          "/robot2/map_fusion",
+          "/robot2/planner_server",
+          "/robot2/robot2",
+          "/robot2/robot2_d500_scan_fix",
+          "/robot2/robot_state_publisher",
+          "/robot2/route_server",
+          "/robot2/slam_toolbox",
+          "/robot2/smoother_server",
+          "/robot2/teammate_scan_filter",
+          "/robot2/transform_listener_impl_5d2af5ea4850",
+          "/robot2/transform_listener_impl_618bd79d5f10",
+          "/robot2/twist_stamper",
+          "/robot2/velocity_smoother",
+          "/robot2/waypoint_follower",
+          "/shared_to_robot1_map",
+          "/shared_to_robot2_map"
+        ],
+        "wall_elapsed_s": 82.90444108800148
+      },
+      "launch_process_started": {
+        "pid": 119141,
+        "wall_elapsed_s": 0.014648199998191558
+      },
+      "mission_timer_started": {
+        "mission_clock": "sim",
+        "mission_sim_start": 5.92,
+        "wall_elapsed_s": 82.90445137899951
+      },
+      "result_directory_created": {
+        "wall_elapsed_s": 1.1103002179879695e-05
+      },
+      "runner_process_start": {
+        "wall_elapsed_s": 0.0
+      },
+      "runtime_parameters_generated": {
+        "wall_elapsed_s": 5.70619959034957e-05
+      }
+    },
+    "supervisor_pid": 119123,
+    "supervisor_return_code": 0,
+    "temporary_directory": "/home/arash/webots_ws/results/two_robot_drift_reproduction_20260814/regression_20260814T143359Z/attempts/trial_01_attempt_01/tmp",
+    "tf_readiness": {
+      "context_identity": 124267051271952,
+      "domain_id": 228,
+      "first_odom_wall_elapsed_s": {
+        "robot1": 3.8804870990061318,
+        "robot2": 3.049914309005544
+      },
+      "first_transform_wall_elapsed_s": {
+        "odom_to_base:robot1/odom->robot1/base_footprint": 3.8678873300013947,
+        "odom_to_base:robot2/odom->robot2/base_footprint": 3.0493197050018352,
+        "shared_to_base:robot1/base_footprint->shared_map": 5.089996808004798,
+        "shared_to_base:robot2/base_footprint->shared_map": 3.9008697550016223
+      },
+      "latest_odom_stamp": {
+        "robot1": {
+          "nanosec": 100000000,
+          "sec": 34
+        },
+        "robot2": {
+          "nanosec": 100000000,
+          "sec": 34
+        }
+      },
+      "odom_received": {
+        "robot1": true,
+        "robot2": true
+      },
+      "probe_pid": 119123,
+      "reason": "READY",
+      "requested_transforms": [
+        {
+          "role": "odom_to_base",
+          "source": "robot1/odom",
+          "target": "robot1/base_footprint"
+        },
+        {
+          "role": "shared_to_base",
+          "source": "robot1/base_footprint",
+          "target": "shared_map"
+        },
+        {
+          "role": "odom_to_base",
+          "source": "robot2/odom",
+          "target": "robot2/base_footprint"
+        },
+        {
+          "role": "shared_to_base",
+          "source": "robot2/base_footprint",
+          "target": "shared_map"
+        }
+      ],
+      "setup_wall_elapsed_s": 2.920141472000978
+    },
+    "tracked_pids": [
+      119141,
+      119142,
+      119159,
+      119218,
+      119219,
+      119220,
+      119221,
+      119222,
+      119223,
+      119224,
+      119225,
+      119226,
+      119227,
+      119228,
+      119229,
+      119230,
+      119231,
+      119232,
+      119233,
+      119234,
+      119235,
+      119252,
+      119253,
+      119258,
+      119259,
+      119260,
+      119263,
+      119264,
+      119269,
+      119270,
+      119271,
+      119272,
+      119275,
+      119279,
+      119285,
+      119286,
+      119291,
+      119296,
+      119300,
+      119302,
+      119313,
+      119320,
+      119321,
+      119326,
+      119327,
+      119330,
+      119332,
+      119336,
+      119342,
+      119344,
+      119485,
+      119541,
+      120022,
+      120878,
+      120879
+    ],
+    "trial_id": "trial_01",
+    "utc_end": "2026-08-14T14:40:42.160903Z",
+    "utc_start": "2026-08-14T14:34:02.429457Z",
+    "wall_time_s": 399.7314956459959,
+    "webots_port": 23660,
+    "webots_windows_pid_at_end": null
+  },
+  "campaign_id": "regression_20260814T143359Z",
+  "chosen_concurrency": 1,
+  "chosen_concurrency_reason": "bounded by requested maximum, normal cap, calibration peak RSS, and isolation pilot outcome",
+  "clean_shutdown": true,
+  "concurrency_policy": {
+    "hard_default_cap": 4,
+    "minimum_available_memory_fraction": 0.2,
+    "normal_cap": 3,
+    "overload_cpu_percent": 90,
+    "requested_maximum": 1
+  },
+  "cpu_model": "12th Gen Intel(R) Core(TM) i7-12650H",
+  "dirty_worktree": true,
+  "dirty_worktree_status": [
+    "M src/my_epuck_project/docs/simulated_lidar_slam_policy.md",
+    " M src/my_epuck_project/launch/motion_characterization_launch.py",
+    " M src/my_epuck_project/launch/two_robots_decentralized_exploration_launch.py",
+    " M src/my_epuck_project/my_epuck_project/__pycache__/__init__.cpython-312.pyc",
+    " M src/my_epuck_project/my_epuck_project/__pycache__/d500_scan_fix.cpython-312.pyc",
+    " M src/my_epuck_project/my_epuck_project/__pycache__/imu_webots_plugin.cpython-312.pyc",
+    " M src/my_epuck_project/my_epuck_project/__pycache__/twist_stamper.cpython-312.pyc",
+    " M src/my_epuck_project/my_epuck_project/cooperative_experiment_logger.py",
+    " M src/my_epuck_project/my_epuck_project/cooperative_regression.py",
+    " M src/my_epuck_project/my_epuck_project/cooperative_regression_report.py",
+    " M src/my_epuck_project/my_epuck_project/cooperative_trial_collector.py",
+    " M src/my_epuck_project/my_epuck_project/distributed_assignment/canonical.py",
+    " M src/my_epuck_project/my_epuck_project/motion_slam_recorder.py",
+    " M src/my_epuck_project/resource/cooperative_manual_exploration.rviz",
+    " M src/my_epuck_project/setup.py",
+    " M src/my_epuck_project/test/test_cooperative_manual_rviz.py",
+    " M src/my_epuck_project/test/test_cooperative_regression.py",
+    " M src/my_epuck_project/test/test_cooperative_world_profiles.py",
+    " M src/my_epuck_project/test/test_distributed_launch_inventory.py",
+    " M src/my_epuck_project/test/test_distributed_task_canonicalization.py",
+    " M src/my_epuck_project/test/test_slam_pipeline_separation.py",
+    " M src/my_epuck_project/test/test_slam_range_policy.py",
+    " M src/my_epuck_project/test/test_teammate_scan_filter_geometry.py",
+    " M src/my_epuck_project/worlds/.epuck_d500_two_world_large.wbproj",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world.wbt",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world_both_active.wbt",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world_robot1_active.wbt",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world_robot2_active.wbt",
+    " M src/my_epuck_project/worlds/epuck_d500_two_world_teammate_visible.wbt",
+    "?? check_slam_stack.sh",
+    "?? src/frontier-exploration-ros2/",
+    "?? src/m-explore-ros2/",
+    "?? src/my_epuck_project/FILTERING_ARCHITECTURE.md",
+    "?? src/my_epuck_project/my_epuck_project/cooperative_ground_truth_observer.py",
+    "?? src/my_epuck_project/my_epuck_project/cooperative_map_png_export.py",
+    "?? src/my_epuck_project/my_epuck_project/cooperative_trial_fast.py",
+    "?? src/my_epuck_project/my_epuck_project/forensic_evidence.py",
+    "?? src/my_epuck_project/my_epuck_project/motion_course_node.py",
+    "?? src/my_epuck_project/my_epuck_project/motion_course_spec.py",
+    "?? src/my_epuck_project/my_epuck_project/motion_course_supervisor.py",
+    "?? src/my_epuck_project/my_epuck_project/motion_scan_branch_relay.py",
+    "?? src/my_epuck_project/test/test_cooperative_map_png_export.py",
+    "?? src/my_epuck_project/test/test_cooperative_trial_fast.py",
+    "?? src/my_epuck_project/test/test_motion_course_methodology.py",
+    "?? src/my_epuck_project/test/test_webots_robot_windows.py",
+    "?? src/my_epuck_project/tools/analyze_motion_trajectory.py",
+    "?? src/my_epuck_project/tools/analyze_slam_map_quality.py",
+    "?? src/my_epuck_project/tools/analyze_turn_motion.py",
+    "?? src/my_epuck_project/tools/export_cooperative_maps_png.py",
+    "?? src/my_epuck_project/tools/forensic_runtime_efficiency.py",
+    "?? src/my_epuck_project/tools/run_cooperative_trial_fast.py",
+    "?? src/my_epuck_project/tools/run_nav2_frontier_diagnostic.py",
+    "?? src/my_epuck_project/tools/turn_motion_diagnostics.py",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world.wbproj",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world_both_active.wbproj",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world_large.jpg",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world_robot1_active.wbproj",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world_robot2_active.wbproj",
+    "?? src/my_epuck_project/worlds/.epuck_d500_two_world_teammate_visible.wbproj",
+    "?? src/scan_sanitize/",
+    "?? src/webots_ros2/"
+  ],
+  "exact_webots_options": "--port=<trial-port> --batch --mode=fast --no-rendering --stdout --stderr --minimize",
+  "execution_profile": "headless",
+  "fast_mode": true,
+  "final_cleanup_audit": {
+    "clean": true,
+    "occupied_selected_ports": [],
+    "open_result_files": [],
+    "remaining_campaign_processes": [],
+    "utc": "2026-08-14T14:40:45.657453Z"
+  },
+  "fusion_resolution": 0.03,
+  "git_commit": "84586dab1056810a43101671ac7f65fa985b7221",
+  "global_costmap_resolution": 0.03,
+  "hostname": "DESKTOP-OVP2LHB",
+  "initial_map_costmap_configuration": {
+    "coverage_attribution_resolution": 0.03,
+    "map_comparison_shift_window": 1,
+    "minimum_frontier_cells": 2,
+    "minimum_known_cell_gain_for_activity": 1
+  },
+  "initial_separation_m": 2.5,
+  "installed_world_path": "/home/arash/webots_ws/install/my_epuck_project/share/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+  "installed_world_sha256": "4caa7e7deba011ae88a0a952ac2b7a8680ad6dedc65e0610e03f6a2ea08c8415",
+  "isolation_pilot_passed": false,
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "known_initial_relative_transform": [
+    1.5308084989341916e-16,
+    -2.5,
+    0.0
+  ],
+  "launch_arguments": {
+    "assignment_mode": "replicated_two_robot_pair",
+    "dispatch_enabled": true,
+    "hold_open_after_completion": false,
+    "launch_rviz": false,
+    "no_mission_timeout": false,
+    "time_mode": "sim",
+    "use_sim_time": true,
+    "world_profile": "large"
+  },
+  "launch_file": "two_robots_decentralized_exploration_launch.py",
+  "lidar_maximum_range": 12.0,
+  "limitations": [
+    "Process launch, startup, clock-stall, and emergency limits use wall time; mission timers use ROS simulation time when time_mode=sim."
+  ],
+  "local_costmap_resolution": 0.02,
+  "logging_mode": {
+    "console_status": false,
+    "observer": true
+  },
+  "logical_cpu_count": 16,
+  "map_thresholds": {
+    "free_max": 25,
+    "occupied_min": 65,
+    "uncertain": "25 < value < 65",
+    "unknown": "value < 0"
+  },
+  "offline_map_benchmark": {
+    "all_45_pair_comparisons_time_s": 2.3984427350005717,
+    "cached_alignment_time_s": 0.16027415699500125,
+    "common_grid_time_s": 0.00017752800340531394,
+    "consensus_generation_time_s": 0.206270319999021,
+    "height": 1120,
+    "one_pair_comparison_time_s": 0.05060869700537296,
+    "resolution": 0.029999999329447746,
+    "rss_increase_bytes": 12935168,
+    "source": "calibration final map geometry",
+    "width": 391
+  },
+  "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "peer_export_resolution": 0.03,
+  "random_seeds": {
+    "controlled": false,
+    "reason": "no project/Webots seed is exposed by committed launch"
+  },
+  "rendering_mode": "disabled",
+  "reproduction_command": "src/my_epuck_project/tools/run_cooperative_regression.py --trials 1 --maximum-concurrency 1 --output-root results/two_robot_drift_reproduction_20260814 --world-profile large --execution-profile headless --sensor-profile full --time-mode sim --fast-mode true --rendering false --rviz false --diagnostic-mode true --enable-forensic-capture true --forensic-snapshot-interval-s 15 --mission-timeout 600 --emergency-wall-runtime 900 --no-infrastructure-retry --skip-build --skip-tests --ros-domain-base 228 --webots-port-base 23660",
+  "rmw_implementation": "rmw_fastrtps_cpp",
+  "robot_start_poses": {
+    "robot1": {
+      "controller": "<extern>",
+      "planar_yaw": 1.5707963267948966,
+      "rotation": [
+        0.0,
+        0.0,
+        1.0,
+        1.5707963267948966
+      ],
+      "translation": [
+        16.0,
+        0.0,
+        0.001
+      ],
+      "window": "<none>"
+    },
+    "robot2": {
+      "controller": "<extern>",
+      "planar_yaw": 1.5707963267948966,
+      "rotation": [
+        0.0,
+        0.0,
+        1.0,
+        1.5707963267948966
+      ],
+      "translation": [
+        18.5,
+        0.0,
+        0.001
+      ],
+      "window": "<none>"
+    }
+  },
+  "ros_distribution": "jazzy",
+  "ros_domain_id_range": [
+    228,
+    228
+  ],
+  "rviz": false,
+  "schema_version": "1.0.0",
+  "sensor_profile": "full",
+  "simulation_time_measurement": "collector /clock telemetry",
+  "slam_resolution": 0.03,
+  "source_world_path": "/home/arash/webots_ws/src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+  "time_mode": "sim",
+  "timeouts": {
+    "emergency_wall_runtime_s": 900.0,
+    "graceful_shutdown_s": 20.0,
+    "hard_shutdown_s": 10.0,
+    "mission_s": 600.0,
+    "mission_timeout_domain": "sim",
+    "settling_s": 4.0,
+    "startup_s": 300.0
+  },
+  "total_ram_bytes": 8128757760,
+  "total_wall_time_s": 405.040807,
+  "transform_source": "WORLD_DERIVED",
+  "trial_count_requested": 1,
+  "use_sim_time": true,
+  "utc_end": "2026-08-14T14:40:45.263345Z",
+  "utc_start": "2026-08-14T14:34:00.222538Z",
+  "webots_executable": "/mnt/c/Program Files/Webots/msys64/mingw64/bin/webots.exe",
+  "webots_mode": "fast",
+  "webots_port_range": [
+    23660,
+    23660
+  ],
+  "webots_version": "R2025a",
+  "world": "epuck_d500_two_world_large.wbt",
+  "world_dimensions_m": [
+    40.0,
+    10.0
+  ],
+  "world_profile": "large",
+  "world_sha256": "4caa7e7deba011ae88a0a952ac2b7a8680ad6dedc65e0610e03f6a2ea08c8415"
+}

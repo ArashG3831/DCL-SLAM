@@ -12,7 +12,7 @@ from my_epuck_project.slam_range_policy import (
     installed_karto_semantics,
     validate_free_space_cap,
 )
-from my_epuck_project.teammate_scan_filter import filtered_scan
+from my_epuck_project.teammate_scan_filter import prepare_slam_scan
 
 
 def test_derived_cap_has_explicit_margin():
@@ -73,15 +73,32 @@ def test_cap_validation_rejects_unsafe_values():
         validate_free_space_cap(0.06, 0.05, 12.0)
 
 
-def test_completed_natural_no_return_still_masks_teammate_before_cap():
-    """A teammate before the cap masks a converted natural no-return."""
+def test_teammate_masking_precedes_natural_no_return_completion():
+    """A finite hit becomes unknown while a natural no-return becomes free."""
     scan = LaserScan()
     scan.angle_min = 0.0
     scan.angle_increment = 0.0
     scan.range_min = 0.05
     scan.range_max = 12.0
-    scan.ranges = [FREE_SPACE_CAP]
-    output, indices, _ = filtered_scan(
-        scan, 1.0, 0.0, 0.1, 0.012, [(1.0, 0.0)], {0})
+    scan.ranges = [0.9, math.inf]
+    output, indices, stats = prepare_slam_scan(
+        scan, 1.0, 0.0, 0.1, 0.005, FREE_SPACE_CAP)
     assert indices == [0]
     assert math.isnan(output.ranges[0])
+    assert output.ranges[1] == pytest.approx(FREE_SPACE_CAP)
+    assert stats.raw_positive_infinity == 1
+    assert stats.converted_free_cap == 1
+
+
+def test_original_positive_infinity_crossing_teammate_is_never_nan():
+    """Predicted geometry without a finite observation is not a detection."""
+    scan = LaserScan()
+    scan.angle_min = 0.0
+    scan.angle_increment = 0.0
+    scan.range_min = 0.05
+    scan.range_max = 12.0
+    scan.ranges = [math.inf]
+    output, indices, _ = prepare_slam_scan(
+        scan, 1.0, 0.0, 0.1, 0.005, FREE_SPACE_CAP)
+    assert indices == []
+    assert output.ranges[0] == pytest.approx(FREE_SPACE_CAP)

@@ -1,0 +1,16 @@
+{
+  "original_geometric_length_m": 16.925950540754467,
+  "mirrored_geometric_length_m": 16.925950540754467,
+  "length_difference_m": 0.0,
+  "route_signature_equal_after_reflection": true,
+  "original_curvature_values_1pm": [
+    3.335082
+  ],
+  "mirrored_curvature_values_1pm": [
+    -3.335082
+  ],
+  "original_curvature_positive_count": 84,
+  "original_curvature_negative_count": 0,
+  "mirrored_curvature_positive_count": 0,
+  "mirrored_curvature_negative_count": 84
+}

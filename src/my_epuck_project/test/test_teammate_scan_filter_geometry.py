@@ -1,23 +1,27 @@
-import math
-import threading
+"""Focused geometry and pending-queue tests for teammate scan filtering."""
 
+import inspect
+import math
+
+import pytest
 from sensor_msgs.msg import LaserScan
 
 from my_epuck_project.teammate_scan_filter import (
-    Transform2D, PoseSourceTransition, beam_directions, circle_ray_interval,
-    compose_transform, filtered_scan, inverse_transform, selected_indices,
-    selected_indices_cached, is_shutdown_conversion_error,
+    PendingScanQueue,
+    Transform2D,
+    circle_first_intersection,
+    compose_transform,
+    mask_teammate_returns,
 )
-from tf2_ros import TransformException
 
 
-def scan(ranges, angle_min=-1.0, increment=0.5, intensities=None):
+def scan(ranges, angle_min=0.0, increment=0.0, intensities=None):
     message = LaserScan()
     message.header.stamp.sec = 12
     message.header.stamp.nanosec = 345
     message.header.frame_id = 'robot1/d500_lidar'
     message.angle_min = angle_min
-    message.angle_max = angle_min + increment * max(0, len(ranges)-1)
+    message.angle_max = angle_min + increment * max(0, len(ranges) - 1)
     message.angle_increment = increment
     message.time_increment = 0.0001
     message.scan_time = 0.1
@@ -28,17 +32,8 @@ def scan(ranges, angle_min=-1.0, increment=0.5, intensities=None):
     return message
 
 
-def test_teammate_filter_shutdown_conversion_signature_is_narrow():
-    """Only the known conversion error after shutdown is eligible to stop cleanly."""
-    assert is_shutdown_conversion_error(
-        RuntimeError('Unable to convert call argument'), True, False)
-    assert not is_shutdown_conversion_error(
-        RuntimeError('Unable to convert call argument'), False, False)
-    assert not is_shutdown_conversion_error(
-        RuntimeError('callback failure'), True, False)
-
-
-def assert_preserved(source, output, changed):
+def assert_scan_preserved(source, output, masked=()):
+    masked = set(masked)
     assert output.header == source.header
     assert output.angle_min == source.angle_min
     assert output.angle_max == source.angle_max
@@ -47,10 +42,9 @@ def assert_preserved(source, output, changed):
     assert output.scan_time == source.scan_time
     assert output.range_min == source.range_min
     assert output.range_max == source.range_max
-    assert len(output.ranges) == len(source.ranges)
     assert output.intensities == source.intensities
     for index, value in enumerate(source.ranges):
-        if index in changed:
+        if index in masked:
             assert math.isnan(output.ranges[index])
         elif math.isnan(value):
             assert math.isnan(output.ranges[index])
@@ -58,235 +52,143 @@ def assert_preserved(source, output, changed):
             assert output.ranges[index] == value
 
 
-def test_ray_miss_and_no_angle_only_mask():
-    message = scan([1.0], angle_min=math.pi/2, increment=1.0)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
-    assert indices == []
-    assert_preserved(message, output, set())
+def filter_one(value, angle=0.0, tolerance=0.005):
+    message = scan([value], angle_min=angle)
+    output, indices = mask_teammate_returns(
+        message, 1.0, 0.0, 0.1, tolerance)
+    return message, output, indices
 
 
-def test_peer_match_only():
-    message = scan([0.95], angle_min=0.0, increment=1.0)
-    output, indices, intervals = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
+def test_finite_return_at_first_circle_intersection_is_masked():
+    message, output, indices = filter_one(0.9)
     assert indices == [0]
-    assert intervals[0] == (0.9, 1.1)
-    assert_preserved(message, output, {0})
+    assert_scan_preserved(message, output, indices)
 
 
-def test_static_return_before_peer_is_preserved():
-    message = scan([0.50], angle_min=0.0, increment=1.0)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
+def test_finite_return_within_tolerance_is_masked():
+    message, output, indices = filter_one(0.904)
+    assert indices == [0]
+    assert_scan_preserved(message, output, indices)
+
+
+def test_wall_before_first_intersection_is_preserved():
+    message, output, indices = filter_one(0.5)
     assert indices == []
-    assert_preserved(message, output, set())
+    assert_scan_preserved(message, output)
 
 
-def test_return_beyond_peer_is_preserved():
-    message = scan([1.40], angle_min=0.0, increment=1.0)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
+def test_return_inside_chord_but_not_at_first_surface_is_preserved():
+    message, output, indices = filter_one(1.0, tolerance=0.01)
     assert indices == []
-    assert_preserved(message, output, set())
+    assert_scan_preserved(message, output)
 
 
-def test_tangent_ray_interval_and_match():
+def test_return_beyond_teammate_is_preserved():
+    message, output, indices = filter_one(1.2)
+    assert indices == []
+    assert_scan_preserved(message, output)
+
+
+def test_ray_missing_circle_is_preserved():
+    message, output, indices = filter_one(1.0, angle=math.pi / 2.0)
+    assert indices == []
+    assert circle_first_intersection(1.0, 0.0, 0.1, math.pi / 2.0) is None
+    assert_scan_preserved(message, output)
+
+
+def test_tangent_return_is_masked_at_first_intersection():
     angle = math.asin(0.1)
-    interval = circle_ray_interval(1.0, 0.0, 0.1, angle)
-    assert interval is not None
-    message = scan([interval[0]], angle_min=angle, increment=1.0)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 1e-6)
+    expected = circle_first_intersection(1.0, 0.0, 0.1, angle)
+    assert expected is not None
+    message, output, indices = filter_one(expected, angle=angle, tolerance=1e-8)
     assert indices == [0]
-    assert_preserved(message, output, {0})
+    assert_scan_preserved(message, output, indices)
 
 
-def test_peer_partly_outside_scan_limits():
-    message = scan([0.95, 0.95], angle_min=-0.2, increment=0.2)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
-    assert indices == [1]
-    assert_preserved(message, output, {1})
-
-
-def test_peer_completely_outside_scan():
-    message = scan([1.0, 1.0], angle_min=1.0, increment=0.2)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
+def test_positive_infinity_crossing_circle_is_preserved_by_masking():
+    message, output, indices = filter_one(math.inf)
     assert indices == []
-    assert_preserved(message, output, set())
+    assert math.isinf(output.ranges[0]) and output.ranges[0] > 0.0
 
 
-def test_nonfinite_and_out_of_range_inputs_unchanged():
-    message = scan(
-        [math.nan, math.inf, 0.02, 13.0, 0.95],
-        angle_min=0.0,
-        increment=0.0,
-    )
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.01)
-    assert indices == [4]
-    assert_preserved(message, output, {4})
+@pytest.mark.parametrize('value', [
+    math.nan, -math.inf, 0.0, -1.0, 12.0, 0.02, 13.0,
+])
+def test_nonfinite_and_ineligible_finite_values_are_preserved(value):
+    message, output, indices = filter_one(value)
+    assert indices == []
+    assert_scan_preserved(message, output)
 
 
-def test_range_tolerance_boundaries_inclusive():
-    message = scan([0.88, 1.12], angle_min=0.0, increment=0.0)
-    output, indices, _ = filtered_scan(message, 1.0, 0.0, 0.1, 0.02)
-    assert indices == [0, 1]
-    assert_preserved(message, output, {0, 1})
-
-
-def test_static_and_dynamic_margin_boundaries():
-    body_radius, static_margin, dynamic_margin = 0.037, 0.003, 0.007
-    radius = body_radius + static_margin + dynamic_margin
-    near = 1.0 - radius
-    message = scan([near], angle_min=0.0, increment=1.0)
-    output, indices, intervals = filtered_scan(message, 1.0, 0.0, radius, 0.0)
-    assert math.isclose(intervals[0][0], near)
+def test_laserscan_metadata_and_intensities_are_unchanged():
+    message = scan([0.9, 0.5], intensities=[7.0, 8.0])
+    output, indices = mask_teammate_returns(
+        message, 1.0, 0.0, 0.1, 0.005)
     assert indices == [0]
-    assert_preserved(message, output, {0})
+    assert_scan_preserved(message, output, indices)
 
 
-def test_rotated_circle_geometry_and_negative_coordinates():
-    # A circle is rotation invariant; negative center coordinates still use rays.
-    message = scan([0.95], angle_min=-math.pi, increment=1.0)
-    output, indices, _ = filtered_scan(message, -1.0, 0.0, 0.1, 0.01)
+def test_robot_behind_sensor_has_no_intersection():
+    assert circle_first_intersection(-1.0, 0.0, 0.1, 0.0) is None
+
+
+def test_negative_peer_coordinates_and_wrapped_beam_angle_work():
+    center = -1.0
+    angle = 5.0 * math.pi / 4.0
+    expected = math.sqrt(2.0) - 0.1
+    assert circle_first_intersection(center, center, 0.1, angle) == pytest.approx(
+        expected)
+    message = scan([expected], angle_min=angle)
+    output, indices = mask_teammate_returns(
+        message, center, center, 0.1, 0.005)
     assert indices == [0]
-    assert_preserved(message, output, {0})
-
-
-def test_empty_and_populated_intensities_preserved():
-    empty = scan([0.95], angle_min=0.0, increment=1.0)
-    output, indices, _ = filtered_scan(empty, 1.0, 0.0, 0.1, 0.01)
-    assert_preserved(empty, output, set(indices))
-    populated = scan([0.95, 0.50], angle_min=0.0, increment=0.0,
-                     intensities=[7.0, 8.0])
-    output, indices, _ = filtered_scan(populated, 1.0, 0.0, 0.1, 0.01)
-    assert_preserved(populated, output, set(indices))
-
-
-# Pending queue/state-machine tests intentionally use synthetic scans and time.
-from my_epuck_project.teammate_scan_filter import PendingScanQueue
+    assert math.isnan(output.ranges[0])
 
 
 def stamped_scan(seconds, nanoseconds=0):
-    message = scan([0.95], angle_min=0.0, increment=1.0)
+    message = scan([0.9])
     message.header.stamp.sec = seconds
     message.header.stamp.nanosec = nanoseconds
     return message
 
 
-def test_pending_transform_delayed_then_publishes_once_with_original_stamp():
+def test_queue_waits_for_transform_then_publishes_once():
     queue = PendingScanQueue(4)
     message = stamped_scan(20, 123)
     queue.enqueue(message, 1.0)
-    action, _, _ = queue.take(1.05, 0.2, False)
-    assert action == 'wait'
-    assert len(queue.items) == 1
-    action, item, _ = queue.take(1.08, 0.2, True)
+    assert queue.take(1.05, 0.2, False)[0] == 'wait'
+    action, item, waited = queue.take(1.08, 0.2, True)
     assert action == 'publish'
-    assert item[0].header.stamp == message.header.stamp
+    assert item[0] is message
+    assert waited == pytest.approx(0.08)
     assert queue.take(1.09, 0.2, True)[0] == 'idle'
 
 
-def test_pending_queue_allows_bounded_degraded_publication():
-    queue = PendingScanQueue(4)
-    message = stamped_scan(20, 123)
-    queue.enqueue(message, 1.0)
-    action, item, waited = queue.take(1.06, 0.2, False, True)
-    assert action == 'publish_degraded'
-    assert math.isclose(waited, 0.06)
-    assert item[0].header.stamp == message.header.stamp
-
-
-def make_pose_resolution_fixture(shared, odom, mode='simulation'):
-    from my_epuck_project.teammate_scan_filter import TeammateScanFilter
-    node = object.__new__(TeammateScanFilter)
-    node.mode = mode
-    node.state_lock = threading.Lock()
-    node.pose_transition = PoseSourceTransition(2, 0.05, 0.15)
-    node.missing_transform_count = 0
-    node.fallback_pose_successes = 0
-    node.preferred_pose_successes = 0
-    node.shared_peer_pose = lambda stamp: (
-        shared if shared is not None else
-        (_ for _ in ()).throw(TransformException('shared unavailable')))
-    node.odom_peer_pose = lambda stamp: (
-        odom if odom is not None else
-        (_ for _ in ()).throw(TransformException('odom unavailable')))
-    return node
-
-
-def test_shared_tf_loss_uses_independent_simulation_odom_fallback():
-    node = make_pose_resolution_fixture(None, Transform2D(1.0, 2.0, 0.1))
-    node.pose_transition.state = 'shared_map_tf_active'
-    pose, state = node.resolve_peer_pose(stamped_scan(30))
-    assert pose == Transform2D(1.0, 2.0, 0.1)
-    assert state == 'fallback_odom_active'
-    assert node.missing_transform_count == 1
-
-
-def test_no_trustworthy_pose_enters_explicit_degraded_mode():
-    node = make_pose_resolution_fixture(None, None)
-    pose, state = node.resolve_peer_pose(stamped_scan(31))
-    assert pose is None
-    assert state == 'degraded_unmasked'
-    assert node.missing_transform_count == 1
-
-
-def test_physical_mode_does_not_use_simulation_odom_fallback():
-    node = make_pose_resolution_fixture(
-        None, Transform2D(1.0, 2.0, 0.1), mode='physical')
-    pose, state = node.resolve_peer_pose(stamped_scan(32))
-    assert pose is None
-    assert state == 'degraded_unmasked'
-
-
-def test_pending_latency_expiry_drops_without_publication():
+def test_queue_drops_after_transform_deadline():
     queue = PendingScanQueue(4)
     queue.enqueue(stamped_scan(1), 2.0)
-    action, item, waited = queue.take(2.201, 0.2, True)
+    action, item, waited = queue.take(2.201, 0.2, False)
     assert action == 'expired'
     assert item[0].header.stamp.sec == 1
     assert waited > 0.2
-    assert queue.take(3.0, 0.2, True)[0] == 'idle'
+    assert not queue.items
 
 
-def test_pending_overflow_drops_oldest_and_counts_separately():
+def test_queue_overflow_drops_oldest_scan():
     queue = PendingScanQueue(2)
     assert queue.enqueue(stamped_scan(1), 1.0) is None
     assert queue.enqueue(stamped_scan(2), 2.0) is None
     dropped = queue.enqueue(stamped_scan(3), 3.0)
     assert dropped[0].header.stamp.sec == 1
-    assert queue.overflow_drops == 1
     assert [item[0].header.stamp.sec for item in queue.items] == [2, 3]
 
 
-def test_pending_timestamp_order_and_no_overtake():
+def test_queue_has_no_degraded_unmasked_publication_action():
     queue = PendingScanQueue(4)
-    queue.enqueue(stamped_scan(3), 3.0)
     queue.enqueue(stamped_scan(1), 1.0)
-    queue.enqueue(stamped_scan(2), 2.0)
-    action, item, _ = queue.take(3.05, 10.0, False)
-    assert action == 'wait' and item[0].header.stamp.sec == 1
-    published = []
-    for now in (3.06, 3.07, 3.08):
-        action, item, _ = queue.take(now, 10.0, True)
-        assert action == 'publish'
-        published.append(item[0].header.stamp.sec)
-    assert published == [1, 2, 3]
-    assert len(set(published)) == len(published)
-
-
-def test_startup_policy_queues_without_unfiltered_passthrough():
-    queue = PendingScanQueue(4)
-    queue.enqueue(stamped_scan(4), 4.0)
-    assert queue.take(4.05, 0.2, False)[0] == 'wait'
-    action, item, _ = queue.take(4.10, 0.2, True)
-    assert action == 'publish'
-    assert item[0].header.stamp.sec == 4
-
-
-def test_latest_transform_is_never_needed_by_queue_and_shutdown_is_safe():
-    queue = PendingScanQueue(4)
-    queue.enqueue(stamped_scan(5), 5.0)
-    assert queue.take(5.01, 0.2, False)[0] == 'wait'
-    queue.clear()
-    queue.clear()
-    assert queue.take(5.02, 0.2, True)[0] == 'idle'
+    assert queue.take(1.1, 0.2, False)[0] == 'wait'
+    assert tuple(inspect.signature(queue.take).parameters) == (
+        'now', 'maximum_latency', 'pose_available')
 
 
 def assert_transform_close(actual, expected, tolerance=1e-9):
@@ -295,20 +197,7 @@ def assert_transform_close(actual, expected, tolerance=1e-9):
     assert math.isclose(actual.yaw, expected.yaw, abs_tol=tolerance)
 
 
-def test_known_initial_odom_transform_and_robot2_inverse():
-    robot1_to_robot2 = Transform2D(
-        -0.299999998712, -0.000027796077, -3.1415)
-    robot2_to_robot1 = inverse_transform(robot1_to_robot2)
-    assert_transform_close(
-        robot2_to_robot1,
-        Transform2D(-0.299999999999703, -0.000000000000102, 3.1415),
-        2e-12,
-    )
-    identity = compose_transform(robot1_to_robot2, robot2_to_robot1)
-    assert_transform_close(identity, Transform2D(0.0, 0.0, 0.0), 2e-12)
-
-
-def test_internal_odom_composition_needs_no_map_transform():
+def test_independent_odometry_transform_composition_is_correct():
     lidar_from_own_odom = Transform2D(-0.02, 0.0, 0.0)
     own_odom_from_peer_odom = Transform2D(-0.30, 0.0, math.pi)
     peer_odom_from_peer_base = Transform2D(0.04, 0.0, 0.1)
@@ -316,67 +205,4 @@ def test_internal_odom_composition_needs_no_map_transform():
         compose_transform(lidar_from_own_odom, own_odom_from_peer_odom),
         peer_odom_from_peer_base,
     )
-    expected = Transform2D(-0.36, 0.0, -math.pi + 0.1)
-    assert_transform_close(result, expected)
-
-
-def test_pose_source_one_way_transition_after_consecutive_matches():
-    transition = PoseSourceTransition(3, 0.05, 0.15)
-    transition.odom_available()
-    assert transition.state == 'odom_bootstrap'
-    odom = Transform2D(-0.3, 0.0, math.pi)
-    shared = Transform2D(-0.301, 0.001, math.pi - 0.01)
-    assert not transition.compare_shared(odom, shared)
-    assert not transition.compare_shared(odom, shared)
-    assert transition.compare_shared(odom, shared)
-    assert transition.state == 'shared_map_tf_active'
-    discontinuous = Transform2D(2.0, 2.0, 0.0)
-    assert transition.compare_shared(odom, discontinuous)
-    assert transition.state == 'shared_map_tf_active'
-
-
-def test_pose_source_rejects_discontinuous_transition():
-    transition = PoseSourceTransition(2, 0.05, 0.15)
-    transition.odom_available()
-    odom = Transform2D(-0.3, 0.0, math.pi)
-    assert not transition.compare_shared(odom, Transform2D(-0.1, 0.0, 0.0))
-    assert transition.state == 'odom_bootstrap'
-    assert transition.consecutive_matches == 0
-    assert transition.rejected_transitions == 1
-
-
-def test_scan_ordering_is_preserved_across_pose_source_transition():
-    queue = PendingScanQueue(4)
-    for stamp in (10, 11, 12):
-        queue.enqueue(stamped_scan(stamp), float(stamp))
-    transition = PoseSourceTransition(1, 0.05, 0.15)
-    transition.odom_available()
-    published = []
-    action, item, _ = queue.take(12.01, 5.0, True)
-    published.append(item[0].header.stamp.sec)
-    transition.compare_shared(Transform2D(0, 0, 0), Transform2D(0, 0, 0))
-    while queue.items:
-        action, item, _ = queue.take(12.02, 5.0, True)
-        published.append(item[0].header.stamp.sec)
-    assert published == [10, 11, 12]
-
-
-def test_angular_window_optimization_matches_full_ray_selection():
-    ranges = [0.4 + 0.001 * index for index in range(720)]
-    message = scan(ranges, angle_min=-math.pi, increment=2 * math.pi / 720)
-    directions = beam_directions(message)
-    optimized, optimized_intervals = selected_indices_cached(
-        message, -0.30, -0.02, 0.035, 0.012, directions)
-    full = []
-    full_intervals = {}
-    for index, measured in enumerate(message.ranges):
-        angle = message.angle_min + index * message.angle_increment
-        interval = circle_ray_interval(-0.30, -0.02, 0.035, angle)
-        if interval is None:
-            continue
-        full_intervals[index] = interval
-        if interval[0] - 0.012 - 1e-7 <= measured <= interval[1] + 0.012 + 1e-7:
-            full.append(index)
-    assert optimized == full
-    assert optimized_intervals.keys() == full_intervals.keys()
-    assert selected_indices(message, -0.30, -0.02, 0.035, 0.012)[0] == full
+    assert_transform_close(result, Transform2D(-0.36, 0.0, -math.pi + 0.1))

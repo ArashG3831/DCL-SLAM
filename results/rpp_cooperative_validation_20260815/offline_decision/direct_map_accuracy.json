@@ -1,0 +1,1537 @@
+{
+  "world": {
+    "path": "src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+    "segments": 96,
+    "solid_boxes": 23,
+    "arena_dimensions_m": [
+      40.0,
+      10.0
+    ]
+  },
+  "runs": [
+    {
+      "controller": "dwb",
+      "trial": "trial_01",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.164077750952196,
+            "y": -4.54613687518144,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 8435,
+          "occupied_area_m2": 7.591499660633509,
+          "mean_distance_m": 0.3184350078749235,
+          "median_distance_m": 0.10092219842110861,
+          "p90_distance_m": 1.0990777747568004,
+          "p95_distance_m": 1.3390777693923823,
+          "p99_distance_m": 1.6990777613457544,
+          "rms_distance_m": 0.545271606182747,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 5357,
+              "area_m2": 4.821299784471097,
+              "fraction": 0.6350918790752815
+            },
+            "gt_0.10_m": {
+              "cells": 4252,
+              "area_m2": 3.826799828928711,
+              "fraction": 0.5040901007705987
+            },
+            "gt_0.15_m": {
+              "cells": 3584,
+              "area_m2": 3.225599855804445,
+              "fraction": 0.42489626556016596
+            },
+            "gt_0.25_m": {
+              "cells": 2731,
+              "area_m2": 2.457899890123309,
+              "fraction": 0.3237700059276823
+            },
+            "gt_0.50_m": {
+              "cells": 1842,
+              "area_m2": 1.6577999258905658,
+              "fraction": 0.21837581505631298
+            }
+          },
+          "known_cells": 141596,
+          "free_cells": 133161,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.1204406888437266,
+          "boundary_unknown_fraction": 0.701893250615039,
+          "boundary_free_fraction": 0.17766606054123435
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.17,
+            "y": -6.6899999999999995,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14389,
+          "occupied_area_m2": 12.950099421085424,
+          "mean_distance_m": 0.26945338390971574,
+          "median_distance_m": 0.12500010158866592,
+          "p90_distance_m": 0.7550000875070683,
+          "p95_distance_m": 1.1449999259039774,
+          "p99_distance_m": 1.585000013075768,
+          "rms_distance_m": 0.44518524048889824,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 10298,
+              "area_m2": 9.268199585679177,
+              "fraction": 0.7156855931614428
+            },
+            "gt_0.10_m": {
+              "cells": 7874,
+              "area_m2": 7.086599683204297,
+              "fraction": 0.5472235735631386
+            },
+            "gt_0.15_m": {
+              "cells": 6721,
+              "area_m2": 6.048899729593101,
+              "fraction": 0.46709291820140386
+            },
+            "gt_0.25_m": {
+              "cells": 4862,
+              "area_m2": 4.3757998043864985,
+              "fraction": 0.3378970046563347
+            },
+            "gt_0.50_m": {
+              "cells": 2244,
+              "area_m2": 2.0195999097168458,
+              "fraction": 0.1559524636875391
+            }
+          },
+          "known_cells": 172223,
+          "free_cells": 157834,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.15755695796341854,
+          "boundary_unknown_fraction": 0.6011338111027917,
+          "boundary_free_fraction": 0.2413092309337897
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.1092966880940205,
+            "y": -4.189220180269528,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 6799,
+          "occupied_area_m2": 6.119099726454917,
+          "mean_distance_m": 0.1850957230189562,
+          "median_distance_m": 0.12429678029495528,
+          "p90_distance_m": 0.4342967031814462,
+          "p95_distance_m": 0.5242967011697885,
+          "p99_distance_m": 0.6742966978170273,
+          "rms_distance_m": 0.25100572161892104,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 4896,
+              "area_m2": 4.406399803018572,
+              "fraction": 0.7201058979261656
+            },
+            "gt_0.10_m": {
+              "cells": 3796,
+              "area_m2": 3.4163998472750206,
+              "fraction": 0.5583173996175909
+            },
+            "gt_0.15_m": {
+              "cells": 3114,
+              "area_m2": 2.8025998747140184,
+              "fraction": 0.45800853066627445
+            },
+            "gt_0.25_m": {
+              "cells": 2238,
+              "area_m2": 2.0141999099582444,
+              "fraction": 0.3291660538314458
+            },
+            "gt_0.50_m": {
+              "cells": 351,
+              "area_m2": 0.3158999858781697,
+              "fraction": 0.05162523900573614
+            }
+          },
+          "known_cells": 95319,
+          "free_cells": 88520,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.07412557492779977,
+          "boundary_unknown_fraction": 0.7514172638784897,
+          "boundary_free_fraction": 0.17445716119371055
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.17,
+            "y": -6.6899999999999995,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14331,
+          "occupied_area_m2": 12.897899423418945,
+          "mean_distance_m": 0.2659358293623319,
+          "median_distance_m": 0.12500010158866592,
+          "p90_distance_m": 0.7450000318512311,
+          "p95_distance_m": 1.1350000231340518,
+          "p99_distance_m": 1.585000013075768,
+          "rms_distance_m": 0.43917035470256244,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 10240,
+              "area_m2": 9.2159995880127,
+              "fraction": 0.7145349242900007
+            },
+            "gt_0.10_m": {
+              "cells": 7816,
+              "area_m2": 7.034399685537819,
+              "fraction": 0.5453911101807271
+            },
+            "gt_0.15_m": {
+              "cells": 6663,
+              "area_m2": 5.996699731926623,
+              "fraction": 0.46493615239690184
+            },
+            "gt_0.25_m": {
+              "cells": 4805,
+              "area_m2": 4.324499806679787,
+              "fraction": 0.3352871397669388
+            },
+            "gt_0.50_m": {
+              "cells": 2195,
+              "area_m2": 1.9754999116882692,
+              "fraction": 0.15316446863442887
+            }
+          },
+          "known_cells": 169663,
+          "free_cells": 155332,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.15755695796341854,
+          "boundary_unknown_fraction": 0.604770563696652,
+          "boundary_free_fraction": 0.2376724783399294
+        }
+      }
+    },
+    {
+      "controller": "dwb",
+      "trial": "trial_02",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.290788959039185,
+            "y": -5.215127629076976,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 15179,
+          "occupied_area_m2": 13.661099389301247,
+          "mean_distance_m": 0.6038994340063227,
+          "median_distance_m": 0.3457890807444186,
+          "p90_distance_m": 1.775788992902073,
+          "p95_distance_m": 2.1763686749876765,
+          "p99_distance_m": 2.4357891457879863,
+          "rms_distance_m": 0.9032577611463293,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 12314,
+              "area_m2": 11.082599504569178,
+              "fraction": 0.8112523881678635
+            },
+            "gt_0.10_m": {
+              "cells": 10926,
+              "area_m2": 9.833399560412769,
+              "fraction": 0.7198102641807761
+            },
+            "gt_0.15_m": {
+              "cells": 9989,
+              "area_m2": 8.990099598111216,
+              "fraction": 0.6580802424402135
+            },
+            "gt_0.25_m": {
+              "cells": 8585,
+              "area_m2": 7.726499654598538,
+              "fraction": 0.5655840305685487
+            },
+            "gt_0.50_m": {
+              "cells": 6140,
+              "area_m2": 5.525999752968552,
+              "fraction": 0.4045062257065683
+            }
+          },
+          "known_cells": 238937,
+          "free_cells": 223758,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.10803294469996791,
+          "boundary_unknown_fraction": 0.5536421007594395,
+          "boundary_free_fraction": 0.3383249545405926
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.31,
+            "y": -5.22,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 21541,
+          "occupied_area_m2": 19.386899133338044,
+          "mean_distance_m": 0.49764797185516324,
+          "median_distance_m": 0.27499955307692403,
+          "p90_distance_m": 1.3850007674470532,
+          "p95_distance_m": 2.0050001968070856,
+          "p99_distance_m": 2.3950001880899063,
+          "rms_distance_m": 0.7743452152120018,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 17993,
+              "area_m2": 16.193699276085205,
+              "fraction": 0.8352908407223434
+            },
+            "gt_0.10_m": {
+              "cells": 15273,
+              "area_m2": 13.745699385519332,
+              "fraction": 0.709020008356158
+            },
+            "gt_0.15_m": {
+              "cells": 13752,
+              "area_m2": 12.37679944671393,
+              "fraction": 0.6384104730513904
+            },
+            "gt_0.25_m": {
+              "cells": 11190,
+              "area_m2": 10.070999549791221,
+              "fraction": 0.519474490506476
+            },
+            "gt_0.50_m": {
+              "cells": 6975,
+              "area_m2": 6.277499719373885,
+              "fraction": 0.32380112343902323
+            }
+          },
+          "known_cells": 265659,
+          "free_cells": 244118,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.12996042357471388,
+          "boundary_unknown_fraction": 0.4657182586372874,
+          "boundary_free_fraction": 0.40432131778799874
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.548155396448572,
+            "y": -2.5539378465246916,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7268,
+          "occupied_area_m2": 6.541199707585577,
+          "mean_distance_m": 0.22642435135830313,
+          "median_distance_m": 0.16876643715818407,
+          "p90_distance_m": 0.523155492002268,
+          "p95_distance_m": 0.6131556073372553,
+          "p99_distance_m": 0.883155601302285,
+          "rms_distance_m": 0.3052958518615442,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 5689,
+              "area_m2": 5.120099771113696,
+              "fraction": 0.7827462850853054
+            },
+            "gt_0.10_m": {
+              "cells": 4676,
+              "area_m2": 4.208399811869862,
+              "fraction": 0.64336818932306
+            },
+            "gt_0.15_m": {
+              "cells": 3908,
+              "area_m2": 3.5171998427689095,
+              "fraction": 0.5376995046780407
+            },
+            "gt_0.25_m": {
+              "cells": 2722,
+              "area_m2": 2.4497998904854072,
+              "fraction": 0.37451843698403964
+            },
+            "gt_0.50_m": {
+              "cells": 781,
+              "area_m2": 0.7028999685779217,
+              "fraction": 0.10745734727572923
+            }
+          },
+          "known_cells": 98893,
+          "free_cells": 91625,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.05872285805968553,
+          "boundary_unknown_fraction": 0.7554818697186865,
+          "boundary_free_fraction": 0.18579527222162798
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_02_attempt_02/observer/trial_02_attempt_02/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.31,
+            "y": -5.22,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 21541,
+          "occupied_area_m2": 19.386899133338044,
+          "mean_distance_m": 0.49764797185516324,
+          "median_distance_m": 0.27499955307692403,
+          "p90_distance_m": 1.3850007674470532,
+          "p95_distance_m": 2.0050001968070856,
+          "p99_distance_m": 2.3950001880899063,
+          "rms_distance_m": 0.7743452152120018,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 17993,
+              "area_m2": 16.193699276085205,
+              "fraction": 0.8352908407223434
+            },
+            "gt_0.10_m": {
+              "cells": 15273,
+              "area_m2": 13.745699385519332,
+              "fraction": 0.709020008356158
+            },
+            "gt_0.15_m": {
+              "cells": 13752,
+              "area_m2": 12.37679944671393,
+              "fraction": 0.6384104730513904
+            },
+            "gt_0.25_m": {
+              "cells": 11190,
+              "area_m2": 10.070999549791221,
+              "fraction": 0.519474490506476
+            },
+            "gt_0.50_m": {
+              "cells": 6975,
+              "area_m2": 6.277499719373885,
+              "fraction": 0.32380112343902323
+            }
+          },
+          "known_cells": 265659,
+          "free_cells": 244118,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.12996042357471388,
+          "boundary_unknown_fraction": 0.4657182586372874,
+          "boundary_free_fraction": 0.40432131778799874
+        }
+      }
+    },
+    {
+      "controller": "dwb",
+      "trial": "trial_03",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.724783290046137,
+            "y": -5.324602511250839,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 11416,
+          "occupied_area_m2": 10.274399540698534,
+          "mean_distance_m": 0.3276513663701832,
+          "median_distance_m": 0.12039733351631376,
+          "p90_distance_m": 0.9997835297685667,
+          "p95_distance_m": 1.1397833450314208,
+          "p99_distance_m": 1.3497834409203924,
+          "rms_distance_m": 0.5111385890009775,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 8073,
+              "area_m2": 7.265699675197903,
+              "fraction": 0.7071653819201121
+            },
+            "gt_0.10_m": {
+              "cells": 6238,
+              "area_m2": 5.614199749025706,
+              "fraction": 0.5464260686755431
+            },
+            "gt_0.15_m": {
+              "cells": 5208,
+              "area_m2": 4.687199790465834,
+              "fraction": 0.4562018220042046
+            },
+            "gt_0.25_m": {
+              "cells": 3992,
+              "area_m2": 3.592799839389326,
+              "fraction": 0.3496846531184303
+            },
+            "gt_0.50_m": {
+              "cells": 3172,
+              "area_m2": 2.8547998723804966,
+              "fraction": 0.27785564120532585
+            }
+          },
+          "known_cells": 184490,
+          "free_cells": 173074,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.13958712161728526,
+          "boundary_unknown_fraction": 0.586158947481014,
+          "boundary_free_fraction": 0.2742539309017007
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.16,
+            "y": -5.34,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 23094,
+          "occupied_area_m2": 20.784599070855986,
+          "mean_distance_m": 0.46706422059150865,
+          "median_distance_m": 0.21499955173581853,
+          "p90_distance_m": 1.205000267215072,
+          "p95_distance_m": 1.7350000318512313,
+          "p99_distance_m": 2.4550000157579763,
+          "rms_distance_m": 0.7371813957706755,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 18404,
+              "area_m2": 16.563599259549388,
+              "fraction": 0.7969169481250541
+            },
+            "gt_0.10_m": {
+              "cells": 14927,
+              "area_m2": 13.434299399439997,
+              "fraction": 0.646358361479172
+            },
+            "gt_0.15_m": {
+              "cells": 13065,
+              "area_m2": 11.758499474354094,
+              "fraction": 0.5657313587944921
+            },
+            "gt_0.25_m": {
+              "cells": 10744,
+              "area_m2": 9.6695995677352,
+              "fraction": 0.465229063826102
+            },
+            "gt_0.50_m": {
+              "cells": 7800,
+              "area_m2": 7.019999686181548,
+              "fraction": 0.33775006495193555
+            }
+          },
+          "known_cells": 276814,
+          "free_cells": 253720,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.1842977858594502,
+          "boundary_unknown_fraction": 0.43298748529254466,
+          "boundary_free_fraction": 0.3827147288480051
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.142602916667276,
+            "y": -2.217497104304053,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 12810,
+          "occupied_area_m2": 11.528999484613543,
+          "mean_distance_m": 0.5576973210783182,
+          "median_distance_m": 0.2923970065544932,
+          "p90_distance_m": 1.6339074648785927,
+          "p95_distance_m": 2.167602938460222,
+          "p99_distance_m": 2.617602928401938,
+          "rms_distance_m": 0.8683423428093011,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 10422,
+              "area_m2": 9.37979958069027,
+              "fraction": 0.8135831381733021
+            },
+            "gt_0.10_m": {
+              "cells": 9033,
+              "area_m2": 8.129699636574093,
+              "fraction": 0.705152224824356
+            },
+            "gt_0.15_m": {
+              "cells": 7959,
+              "area_m2": 7.16309967978448,
+              "fraction": 0.6213114754098361
+            },
+            "gt_0.25_m": {
+              "cells": 6772,
+              "area_m2": 6.094799727541211,
+              "fraction": 0.5286494925839188
+            },
+            "gt_0.50_m": {
+              "cells": 4669,
+              "area_m2": 4.202099812151494,
+              "fraction": 0.3644808743169399
+            }
+          },
+          "known_cells": 220718,
+          "free_cells": 207908,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.08920740186116162,
+          "boundary_unknown_fraction": 0.5935394159803188,
+          "boundary_free_fraction": 0.3172531821585196
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_dwb_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -8.16,
+            "y": -5.34,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 23070,
+          "occupied_area_m2": 20.762999071821582,
+          "mean_distance_m": 0.4670407188516643,
+          "median_distance_m": 0.21499955173581853,
+          "p90_distance_m": 1.205000267215072,
+          "p95_distance_m": 1.7350000318512313,
+          "p99_distance_m": 2.4550000157579763,
+          "rms_distance_m": 0.7372545653475477,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 18385,
+              "area_m2": 16.546499260313816,
+              "fraction": 0.7969224100563502
+            },
+            "gt_0.10_m": {
+              "cells": 14907,
+              "area_m2": 13.41629940024466,
+              "fraction": 0.6461638491547465
+            },
+            "gt_0.15_m": {
+              "cells": 13047,
+              "area_m2": 11.74229947507829,
+              "fraction": 0.5655396618985695
+            },
+            "gt_0.25_m": {
+              "cells": 10727,
+              "area_m2": 9.654299568419164,
+              "fraction": 0.46497615951452104
+            },
+            "gt_0.50_m": {
+              "cells": 7792,
+              "area_m2": 7.0127996865034135,
+              "fraction": 0.3377546597312527
+            }
+          },
+          "known_cells": 276487,
+          "free_cells": 253417,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.18397689592469782,
+          "boundary_unknown_fraction": 0.4348058615894748,
+          "boundary_free_fraction": 0.38121724248582733
+        }
+      }
+    },
+    {
+      "controller": "rpp",
+      "trial": "trial_01",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -10.393328296000915,
+            "y": -4.611112364799864,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 9685,
+          "occupied_area_m2": 8.71649961034209,
+          "mean_distance_m": 0.24359259593746282,
+          "median_distance_m": 0.15832841301228306,
+          "p90_distance_m": 0.6483284579392827,
+          "p95_distance_m": 0.738328455927626,
+          "p99_distance_m": 0.8783283969190272,
+          "rms_distance_m": 0.34720465126176336,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 6492,
+              "area_m2": 5.842799738806489,
+              "fraction": 0.6703149199793496
+            },
+            "gt_0.10_m": {
+              "cells": 5498,
+              "area_m2": 4.948199778798225,
+              "fraction": 0.5676819824470831
+            },
+            "gt_0.15_m": {
+              "cells": 4905,
+              "area_m2": 4.414499802656474,
+              "fraction": 0.5064532782653588
+            },
+            "gt_0.25_m": {
+              "cells": 3689,
+              "area_m2": 3.320099851579966,
+              "fraction": 0.3808982963345379
+            },
+            "gt_0.50_m": {
+              "cells": 1815,
+              "area_m2": 1.6334999269768604,
+              "fraction": 0.1874032008260196
+            }
+          },
+          "known_cells": 189626,
+          "free_cells": 179941,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.1417263878489678,
+          "boundary_unknown_fraction": 0.6128997753770457,
+          "boundary_free_fraction": 0.24537383677398653
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -10.41,
+            "y": -5.3999999999999995,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14207,
+          "occupied_area_m2": 12.786299428407855,
+          "mean_distance_m": 0.18562653682181232,
+          "median_distance_m": 0.08500011902302518,
+          "p90_distance_m": 0.545000332258641,
+          "p95_distance_m": 0.6850001056119783,
+          "p99_distance_m": 0.8350001022592171,
+          "rms_distance_m": 0.28554847810329287,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 9065,
+              "area_m2": 8.158499635286633,
+              "fraction": 0.638065742239741
+            },
+            "gt_0.10_m": {
+              "cells": 6428,
+              "area_m2": 5.78519974138141,
+              "fraction": 0.45245301611881467
+            },
+            "gt_0.15_m": {
+              "cells": 5375,
+              "area_m2": 4.8374997837469005,
+              "fraction": 0.3783346237770113
+            },
+            "gt_0.25_m": {
+              "cells": 3695,
+              "area_m2": 3.325499851338567,
+              "fraction": 0.2600830576476385
+            },
+            "gt_0.50_m": {
+              "cells": 1814,
+              "area_m2": 1.6325999270170934,
+              "fraction": 0.12768353628492995
+            }
+          },
+          "known_cells": 220201,
+          "free_cells": 205994,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.21510321959567869,
+          "boundary_unknown_fraction": 0.44785538560273824,
+          "boundary_free_fraction": 0.33704139480158307
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -5.204940591298734,
+            "y": -2.8995936267735987,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 6148,
+          "occupied_area_m2": 5.533199752646688,
+          "mean_distance_m": 0.05441874853844692,
+          "median_distance_m": 0.035406079189238326,
+          "p90_distance_m": 0.13005917769601538,
+          "p95_distance_m": 0.19005917635491087,
+          "p99_distance_m": 0.25005917501380726,
+          "rms_distance_m": 0.07891476547106901,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 2320,
+              "area_m2": 2.0879999066591273,
+              "fraction": 0.37735849056603776
+            },
+            "gt_0.10_m": {
+              "cells": 1045,
+              "area_m2": 0.9404999579563742,
+              "fraction": 0.16997397527651267
+            },
+            "gt_0.15_m": {
+              "cells": 470,
+              "area_m2": 0.42299998109042664,
+              "fraction": 0.07644762524398178
+            },
+            "gt_0.25_m": {
+              "cells": 127,
+              "area_m2": 0.11429999489039189,
+              "fraction": 0.02065712426805465
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 90263,
+          "free_cells": 84115,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.14108460797946304,
+          "boundary_unknown_fraction": 0.7236068028666167,
+          "boundary_free_fraction": 0.13530858915392022
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -10.41,
+            "y": -5.3999999999999995,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14207,
+          "occupied_area_m2": 12.786299428407855,
+          "mean_distance_m": 0.18562653682181232,
+          "median_distance_m": 0.08500011902302518,
+          "p90_distance_m": 0.545000332258641,
+          "p95_distance_m": 0.6850001056119783,
+          "p99_distance_m": 0.8350001022592171,
+          "rms_distance_m": 0.28554847810329287,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 9065,
+              "area_m2": 8.158499635286633,
+              "fraction": 0.638065742239741
+            },
+            "gt_0.10_m": {
+              "cells": 6428,
+              "area_m2": 5.78519974138141,
+              "fraction": 0.45245301611881467
+            },
+            "gt_0.15_m": {
+              "cells": 5375,
+              "area_m2": 4.8374997837469005,
+              "fraction": 0.3783346237770113
+            },
+            "gt_0.25_m": {
+              "cells": 3695,
+              "area_m2": 3.325499851338567,
+              "fraction": 0.2600830576476385
+            },
+            "gt_0.50_m": {
+              "cells": 1814,
+              "area_m2": 1.6325999270170934,
+              "fraction": 0.12768353628492995
+            }
+          },
+          "known_cells": 220201,
+          "free_cells": 205994,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.21510321959567869,
+          "boundary_unknown_fraction": 0.44785538560273824,
+          "boundary_free_fraction": 0.33704139480158307
+        }
+      }
+    },
+    {
+      "controller": "rpp",
+      "trial": "trial_02",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.971261352772835,
+            "y": -5.299985505890691,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 9994,
+          "occupied_area_m2": 8.994599597910051,
+          "mean_distance_m": 0.2745465581859906,
+          "median_distance_m": 0.16501398080156093,
+          "p90_distance_m": 0.696261548909368,
+          "p95_distance_m": 0.7862613792596473,
+          "p99_distance_m": 0.906261544215502,
+          "rms_distance_m": 0.38784334877416454,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 6664,
+              "area_m2": 5.99759973188639,
+              "fraction": 0.6668000800480288
+            },
+            "gt_0.10_m": {
+              "cells": 5750,
+              "area_m2": 5.174999768659475,
+              "fraction": 0.5753452071242746
+            },
+            "gt_0.15_m": {
+              "cells": 5117,
+              "area_m2": 4.605299794127049,
+              "fraction": 0.5120072043225935
+            },
+            "gt_0.25_m": {
+              "cells": 4135,
+              "area_m2": 3.721499833635988,
+              "fraction": 0.4137482489493696
+            },
+            "gt_0.50_m": {
+              "cells": 2594,
+              "area_m2": 2.3345998956352485,
+              "fraction": 0.25955573344006405
+            }
+          },
+          "known_cells": 186824,
+          "free_cells": 176830,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.14707455342817413,
+          "boundary_unknown_fraction": 0.624986629586052,
+          "boundary_free_fraction": 0.22793881698577387
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.109999999999999,
+            "y": -5.31,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 19272,
+          "occupied_area_m2": 17.344799224627028,
+          "mean_distance_m": 0.23066487765200303,
+          "median_distance_m": 0.12499978240579468,
+          "p90_distance_m": 0.5750002578273401,
+          "p95_distance_m": 0.6895001490972988,
+          "p99_distance_m": 0.8508001868426951,
+          "rms_distance_m": 0.3269508729516177,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 13751,
+              "area_m2": 12.375899446754163,
+              "fraction": 0.7135222083852221
+            },
+            "gt_0.10_m": {
+              "cells": 10474,
+              "area_m2": 9.426599578598147,
+              "fraction": 0.5434827729348277
+            },
+            "gt_0.15_m": {
+              "cells": 9101,
+              "area_m2": 8.19089963383824,
+              "fraction": 0.4722395184723952
+            },
+            "gt_0.25_m": {
+              "cells": 6917,
+              "area_m2": 6.225299721707406,
+              "fraction": 0.3589144873391449
+            },
+            "gt_0.50_m": {
+              "cells": 3319,
+              "area_m2": 2.9870998664662256,
+              "fraction": 0.17221876297218763
+            }
+          },
+          "known_cells": 258243,
+          "free_cells": 238971,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.2168146325810247,
+          "boundary_unknown_fraction": 0.3828216921595893,
+          "boundary_free_fraction": 0.40036367525938604
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.094701177784347,
+            "y": -2.233412238215765,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 11608,
+          "occupied_area_m2": 10.447199532973771,
+          "mean_distance_m": 0.14969160337230308,
+          "median_distance_m": 0.07029855030671417,
+          "p90_distance_m": 0.4402985979159255,
+          "p95_distance_m": 0.5002985965748215,
+          "p99_distance_m": 0.5802985389073276,
+          "rms_distance_m": 0.22301031789444592,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 6921,
+              "area_m2": 6.228899721546474,
+              "fraction": 0.5962267401791868
+            },
+            "gt_0.10_m": {
+              "cells": 4803,
+              "area_m2": 4.322699806760253,
+              "fraction": 0.41376636802205374
+            },
+            "gt_0.15_m": {
+              "cells": 3922,
+              "area_m2": 3.5297998422056454,
+              "fraction": 0.33787043418332185
+            },
+            "gt_0.25_m": {
+              "cells": 2845,
+              "area_m2": 2.5604998855367316,
+              "fraction": 0.24508959338387318
+            },
+            "gt_0.50_m": {
+              "cells": 656,
+              "area_m2": 0.5903999736070635,
+              "fraction": 0.05651274982770503
+            }
+          },
+          "known_cells": 188959,
+          "free_cells": 177351,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.18536741897529146,
+          "boundary_unknown_fraction": 0.5477591186223125,
+          "boundary_free_fraction": 0.26687346240239596
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -7.109999999999999,
+            "y": -5.31,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 19249,
+          "occupied_area_m2": 17.324099225552388,
+          "mean_distance_m": 0.23046370686644524,
+          "median_distance_m": 0.12499978240579468,
+          "p90_distance_m": 0.5750002578273401,
+          "p95_distance_m": 0.691000132299943,
+          "p99_distance_m": 0.8554001353308622,
+          "rms_distance_m": 0.3267587551947522,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 13729,
+              "area_m2": 12.356099447639293,
+              "fraction": 0.7132318562003221
+            },
+            "gt_0.10_m": {
+              "cells": 10453,
+              "area_m2": 9.407699579443042,
+              "fraction": 0.5430411969452958
+            },
+            "gt_0.15_m": {
+              "cells": 9085,
+              "area_m2": 8.17649963448197,
+              "fraction": 0.47197257000363657
+            },
+            "gt_0.25_m": {
+              "cells": 6902,
+              "area_m2": 6.211799722310904,
+              "fraction": 0.35856408125097405
+            },
+            "gt_0.50_m": {
+              "cells": 3308,
+              "area_m2": 2.9771998669087902,
+              "fraction": 0.17185308327705334
+            }
+          },
+          "known_cells": 257864,
+          "free_cells": 238615,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.21670766926944057,
+          "boundary_unknown_fraction": 0.3829286554711734,
+          "boundary_free_fraction": 0.40036367525938604
+        }
+      }
+    },
+    {
+      "controller": "rpp",
+      "trial": "trial_03",
+      "map_accuracy": {
+        "robot1_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.939008022491171,
+            "y": -5.88213764104932,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 8759,
+          "occupied_area_m2": 7.883099647597972,
+          "mean_distance_m": 0.187600159559936,
+          "median_distance_m": 0.11599193157599963,
+          "p90_distance_m": 0.4840080550129535,
+          "p95_distance_m": 0.5540082769657504,
+          "p99_distance_m": 0.7040082736129882,
+          "rms_distance_m": 0.26355262250989414,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 5829,
+              "area_m2": 5.246099765481057,
+              "fraction": 0.6654869277314762
+            },
+            "gt_0.10_m": {
+              "cells": 4665,
+              "area_m2": 4.198499812312426,
+              "fraction": 0.5325950450964722
+            },
+            "gt_0.15_m": {
+              "cells": 3905,
+              "area_m2": 3.5144998428896086,
+              "fraction": 0.44582714921794725
+            },
+            "gt_0.25_m": {
+              "cells": 2757,
+              "area_m2": 2.4812998890772473,
+              "fraction": 0.3147619591277543
+            },
+            "gt_0.50_m": {
+              "cells": 716,
+              "area_m2": 0.6443999711930755,
+              "fraction": 0.08174449138029455
+            }
+          },
+          "known_cells": 174968,
+          "free_cells": 166209,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.12268691838699326,
+          "boundary_unknown_fraction": 0.6763290191464327,
+          "boundary_free_fraction": 0.20098406246657397
+        },
+        "robot1_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.96,
+            "y": -5.91,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14852,
+          "occupied_area_m2": 13.366799402457483,
+          "mean_distance_m": 0.1671854195415146,
+          "median_distance_m": 0.11500004123896268,
+          "p90_distance_m": 0.38500020284205494,
+          "p95_distance_m": 0.4850002564862361,
+          "p99_distance_m": 0.6550000291690212,
+          "rms_distance_m": 0.2298423924365668,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 10449,
+              "area_m2": 9.404099579603974,
+              "fraction": 0.7035416105575006
+            },
+            "gt_0.10_m": {
+              "cells": 7732,
+              "area_m2": 6.958799688917402,
+              "fraction": 0.5206032857527606
+            },
+            "gt_0.15_m": {
+              "cells": 6480,
+              "area_m2": 5.831999739289286,
+              "fraction": 0.4363048747643415
+            },
+            "gt_0.25_m": {
+              "cells": 3852,
+              "area_m2": 3.466799845021965,
+              "fraction": 0.25935900888769187
+            },
+            "gt_0.50_m": {
+              "cells": 719,
+              "area_m2": 0.647099971072376,
+              "fraction": 0.048410988419068136
+            }
+          },
+          "known_cells": 200270,
+          "free_cells": 185418,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.19039469461974542,
+          "boundary_unknown_fraction": 0.5891539202053696,
+          "boundary_free_fraction": 0.22045138517488502
+        },
+        "robot2_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -5.473498143203837,
+            "y": -2.01306475676315,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 8680,
+          "occupied_area_m2": 7.81199965077639,
+          "mean_distance_m": 0.11621885781796755,
+          "median_distance_m": 0.06849815225629197,
+          "p90_distance_m": 0.2884983708563258,
+          "p95_distance_m": 0.3384981462213208,
+          "p99_distance_m": 0.4084983681741168,
+          "rms_distance_m": 0.16216229020814174,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 4947,
+              "area_m2": 4.452299800966682,
+              "fraction": 0.5699308755760368
+            },
+            "gt_0.10_m": {
+              "cells": 3541,
+              "area_m2": 3.1868998575344696,
+              "fraction": 0.40794930875576035
+            },
+            "gt_0.15_m": {
+              "cells": 2969,
+              "area_m2": 2.672099880547823,
+              "fraction": 0.34205069124423965
+            },
+            "gt_0.25_m": {
+              "cells": 1388,
+              "area_m2": 1.249199944156409,
+              "fraction": 0.15990783410138248
+            },
+            "gt_0.50_m": {
+              "cells": 3,
+              "area_m2": 0.0026999998793005957,
+              "fraction": 0.0003456221198156682
+            }
+          },
+          "known_cells": 185432,
+          "free_cells": 176752,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.17189004171569153,
+          "boundary_unknown_fraction": 0.6238100331586266,
+          "boundary_free_fraction": 0.2042999251256819
+        },
+        "robot2_shared_map": {
+          "path": "results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.96,
+            "y": -5.91,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 14852,
+          "occupied_area_m2": 13.366799402457483,
+          "mean_distance_m": 0.1671854195415146,
+          "median_distance_m": 0.11500004123896268,
+          "p90_distance_m": 0.38500020284205494,
+          "p95_distance_m": 0.4850002564862361,
+          "p99_distance_m": 0.6550000291690212,
+          "rms_distance_m": 0.2298423924365668,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 10449,
+              "area_m2": 9.404099579603974,
+              "fraction": 0.7035416105575006
+            },
+            "gt_0.10_m": {
+              "cells": 7732,
+              "area_m2": 6.958799688917402,
+              "fraction": 0.5206032857527606
+            },
+            "gt_0.15_m": {
+              "cells": 6480,
+              "area_m2": 5.831999739289286,
+              "fraction": 0.4363048747643415
+            },
+            "gt_0.25_m": {
+              "cells": 3852,
+              "area_m2": 3.466799845021965,
+              "fraction": 0.25935900888769187
+            },
+            "gt_0.50_m": {
+              "cells": 719,
+              "area_m2": 0.647099971072376,
+              "fraction": 0.048410988419068136
+            }
+          },
+          "known_cells": 200270,
+          "free_cells": 185418,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.19039469461974542,
+          "boundary_unknown_fraction": 0.5891539202053696,
+          "boundary_free_fraction": 0.22045138517488502
+        }
+      }
+    }
+  ]
+}

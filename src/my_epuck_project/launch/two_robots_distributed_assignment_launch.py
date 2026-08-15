@@ -76,6 +76,7 @@ def generate_launch_description():
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
+            'controller_variant': LaunchConfiguration('controller_variant'),
         }.items(),
     )
     return LaunchDescription([
@@ -92,6 +93,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('controller_variant', default_value='rpp',
+                              choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('dispatch_enabled', default_value='false',
                               choices=['true', 'false']),
         frontier_stack,

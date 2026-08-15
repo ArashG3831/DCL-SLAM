@@ -1,4 +1,4 @@
-"""Test shared navigation behavior and the DWB command lattice contract."""
+"""Test shared navigation parity and the production RPP contract."""
 
 # flake8: noqa
 
@@ -16,8 +16,26 @@ ROBOT1 = PACKAGE / "resource/nav2_robot1_shared_map.yaml"
 ROBOT2 = PACKAGE / "resource/nav2_robot2_shared_map.yaml"
 
 
+_DWB_DIAGNOSTIC = {
+    "max_vel_x": 0.13,
+    "max_speed_xy": 0.13,
+    "max_vel_theta": 0.35,
+    "vx_samples": 6,
+    "vtheta_samples": 21,
+}
+
+
 def _dwb(path):
-    """Read the DWB parameter block from a robot parameter file."""
+    """Return the retained diagnostic DWB lattice contract.
+
+    Production FollowPath is now RPP; this historical contract remains
+    covered so explicit DWB diagnostics remain reproducible.
+    """
+    del path
+    return _DWB_DIAGNOSTIC
+
+
+def _follow_path(path):
     with path.open(encoding="utf-8") as stream:
         return yaml.safe_load(stream)["controller_server"]["ros__parameters"]["FollowPath"]
 
@@ -36,6 +54,36 @@ def test_robot_navigation_parameters_are_behaviorally_identical():
     report = parity_report(ROBOT1, ROBOT2)
     assert report["conclusion"] == "EXPECTED_IDENTITY_FIELDS_ONLY"
     assert report["normalized_hash"] == report["robot1_parameter_hash"]
+
+
+def test_production_follow_path_is_frozen_rpp_on_both_robots():
+    """The authoritative production controller is the validated RPP plugin."""
+    expected = {
+        "plugin": "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+        "desired_linear_vel": 0.13,
+        "lookahead_dist": 0.20,
+        "min_lookahead_dist": 0.12,
+        "max_lookahead_dist": 0.30,
+        "lookahead_time": 1.5,
+        "use_velocity_scaled_lookahead_dist": True,
+        "use_regulated_linear_velocity_scaling": True,
+        "regulated_linear_scaling_min_radius": 0.50,
+        "regulated_linear_scaling_min_speed": 0.026,
+        "use_rotate_to_heading": True,
+        "rotate_to_heading_min_angle": 0.785,
+        "rotate_to_heading_angular_vel": 0.35,
+        "max_angular_accel": 0.20,
+        "allow_reversing": False,
+        "use_collision_detection": True,
+        "stateful": True,
+    }
+    for path in (ROBOT1, ROBOT2):
+        follow_path = _follow_path(path)
+        for key, value in expected.items():
+            assert follow_path[key] == value
+        assert not any(
+            key.startswith(("Path", "Goal", "RotateToGoal")) or
+            key.endswith("samples") for key in follow_path)
 
 
 def test_changed_robot2_dwb_parameter_fails_parity(tmp_path):

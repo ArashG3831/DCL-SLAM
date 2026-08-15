@@ -1,0 +1,87 @@
+{
+  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/per_run_decision_metrics.json",
+  "runs": [
+    {
+      "cancellations": 0,
+      "failures": 0,
+      "goals_accepted": 12,
+      "goals_sent": 12,
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 445,
+          "robot2": 399
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 20.871893461389057,
+          "robot2": 16.672890562515104
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 18.904246046780454,
+          "robot2": 15.12631829491208
+        }
+      },
+      "recoveries": 0,
+      "run_id": "pre_demo_burgard_large_01_final",
+      "sim_elapsed_s": 336.5,
+      "successes": 11,
+      "timeouts": 0
+    },
+    {
+      "cancellations": 0,
+      "failures": 2,
+      "goals_accepted": 10,
+      "goals_sent": 10,
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 284,
+          "robot2": 430
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 12.653739341898747,
+          "robot2": 22.290447607788746
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.077161941350242,
+          "robot2": 20.26717517361538
+        }
+      },
+      "recoveries": 0,
+      "run_id": "pre_demo_burgard_large_02_final",
+      "sim_elapsed_s": 296.0,
+      "successes": 7,
+      "timeouts": 0
+    },
+    {
+      "cancellations": 0,
+      "failures": 0,
+      "goals_accepted": 11,
+      "goals_sent": 11,
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 298,
+          "robot2": 469
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 13.007625673900632,
+          "robot2": 22.84710698469576
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.450314867848842,
+          "robot2": 20.829430845826476
+        }
+      },
+      "recoveries": 0,
+      "run_id": "pre_demo_burgard_large_03_final",
+      "sim_elapsed_s": 315.18,
+      "successes": 9,
+      "timeouts": 0
+    }
+  ],
+  "source": "measured run summaries discovered by this report generator"
+}

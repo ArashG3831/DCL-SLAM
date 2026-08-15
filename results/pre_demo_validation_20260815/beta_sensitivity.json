@@ -1,0 +1,101 @@
+{
+  "assignment_change_count_between_adjacent_betas": 0,
+  "beta_values": [
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0
+  ],
+  "kind": "offline_pure_algorithm_sensitivity",
+  "note": "This is a bounded saved-fixture diagnostic, not production retuning.",
+  "production_beta": 1.0,
+  "results": [
+    {
+      "beta": 0.25,
+      "reductions": [
+        {
+          "distance_m": 10.0,
+          "line_of_sight_clear": true,
+          "reduction": 0.165275459098,
+          "task_id": "north",
+          "utility_after": 0.834724540902,
+          "utility_before": 1.0
+        }
+      ],
+      "robot1_task": "north",
+      "robot2_task": "south",
+      "selected_normalized_cost_mean": 0.0,
+      "selected_raw_path_m": 9.0
+    },
+    {
+      "beta": 0.5,
+      "reductions": [
+        {
+          "distance_m": 10.0,
+          "line_of_sight_clear": true,
+          "reduction": 0.165275459098,
+          "task_id": "north",
+          "utility_after": 0.834724540902,
+          "utility_before": 1.0
+        }
+      ],
+      "robot1_task": "north",
+      "robot2_task": "south",
+      "selected_normalized_cost_mean": 0.0,
+      "selected_raw_path_m": 9.0
+    },
+    {
+      "beta": 1.0,
+      "reductions": [
+        {
+          "distance_m": 10.0,
+          "line_of_sight_clear": true,
+          "reduction": 0.165275459098,
+          "task_id": "north",
+          "utility_after": 0.834724540902,
+          "utility_before": 1.0
+        }
+      ],
+      "robot1_task": "north",
+      "robot2_task": "south",
+      "selected_normalized_cost_mean": 0.0,
+      "selected_raw_path_m": 9.0
+    },
+    {
+      "beta": 2.0,
+      "reductions": [
+        {
+          "distance_m": 10.0,
+          "line_of_sight_clear": true,
+          "reduction": 0.165275459098,
+          "task_id": "north",
+          "utility_after": 0.834724540902,
+          "utility_before": 1.0
+        }
+      ],
+      "robot1_task": "north",
+      "robot2_task": "south",
+      "selected_normalized_cost_mean": 0.0,
+      "selected_raw_path_m": 9.0
+    },
+    {
+      "beta": 4.0,
+      "reductions": [
+        {
+          "distance_m": 10.0,
+          "line_of_sight_clear": true,
+          "reduction": 0.165275459098,
+          "task_id": "north",
+          "utility_after": 0.834724540902,
+          "utility_before": 1.0
+        }
+      ],
+      "robot1_task": "north",
+      "robot2_task": "south",
+      "selected_normalized_cost_mean": 0.0,
+      "selected_raw_path_m": 9.0
+    }
+  ],
+  "round_fixture": "pre-demo-sensitivity-round"
+}

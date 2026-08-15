@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import math
 import time
 from typing import Optional
@@ -66,6 +67,8 @@ from .distributed_assignment.scoring import (
     AssignmentWeights,
     choose_pair_assignment,
 )
+from .distributed_assignment.burgard_assignment import choose_burgard_assignment
+from .distributed_assignment.traffic_scheduler import TrafficDecision, schedule_traffic
 
 
 @dataclass
@@ -81,7 +84,20 @@ class RoundWork:
     bids: tuple[Bid, ...] = ()
     local_batch: Optional[BidBatch] = None
     decision: Optional[PairDecision] = None
+    traffic: Optional[TrafficDecision] = None
     decision_published: bool = False
+
+
+@dataclass
+class TrafficHold:
+    """A local deferred dispatch bound to one agreed traffic reservation."""
+
+    round_id: str
+    decision_hash: str
+    winner_robot_id: str
+    snapshot_epochs: tuple[int, int]
+    created_steady_s: float
+    winner_observed_active: bool = False
 
 
 STATE_TO_MESSAGE = {
@@ -89,6 +105,8 @@ STATE_TO_MESSAGE = {
     CoordinatorState.BIDDING: DistributedExplorationStatus.BIDDING,
     CoordinatorState.WAITING_FOR_MATCHING_DECISION:
         DistributedExplorationStatus.WAITING_FOR_MATCHING_DECISION,
+    CoordinatorState.WAITING_FOR_TRAFFIC:
+        DistributedExplorationStatus.WAITING_FOR_TRAFFIC,
     CoordinatorState.NAVIGATING: DistributedExplorationStatus.NAVIGATING,
     CoordinatorState.DEGRADED_SOLO: DistributedExplorationStatus.DEGRADED_SOLO,
     CoordinatorState.COMPLETE: DistributedExplorationStatus.COMPLETE,
@@ -164,6 +182,44 @@ class DistributedFrontierAssignment(Node):
         self._completion_confirmation_s = float(
             self.declare_parameter('completion_confirmation_s', 4.0).value,
         )
+        self._assignment_strategy = str(
+            self.declare_parameter('assignment_strategy', 'burgard').value,
+        )
+        if self._assignment_strategy not in ('burgard', 'legacy_weighted'):
+            raise ValueError('assignment_strategy must be burgard or legacy_weighted')
+        self._burgard_beta = float(self.declare_parameter('burgard_beta', 1.0).value)
+        self._burgard_sensor_max_range_m = float(self.declare_parameter(
+            'burgard_sensor_max_range_m', 11.98,
+        ).value)
+        self._burgard_occupied_threshold = int(self.declare_parameter(
+            'burgard_occupied_threshold', 50,
+        ).value)
+        self._burgard_allow_missing_map_for_test = bool(self.declare_parameter(
+            'burgard_allow_missing_map_for_test', False,
+        ).value)
+        self._traffic_scheduler_enabled = bool(self.declare_parameter(
+            'traffic_scheduler_enabled', True,
+        ).value)
+        self._traffic_robot1_safe_radius_m = float(self.declare_parameter(
+            'traffic_robot1_safe_radius_m', 0.08,
+        ).value)
+        self._traffic_robot2_safe_radius_m = float(self.declare_parameter(
+            'traffic_robot2_safe_radius_m', 0.08,
+        ).value)
+        self._traffic_reference_speed_mps = float(self.declare_parameter(
+            'traffic_reference_speed_mps', 0.13,
+        ).value)
+        self._traffic_eta_tie_s = float(self.declare_parameter(
+            'traffic_eta_tie_s', 0.05,
+        ).value)
+        self._traffic_dispatch_grace_s = float(self.declare_parameter(
+            'traffic_dispatch_grace_s', 8.0,
+        ).value)
+        if (self._burgard_beta < 0.0 or self._burgard_sensor_max_range_m <= 0.0 or
+                self._traffic_robot1_safe_radius_m <= 0.0 or
+                self._traffic_robot2_safe_radius_m <= 0.0 or
+                self._traffic_reference_speed_mps <= 0.0):
+            raise ValueError('Burgard and traffic parameters must be positive')
         self._weights = AssignmentWeights(
             gain=float(self.declare_parameter('weight_gain', 3.0).value),
             path=float(self.declare_parameter('weight_path', 1.0).value),
@@ -212,6 +268,7 @@ class DistributedFrontierAssignment(Node):
         self._active_task: Optional[CanonicalTask] = None
         self._active_round_id = ''
         self._active_decision_hash = ''
+        self._traffic_hold: Optional[TrafficHold] = None
         self._last_solo_snapshot_key: Optional[tuple[str, int]] = None
         self._map_versions: dict[str, tuple[str, int, str]] = {}
         self._maps_stable_since_steady_s = time.monotonic()
@@ -259,9 +316,15 @@ class DistributedFrontierAssignment(Node):
         self._status_timer = self.create_timer(1.0, self._publish_status)
         interfaces = self._nav2.interface_names()
         self.get_logger().info(
-            'DISTRIBUTED_ASSIGNMENT robot=%s peer=%s dispatch=%s '
-            'compute=%s navigate=%s no_peer_clients=true no_cmd_vel=true' % (
+            'DISTRIBUTED_ASSIGNMENT robot=%s peer=%s dispatch=%s strategy=%s '
+            'beta=%.3f path_limit=%.3f sensor_range=%.3f traffic=%s '
+            'traffic_radii=(%.3f,%.3f) traffic_speed=%.3f compute=%s navigate=%s '
+            'no_peer_clients=true no_cmd_vel=true' % (
                 self._robot_id, self._peer_id, self._dispatch_enabled,
+                self._assignment_strategy, self._burgard_beta,
+                self._maximum_solo_path_m, self._burgard_sensor_max_range_m,
+                self._traffic_scheduler_enabled, self._traffic_robot1_safe_radius_m,
+                self._traffic_robot2_safe_radius_m, self._traffic_reference_speed_mps,
                 interfaces['compute_path'], interfaces['navigate'],
             )
         )
@@ -415,7 +478,24 @@ class DistributedFrontierAssignment(Node):
         self._expire_failures(now)
         if self._state == CoordinatorState.COMPLETE:
             return
+        if self._traffic_hold is not None:
+            self._continue_traffic_hold(now)
+            return
         if self._nav2.local_goal_active or self._dispatch_in_progress:
+            return
+        # A healthy peer goal is an already-issued local Nav2 commitment, not
+        # a new candidate to be re-arbitrated.  Conservatively wait for its
+        # terminal result and fresh proposals instead of issuing a conflicting
+        # new goal or cancelling the peer's local action.  This is the active
+        # robot priority rule; both replicas observe the same peer status.
+        peer_status = self._peer_status
+        if (peer_status is not None and peer_status.fresh(now) and
+                (peer_status.value.local_nav_goal_active or
+                 peer_status.value.state == DistributedExplorationStatus.NAVIGATING)):
+            self._transition(
+                CoordinatorState.WAITING_FOR_INPUTS,
+                'peer active local NavigateToPose retains traffic priority',
+            )
             return
         if now < self._settle_until_steady_s:
             return
@@ -491,10 +571,30 @@ class DistributedFrontierAssignment(Node):
             first_batch = self._bid_batches['robot1'].value
             second_batch = self._bid_batches['robot2'].value
             hard_ids = self._hard_failed_task_ids(self._round.union)
-            decision = choose_pair_assignment(
-                self._round.round_id, self._round.union,
-                first_batch, second_batch, hard_ids, self._weights,
-            )
+            if self._assignment_strategy == 'burgard':
+                if self._nav2.shared_map is None:
+                    self.get_logger().warning(
+                        'BURGARD_LOS_MAP_UNAVAILABLE round=%s; retaining range '
+                        'utility reduction gate with zero reduction until a map exists',
+                        self._round.round_id,
+                    )
+                decision = choose_burgard_assignment(
+                    self._round.round_id, self._round.union,
+                    first_batch, second_batch,
+                    beta=self._burgard_beta,
+                    maximum_path_length_m=self._maximum_solo_path_m,
+                    minimum_visible_gain_m=self._minimum_solo_visible_gain_m,
+                    sensor_max_range_m=self._burgard_sensor_max_range_m,
+                    occupied_threshold=self._burgard_occupied_threshold,
+                    shared_map=self._nav2.shared_map,
+                    hard_failed_tasks=hard_ids,
+                )
+            else:
+                decision = choose_pair_assignment(
+                    self._round.round_id, self._round.union,
+                    first_batch, second_batch, hard_ids, self._weights,
+                )
+            traffic = self._traffic_for_decision(decision, first_batch, second_batch)
             # Snapshot cardinalities are transport/provenance facts rather
             # than solver inputs.  Attach them here so the decision telemetry
             # can distinguish an empty source snapshot from a source whose
@@ -506,11 +606,11 @@ class DistributedFrontierAssignment(Node):
                     robot1_snapshot_task_count=len(
                         self._round.snapshots[0].tasks,
                     ),
-                    robot2_snapshot_task_count=len(
-                        self._round.snapshots[1].tasks,
-                    ),
+                    robot2_snapshot_task_count=len(self._round.snapshots[1].tasks),
+                    traffic=traffic.as_dict(),
                 ),
             )
+            self._round.traffic = traffic
             self._publish_decision()
             self._transition(
                 CoordinatorState.WAITING_FOR_MATCHING_DECISION,
@@ -532,6 +632,107 @@ class DistributedFrontierAssignment(Node):
             )
             return
         self._start_local_dispatch()
+
+    def _traffic_for_decision(
+            self, decision: PairDecision, robot1_bids: BidBatch,
+            robot2_bids: BidBatch) -> TrafficDecision:
+        """Derive the same bounded traffic result from agreed bid geometry."""
+        required = self._traffic_robot1_safe_radius_m + self._traffic_robot2_safe_radius_m
+        if not self._traffic_scheduler_enabled:
+            return TrafficDecision(required_separation_m=required, reason='DISABLED')
+        if not decision.robot1_task_id or not decision.robot2_task_id:
+            return TrafficDecision(required_separation_m=required, reason='SINGLE_ACTIVE_OR_IDLE')
+        first = {bid.canonical_task_id: bid for bid in robot1_bids.bids}.get(
+            decision.robot1_task_id,
+        )
+        second = {bid.canonical_task_id: bid for bid in robot2_bids.bids}.get(
+            decision.robot2_task_id,
+        )
+        if first is None or second is None:
+            return TrafficDecision(required_separation_m=required, reason='SELECTED_BID_MISSING')
+        return schedule_traffic(
+            first.path, second.path,
+            robot1_safe_radius_m=self._traffic_robot1_safe_radius_m,
+            robot2_safe_radius_m=self._traffic_robot2_safe_radius_m,
+            reference_speed_mps=self._traffic_reference_speed_mps,
+            eta_tie_s=self._traffic_eta_tie_s,
+            # A matched round contains only new undispatched goals.  Keeping
+            # asynchronous status observations out of this calculation makes
+            # traffic evidence bit-for-bit reproducible at both replicas.
+            active_robots=frozenset(),
+        )
+
+    def _traffic_reason(self, traffic: TrafficDecision) -> str:
+        """Keep event/status evidence compact, structured, and deterministic."""
+        return json.dumps(traffic.as_dict(), sort_keys=True, separators=(',', ':'))
+
+    def _continue_traffic_hold(self, now: float) -> None:
+        """Wait for winner terminal evidence, then require newer proposals."""
+        hold = self._traffic_hold
+        if hold is None:
+            return
+        peer = self._peer_status
+        peer_active = bool(
+            peer is not None and peer.fresh(now) and
+            (peer.value.local_nav_goal_active or
+             peer.value.state == DistributedExplorationStatus.NAVIGATING)
+        )
+        if peer_active:
+            hold.winner_observed_active = True
+            self._transition(
+                CoordinatorState.WAITING_FOR_TRAFFIC,
+                'traffic reservation held by active %s' % hold.winner_robot_id,
+            )
+            return
+        if not hold.winner_observed_active and (
+                now - hold.created_steady_s < self._traffic_dispatch_grace_s):
+            self._transition(
+                CoordinatorState.WAITING_FOR_TRAFFIC,
+                'waiting for traffic winner %s dispatch heartbeat' % hold.winner_robot_id,
+            )
+            return
+        first = self._fresh_snapshot('robot1', now)
+        second = self._fresh_snapshot('robot2', now)
+        if first is None or second is None:
+            self._transition(
+                CoordinatorState.WAITING_FOR_TRAFFIC,
+                'traffic winner released; waiting for fresh task snapshots',
+            )
+            return
+        if (first.epoch <= hold.snapshot_epochs[0] and
+                second.epoch <= hold.snapshot_epochs[1]):
+            self._transition(
+                CoordinatorState.WAITING_FOR_TRAFFIC,
+                'traffic winner released; stale deferred goal discarded pending newer proposals',
+            )
+            return
+        waited = now - hold.created_steady_s
+        self._emit_event(
+            'TRAFFIC_RELEASED_FRESH_REALLOCATION',
+            'winner terminal/released; stale deferred task will not dispatch',
+            duration=waited,
+        )
+        self._traffic_hold = None
+        self._reset_round('traffic reservation released; rebuilding from fresh proposals')
+
+    def _begin_traffic_wait(self, traffic: TrafficDecision) -> None:
+        """Defer only this new local goal; never inject a Nav2 velocity hold."""
+        if self._round is None or self._round.decision is None:
+            return
+        if self._traffic_hold is None:
+            self._traffic_hold = TrafficHold(
+                round_id=self._round.round_id,
+                decision_hash=self._round.decision.decision_hash,
+                winner_robot_id=traffic.winner_robot_id,
+                snapshot_epochs=(self._round.snapshots[0].epoch,
+                                 self._round.snapshots[1].epoch),
+                created_steady_s=time.monotonic(),
+            )
+            self._emit_event('TRAFFIC_WAITING', self._traffic_reason(traffic))
+        self._transition(
+            CoordinatorState.WAITING_FOR_TRAFFIC,
+            'traffic deferred local dispatch behind %s' % traffic.winner_robot_id,
+        )
 
     def _consider_completion(self, now: float) -> bool:
         """Require matching healthy empty-round persistence before COMPLETE."""
@@ -767,6 +968,26 @@ class DistributedFrontierAssignment(Node):
         if not log_decision:
             return
         score = self._round.decision.score
+        diagnostics = self._round.decision.diagnostics
+        if diagnostics.strategy == 'burgard':
+            self.get_logger().info(
+                'BURGARD_DECISION robot=%s round=%s union=%s hash=%s '
+                'r1=%s r2=%s beta=%.6f path_limit=%.6f sensor_range=%.6f '
+                'selection_total=%.6f trace=%s traffic=%s' % (
+                    self._robot_id, self._round.round_id,
+                    self._round.union.union_hash,
+                    self._round.decision.decision_hash,
+                    self._round.decision.robot1_task_id or 'IDLE',
+                    self._round.decision.robot2_task_id or 'IDLE',
+                    diagnostics.beta, diagnostics.feasible_path_limit_m,
+                    diagnostics.sensor_max_range_m, score.total,
+                    json.dumps(diagnostics.burgard_trace, sort_keys=True,
+                               separators=(',', ':')),
+                    json.dumps(diagnostics.traffic, sort_keys=True,
+                               separators=(',', ':')),
+                )
+            )
+            return
         self.get_logger().info(
             'PAIR_DECISION robot=%s round=%s union=%s hash=%s r1=%s r2=%s '
             'total=%.6f gain=%.6f path=%.6f nearby=%.6f route=%.6f hard=%.6f '
@@ -807,6 +1028,16 @@ class DistributedFrontierAssignment(Node):
     def _start_local_dispatch(self) -> None:
         if self._round is None or self._round.decision is None:
             return
+        traffic = self._round.traffic
+        if (self._traffic_scheduler_enabled and traffic is not None and
+                traffic.conflict):
+            if traffic.waiting_robot_id == self._robot_id:
+                self._begin_traffic_wait(traffic)
+                return
+            if traffic.winner_robot_id == self._robot_id:
+                self._emit_event('TRAFFIC_PRIORITY_GRANTED', self._traffic_reason(traffic))
+            elif traffic.reason == 'BOTH_ALREADY_ACTIVE_MONITOR_ONLY':
+                self._emit_event('TRAFFIC_MONITOR_ONLY', self._traffic_reason(traffic))
         task_id = (
             self._round.decision.robot1_task_id if self._robot_id == 'robot1'
             else self._round.decision.robot2_task_id

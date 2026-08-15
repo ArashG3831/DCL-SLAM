@@ -1,0 +1,93 @@
+{
+  "production_sources": [
+    "src/my_epuck_project/my_epuck_project/distributed_assignment/local_nav2.py",
+    "src/my_epuck_project/my_epuck_project/distributed_assignment/failures.py",
+    "src/my_epuck_project/my_epuck_project/distributed_frontier_assignment.py",
+    "src/my_epuck_frontier_candidates/src/frontier_candidate_generator.cpp"
+  ],
+  "action_status_constants": {
+    "STATUS_UNKNOWN": 0,
+    "STATUS_ACCEPTED": 1,
+    "STATUS_EXECUTING": 2,
+    "STATUS_CANCELING": 3,
+    "STATUS_SUCCEEDED": 4,
+    "STATUS_CANCELED": 5,
+    "STATUS_ABORTED": 6
+  },
+  "success_rules": {
+    "compute_path_to_pose": "wrapped.status == STATUS_SUCCEEDED AND result is not None AND result.error_code == ComputePathToPose.Result.NONE (0) AND path contains at least one pose",
+    "navigate_to_pose": "wrapped.status == STATUS_SUCCEEDED AND result is not None AND result.error_code == NavigateToPose.Result.NONE (0)",
+    "distributed_node_terminal_success": "outcome.status == 4 AND outcome.error_code == 0",
+    "source_lines": [
+      "local_nav2.py:351-353",
+      "local_nav2.py:588-591",
+      "distributed_frontier_assignment.py:892-895"
+    ]
+  },
+  "compute_path_result_mapping": {
+    "GOAL_OCCUPIED": {"value": 206, "class": "HARD_UNREACHABLE"},
+    "GOAL_OUTSIDE_MAP": {"value": 204, "class": "HARD_UNREACHABLE"},
+    "NO_VALID_PATH": {"value": 208, "class": "HARD_UNREACHABLE"},
+    "TF_ERROR": {"value": 202, "class": "TF_OR_LIFECYCLE"},
+    "TIMEOUT": {"value": 207, "class": "TIMEOUT"},
+    "other_nonzero_error_code": "PLANNER_FAILURE when the result is invalid",
+    "zero_error_code_but_bad_status_or_empty_path": "UNKNOWN",
+    "goal_handle_rejected": "ACTION_REJECTION",
+    "local_path_timer_expiry": "TIMEOUT"
+  },
+  "navigate_result_mapping": {
+    "explicit_local_navigation_timeout": "TIMEOUT; the wrapper cancels the goal after navigation_timeout_s (default 240 s)",
+    "explicit_no_progress_timeout": "CONTROLLER_NO_PROGRESS; the wrapper cancels after navigation_no_progress_timeout_s (default 30 s since last >=0.05 m progress)",
+    "explicit_cancel_request_or_status_canceled": "EXPLICIT_CANCELLATION",
+    "goal_handle_rejected": "ACTION_REJECTION",
+    "result_exception_or_other_aborted_status": "UNKNOWN",
+    "recovery_exhaustion": "not separately distinguished; it remains UNKNOWN unless the local no-progress watchdog was the direct evidence",
+    "dynamic_blockage": "not produced by current LocalNav2; the enum exists but no dynamic_obstacle_confirmed evidence is set"
+  },
+  "hard_failure_set": [
+    "HARD_UNREACHABLE",
+    "PLANNER_FAILURE",
+    "CONTROLLER_NO_PROGRESS",
+    "DYNAMIC_BLOCKAGE"
+  ],
+  "non_hard_classes": [
+    "TF_OR_LIFECYCLE",
+    "ACTION_REJECTION",
+    "TIMEOUT",
+    "EXPLICIT_CANCELLATION",
+    "UNKNOWN"
+  ],
+  "association": {
+    "wire_fields": ["round_id", "canonical_task_id", "physical_task_signature", "approach_pose", "path_samples"],
+    "suppression_key": "exact physical_task_signature string",
+    "canonical_effect": "a canonical task is blocked when any member physical_signature is currently suppressed",
+    "spatial_tolerance": "none at failure-memory lookup; the signature itself was generated from 0.05 m quantized approach, centroid and bounds",
+    "per_robot_or_team": "team-visible in effect: both peers subscribe to both /robotN/exploration_failure topics and each keeps its own local copy; the failing peer records local evidence before publishing",
+    "alternative_approach": "the transport message has no alternative_approach field; the unused pure FailureSuppressor supports it only in unit-testable infrastructure"
+  },
+  "allocator_suppression": {
+    "first_hard_failure": "record immediately with requested TTL 15 s",
+    "repeat_duration_formula": "min(120 s, clamp(requested_ttl, 0.1 s, 15 s) * 2^(count-1))",
+    "durations_for_15_s_request": {"count_1": 15, "count_2": 30, "count_3": 60, "count_4_or_more": 120},
+    "expiry": "_expire_failures removes entries when receiver-local time exceeds expiry; map revision does not explicitly clear this table",
+    "wire_validity": {"hard": 15, "non_hard": 2},
+    "retry_count_on_wire": 1,
+    "maximum_count_records": 128,
+    "source_lines": ["distributed_frontier_assignment.py:362-385", "distributed_frontier_assignment.py:936-970", "distributed_frontier_assignment.py:972-983"]
+  },
+  "candidate_generator_suppression": {
+    "key": "stable frontier uint64 ID from quantized geometry/bounds/size",
+    "goal_occupied_or_outside_map": "persist until a different map revision is observed",
+    "other_path_failure_or_timeout": "unreachable_suppression_s default 7 s",
+    "capacity": "128 entries", "source_lines": ["frontier_candidate_generator.cpp:69-71", "frontier_candidate_generator.cpp:100-119", "frontier_candidate_generator.cpp:133-134"]
+  },
+  "gate_or_penalty": {
+    "current_behavior": "hard failure is already a feasibility/suppression gate in _task_feasible; the nominal -5 score term is unreachable for selected feasible assignments",
+    "safe_rewrite_direction": "preserve the exact-signature bounded TTL gate; remove hard_failure from the soft exploration objective and retain failure diagnostics"
+  },
+  "map_change_risk": {
+    "permanent_miss": false,
+    "reason": "allocator suppression is bounded to at most 120 s and candidate-generator persistent suppression is released on a changed map revision",
+    "remaining_risk": "an unchanged physical signature can be temporarily unavailable even if a newly changed map would make it useful; the next allocator should keep the bounded expiry and consider a changed-map/signature version if reopening sooner is required"
+  }
+}

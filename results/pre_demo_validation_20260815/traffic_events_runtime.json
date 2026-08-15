@@ -1,0 +1,6 @@
+{
+  "count": 0,
+  "events": [],
+  "interpretation": "No runtime traffic events were emitted in the three large-world runs; pure geometry/priority validation is in traffic_benchmark.json.",
+  "source": "measured production observer events"
+}

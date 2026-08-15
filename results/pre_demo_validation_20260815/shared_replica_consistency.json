@@ -1,0 +1,5 @@
+{
+  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/shared_replica_metrics.json",
+  "new_run_count": 3,
+  "source": "archived reference only; new observer runs provide map-state telemetry but not archived forensic comparison arrays"
+}

@@ -1,0 +1,48 @@
+{
+  "current_route_overlap": {
+    "function": "route_overlap",
+    "source": "src/my_epuck_project/my_epuck_project/distributed_assignment/scoring.py:80-98",
+    "inputs": "Bid.path tuples for the two selected tasks",
+    "geometry": "Each bid carries only an ordered bounded XY sample polyline in shared_map; generator paths are sampled to at most 16 points and LocalNav2 paths to at most 32 points.",
+    "sampling_interval": "No fixed spatial interval. Downsampling is index-spaced; candidate-generator samples at most 16 evenly by pose index, LocalNav2 at most 32 evenly by pose index.",
+    "threshold": "2*route_corridor_radius_m = 0.32 m point-to-point threshold with default radius 0.16 m.",
+    "directionality": "Unsigned symmetric average of two one-way sample-match fractions.",
+    "distinguishes_crossing": "No; a single crossing and a long shared corridor both become a scalar fraction, with some dependence on sample density.",
+    "distinguishes_same_direction": "No.",
+    "distinguishes_opposite_direction": "No.",
+    "where_along_path": "No; only one scalar is returned and matched indices/intervals are discarded.",
+    "geometry_output": "No overlap geometry, intervals or conflict-zone endpoints.",
+    "time_or_eta": "None. Bid has a path-query timestamp, but route_overlap does not use it and no path speed/time parameter is transported.",
+    "costmap_width": "No costmap input; route_overlap cannot determine whether a shared section is too narrow for two footprints to pass."
+  },
+  "available_reusable_data": {
+    "peer_bids": "Both peers retain current-round bid batches, including selected-task path samples, while the round is active/navigating.",
+    "path_frame": "The task/bid wire messages do not carry a path frame field; current code and publishers use shared_map by convention.",
+    "current_pose": "The allocator has its own odometry and TF for LocalNav2 health, but it does not publish or consume peer pose in the protocol.",
+    "costmaps": "LocalNav2 subscribes to each namespace's global_costmap/costmap for dispatch checks; no shared costmap or common obstacle-width computation is exposed by the allocator.",
+    "collision_monitor": "Production Nav2 launches include Collision Monitor with a 0.08 m stop circle and lidar input, which is reactive contact prevention, not a reservation/deadlock scheduler."
+  },
+  "can_refactor_to_detect_conflict_zone": {
+    "answer": "Partially, without changing Nav2: existing sampled paths are enough to identify contiguous sample-index runs that are geometrically close.",
+    "required_new_work": [
+      "retain matched sample indices and convert them to path-distance intervals",
+      "define a shared conflict-zone threshold using robot footprint plus clearance rather than the current 0.32 m soft corridor threshold",
+      "obtain a common costmap/occupancy geometry and determine traversable width",
+      "add fresh robot poses and a deterministic ETA model",
+      "add a reservation/occupancy/release message or a rigorously shared TF-based state machine"
+    ],
+    "nav2_change": "Not intrinsically required; the safest first implementation gates dispatch or holds before Nav2 starts rather than injecting velocity commands."
+  },
+  "proposed_scheduler_feasibility": {
+    "peer_pose_frequency": "Not available in current allocator messages. Global TF may contain both robot frames in this project, but the assignment node has no peer-pose query, freshness policy or wire agreement for it.",
+    "both_paths_at_both_peers": "Yes for the current round, as bounded Bid.path samples; not full nav_msgs/Path geometry.",
+    "same_conflict_zone_independently": "A sampled-path proximity interval could be deterministic from the common round bids. A true narrow-zone test cannot be guaranteed because local costmaps and footprint/clearance data are not currently part of the agreement.",
+    "deterministic_eta": "Not currently. Path length is available, but start pose, speed model and current time are not protocol-bound. A fixed configured speed plus common TF could be deterministic after a new freshness rule.",
+    "safe_hold_point": "No existing helper. It would need a path prefix before the conflict interval, map/costmap free-space and footprint-clearance validation, and a fallback to not dispatch if no safe hold point exists.",
+    "pause_without_cancel": "No. LocalNav2 exposes send/cancel only; the allocator deliberately has no cmd_vel publisher. Zero-command gating could trip Nav2 progress checks and Collision Monitor is not a pause/reservation API.",
+    "delay_dispatch": "Yes, cleaner and safer: leave the agreed task/decision intact, gate the lower-priority peer before send_navigation, and release only from an explicit winner-clear condition.",
+    "conflict_emerges_after_dispatch": "Do not cancel or inject a stop from this layer for the first implementation. Keep Nav2/Collision Monitor reactive safety and handle only pre-dispatch conflicts; a later version needs a reservation state machine for already-active goals.",
+    "minimum_tomorrow_demo": "Add a pre-dispatch deterministic gate for already-known conflicting sampled-path intervals, with one reservation owner, a lower-priority not-yet-dispatched state, a safe current-pose hold, and a release heartbeat. If the necessary common pose/clearance evidence is absent, conservatively serialize the two conflicting dispatches rather than guess a hold point.",
+    "robot_id_priority": "Robot ID should remain only the final tie-break after occupied-zone status and ETA; the current architecture does not yet provide the primary occupied/ETA facts."
+  }
+}

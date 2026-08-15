@@ -213,6 +213,11 @@ class LocalNav2:
         )
 
     @property
+    def shared_map(self) -> Optional[OccupancyGrid]:
+        """Expose the local shared-map replica for allocator LOS evaluation."""
+        return self._map
+
+    @property
     def travelled_distance_m(self) -> float:
         """Return measured cumulative local odometry displacement."""
         return self._distance.distance_m

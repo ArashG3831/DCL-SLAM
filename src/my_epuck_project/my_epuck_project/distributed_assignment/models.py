@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 
 Point = Tuple[float, float]
@@ -155,6 +155,15 @@ class AssignmentDiagnostics:
     best_non_idle_robot2_task_id: str = ''
     best_non_idle_score: AssignmentScore = AssignmentScore()
     idle_score: float = 0.0
+    # ``legacy_weighted`` retains the historical seven-term diagnostic score.
+    # ``burgard`` serializes the bounded, deterministic Algorithm-1-style
+    # selection trace instead of relabelling old heuristic terms.
+    strategy: str = 'legacy_weighted'
+    beta: float = 0.0
+    feasible_path_limit_m: float = 0.0
+    sensor_max_range_m: float = 0.0
+    burgard_trace: Tuple[dict[str, Any], ...] = ()
+    traffic: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -226,6 +235,7 @@ class CoordinatorState(str, Enum):
     WAITING_FOR_INPUTS = 'WAITING_FOR_INPUTS'
     BIDDING = 'BIDDING'
     WAITING_FOR_MATCHING_DECISION = 'WAITING_FOR_MATCHING_DECISION'
+    WAITING_FOR_TRAFFIC = 'WAITING_FOR_TRAFFIC'
     NAVIGATING = 'NAVIGATING'
     DEGRADED_SOLO = 'DEGRADED_SOLO'
     COMPLETE = 'COMPLETE'

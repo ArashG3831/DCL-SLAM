@@ -1,0 +1,268 @@
+{
+  "decision_event_count": 34,
+  "measured_run_count": 3,
+  "new_runtime_benchmark_complete": true,
+  "runs": [
+    {
+      "clean_shutdown": true,
+      "configuration": {
+        "assignment_strategy": "burgard",
+        "burgard_beta": 1.0,
+        "dispatch_enabled": true,
+        "frontier_engine": "frontier_exploration_ros2 public core",
+        "map_fusion_resolution": 0.03,
+        "maximum_path_queries": 8,
+        "maximum_tasks_per_source": 5,
+        "maximum_union_tasks": 10,
+        "traffic_scheduler_enabled": true
+      },
+      "coordination": {
+        "agreement_publications": 12,
+        "dispatch_attempts": 12,
+        "goals_terminal": 11,
+        "unique_agreed_decisions": 6,
+        "unique_agreed_rounds": 6
+      },
+      "duration_s": 359.6231612410047,
+      "event_metrics": {
+        "agreement_event_count": 12,
+        "assignment_computation_latency_not_observable_in_event_schema": true,
+        "both_active_assignment_count": 6,
+        "canonical_duplicate_assignment_attempts": 0,
+        "decisions_with_both_replica_events": 6,
+        "idle_robot_count": 0,
+        "los_blocked_reduction_count": 34,
+        "raw_pair_decision_events": 12,
+        "redundancy_reduction_count": 62,
+        "redundancy_reduction_mean": 0.34553848749869354,
+        "runtime_traffic_conflict_decisions": 0,
+        "runtime_traffic_event_count": 0,
+        "runtime_traffic_wait_events": 0,
+        "selected_normalized_cost_mean": 0.18693925274733333,
+        "selected_raw_path_length_m_mean": 3.36490654945375,
+        "selected_utility_before_reduction_mean": 0.9460995376059167,
+        "semantic_agreement_rate": 1.0,
+        "single_active_assignment_count": 0,
+        "unique_semantic_decisions": 6
+      },
+      "mapping": {
+        "coverage_gain_cells": 107481,
+        "coverage_gain_per_metre_travelled": 2862.7411981267114,
+        "duplicated_known_fraction": 0.42457417869847247,
+        "final_known_cells": 118502,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 24840,
+          "robot2": 23361
+        },
+        "simultaneously_observed_cells": 2525,
+        "total_known_union_cells": 119475,
+        "unique_first_seen_cells": {
+          "robot1": 70105,
+          "robot2": 49370
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 445,
+          "robot2": 399
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 20.871893461389057,
+          "robot2": 16.672890562515104
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 18.904246046780454,
+          "robot2": 15.12631829491208
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 12,
+        "goals_sent": 12,
+        "recoveries": 0,
+        "successes": 11,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_01_final",
+      "sim_elapsed_s": 336.5
+    },
+    {
+      "clean_shutdown": true,
+      "configuration": {
+        "assignment_strategy": "burgard",
+        "burgard_beta": 1.0,
+        "dispatch_enabled": true,
+        "frontier_engine": "frontier_exploration_ros2 public core",
+        "map_fusion_resolution": 0.03,
+        "maximum_path_queries": 8,
+        "maximum_tasks_per_source": 5,
+        "maximum_union_tasks": 10,
+        "traffic_scheduler_enabled": true
+      },
+      "coordination": {
+        "agreement_publications": 10,
+        "dispatch_attempts": 10,
+        "goals_terminal": 9,
+        "unique_agreed_decisions": 5,
+        "unique_agreed_rounds": 5
+      },
+      "duration_s": 318.1667966720124,
+      "event_metrics": {
+        "agreement_event_count": 10,
+        "assignment_computation_latency_not_observable_in_event_schema": true,
+        "both_active_assignment_count": 5,
+        "canonical_duplicate_assignment_attempts": 0,
+        "decisions_with_both_replica_events": 5,
+        "idle_robot_count": 0,
+        "los_blocked_reduction_count": 16,
+        "raw_pair_decision_events": 10,
+        "redundancy_reduction_count": 49,
+        "redundancy_reduction_mean": 0.5090400524604693,
+        "runtime_traffic_conflict_decisions": 0,
+        "runtime_traffic_event_count": 0,
+        "runtime_traffic_wait_events": 0,
+        "selected_normalized_cost_mean": 0.2246443225277,
+        "selected_raw_path_length_m_mean": 4.0435978055,
+        "selected_utility_before_reduction_mean": 0.9353194451271,
+        "semantic_agreement_rate": 1.0,
+        "single_active_assignment_count": 0,
+        "unique_semantic_decisions": 5
+      },
+      "mapping": {
+        "coverage_gain_cells": 86291,
+        "coverage_gain_per_metre_travelled": 2469.3949847578783,
+        "duplicated_known_fraction": 0.6200255167134473,
+        "final_known_cells": 97312,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 36529,
+          "robot2": 23345
+        },
+        "simultaneously_observed_cells": 873,
+        "total_known_union_cells": 97975,
+        "unique_first_seen_cells": {
+          "robot1": 49736,
+          "robot2": 48239
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 284,
+          "robot2": 430
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 12.653739341898747,
+          "robot2": 22.290447607788746
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.077161941350242,
+          "robot2": 20.26717517361538
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 2,
+        "goals_accepted": 10,
+        "goals_sent": 10,
+        "recoveries": 0,
+        "successes": 7,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_02_final",
+      "sim_elapsed_s": 296.0
+    },
+    {
+      "clean_shutdown": true,
+      "configuration": {
+        "assignment_strategy": "burgard",
+        "burgard_beta": 1.0,
+        "dispatch_enabled": true,
+        "frontier_engine": "frontier_exploration_ros2 public core",
+        "map_fusion_resolution": 0.03,
+        "maximum_path_queries": 8,
+        "maximum_tasks_per_source": 5,
+        "maximum_union_tasks": 10,
+        "traffic_scheduler_enabled": true
+      },
+      "coordination": {
+        "agreement_publications": 11,
+        "dispatch_attempts": 11,
+        "goals_terminal": 9,
+        "unique_agreed_decisions": 6,
+        "unique_agreed_rounds": 6
+      },
+      "duration_s": 333.4391189930029,
+      "event_metrics": {
+        "agreement_event_count": 11,
+        "assignment_computation_latency_not_observable_in_event_schema": true,
+        "both_active_assignment_count": 6,
+        "canonical_duplicate_assignment_attempts": 0,
+        "decisions_with_both_replica_events": 6,
+        "idle_robot_count": 0,
+        "los_blocked_reduction_count": 35,
+        "raw_pair_decision_events": 12,
+        "redundancy_reduction_count": 62,
+        "redundancy_reduction_mean": 0.32820983419251615,
+        "runtime_traffic_conflict_decisions": 0,
+        "runtime_traffic_event_count": 0,
+        "runtime_traffic_wait_events": 0,
+        "selected_normalized_cost_mean": 0.23784559137300001,
+        "selected_raw_path_length_m_mean": 4.281220644712417,
+        "selected_utility_before_reduction_mean": 0.9460995376059167,
+        "semantic_agreement_rate": 1.0,
+        "single_active_assignment_count": 0,
+        "unique_semantic_decisions": 6
+      },
+      "mapping": {
+        "coverage_gain_cells": 85853,
+        "coverage_gain_per_metre_travelled": 2394.4677211089515,
+        "duplicated_known_fraction": 0.5662401514060603,
+        "final_known_cells": 96874,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 28605,
+          "robot2": 25612
+        },
+        "simultaneously_observed_cells": 834,
+        "total_known_union_cells": 97222,
+        "unique_first_seen_cells": {
+          "robot1": 50658,
+          "robot2": 46564
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 298,
+          "robot2": 469
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 13.007625673900632,
+          "robot2": 22.84710698469576
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.450314867848842,
+          "robot2": 20.829430845826476
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 9,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_03_final",
+      "sim_elapsed_s": 315.18
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "status": "analysis_only_no_runtime_change",
+  "preserve_unchanged": [
+    "FrontierCandidateArray publication and local candidate-generator ComputePathToPose feasibility filtering",
+    "FrontierProposalAdapter source session/epoch/TTL and physical signatures",
+    "SnapshotLedger, receiver-local TTL, source provenance and canonical round binding",
+    "canonical geometry equivalence, union-find clustering, canonical IDs and union_hash",
+    "per-robot local Nav2 bid computation and path-query lock",
+    "bid path samples/fingerprints and PairDecision matching",
+    "local NavigateToPose ownership, final path validation, lifecycle/TF/map/costmap dispatch preconditions",
+    "bounded hard-failure suppression and failure/event/status telemetry",
+    "post-terminal settle and wait-for-both-fresh-snapshots behavior"
+  ],
+  "replace_as_exploration_heuristic": [
+    "the weighted AssignmentScore objective in scoring.py",
+    "the normalized visible_gain_scale_m=5.0 and path_cost_scale_m=12.0 coefficient interpretation",
+    "the weighted sensing-overlap penalty if explicit information redundancy is implemented"
+  ],
+  "move_to_traffic_layer": [
+    "route_overlap as a soft pair-score penalty",
+    "path-sample matching logic, after refactoring it to return path-distance intervals/conflict zones",
+    "any future occupied-zone, ETA, hold-point and reservation/release state"
+  ],
+  "likely_remove_from_exploration_objective": [
+    "nearby_goal_penalty once canonical task merging and explicit sensing redundancy are authoritative",
+    "workload_imbalance_penalty because it is fairness-only and can override exploration ranking",
+    "hard_failure_penalty as a soft term; retain hard failures as a bounded feasibility/suppression gate",
+    "route_overlap_penalty as an exploration term"
+  ],
+  "recommended_next_allocator": {
+    "choice": "project adaptation using explicit visible-cell sets only after making those sets real and source-bound; otherwise use a documented Burgard-style scalar visibility utility, not a false union",
+    "assignment_core": "For each unassigned robot, choose the feasible task maximizing U_t - beta*C_i_t; initialize U_t from a dimensionless normalized literature-backed utility, use beta=1 only after scale calibration, and reduce other task utility by the documented expected-visible set/region after assignment.",
+    "literal_burgard_warning": "Do not call current metre-valued visible_reveal_gain and metre-valued Nav2 path length dimensionally compatible with beta=1. Current gain is a length proxy and current path is a length; subtracting them has no literature-justified meaning unless both are explicitly nondimensionalized/calibrated.",
+    "path_scaling_options": [
+      "preferred: define a dimensionless travel cost C_i_t = path_length_m / calibrated_distance_scale_m, then beta=1 is meaningful only as a declared empirical normalization",
+      "alternative: use a measured time estimate path_length_m / shared_nominal_speed_mps, then normalize information utility to the same time/value convention",
+      "if exact Burgard utility is desired: implement the paper's utility/cost definitions and document the project-specific conversion separately; do not reuse current AssignmentWeights scales silently"
+    ],
+    "failure_gate": "Filter tasks with active hard suppression before utility ranking; retain expiry/escalation and allow re-entry after bounded TTL or changed physical signature/map evidence. Do not use -5 to make an otherwise infeasible task merely less attractive.",
+    "protocol_impact": "No change if the new solver consumes the existing canonical tasks/bids and emits deterministic robot1_task_id/robot2_task_id plus matching fingerprints/hash. Explicit visible-cell union requires a message/data-path extension because current live candidates carry no visible set.",
+    "traffic_boundary": "The allocator returns assignments and path samples; a separate traffic gate decides whether a selected goal may be dispatched. It must never make the exploration score encode doorway order."
+  },
+  "immediate_tests_after_rewrite": [
+    "python3 -m pytest -q src/my_epuck_project/test/test_distributed_pair_scoring.py src/my_epuck_project/test/test_distributed_task_canonicalization.py src/my_epuck_project/test/test_distributed_protocol.py src/my_epuck_project/test/test_distributed_failures_and_telemetry.py",
+    "add unit tests for utility units/scaling, one-active vs two-active selection, explicit visible-set union/intersection, and hard-failure gate expiry",
+    "preserve tests for bid fingerprint order independence, union_hash/round binding, stale session rejection, duplicate canonical-task exclusion and decision agreement",
+    "run the fixed no-motion allocator validation launch with dispatch disabled and confirm both peers publish identical round/union/decision hashes",
+    "run the shortest existing dispatch-enabled RPP smoke test only after the offline/unit checks pass; verify one local NavigateToPose per selected task, no peer action client, no cmd_vel publisher and no TF loop",
+    "inspect allocator_validation_pair_scores.csv and protocol_events.jsonl for the new utility fields and unchanged protocol bindings"
+  ],
+  "traffic_first_increment": "Pre-dispatch only, deterministic conflict interval from current-round bid samples, no velocity override, no active-goal cancellation, and conservative serialization if common pose/clearance evidence is missing."
+}

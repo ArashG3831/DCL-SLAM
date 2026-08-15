@@ -27,6 +27,10 @@ def _peer(robot, origin_x):
             'synthetic_origin_y': 0.0, 'maximum_union_tasks': 10,
             'maximum_path_queries': 8, 'bid_validity_s': 30.0,
             'decision_validity_s': 30.0, 'peer_timeout_s': 30.0,
+            # Historical fixed-task scenario: explicitly preserve the old
+            # weighted result for regression/reproducibility only.
+            'assignment_strategy': 'legacy_weighted',
+            'traffic_scheduler_enabled': False,
             'use_sim_time': False,
         }],
     )

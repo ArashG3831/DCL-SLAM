@@ -5,6 +5,7 @@ uint8 NAVIGATING=3
 uint8 DEGRADED_SOLO=4
 uint8 COMPLETE=5
 uint8 BLOCKED=6
+uint8 WAITING_FOR_TRAFFIC=7
 
 std_msgs/Header header
 string source_robot_id

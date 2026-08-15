@@ -74,6 +74,10 @@ def launch_setup(context):
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'dispatch_enabled': str(dispatch_enabled).lower(),
             'controller_variant': LaunchConfiguration('controller_variant'),
+            'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+            'burgard_beta': LaunchConfiguration('burgard_beta'),
+            'traffic_scheduler_enabled': LaunchConfiguration(
+                'traffic_scheduler_enabled'),
         }.items(),
     )
     observer = Node(
@@ -109,6 +113,13 @@ def launch_setup(context):
                 'maximum_union_tasks': 10,
                 'maximum_path_queries': 8,
                 'dispatch_enabled': dispatch_enabled,
+                'assignment_strategy': LaunchConfiguration(
+                    'assignment_strategy').perform(context),
+                'burgard_beta': float(LaunchConfiguration(
+                    'burgard_beta').perform(context)),
+                'traffic_scheduler_enabled': LaunchConfiguration(
+                    'traffic_scheduler_enabled').perform(context).lower()
+                    == 'true',
                 'map_fusion_resolution': selected['fusion_resolution'],
             }, sort_keys=True),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -152,6 +163,11 @@ def generate_launch_description():
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('assignment_strategy', default_value='burgard',
+                              choices=['burgard', 'legacy_weighted']),
+        DeclareLaunchArgument('burgard_beta', default_value='1.0'),
+        DeclareLaunchArgument('traffic_scheduler_enabled', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('enable_observer', default_value='true',
                               choices=['true', 'false']),

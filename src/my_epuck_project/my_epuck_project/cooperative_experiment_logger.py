@@ -381,6 +381,7 @@ class CooperativeExperimentLogger(Node):
             DistributedExplorationStatus.WAITING_FOR_INPUTS: 'WAITING_FOR_INPUTS',
             DistributedExplorationStatus.BIDDING: 'BIDDING',
             DistributedExplorationStatus.WAITING_FOR_MATCHING_DECISION: 'WAITING_FOR_MATCHING_DECISION',
+            DistributedExplorationStatus.WAITING_FOR_TRAFFIC: 'WAITING_FOR_TRAFFIC',
             DistributedExplorationStatus.NAVIGATING: 'NAVIGATING',
             DistributedExplorationStatus.DEGRADED_SOLO: 'DEGRADED_SOLO',
             DistributedExplorationStatus.COMPLETE: 'COMPLETE',

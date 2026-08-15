@@ -1,0 +1,104 @@
+{
+  "scope": "two equal replicated ROS 2 peers; no central coordinator",
+  "source_files": [
+    "src/my_epuck_project/my_epuck_project/distributed_frontier_assignment.py",
+    "src/my_epuck_project/my_epuck_project/distributed_assignment/protocol.py",
+    "src/my_epuck_project/my_epuck_project/distributed_assignment/canonical.py",
+    "src/my_epuck_project/my_epuck_project/distributed_assignment/ros_conversion.py",
+    "src/my_epuck_interfaces/msg/TaskSnapshot.msg",
+    "src/my_epuck_interfaces/msg/TaskBidArray.msg",
+    "src/my_epuck_interfaces/msg/PairDecision.msg",
+    "src/my_epuck_interfaces/msg/DistributedExplorationStatus.msg",
+    "src/my_epuck_interfaces/msg/ExplorationFailure.msg"
+  ],
+  "topics": {
+    "frontier_candidates": {
+      "topic_pattern": "/robotN/frontier_candidates",
+      "type": "my_epuck_interfaces/msg/FrontierCandidateArray",
+      "publisher": "my_epuck_frontier_candidates/frontier_candidate_generator",
+      "subscriber": "my_epuck_project/frontier_proposal_adapter",
+      "role": "local reachable candidate publication"
+    },
+    "task_snapshot": {
+      "topic_pattern": "/robotN/task_snapshot",
+      "type": "my_epuck_interfaces/msg/TaskSnapshot",
+      "publisher": "FrontierProposalAdapter for robot N",
+      "subscribers": "both assignment peers and passive logger",
+      "qos": "reliable, transient-local, depth 1",
+      "role": "bounded physical task proposal with source session, epoch, map revision and TTL"
+    },
+    "task_bids": {
+      "topic_pattern": "/robotN/task_bids",
+      "type": "my_epuck_interfaces/msg/TaskBidArray",
+      "publisher": "assignment peer in robot N namespace",
+      "subscribers": "both assignment peers and passive logger",
+      "qos": "reliable, transient-local, depth 1",
+      "role": "robot-N-local Nav2 path evaluations for the current round"
+    },
+    "pair_decision": {
+      "topic_pattern": "/robotN/pair_decision",
+      "type": "my_epuck_interfaces/msg/PairDecision",
+      "publisher": "assignment peer in robot N namespace",
+      "subscribers": "both assignment peers and passive logger",
+      "qos": "reliable, transient-local, depth 1",
+      "role": "complete replicated pair assignment and score diagnostics"
+    },
+    "distributed_status": {
+      "topic_pattern": "/robotN/distributed_status",
+      "type": "my_epuck_interfaces/msg/DistributedExplorationStatus",
+      "publisher": "assignment peer in robot N namespace",
+      "subscribers": "peer assignment node and passive logger",
+      "qos": "reliable, transient-local, depth 1",
+      "role": "heartbeat, state, active task, health and liveness"
+    },
+    "exploration_failure": {
+      "topic_pattern": "/robotN/exploration_failure",
+      "type": "my_epuck_interfaces/msg/ExplorationFailure",
+      "publisher": "assignment peer in robot N namespace",
+      "subscribers": "both assignment peers and passive logger",
+      "qos": "reliable, transient-local, depth 1 for the node",
+      "role": "team-visible failure evidence and suppression hint"
+    },
+    "distributed_event": {
+      "topic_pattern": "/robotN/distributed_event",
+      "type": "my_epuck_interfaces/msg/DistributedExplorationEvent",
+      "publisher": "assignment peer in robot N namespace",
+      "subscribers": "passive logger",
+      "qos": "reliable, volatile, depth 50",
+      "role": "diagnostic event stream; not a control input"
+    }
+  },
+  "identity_and_freshness": {
+    "session_uuid": "random per FrontierProposalAdapter process; copied into each task, snapshot and bid source provenance; assignment decisions use the source snapshot session UUID",
+    "snapshot_epoch": "monotonic per adapter candidate callback; SnapshotLedger accepts only increasing epoch within a session and rejects old retired sessions",
+    "map_revision": "source-local only; regressions within a session are rejected and cross-robot numeric comparison is forbidden",
+    "round_id": "sha256([robot1_session, robot1_epoch, robot2_session, robot2_epoch]) in fixed robot1-then-robot2 order",
+    "union_hash": "sha256(list of canonical_id in deterministic canonical task order)",
+    "ttl": "sender duration is clamped to [0.1,10] s by receive(); freshness is receiver-local steady-clock age; production launch sets snapshot 8 s, bid 8 s, decision 8 s and status 2.5 s",
+    "bounds": "snapshot <=5 tasks per source, union <=10 tasks, bid batch <=10 bids"
+  },
+  "replicated_round": [
+    "Both fresh source snapshots are accepted and combined into a canonical union.",
+    "Each peer independently creates the same round_id and union_hash.",
+    "Each peer bids for up to maximum_path_queries=8 canonical tasks using its own local ComputePathToPose, reusing its own candidate-generator path when available.",
+    "Each peer publishes its local TaskBidArray; the message binds source robot, source session, source epoch, round_id, union_hash and validity.",
+    "Each peer waits for both fresh, source-consistent bid arrays, then calls choose_pair_assignment locally.",
+    "Each peer publishes the complete PairDecision including both task IDs, both bid fingerprints, epochs, score components, decision_hash and diagnostics.",
+    "A peer dispatches only after its locally computed decision matches the peer decision on peer session, round_id, union_hash, both epochs, both bid fingerprints, both assignments and decision_hash.",
+    "The local peer sends only its own selected goal; there is no peer action client, central coordinator, cmd_vel publisher or command to the other robot."
+  ],
+  "semantic_agreement": "Equality of all decision-binding provenance and assignment fingerprints, not merely equality of selected coordinates or total score.",
+  "decision_hash_payload": "round_id, union_hash, robot1/robot2 bid fingerprints, robot1/robot2 task IDs, and every AssignmentScore field rounded to millionths",
+  "status_and_liveness": {
+    "peer_status_is_heartbeat": true,
+    "peer_status_can_keep_liveness_while_peer_navigates": true,
+    "peer_timeout_default_in_final_launch_s": 12.0,
+    "degraded_solo": "after peer snapshot timeout, a survivor can dispatch at most one local task per local snapshot epoch without coordinated claims; a new peer session is required to leave DEGRADED_SOLO",
+    "peer_session_restart": "fresh peer snapshot can cancel local navigation immediately and reset the round; same old session does not recover degraded mode"
+  },
+  "protocol_preservation_answer": {
+    "scoring_only_rewrite_requires_protocol_change": false,
+    "reason": "The protocol transports bounded task identity/provenance, per-robot bid values and path samples, complete pair IDs/fingerprints, and local dispatch ownership. A replacement allocator can keep these bindings if it returns the same PairDecision contract and deterministic decision hash semantics.",
+    "caveat": "Changing from a scalar score to explicit visible-set utilities may require adding visible-set data or a new utility field to the task/bid messages; that is a data-model change, not a need for a central coordinator."
+  }
+}

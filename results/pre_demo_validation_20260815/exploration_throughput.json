@@ -1,0 +1,144 @@
+{
+  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/normalized_throughput.json",
+  "runs": [
+    {
+      "mapping": {
+        "coverage_gain_cells": 107481,
+        "coverage_gain_per_metre_travelled": 2862.7411981267114,
+        "duplicated_known_fraction": 0.42457417869847247,
+        "final_known_cells": 118502,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 24840,
+          "robot2": 23361
+        },
+        "simultaneously_observed_cells": 2525,
+        "total_known_union_cells": 119475,
+        "unique_first_seen_cells": {
+          "robot1": 70105,
+          "robot2": 49370
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 445,
+          "robot2": 399
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 20.871893461389057,
+          "robot2": 16.672890562515104
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 18.904246046780454,
+          "robot2": 15.12631829491208
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 12,
+        "goals_sent": 12,
+        "recoveries": 0,
+        "successes": 11,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_01_final",
+      "sim_elapsed_s": 336.5
+    },
+    {
+      "mapping": {
+        "coverage_gain_cells": 86291,
+        "coverage_gain_per_metre_travelled": 2469.3949847578783,
+        "duplicated_known_fraction": 0.6200255167134473,
+        "final_known_cells": 97312,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 36529,
+          "robot2": 23345
+        },
+        "simultaneously_observed_cells": 873,
+        "total_known_union_cells": 97975,
+        "unique_first_seen_cells": {
+          "robot1": 49736,
+          "robot2": 48239
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 284,
+          "robot2": 430
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 12.653739341898747,
+          "robot2": 22.290447607788746
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.077161941350242,
+          "robot2": 20.26717517361538
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 2,
+        "goals_accepted": 10,
+        "goals_sent": 10,
+        "recoveries": 0,
+        "successes": 7,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_02_final",
+      "sim_elapsed_s": 296.0
+    },
+    {
+      "mapping": {
+        "coverage_gain_cells": 85853,
+        "coverage_gain_per_metre_travelled": 2394.4677211089515,
+        "duplicated_known_fraction": 0.5662401514060603,
+        "final_known_cells": 96874,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 28605,
+          "robot2": 25612
+        },
+        "simultaneously_observed_cells": 834,
+        "total_known_union_cells": 97222,
+        "unique_first_seen_cells": {
+          "robot1": 50658,
+          "robot2": 46564
+        }
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 298,
+          "robot2": 469
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 13.007625673900632,
+          "robot2": 22.84710698469576
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 11.450314867848842,
+          "robot2": 20.829430845826476
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 9,
+        "timeouts": 0
+      },
+      "run_id": "pre_demo_burgard_large_03_final",
+      "sim_elapsed_s": 315.18
+    }
+  ],
+  "source": "new observer summaries when complete; archived reference retained"
+}

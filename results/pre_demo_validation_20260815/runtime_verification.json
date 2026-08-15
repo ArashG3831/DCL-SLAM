@@ -1,0 +1,9 @@
+{
+  "build": "passed: colcon build --packages-select my_epuck_interfaces my_epuck_frontier_candidates my_epuck_project --symlink-install --allow-overriding my_epuck_interfaces",
+  "direct_smoke": "clean shutdown, startup-only, zero goals; excluded from performance metrics",
+  "focused_python_tests": 82,
+  "frontier_cpp_ctest": "1/1 passed",
+  "known_transform_only": true,
+  "large_runs_discovered": 3,
+  "unknown_initial_pose_out_of_scope": true
+}

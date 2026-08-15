@@ -51,6 +51,21 @@ def _assignment_peer(robot):
             'minimum_solo_visible_gain_m': 0.05,
             'minimum_solo_ordering_score': 0.0,
             'maximum_solo_path_m': 18.0,
+            # Production default: task-level adaptation of Burgard et al.
+            # Algorithm 1.  The 18 m denominator is the pre-existing path
+            # feasibility ceiling, not a second tuned score scale.
+            'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+            'burgard_beta': LaunchConfiguration('burgard_beta'),
+            'burgard_sensor_max_range_m': 11.98,
+            'burgard_occupied_threshold': 50,
+            # Derived from the frozen production Nav2 profiles: stop circle
+            # 0.08 m dominates robot_radius 0.055 m; RPP desired speed 0.13.
+            'traffic_scheduler_enabled': LaunchConfiguration(
+                'traffic_scheduler_enabled'),
+            'traffic_robot1_safe_radius_m': 0.08,
+            'traffic_robot2_safe_radius_m': 0.08,
+            'traffic_reference_speed_mps': 0.13,
+            'traffic_eta_tie_s': 0.05,
             'bid_validity_s': 8.0,
             'decision_validity_s': 8.0,
             'peer_timeout_s': 12.0,
@@ -96,6 +111,14 @@ def generate_launch_description():
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('dispatch_enabled', default_value='false',
+                              choices=['true', 'false']),
+        # Defaults are the production literature-backed allocator.  These
+        # switches are deliberately explicit so historical weighted rounds
+        # remain reproducible without changing normal launches.
+        DeclareLaunchArgument('assignment_strategy', default_value='burgard',
+                              choices=['burgard', 'legacy_weighted']),
+        DeclareLaunchArgument('burgard_beta', default_value='1.0'),
+        DeclareLaunchArgument('traffic_scheduler_enabled', default_value='true',
                               choices=['true', 'false']),
         frontier_stack,
         _proposal_adapter('robot1'),

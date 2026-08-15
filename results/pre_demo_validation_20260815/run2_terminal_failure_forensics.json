@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "pre_demo_burgard_large_02_final",
+  "scope": "retrospective evidence only; no traffic events were present",
+  "overall_conclusion": {
+    "classification": "NAV2_BT_ABORT_WITH_INSUFFICIENT_TERMINAL_TELEMETRY",
+    "supported": "Both goals were accepted and began executing, then bt_navigator aborted NavigateToPose and emitted Goal failed. The project event stream classified both outcomes as UNKNOWN (ExplorationFailure value 8), with no persisted Nav2 result error code/message.",
+    "not_supported": "The retained artifacts do not establish planner-no-path, controller-no-valid-control, progress-checker failure, TF failure, recovery exhaustion, or map-change invalidation as the terminal cause.",
+    "traffic_involvement": false
+  },
+  "failures": [
+    {
+      "failure_index": 1,
+      "robot_id": "robot1",
+      "round_id": "063682adcd4e40e4bed32d6a2bef575797794f5a3101f0319a79c1d9a315d750",
+      "union_hash": "6bf970734c0589d63a3ed52e65034297256df843303bc322223675ff3d491ea7",
+      "decision_hash": "6b0ad3230a27aa605a9b6e413e5bc43741d62881b7284b4d662182406d7d302c",
+      "canonical_task_id": "46a9fdf7c4c2b8fca8b21998",
+      "physical_task_signature": "d32d014676762cb5a2404081",
+      "goal_pose_xy_m": [-3.375000072084367, -0.4950000828132035],
+      "dispatch_sim_time_s": 85.5,
+      "terminal_sim_time_s": 92.80000000000001,
+      "elapsed_navigation_s": 7.291793346405029,
+      "path_length_at_bid_m": 1.1818604469299316,
+      "normalized_cost_at_bid": 0.06565891371832953,
+      "utility_at_assignment": 1.0,
+      "failure_class": "UNKNOWN",
+      "failure_class_value": 8,
+      "nav2_error_code_persisted": 0,
+      "nav2_error_message_persisted": "",
+      "travelled_distance_at_terminal_m": 0.13156583905220032,
+      "terminal_feedback_recoveries": 0,
+      "last_observed_pose_xy_m": [-2.6747680635784574, -1.2263780353027005],
+      "last_observed_commanded_velocity_mps": 0.0,
+      "last_observed_distance_remaining_m": 0.0,
+      "terminal_rosout": [
+        "[navigate_to_pose] [ActionServer] Aborting handle.",
+        "Goal failed"
+      ],
+      "supported_cause": "Nav2 NavigateToPose reached a terminal BT abort. The persisted evidence cannot identify the deeper BT child or action result code.",
+      "unsupported_possibilities": ["PLANNER_NO_PATH", "CONTROLLER_NO_VALID_CONTROL", "FAILED_TO_MAKE_PROGRESS", "TF_FAILURE", "RECOVERY_EXHAUSTION", "GOAL_INVALIDATED_BY_MAP_CHANGE"],
+      "missing_telemetry": ["raw NavigateToPose action status", "NavigateToPose result error code/message", "BT child failure/status", "goal-correlated planner/controller diagnostics", "costmap snapshot at dispatch and terminal time", "GT/odom trajectory for this run"],
+      "suppression_effect": "The failure was UNKNOWN, not a typed hard-unreachable/planner/controller/timeout failure. No FAILURE_SUPPRESSION_CREATED event was retained for this outcome; it therefore did not reach the normal typed hard-failure suppression path."
+    },
+    {
+      "failure_index": 2,
+      "robot_id": "robot1",
+      "round_id": "3c5ab512f9fc4dc9146f3b36a5c314ee330b2ccbb478bab7114443ea69bfd33a",
+      "union_hash": "d3e2de8dfdbc4a3186830b4e143c08cead36b358302382a9e5526556f2653c18",
+      "decision_hash": "74c1fb39895d8320a83ca9d66b790bb4fb0658b6910ca808171de9cb24824d85",
+      "canonical_task_id": "b2a255a201ef6949c42bfb95",
+      "physical_task_signature": "f481710d17c3740c51d472d6",
+      "goal_pose_xy_m": [-2.53500009085983, 1.934999862872064],
+      "dispatch_sim_time_s": 176.94,
+      "terminal_sim_time_s": 188.28,
+      "elapsed_navigation_s": 11.411863327026367,
+      "path_length_at_bid_m": 3.46461820602417,
+      "normalized_cost_at_bid": 0.192478789224,
+      "utility_at_assignment": 1.0,
+      "redundancy_reduction_before_assignment": {
+        "task_id": "b2a255a201ef6949c42bfb95",
+        "distance_m": 4.459261879395,
+        "line_of_sight_clear": false,
+        "reduction": 0.0,
+        "utility_after": 1.0
+      },
+      "failure_class": "UNKNOWN",
+      "failure_class_value": 8,
+      "nav2_error_code_persisted": 0,
+      "nav2_error_message_persisted": "",
+      "travelled_distance_at_terminal_m": 1.0329968929290771,
+      "terminal_feedback_recoveries": 0,
+      "last_observed_pose_xy_m": [-3.030280089374918, -0.3745185300949903],
+      "last_observed_commanded_velocity_mps": 0.10664929134406215,
+      "last_observed_distance_remaining_m": 2.436213254928589,
+      "terminal_rosout": [
+        "[navigate_to_pose] [ActionServer] Aborting handle.",
+        "Goal failed"
+      ],
+      "supported_cause": "Nav2 NavigateToPose reached a terminal BT abort while the robot was still 2.436 m from the goal. The persisted evidence cannot identify the deeper BT child or action result code.",
+      "unsupported_possibilities": ["PLANNER_NO_PATH", "CONTROLLER_NO_VALID_CONTROL", "FAILED_TO_MAKE_PROGRESS", "TF_FAILURE", "RECOVERY_EXHAUSTION", "GOAL_INVALIDATED_BY_MAP_CHANGE"],
+      "missing_telemetry": ["raw NavigateToPose action status", "NavigateToPose result error code/message", "BT child failure/status", "goal-correlated planner/controller diagnostics", "costmap snapshot at dispatch and terminal time", "GT/odom trajectory for this run"],
+      "suppression_effect": "The failure was UNKNOWN, not a typed hard-unreachable/planner/controller/timeout failure. No FAILURE_SUPPRESSION_CREATED event was retained for this outcome; it therefore did not reach the normal typed hard-failure suppression path."
+    }
+  ],
+  "recovery_count_analysis": {
+    "observed": "Both terminal events reported recoveries=0 and no RECOVERY_COUNT_CHANGED event was retained for robot1.",
+    "conclusion": "The old telemetry supports zero observed recovery feedback, but cannot distinguish failure before recovery entry from a recovery event that the logger did not persist. The logger only records recovery-count changes and the old navigation event did not persist raw NavigateToPose feedback/status transitions.",
+    "not_proven": "It is not proven that Nav2 never evaluated a recovery behavior."
+  },
+  "map_change_analysis": {
+    "evidence": [
+      "A shared-map divergence event and stale frontier updates occurred near the second failure window.",
+      "The task remained represented in snapshots immediately before dispatch and was selected with a valid ComputePathToPose bid.",
+      "No dispatch-vs-terminal costmap snapshot or goal-correlated map obstacle change was retained."
+    ],
+    "conclusion": "Map evolution is a plausible project-level mechanism but is not established as the cause of either failure."
+  },
+  "odometry_analysis": {
+    "conclusion": "Run 2 had no Supervisor GT or odometry-forensic trajectory capture suitable for a GT-to-odom causal analysis.",
+    "excluded_evidence": "Archived runs from other campaigns were not attributed to Run 2."
+  },
+  "forensic_capture_startup_failure": {
+    "artifact": "results/forensic_large_20260814_final/forensic_large_20260814_final/forensic/supervisor_ground_truth.log",
+    "error": "SUPERVISOR_ROBOT_NOT_FOUND name=ROBOT1",
+    "root_cause": "The Webots world uses lowercase robot node names robot1 and robot2, while the Supervisor runtime exposed the names as ROBOT1 and ROBOT2. The observer compared names case-sensitively.",
+    "not_root_cause": ["startup ordering", "ROS domain collision", "RMW collision", "Webots port availability"],
+    "repair": "Observer name matching is now case-insensitive and writes a supervisor_ready.json readiness artifact; the experiment logger monitors readiness and child exit."
+  }
+}

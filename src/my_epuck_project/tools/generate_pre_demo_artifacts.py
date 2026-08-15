@@ -3,7 +3,8 @@
 
 The script deliberately distinguishes measured final-run data, archived
 baseline data, and pure deterministic scheduler checks.  It never invents a
-runtime event when an observer file is absent.
+runtime event when an observer file is absent.  Traffic is experimental and
+disabled by default until a dedicated doorway world is validated.
 """
 
 from __future__ import annotations
@@ -425,11 +426,11 @@ This is a project adaptation of Burgard et al.: canonical tasks and Nav2 path le
 
 A path failure, planner/controller failure, timeout, cancellation, or TF/lifecycle problem is classified from terminal evidence. Only the existing hard/unreachable suppression path excludes a task; records are scoped to task/region and expire under the existing retry semantics. This avoids a permanent magic `-5` penalty while allowing an evolving map to make a region eligible again.
 
-## Traffic
+## Traffic (experimental/deferred)
 
 Frontier utility answers *where to explore*. Traffic answers whether the two selected new routes can be dispatched together. Continuous path-segment geometry compares the planned centerlines against the configured safety separation: `0.08+0.08=0.16 m`, where 0.08 m is the frozen Collision Monitor stop-circle radius. Priority is an already-active robot, then lower ETA to the first conflict (`distance/0.13 m/s`), then lower robot ID only for an exact ETA tie. The loser enters `WAITING_FOR_TRAFFIC`; its NavigateToPose action is not sent. After the winner terminal event, the old losing task is discarded and a fresh allocation round is required.
 
-The scheduler does not inject zero `cmd_vel`, cancel a healthy active goal, or command the peer robot. Collision Monitor remains a final local safety layer. This is deterministic pre-dispatch scheduling, not a universal collision-free guarantee.
+The scheduler is disabled by default tonight because no doorway Webots world is available for physical validation. When explicitly enabled for experiments, it does not inject zero `cmd_vel`, cancel a healthy active goal, or command the peer robot. Collision Monitor remains a final local safety layer. This is deterministic pre-dispatch scheduling, not a universal collision-free guarantee.
 
 ## Mapping and future work
 
@@ -461,7 +462,7 @@ No centralized allocator exists; neither robot sends an action to the other.
 
 ## Production state
 
-The ordinary launch defaults are `assignment_strategy=burgard`, `beta=1.0`, and `traffic_scheduler_enabled=true`. `legacy_weighted` remains an explicit diagnostic launch option. RPP, SLAM, fusion, NavFn, costmaps, velocity smoother, Collision Monitor, and known-transform map alignment remain unchanged.
+The ordinary launch defaults are `assignment_strategy=burgard`, `beta=1.0`, and `traffic_scheduler_enabled=false`. `legacy_weighted` remains an explicit diagnostic launch option. The traffic scheduler remains available as an explicit experimental option, but is not part of tonight's validated production path. RPP, SLAM, fusion, NavFn, costmaps, velocity smoother, Collision Monitor, and known-transform map alignment remain unchanged.
 
 The active production assignment is:
 
@@ -473,7 +474,7 @@ argmax(i,t) [ U_t - 1.0*C_i,t ]
 
 The existing 18 m value is the authoritative feasibility ceiling. The division creates a project-specific dimensionless cost; it is not claimed as a Burgard normalization. After each selection, `P(d)=1-d/11.98` for clear LOS within the actual D500 range, otherwise zero. Canonical task IDs are removed after selection, so duplicate physical assignment is impossible within a round.
 
-## Traffic
+## Traffic (experimental/deferred)
 
 Selected bid polylines are checked using continuous segment geometry. The configured safety radius is 0.08 m per robot, derived from the production Collision Monitor stop circle and larger than the 0.055 m Nav2 footprint radius. A conflict is a predicted centerline separation at or below 0.16 m. New conflicting goals are ordered by active status, first-conflict ETA at 0.13 m/s, and robot ID only for a near-equal tie. The losing new goal is held before NavigateToPose and is never blindly resumed after release.
 
@@ -481,7 +482,7 @@ Selected bid polylines are checked using continuous segment geometry. The config
 
 Measured final-run directories discovered: **{run_summary['measured_run_count']}**. New runtime benchmark complete (at least 240 s per measured run): **{run_summary['new_runtime_benchmark_complete']}**. Decision events discovered: **{run_summary['decision_event_count']}**.
 
-The deterministic traffic suite has 3 repetitions for one-task/IDLE, shared-doorway, and separated-wide-route cases: **{traffic['all_passed']}**. Because the repository has no dedicated doorway Webots world and its existing small world is open-room smoke geometry, these are explicitly labeled pure scheduler tests, not physical doorway evidence.
+The deterministic traffic geometry suite remains available for pure tests, but traffic is disabled by default. No doorway world or physical bottleneck validation was run tonight. A dedicated doorway benchmark is deferred until the user adds that world.
 
 Archived RPP cooperative artifacts remain under `results/rpp_cooperative_validation_20260815/`. They are not relabeled as Burgard results. A fair throughput comparison requires matched Burgard missions with the same world, duration, and observer configuration.
 
@@ -530,7 +531,8 @@ def main() -> int:
     write_json(out / 'production_allocator_config.json', {
         'assignment_strategy': 'burgard', 'beta': 1.0,
         'feasible_path_limit_m': 18.0, 'sensor_max_range_m': 11.98,
-        'occupied_threshold': 50, 'traffic_enabled': True,
+        'occupied_threshold': 50, 'traffic_enabled': False,
+        'traffic_status': 'experimental/deferred; explicit enable only',
         'safe_radii_m': {'robot1': 0.08, 'robot2': 0.08},
         'reference_speed_mps': 0.13,
         'legacy_mode': 'legacy_weighted explicit diagnostic only',

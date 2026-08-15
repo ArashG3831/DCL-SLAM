@@ -1,14 +1,12 @@
 {
+  "controller": "RPP",
   "assignment_strategy": "burgard",
   "beta": 1.0,
   "feasible_path_limit_m": 18.0,
-  "legacy_mode": "legacy_weighted explicit diagnostic only",
-  "occupied_threshold": 50,
-  "reference_speed_mps": 0.13,
-  "safe_radii_m": {
-    "robot1": 0.08,
-    "robot2": 0.08
-  },
   "sensor_max_range_m": 11.98,
-  "traffic_enabled": true
+  "occupied_threshold": 50,
+  "traffic_enabled": false,
+  "traffic_status": "experimental/deferred; explicit enable only; no doorway validation tonight",
+  "known_transform": true,
+  "legacy_mode": "legacy_weighted explicit diagnostic only"
 }

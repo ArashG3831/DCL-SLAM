@@ -1,9 +1,10 @@
 {
-  "build": "passed: colcon build --packages-select my_epuck_interfaces my_epuck_frontier_candidates my_epuck_project --symlink-install --allow-overriding my_epuck_interfaces",
-  "direct_smoke": "clean shutdown, startup-only, zero goals; excluded from performance metrics",
-  "focused_python_tests": 82,
-  "frontier_cpp_ctest": "1/1 passed",
+  "build_command": "source /opt/ros/jazzy/setup.bash && colcon build --packages-select my_epuck_project --symlink-install",
+  "focused_test_command": "81 focused tests across Burgard, traffic pure logic, protocol, canonicalization, failures, Nav2 boundaries, launch inventory, logger integration/runtime",
+  "focused_test_count": 81,
+  "forensic_smoke": "invalid startup smoke excluded from metrics; Supervisor capture itself produced ready/GT/maps",
+  "fresh_valid_bounded_runs": 3,
   "known_transform_only": true,
-  "large_runs_discovered": 3,
-  "unknown_initial_pose_out_of_scope": true
+  "unknown_initial_pose_out_of_scope": true,
+  "traffic_physical_validation": "deferred; no doorway world created"
 }

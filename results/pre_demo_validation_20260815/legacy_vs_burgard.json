@@ -1,30 +1,13 @@
 {
-  "archived_rpp_time_matched_300_s_reference": [
-    {
-      "known_cell_gain_per_100_s_interpolated_at_300_s": 57768.166666666664,
-      "known_cells_interpolated_at_300_s": 184325.5,
-      "source": "archived 240/360 s samples; linear interpolation",
-      "trial": "trial_01"
-    },
-    {
-      "known_cell_gain_per_100_s_interpolated_at_300_s": 42562.5,
-      "known_cells_interpolated_at_300_s": 138708.5,
-      "source": "archived 240/360 s samples; linear interpolation",
-      "trial": "trial_02"
-    },
-    {
-      "known_cell_gain_per_100_s_interpolated_at_300_s": 46174.0,
-      "known_cells_interpolated_at_300_s": 149543.0,
-      "source": "archived 240/360 s samples; linear interpolation",
-      "trial": "trial_03"
-    }
+  "comparison_type": "cautious archived controller-matched reference; not a paired randomized allocator comparison",
+  "new_allocator": "RPP + Burgard beta=1.0, three fresh forensic bounded runs",
+  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/normalized_throughput.json",
+  "controller_mapping_stack": "same RPP/mapping/fusion family, but archived campaign and fresh campaign differ in allocator and capture/duration",
+  "fresh_mean_known_cells_per_combined_gt_m": 3207.8086507043013,
+  "archived_rpp_known_cells_per_combined_m": [
+    3417.500036712901,
+    3035.556958102263,
+    3233.1092724643077
   ],
-  "baseline_directory": "/home/arash/webots_ws/results/rpp_cooperative_validation_20260815/rpp_cooperative_validation_20260815_rpp_realtime",
-  "baseline_metrics_are_not_claimed_as_new_allocator_results": true,
-  "campaign_summary_available": true,
-  "comparison_type": "archived_matched_controller_campaign; allocator provenance is historical",
-  "comparison_warning": "Use the new three-run observer summaries for current system health; do not claim improvement/regression against the archived RPP campaign without matched duration and capture configuration.",
-  "new_burgard_measurement_file": "allocator_benchmark.json",
-  "note": "The archived run predates this implementation. Its 300 s values are interpolated references from 240/360 s samples; they are not a paired causal comparison because the archived missions used a different duration/observer campaign.",
-  "pooled_decision_metrics_available": true
+  "interpretation": "Fresh normalized map yield is in the same range as the archived RPP reference; the evidence supports preserved health, not causal superiority."
 }

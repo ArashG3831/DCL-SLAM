@@ -177,13 +177,13 @@ def test_equal_score_tie_and_replica_result_are_deterministic():
     assert one.robot1_task_id == min(ids.values())
 
 
-def test_normal_production_launch_defaults_to_burgard_beta_one_and_traffic():
-    """Keep the normal cooperative launch on the new production policy."""
+def test_normal_production_launch_defaults_to_burgard_beta_one_and_traffic_deferred():
+    """Keep the normal launch on Burgard with unvalidated traffic deferred."""
     source = open(
         'src/my_epuck_project/launch/two_robots_distributed_assignment_launch.py',
         encoding='utf-8',
     ).read()
     assert "DeclareLaunchArgument('assignment_strategy', default_value='burgard'" in source
     assert "DeclareLaunchArgument('burgard_beta', default_value='1.0')" in source
-    assert "DeclareLaunchArgument('traffic_scheduler_enabled', default_value='true'" in source
+    assert "DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false'" in source
     assert "'maximum_solo_path_m': 18.0" in source

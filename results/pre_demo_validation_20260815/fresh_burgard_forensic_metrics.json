@@ -1,0 +1,1687 @@
+{
+  "schema_version": "1.0.0",
+  "campaign": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815",
+  "world": "src/my_epuck_project/worlds/epuck_d500_two_world_large.wbt",
+  "known_transform": true,
+  "controller": "RPP",
+  "allocator": "Burgard-style, beta=1.0",
+  "traffic": "experimental/deferred; disabled by default; no doorway validation",
+  "valid_bounded_runs": 3,
+  "runs": [
+    {
+      "trial": "trial_01",
+      "run_id": "trial_01_attempt_01",
+      "duration_s": 325.4691592200252,
+      "clean_shutdown": true,
+      "runner_classification": "BOUNDED_DIAGNOSTIC",
+      "runner_shutdown_reason": "simulated_mission_timeout",
+      "mapping": {
+        "coverage_gain_cells": 105505,
+        "coverage_gain_per_metre_travelled": 3334.0603010695436,
+        "duplicated_known_fraction": 0.4353918449847765,
+        "final_known_cells": 116526,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 27173,
+          "robot2": 23072
+        },
+        "simultaneously_observed_cells": 806,
+        "total_known_union_cells": 117253,
+        "unique_first_seen_cells": {
+          "robot1": 70904,
+          "robot2": 46349
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 1,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 10,
+        "timeouts": 0
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 458,
+          "robot2": 234
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 21.135588225842362,
+          "robot2": 10.509010393491163
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 19.914505540688445,
+          "robot2": 9.728532655620253
+        }
+      },
+      "gt_odom": {
+        "robot1": {
+          "samples": 14146,
+          "gt_distance_m": 21.115560348972284,
+          "translation_rmse_m": 0.003375564754800631,
+          "translation_median_m": 0.0015732418361525872,
+          "translation_p95_m": 0.00838093347422026,
+          "final_translation_error_m": 0.011077764480324742,
+          "yaw_rmse_rad": 0.0029879303837949843,
+          "final_yaw_error_rad": 0.0005256944307847622,
+          "normalized_translation_rmse_per_10m": 0.0015986148124953372,
+          "alignment_theta_rad": -1.5707963269657799,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        },
+        "robot2": {
+          "samples": 14198,
+          "gt_distance_m": 10.505724742578899,
+          "translation_rmse_m": 0.022450020120851153,
+          "translation_median_m": 0.0060626266413280295,
+          "translation_p95_m": 0.03833922875455531,
+          "final_translation_error_m": 0.03833922875455531,
+          "yaw_rmse_rad": 0.006192797948813622,
+          "final_yaw_error_rad": -0.008493158577897564,
+          "normalized_translation_rmse_per_10m": 0.021369320699849426,
+          "alignment_theta_rad": -1.57079632696582,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        }
+      },
+      "direct_map_accuracy": {
+        "robot1_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -5.28428770502145,
+            "y": -4.5176090983300785,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 5271,
+          "occupied_area_m2": 4.743899787931147,
+          "mean_distance_m": 0.025449105178850653,
+          "median_distance_m": 0.0218476500015313,
+          "p90_distance_m": 0.052609108723636666,
+          "p95_distance_m": 0.05928771005059197,
+          "p99_distance_m": 0.08928770938003971,
+          "rms_distance_m": 0.03352666227906971,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 963,
+              "area_m2": 0.8666999612554912,
+              "fraction": 0.18269778030734207
+            },
+            "gt_0.10_m": {
+              "cells": 28,
+              "area_m2": 0.025199998873472226,
+              "fraction": 0.005312084993359893
+            },
+            "gt_0.15_m": {
+              "cells": 3,
+              "area_m2": 0.0026999998793005957,
+              "fraction": 0.0005691519635742744
+            },
+            "gt_0.25_m": {
+              "cells": 2,
+              "area_m2": 0.0017999999195337305,
+              "fraction": 0.00037943464238284955
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 97958,
+          "free_cells": 92687,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.19691945662637717,
+          "boundary_unknown_fraction": 0.7211466467001818,
+          "boundary_free_fraction": 0.081933896673441
+        },
+        "robot1_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.6,
+            "y": -4.53,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7320,
+          "occupied_area_m2": 6.587999705493454,
+          "mean_distance_m": 0.02865791665702162,
+          "median_distance_m": 0.024999930597839892,
+          "p90_distance_m": 0.05500003453344071,
+          "p95_distance_m": 0.06500001039356107,
+          "p99_distance_m": 0.09500000972300882,
+          "rms_distance_m": 0.03716114910385044,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 1364,
+              "area_m2": 1.227599945122004,
+              "fraction": 0.18633879781420765
+            },
+            "gt_0.10_m": {
+              "cells": 47,
+              "area_m2": 0.04229999810904267,
+              "fraction": 0.006420765027322404
+            },
+            "gt_0.15_m": {
+              "cells": 11,
+              "area_m2": 0.009899999557435517,
+              "fraction": 0.0015027322404371586
+            },
+            "gt_0.25_m": {
+              "cells": 3,
+              "area_m2": 0.0026999998793005957,
+              "fraction": 0.0004098360655737705
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 116705,
+          "free_cells": 109385,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.2724355546047706,
+          "boundary_unknown_fraction": 0.6353620708097123,
+          "boundary_free_fraction": 0.09220237458551717
+        },
+        "robot2_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.594331482700657,
+            "y": -1.7792754444551022,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 3915,
+          "occupied_area_m2": 3.5234998424872774,
+          "mean_distance_m": 0.0308303788414867,
+          "median_distance_m": 0.025724425793036687,
+          "p90_distance_m": 0.06903485436605566,
+          "p95_distance_m": 0.07066831244563021,
+          "p99_distance_m": 0.10066831177507796,
+          "rms_distance_m": 0.03931594590819829,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 800,
+              "area_m2": 0.7199999678134922,
+              "fraction": 0.20434227330779056
+            },
+            "gt_0.10_m": {
+              "cells": 76,
+              "area_m2": 0.06839999694228176,
+              "fraction": 0.019412515964240103
+            },
+            "gt_0.15_m": {
+              "cells": 6,
+              "area_m2": 0.005399999758601191,
+              "fraction": 0.0015325670498084292
+            },
+            "gt_0.25_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 68981,
+          "free_cells": 65066,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.130067386886298,
+          "boundary_unknown_fraction": 0.7977323777944165,
+          "boundary_free_fraction": 0.07220023531928549
+        },
+        "robot2_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_01_attempt_01/observer/trial_01_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.6,
+            "y": -4.53,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7303,
+          "occupied_area_m2": 6.572699706177417,
+          "mean_distance_m": 0.028656846511281742,
+          "median_distance_m": 0.024999930597839892,
+          "p90_distance_m": 0.05500003453344071,
+          "p95_distance_m": 0.06500001039356107,
+          "p99_distance_m": 0.09500000972300882,
+          "rms_distance_m": 0.03716603325919658,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 1361,
+              "area_m2": 1.2248999452427036,
+              "fraction": 0.18636176913597152
+            },
+            "gt_0.10_m": {
+              "cells": 47,
+              "area_m2": 0.04229999810904267,
+              "fraction": 0.006435711351499384
+            },
+            "gt_0.15_m": {
+              "cells": 11,
+              "area_m2": 0.009899999557435517,
+              "fraction": 0.0015062303163083663
+            },
+            "gt_0.25_m": {
+              "cells": 3,
+              "area_m2": 0.0026999998793005957,
+              "fraction": 0.0004107900862659181
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 116526,
+          "free_cells": 109223,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.27190073804684994,
+          "boundary_unknown_fraction": 0.6356829607444646,
+          "boundary_free_fraction": 0.09241630120868542
+        }
+      },
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7320,
+          "fused_occupied_cells": 7320,
+          "occupied_iou": 1.0,
+          "fused_additional_cells": 0,
+          "source_union_missing_cells": 0
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7320,
+          "fused_occupied_cells": 7303,
+          "occupied_iou": 0.9968592107059948,
+          "fused_additional_cells": 3,
+          "source_union_missing_cells": 20
+        }
+      },
+      "shared_map_replica_consistency": {
+        "robot1": {
+          "known_iou": 0.9984662182425774,
+          "free_iou": 0.9982084422588252,
+          "occupied_iou": 0.9968592107059948,
+          "known_cell_agreement": 0.9998283644851793,
+          "occupied_free_conflict_rate": 0.00017163551482072672,
+          "unknown_mismatch_rate": 0.0015337817574225612,
+          "coverage_area_a_m2": 105.034495304592,
+          "coverage_area_b_m2": 104.87339531179374,
+          "coverage_area_difference_m2": 0.16109999279825615,
+          "coverage_area_relative_difference": 0.0015337817574224402,
+          "occupied_area_difference_m2": 0.015299999316036761,
+          "occupied_area_relative_difference": 0.002322404371584707,
+          "free_area_difference_m2": 0.14579999348222827,
+          "free_area_relative_difference": 0.0014810074507473207,
+          "raw_occupancy_correlation": 0.9985409705167682,
+          "jointly_known_cell_count": 116526,
+          "known_union_count": 116705,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 236023,
+            "unknown/free": 0,
+            "unknown/occupied": 0,
+            "unknown/uncertain": 0,
+            "free/unknown": 176,
+            "free/free": 109206,
+            "free/occupied": 3,
+            "free/uncertain": 0,
+            "occupied/unknown": 3,
+            "occupied/free": 17,
+            "occupied/occupied": 7300,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9997264583190864,
+          "zero_shift_correlation": 0.9985409705167682,
+          "best_shift_correlation": 0.9985409705167682,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            413,
+            851
+          ],
+          "dimensions_b": [
+            413,
+            848
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 414,
+            "height": 852,
+            "resolution": 0.029999999329447746,
+            "origin_x": -6.629999851807952,
+            "origin_y": -4.559999898076057
+          }
+        },
+        "robot2": {
+          "known_iou": 0.9984662182425774,
+          "free_iou": 0.9982084422588252,
+          "occupied_iou": 0.9968592107059948,
+          "known_cell_agreement": 0.9998283644851793,
+          "occupied_free_conflict_rate": 0.00017163551482072672,
+          "unknown_mismatch_rate": 0.0015337817574225612,
+          "coverage_area_a_m2": 104.87339531179374,
+          "coverage_area_b_m2": 105.034495304592,
+          "coverage_area_difference_m2": 0.16109999279825615,
+          "coverage_area_relative_difference": 0.0015337817574224402,
+          "occupied_area_difference_m2": 0.015299999316036761,
+          "occupied_area_relative_difference": 0.002322404371584707,
+          "free_area_difference_m2": 0.14579999348222827,
+          "free_area_relative_difference": 0.0014810074507473207,
+          "raw_occupancy_correlation": 0.9985409705167682,
+          "jointly_known_cell_count": 116526,
+          "known_union_count": 116705,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 236023,
+            "unknown/free": 176,
+            "unknown/occupied": 3,
+            "unknown/uncertain": 0,
+            "free/unknown": 0,
+            "free/free": 109206,
+            "free/occupied": 17,
+            "free/uncertain": 0,
+            "occupied/unknown": 0,
+            "occupied/free": 3,
+            "occupied/occupied": 7300,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9997264583190864,
+          "zero_shift_correlation": 0.9985409705167682,
+          "best_shift_correlation": 0.9985409705167682,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            413,
+            848
+          ],
+          "dimensions_b": [
+            413,
+            851
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 414,
+            "height": 852,
+            "resolution": 0.029999999329447746,
+            "origin_x": -6.629999851807952,
+            "origin_y": -4.559999898076057
+          }
+        }
+      },
+      "coverage": {
+        "duration_s_used": 304.0,
+        "known_cells_at_s": {
+          "60": 55323.0,
+          "120": 75532.0,
+          "180": 87639.0,
+          "240": 98401.0,
+          "300": 116675.0
+        },
+        "initial_known_cells": 11021.0,
+        "final_known_cells": 117253.0,
+        "known_cell_gain": 106232.0,
+        "known_cell_auc_cells_s": 22924440.0,
+        "known_cell_gain_per_100s": 34944.73684210526,
+        "known_cell_gain_per_successful_goal": 10623.2
+      },
+      "allocator": {
+        "total_pair_decision_events": 15,
+        "unique_agreed_decisions": 8,
+        "complete_replica_decisions": 7,
+        "incomplete_or_superseded_local_decisions": 1,
+        "semantic_agreement_rate_complete_replicas": 1.0,
+        "decision_agreed_event_count": 12,
+        "decision_disagreements": 0,
+        "both_active_assignments": 8,
+        "single_active_assignments": 0,
+        "idle_robot_decisions": 0,
+        "canonical_duplicate_assignment_attempts": 0,
+        "raw_path_length_mean_m": 3.965309690683938,
+        "normalized_cost_mean": 0.220294982815875,
+        "utility_before_reduction_mean": 0.9595746532044375,
+        "redundancy_reduction_count": 64,
+        "redundancy_reduction_mean": 0.30427847703331246,
+        "los_blocked_reduction_count": 37,
+        "tie_break_count": 0,
+        "beta": 1.0,
+        "assignment_latency": "not persisted in current event schema",
+        "snapshot_to_agreement_latency": "not persisted in current event schema",
+        "agreement_to_dispatch_latency": "not persisted in current event schema",
+        "round_ids": [
+          "18e052249ec205c4df051f941fa1bd215b558f00da174e95f609197cf42239a2",
+          "32468d216020e064aae74a12c35e11340f3263b84a2b3577c470e4968a67fb34",
+          "457796e0162ec2d8477d21819a9989c71fbd11b41895f8c33c868a56cb8153f5",
+          "46c814add76113ea899a7946f492a109bf3f3b808138ca0fde18d479b6039c7a",
+          "5052cb4fe0c8054303c5300892799c0ee9e53415bc600cd1ff83cf9e9c546558",
+          "5637660c119bb4d939d9d65b1a0b3926995e3e57b7ec8c936b5f19d4d594b1ab",
+          "71b64c2c8232933afd857c54be323e40049c285366d6b7564020b0d6b2605370",
+          "9eb44e91a267b12683c12ce05e59db27338237cc923fa5aa466a0534cc7843c5"
+        ]
+      },
+      "traffic": {
+        "runtime_event_count": 0,
+        "runtime_conflict_count": 0,
+        "runtime_wait_count": 0,
+        "status": "deferred; no Webots doorway validation run"
+      },
+      "exploration": {
+        "combined_gt_distance_m": 31.621285091551183,
+        "known_cell_gain_per_combined_gt_m": 3359.509257528053,
+        "successful_goals_per_100s": 3.0724877355398683
+      },
+      "terminal_failures": [
+        {
+          "schema_version": "1.1.0",
+          "run_id": "trial_01_attempt_01",
+          "event_sequence": 2264,
+          "wall_time_utc": "2026-08-15T19:23:57.088Z",
+          "ros_time_sec": 217,
+          "ros_time_nanosec": 880000000,
+          "elapsed_s": 217.88000000000002,
+          "wall_elapsed_s": 233.72862752800575,
+          "robot_id": "robot2",
+          "source": "/robot2/distributed_event",
+          "severity": "INFO",
+          "event_type": "NAVIGATION_FAILED",
+          "message": "FAILED",
+          "source_session_id": "4c5870bf58914c7da6732a9003392ee3",
+          "round_id": "457796e0162ec2d8477d21819a9989c71fbd11b41895f8c33c868a56cb8153f5",
+          "union_hash": "21683aa161d4869a2702e713b6ce2c292b50815f434336f3dd2a23f0af4bfa15",
+          "decision_hash": "e168800a9f79ec6fe69b9b6d06659cb58b7ae4ff617385bd24504b824f69ccdd",
+          "canonical_task_id": "494e1e23c98f2319ebc922ba",
+          "physical_task_signature": "3dea6a8d8036ee8ac65d45b6",
+          "previous_state": "",
+          "next_state": "",
+          "path_length_m": 0.0,
+          "travelled_distance_m": 4.605185508728027,
+          "navigation_duration_s": 45.48112106323242,
+          "newly_discovered_cells": 0.0,
+          "peer_first_discovered_cells": 0.0,
+          "duplicated_cells": 0.0,
+          "route_overlap_score": 0.0,
+          "sensing_overlap_estimate": 0.0,
+          "result": "NAVIGATION_FAILED",
+          "failure_class": 8,
+          "recoveries": 0,
+          "nav2_error_code": 0,
+          "nav2_error_message": ""
+        }
+      ]
+    },
+    {
+      "trial": "trial_02",
+      "run_id": "trial_02_attempt_01",
+      "duration_s": 320.0249544749968,
+      "clean_shutdown": true,
+      "runner_classification": "BOUNDED_DIAGNOSTIC",
+      "runner_shutdown_reason": "simulated_mission_timeout",
+      "mapping": {
+        "coverage_gain_cells": 93915,
+        "coverage_gain_per_metre_travelled": 3242.602124177082,
+        "duplicated_known_fraction": 0.4816546387353128,
+        "final_known_cells": 104936,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 27036,
+          "robot2": 22688
+        },
+        "simultaneously_observed_cells": 1066,
+        "total_known_union_cells": 105449,
+        "unique_first_seen_cells": {
+          "robot1": 56346,
+          "robot2": 49103
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 10,
+        "timeouts": 0
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 324,
+          "robot2": 328
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 14.950352034855095,
+          "robot2": 14.012498294441492
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 13.921312141038445,
+          "robot2": 13.175500328158297
+        }
+      },
+      "gt_odom": {
+        "robot1": {
+          "samples": 14133,
+          "gt_distance_m": 14.940710469351039,
+          "translation_rmse_m": 0.03370091336423658,
+          "translation_median_m": 0.006991803024637904,
+          "translation_p95_m": 0.09808420736125839,
+          "final_translation_error_m": 0.13365329869164239,
+          "yaw_rmse_rad": 0.0108345232735621,
+          "final_yaw_error_rad": -0.021866153640115016,
+          "normalized_translation_rmse_per_10m": 0.022556432930930362,
+          "alignment_theta_rad": -1.5707963269657783,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        },
+        "robot2": {
+          "samples": 14208,
+          "gt_distance_m": 14.008910069238015,
+          "translation_rmse_m": 0.026861808232670592,
+          "translation_median_m": 0.007002563742080578,
+          "translation_p95_m": 0.04551707152011671,
+          "final_translation_error_m": 0.04551707152011671,
+          "yaw_rmse_rad": 0.004664255691210797,
+          "final_yaw_error_rad": -0.004652253933186801,
+          "normalized_translation_rmse_per_10m": 0.019174802393553864,
+          "alignment_theta_rad": -1.5707963269669183,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        }
+      },
+      "direct_map_accuracy": {
+        "robot1_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -5.194660176628726,
+            "y": -4.738320309662734,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 4632,
+          "occupied_area_m2": 4.16879981364012,
+          "mean_distance_m": 0.05268823988432021,
+          "median_distance_m": 0.029660180316763096,
+          "p90_distance_m": 0.1496378878254573,
+          "p95_distance_m": 0.20033975866298226,
+          "p99_distance_m": 0.28617095369131157,
+          "rms_distance_m": 0.08319265774092471,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 1545,
+              "area_m2": 1.3904999378398069,
+              "fraction": 0.3335492227979275
+            },
+            "gt_0.10_m": {
+              "cells": 729,
+              "area_m2": 0.6560999706700448,
+              "fraction": 0.15738341968911918
+            },
+            "gt_0.15_m": {
+              "cells": 464,
+              "area_m2": 0.41759998133182546,
+              "fraction": 0.1001727115716753
+            },
+            "gt_0.25_m": {
+              "cells": 94,
+              "area_m2": 0.08459999621808534,
+              "fraction": 0.020293609671848015
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 83729,
+          "free_cells": 79097,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.13113702000213925,
+          "boundary_unknown_fraction": 0.7566584661461119,
+          "boundary_free_fraction": 0.11220451385174884
+        },
+        "robot1_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.6,
+            "y": -10.59,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7239,
+          "occupied_area_m2": 6.515099708752337,
+          "mean_distance_m": 0.04924684453263192,
+          "median_distance_m": 0.0349997958168391,
+          "p90_distance_m": 0.11499973814934528,
+          "p95_distance_m": 0.17499990444630464,
+          "p99_distance_m": 0.2649999024346479,
+          "rms_distance_m": 0.07396478229459713,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 2493,
+              "area_m2": 2.243699899698795,
+              "fraction": 0.3443845835060091
+            },
+            "gt_0.10_m": {
+              "cells": 743,
+              "area_m2": 0.6686999701067808,
+              "fraction": 0.10263848597872634
+            },
+            "gt_0.15_m": {
+              "cells": 469,
+              "area_m2": 0.4220999811306598,
+              "fraction": 0.06478795413731178
+            },
+            "gt_0.25_m": {
+              "cells": 95,
+              "area_m2": 0.0854999961778522,
+              "fraction": 0.013123359580052493
+            },
+            "gt_0.50_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.0001381406271584473
+            }
+          },
+          "known_cells": 105227,
+          "free_cells": 97988,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.22141405497914216,
+          "boundary_unknown_fraction": 0.6488394480693123,
+          "boundary_free_fraction": 0.1297464969515456
+        },
+        "robot2_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.570336739691916,
+            "y": -8.070971819730158,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 4429,
+          "occupied_area_m2": 3.986099821807446,
+          "mean_distance_m": 0.03023533166979985,
+          "median_distance_m": 0.02466300113963804,
+          "p90_distance_m": 0.06466302259731105,
+          "p95_distance_m": 0.07466304472553498,
+          "p99_distance_m": 0.09466305545437148,
+          "rms_distance_m": 0.040348828268909114,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 933,
+              "area_m2": 0.8396999624624852,
+              "fraction": 0.2106570331903364
+            },
+            "gt_0.10_m": {
+              "cells": 23,
+              "area_m2": 0.0206999990746379,
+              "fraction": 0.005193045834274102
+            },
+            "gt_0.15_m": {
+              "cells": 12,
+              "area_m2": 0.010799999517202383,
+              "fraction": 0.0027094152178821405
+            },
+            "gt_0.25_m": {
+              "cells": 3,
+              "area_m2": 0.0026999998793005957,
+              "fraction": 0.0006773538044705351
+            },
+            "gt_0.50_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.00022578460149017836
+            }
+          },
+          "known_cells": 72083,
+          "free_cells": 67654,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.1729596748315328,
+          "boundary_unknown_fraction": 0.754198309979677,
+          "boundary_free_fraction": 0.07284201518879024
+        },
+        "robot2_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_02_attempt_01/observer/trial_02_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -6.6,
+            "y": -10.59,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7237,
+          "occupied_area_m2": 6.513299708832804,
+          "mean_distance_m": 0.049266452223288695,
+          "median_distance_m": 0.034999783746897606,
+          "p90_distance_m": 0.11499973814934528,
+          "p95_distance_m": 0.17499990444630464,
+          "p99_distance_m": 0.2649999024346479,
+          "rms_distance_m": 0.07413777197542978,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 2490,
+              "area_m2": 2.2409998998194944,
+              "fraction": 0.3440652203951914
+            },
+            "gt_0.10_m": {
+              "cells": 740,
+              "area_m2": 0.6659999702274803,
+              "fraction": 0.10225231449495648
+            },
+            "gt_0.15_m": {
+              "cells": 469,
+              "area_m2": 0.4220999811306598,
+              "fraction": 0.06480585878126295
+            },
+            "gt_0.25_m": {
+              "cells": 97,
+              "area_m2": 0.08729999609738592,
+              "fraction": 0.013403343927041593
+            },
+            "gt_0.50_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.0001381788033715628
+            }
+          },
+          "known_cells": 105064,
+          "free_cells": 97827,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.22141405497914216,
+          "boundary_unknown_fraction": 0.6488394480693123,
+          "boundary_free_fraction": 0.1297464969515456
+        }
+      },
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7249,
+          "fused_occupied_cells": 7239,
+          "occupied_iou": 0.9969676085458304,
+          "fused_additional_cells": 6,
+          "source_union_missing_cells": 16
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7249,
+          "fused_occupied_cells": 7237,
+          "occupied_iou": 0.9950420052334389,
+          "fused_additional_cells": 12,
+          "source_union_missing_cells": 24
+        }
+      },
+      "shared_map_replica_consistency": {
+        "robot1": {
+          "known_iou": 0.9984509679074762,
+          "free_iou": 0.9982141946017654,
+          "occupied_iou": 0.9972406181015453,
+          "known_cell_agreement": 0.9998477118708596,
+          "occupied_free_conflict_rate": 0.0001522881291403335,
+          "unknown_mismatch_rate": 0.001549032092523782,
+          "coverage_area_a_m2": 94.70429576638793,
+          "coverage_area_b_m2": 94.55759577294593,
+          "coverage_area_difference_m2": 0.1466999934419988,
+          "coverage_area_relative_difference": 0.0015490320925237795,
+          "occupied_area_difference_m2": 0.0017999999195330574,
+          "occupied_area_relative_difference": 0.0002762812543167913,
+          "free_area_difference_m2": 0.14489999352245775,
+          "free_area_relative_difference": 0.0016430583336734255,
+          "raw_occupancy_correlation": 0.9988126516291003,
+          "jointly_known_cell_count": 105064,
+          "known_union_count": 105227,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 287935,
+            "unknown/free": 0,
+            "unknown/occupied": 0,
+            "unknown/uncertain": 0,
+            "free/unknown": 159,
+            "free/free": 97820,
+            "free/occupied": 9,
+            "free/uncertain": 0,
+            "occupied/unknown": 4,
+            "occupied/free": 7,
+            "occupied/occupied": 7228,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9997236805747444,
+          "zero_shift_correlation": 0.9988126516291003,
+          "best_shift_correlation": 0.9988126516291003,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            461,
+            850
+          ],
+          "dimensions_b": [
+            461,
+            847
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 462,
+            "height": 851,
+            "resolution": 0.029999999329447746,
+            "origin_x": -6.629999851807952,
+            "origin_y": -10.619999762624502
+          }
+        },
+        "robot2": {
+          "known_iou": 0.9984509679074762,
+          "free_iou": 0.9982141946017654,
+          "occupied_iou": 0.9972406181015453,
+          "known_cell_agreement": 0.9998477118708596,
+          "occupied_free_conflict_rate": 0.0001522881291403335,
+          "unknown_mismatch_rate": 0.001549032092523782,
+          "coverage_area_a_m2": 94.55759577294593,
+          "coverage_area_b_m2": 94.70429576638793,
+          "coverage_area_difference_m2": 0.1466999934419988,
+          "coverage_area_relative_difference": 0.0015490320925237795,
+          "occupied_area_difference_m2": 0.0017999999195330574,
+          "occupied_area_relative_difference": 0.0002762812543167913,
+          "free_area_difference_m2": 0.14489999352245775,
+          "free_area_relative_difference": 0.0016430583336734255,
+          "raw_occupancy_correlation": 0.9988126516291004,
+          "jointly_known_cell_count": 105064,
+          "known_union_count": 105227,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 287935,
+            "unknown/free": 159,
+            "unknown/occupied": 4,
+            "unknown/uncertain": 0,
+            "free/unknown": 0,
+            "free/free": 97820,
+            "free/occupied": 7,
+            "free/uncertain": 0,
+            "occupied/unknown": 0,
+            "occupied/free": 9,
+            "occupied/occupied": 7228,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9997236805747444,
+          "zero_shift_correlation": 0.9988126516291004,
+          "best_shift_correlation": 0.9988126516291004,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            461,
+            847
+          ],
+          "dimensions_b": [
+            461,
+            850
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 462,
+            "height": 851,
+            "resolution": 0.029999999329447746,
+            "origin_x": -6.629999851807952,
+            "origin_y": -10.619999762624502
+          }
+        }
+      },
+      "coverage": {
+        "duration_s_used": 302.0,
+        "known_cells_at_s": {
+          "60": 55151.0,
+          "120": 74823.0,
+          "180": 90768.0,
+          "240": 95158.0,
+          "300": 105102.0
+        },
+        "initial_known_cells": 11021.0,
+        "final_known_cells": 105449.0,
+        "known_cell_gain": 94428.0,
+        "known_cell_auc_cells_s": 22319920.0,
+        "known_cell_gain_per_100s": 31267.549668874173,
+        "known_cell_gain_per_successful_goal": 9442.8
+      },
+      "allocator": {
+        "total_pair_decision_events": 12,
+        "unique_agreed_decisions": 6,
+        "complete_replica_decisions": 6,
+        "incomplete_or_superseded_local_decisions": 0,
+        "semantic_agreement_rate_complete_replicas": 1.0,
+        "decision_agreed_event_count": 11,
+        "decision_disagreements": 0,
+        "both_active_assignments": 6,
+        "single_active_assignments": 0,
+        "idle_robot_decisions": 0,
+        "canonical_duplicate_assignment_attempts": 0,
+        "raw_path_length_mean_m": 3.1384645799795,
+        "normalized_cost_mean": 0.17435914333208333,
+        "utility_before_reduction_mean": 0.9460995376059166,
+        "redundancy_reduction_count": 66,
+        "redundancy_reduction_mean": 0.3409675446271969,
+        "los_blocked_reduction_count": 38,
+        "tie_break_count": 0,
+        "beta": 1.0,
+        "assignment_latency": "not persisted in current event schema",
+        "snapshot_to_agreement_latency": "not persisted in current event schema",
+        "agreement_to_dispatch_latency": "not persisted in current event schema",
+        "round_ids": [
+          "1588f69846584103bf1c53bae7b7fe308d36c3f94beb369e6cc03d866ebdaf16",
+          "262c84fe0e8c3f34fcf4d168809d5536f99abb12741ace4c67d9d3cdfd1c057b",
+          "71b81aa0807f444e310d3a2d280643279ceff67ce2aa9bac7dcc30bda6314138",
+          "7f991b556cf4c9d786394be353d40605d0f7421c631e3962f71a8b4e608cfca1",
+          "87d30da49041b9acb6da2dd86e30d3613edcae41d2f56127e7cf0d155beef20a",
+          "9082b8756e11529f9a7825f01d659e9ed3a7cf5090d1b91ea7367b342ff763d4"
+        ]
+      },
+      "traffic": {
+        "runtime_event_count": 0,
+        "runtime_conflict_count": 0,
+        "runtime_wait_count": 0,
+        "status": "deferred; no Webots doorway validation run"
+      },
+      "exploration": {
+        "combined_gt_distance_m": 28.949620538589052,
+        "known_cell_gain_per_combined_gt_m": 3261.8044120519667,
+        "successful_goals_per_100s": 3.1247563229577118
+      },
+      "terminal_failures": []
+    },
+    {
+      "trial": "trial_03",
+      "run_id": "trial_03_attempt_01",
+      "duration_s": 338.5529473150091,
+      "clean_shutdown": true,
+      "runner_classification": "BOUNDED_DIAGNOSTIC",
+      "runner_shutdown_reason": "simulated_mission_timeout",
+      "mapping": {
+        "coverage_gain_cells": 96614,
+        "coverage_gain_per_metre_travelled": 2993.9712090989983,
+        "duplicated_known_fraction": 0.48584005189509777,
+        "final_known_cells": 107635,
+        "initial_known_cells": 11021,
+        "later_duplicated_cells": {
+          "robot1": 27909,
+          "robot2": 23896
+        },
+        "simultaneously_observed_cells": 622,
+        "total_known_union_cells": 107910,
+        "unique_first_seen_cells": {
+          "robot1": 62539,
+          "robot2": 45371
+        }
+      },
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 10,
+        "goals_sent": 10,
+        "recoveries": 0,
+        "successes": 9,
+        "timeouts": 0
+      },
+      "motion": {
+        "bins_per_robot": {
+          "robot1": 479,
+          "robot2": 259
+        },
+        "cross_robot_bins": 0,
+        "cross_robot_overlap_fraction": 0.0,
+        "distance_travelled_m": {
+          "robot1": 21.0947655832143,
+          "robot2": 11.174749803700491
+        },
+        "repeated_visit_distance_m": {
+          "robot1": 19.719571960748965,
+          "robot2": 10.270934142958644
+        }
+      },
+      "gt_odom": {
+        "robot1": {
+          "samples": 14462,
+          "gt_distance_m": 21.092114644489705,
+          "translation_rmse_m": 0.021920002015455582,
+          "translation_median_m": 0.0023625353885921444,
+          "translation_p95_m": 0.05446117487353844,
+          "final_translation_error_m": 0.06381316818748377,
+          "yaw_rmse_rad": 0.0037621767812429773,
+          "final_yaw_error_rad": -0.00797039839973479,
+          "normalized_translation_rmse_per_10m": 0.010392510369358418,
+          "alignment_theta_rad": -1.570796326965751,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        },
+        "robot2": {
+          "samples": 14516,
+          "gt_distance_m": 11.181495028182049,
+          "translation_rmse_m": 0.022926893254140192,
+          "translation_median_m": 0.002716607266304757,
+          "translation_p95_m": 0.047348946113714124,
+          "final_translation_error_m": 0.047348946113714124,
+          "yaw_rmse_rad": 0.006559928180589434,
+          "final_yaw_error_rad": -0.012557333749602329,
+          "normalized_translation_rmse_per_10m": 0.02050431824756423,
+          "alignment_theta_rad": -1.570796326965689,
+          "alignment_convention": "initial GT yaw/position aligned to odom, matching prior offline analysis"
+        }
+      },
+      "direct_map_accuracy": {
+        "robot1_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_map_final.npz",
+          "robot": "robot1",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -9.718810850546282,
+            "y": -4.789875254208018,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 5584,
+          "occupied_area_m2": 5.025599775338176,
+          "mean_distance_m": 0.03814997923388442,
+          "median_distance_m": 0.026188995561975847,
+          "p90_distance_m": 0.08618898617424486,
+          "p95_distance_m": 0.09618904183008237,
+          "p99_distance_m": 0.1261890411595301,
+          "rms_distance_m": 0.04891129576527436,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 1840,
+              "area_m2": 1.655999925971032,
+              "fraction": 0.32951289398280803
+            },
+            "gt_0.10_m": {
+              "cells": 152,
+              "area_m2": 0.13679999388456351,
+              "fraction": 0.027220630372492838
+            },
+            "gt_0.15_m": {
+              "cells": 24,
+              "area_m2": 0.021599999034404765,
+              "fraction": 0.004297994269340974
+            },
+            "gt_0.25_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 90350,
+          "free_cells": 84766,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.15648732484757727,
+          "boundary_unknown_fraction": 0.753342603487004,
+          "boundary_free_fraction": 0.09017007166541877
+        },
+        "robot1_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot1_shared_map_final.npz",
+          "robot": "robot1",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -9.719999999999999,
+            "y": -4.8,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7788,
+          "occupied_area_m2": 7.0091996866643465,
+          "mean_distance_m": 0.040073079615003664,
+          "median_distance_m": 0.03499989371746892,
+          "p90_distance_m": 0.0849998367205278,
+          "p95_distance_m": 0.0949998923763653,
+          "p99_distance_m": 0.12499989170581305,
+          "rms_distance_m": 0.050291497443467385,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 2728,
+              "area_m2": 2.455199890244008,
+              "fraction": 0.3502824858757062
+            },
+            "gt_0.10_m": {
+              "cells": 209,
+              "area_m2": 0.18809999159127483,
+              "fraction": 0.026836158192090395
+            },
+            "gt_0.15_m": {
+              "cells": 33,
+              "area_m2": 0.029699998672306552,
+              "fraction": 0.00423728813559322
+            },
+            "gt_0.25_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.00012840267077555214
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 107690,
+          "free_cells": 99902,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.21767033907369773,
+          "boundary_unknown_fraction": 0.6848860840731629,
+          "boundary_free_fraction": 0.09744357685313937
+        },
+        "robot2_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_map_final.npz",
+          "robot": "robot2",
+          "kind": "map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -5.17347088957366,
+            "y": -1.6891587873279241,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            1.5308084989341916e-16,
+            -2.5,
+            0.0
+          ],
+          "map_to_world": [
+            18.5,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 3969,
+          "occupied_area_m2": 3.572099840314688,
+          "mean_distance_m": 0.03140750074272054,
+          "median_distance_m": 0.025841065485856518,
+          "p90_distance_m": 0.061528926359746716,
+          "p95_distance_m": 0.08152893708858278,
+          "p99_distance_m": 0.11078655584555906,
+          "rms_distance_m": 0.03973217372412703,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 963,
+              "area_m2": 0.8666999612554912,
+              "fraction": 0.24263038548752835
+            },
+            "gt_0.10_m": {
+              "cells": 41,
+              "area_m2": 0.03689999835044147,
+              "fraction": 0.010330057949105569
+            },
+            "gt_0.15_m": {
+              "cells": 2,
+              "area_m2": 0.0017999999195337305,
+              "fraction": 0.0005039052658100278
+            },
+            "gt_0.25_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.0002519526329050139
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 69299,
+          "free_cells": 65330,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.12675152422719008,
+          "boundary_unknown_fraction": 0.8123863514814419,
+          "boundary_free_fraction": 0.06086212429136806
+        },
+        "robot2_shared_map": {
+          "path": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_03_attempt_01/observer/trial_03_attempt_01/forensic/maps/robot2_shared_map_final.npz",
+          "robot": "robot2",
+          "kind": "shared_map",
+          "resolution_m": 0.029999999329447746,
+          "origin": {
+            "x": -9.719999999999999,
+            "y": -4.8,
+            "yaw": 0.0
+          },
+          "map_to_shared": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_to_world": [
+            16.0,
+            0.0,
+            1.5707963267948966
+          ],
+          "occupied_cells": 7769,
+          "occupied_area_m2": 6.992099687428776,
+          "mean_distance_m": 0.03987439131851626,
+          "median_distance_m": 0.03499989371746892,
+          "p90_distance_m": 0.0849998367205278,
+          "p95_distance_m": 0.0949998923763653,
+          "p99_distance_m": 0.12499989170581305,
+          "rms_distance_m": 0.049968976697276346,
+          "off_geometry": {
+            "gt_0.05_m": {
+              "cells": 2709,
+              "area_m2": 2.438099891008438,
+              "fraction": 0.3486935255502639
+            },
+            "gt_0.10_m": {
+              "cells": 201,
+              "area_m2": 0.1808999919131399,
+              "fraction": 0.025872055605612048
+            },
+            "gt_0.15_m": {
+              "cells": 27,
+              "area_m2": 0.02429999891370536,
+              "fraction": 0.0034753507529926633
+            },
+            "gt_0.25_m": {
+              "cells": 1,
+              "area_m2": 0.0008999999597668652,
+              "fraction": 0.00012871669455528383
+            },
+            "gt_0.50_m": {
+              "cells": 0,
+              "area_m2": 0.0,
+              "fraction": 0.0
+            }
+          },
+          "known_cells": 107649,
+          "free_cells": 99880,
+          "boundary_samples": 9349,
+          "boundary_occupied_fraction": 0.21767033907369773,
+          "boundary_unknown_fraction": 0.6848860840731629,
+          "boundary_free_fraction": 0.09744357685313937
+        }
+      },
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7788,
+          "fused_occupied_cells": 7788,
+          "occupied_iou": 1.0,
+          "fused_additional_cells": 0,
+          "source_union_missing_cells": 0
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7788,
+          "fused_occupied_cells": 7769,
+          "occupied_iou": 0.9960225814729279,
+          "fused_additional_cells": 6,
+          "source_union_missing_cells": 25
+        }
+      },
+      "shared_map_replica_consistency": {
+        "robot1": {
+          "known_iou": 0.9996192775559476,
+          "free_iou": 0.999319489617213,
+          "occupied_iou": 0.9960225814729279,
+          "known_cell_agreement": 0.9997306059508216,
+          "occupied_free_conflict_rate": 0.00026939404917834814,
+          "unknown_mismatch_rate": 0.00038072244405237257,
+          "coverage_area_a_m2": 96.92099566729371,
+          "coverage_area_b_m2": 96.88409566894327,
+          "coverage_area_difference_m2": 0.036899998350435226,
+          "coverage_area_relative_difference": 0.0003807224440523081,
+          "occupied_area_difference_m2": 0.017099999235570706,
+          "occupied_area_relative_difference": 0.0024396507447355287,
+          "free_area_difference_m2": 0.019799999114866296,
+          "free_area_relative_difference": 0.00022021581149521267,
+          "raw_occupancy_correlation": 0.997991153778692,
+          "jointly_known_cell_count": 107649,
+          "known_union_count": 107690,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 414445,
+            "unknown/free": 0,
+            "unknown/occupied": 0,
+            "unknown/uncertain": 0,
+            "free/unknown": 39,
+            "free/free": 99857,
+            "free/occupied": 6,
+            "free/uncertain": 0,
+            "occupied/unknown": 2,
+            "occupied/free": 23,
+            "occupied/occupied": 7763,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9993572025454779,
+          "zero_shift_correlation": 0.997991153778692,
+          "best_shift_correlation": 0.997991153778692,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            614,
+            848
+          ],
+          "dimensions_b": [
+            614,
+            846
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 615,
+            "height": 849,
+            "resolution": 0.029999999329447746,
+            "origin_x": -9.749999782070518,
+            "origin_y": -4.829999892041087
+          }
+        },
+        "robot2": {
+          "known_iou": 0.9996192775559476,
+          "free_iou": 0.999319489617213,
+          "occupied_iou": 0.9960225814729279,
+          "known_cell_agreement": 0.9997306059508216,
+          "occupied_free_conflict_rate": 0.00026939404917834814,
+          "unknown_mismatch_rate": 0.00038072244405237257,
+          "coverage_area_a_m2": 96.88409566894327,
+          "coverage_area_b_m2": 96.92099566729371,
+          "coverage_area_difference_m2": 0.036899998350435226,
+          "coverage_area_relative_difference": 0.0003807224440523081,
+          "occupied_area_difference_m2": 0.017099999235570706,
+          "occupied_area_relative_difference": 0.0024396507447355287,
+          "free_area_difference_m2": 0.019799999114866296,
+          "free_area_relative_difference": 0.00022021581149521267,
+          "raw_occupancy_correlation": 0.997991153778692,
+          "jointly_known_cell_count": 107649,
+          "known_union_count": 107690,
+          "semantic_confusion_matrix": {
+            "unknown/unknown": 414445,
+            "unknown/free": 39,
+            "unknown/occupied": 2,
+            "unknown/uncertain": 0,
+            "free/unknown": 0,
+            "free/free": 99857,
+            "free/occupied": 23,
+            "free/uncertain": 0,
+            "occupied/unknown": 0,
+            "occupied/free": 6,
+            "occupied/occupied": 7763,
+            "occupied/uncertain": 0,
+            "uncertain/unknown": 0,
+            "uncertain/free": 0,
+            "uncertain/occupied": 0,
+            "uncertain/uncertain": 0
+          },
+          "boundary_tolerant_occupied_agreement": 0.9993572025454779,
+          "zero_shift_correlation": 0.997991153778692,
+          "best_shift_correlation": 0.997991153778692,
+          "best_shift_dx_cells": 0,
+          "best_shift_dy_cells": 0,
+          "best_shift_dx_m": 0.0,
+          "best_shift_dy_m": 0.0,
+          "correlation_improvement": 0.0,
+          "geometry_equal": false,
+          "resolution_equal": true,
+          "origin_position_difference_m": 0.0,
+          "origin_yaw_difference_rad": 0.0,
+          "dimensions_a": [
+            614,
+            846
+          ],
+          "dimensions_b": [
+            614,
+            848
+          ],
+          "comparison_resolution": 0.029999999329447746,
+          "common_grid": {
+            "width": 615,
+            "height": 849,
+            "resolution": 0.029999999329447746,
+            "origin_x": -9.749999782070518,
+            "origin_y": -4.829999892041087
+          }
+        }
+      },
+      "coverage": {
+        "duration_s_used": 316.0,
+        "known_cells_at_s": {
+          "60": 53441.0,
+          "120": 67215.0,
+          "180": 80815.0,
+          "240": 87938.0,
+          "300": 107228.0
+        },
+        "initial_known_cells": 11021.0,
+        "final_known_cells": 107910.0,
+        "known_cell_gain": 96889.0,
+        "known_cell_auc_cells_s": 21815471.0,
+        "known_cell_gain_per_100s": 30661.07594936709,
+        "known_cell_gain_per_successful_goal": 10765.444444444445
+      },
+      "allocator": {
+        "total_pair_decision_events": 12,
+        "unique_agreed_decisions": 6,
+        "complete_replica_decisions": 6,
+        "incomplete_or_superseded_local_decisions": 0,
+        "semantic_agreement_rate_complete_replicas": 1.0,
+        "decision_agreed_event_count": 11,
+        "decision_disagreements": 0,
+        "both_active_assignments": 6,
+        "single_active_assignments": 0,
+        "idle_robot_decisions": 0,
+        "canonical_duplicate_assignment_attempts": 0,
+        "raw_path_length_mean_m": 3.4779731780290835,
+        "normalized_cost_mean": 0.1932207321125833,
+        "utility_before_reduction_mean": 0.9460995376059166,
+        "redundancy_reduction_count": 52,
+        "redundancy_reduction_mean": 0.4273071862243846,
+        "los_blocked_reduction_count": 24,
+        "tie_break_count": 0,
+        "beta": 1.0,
+        "assignment_latency": "not persisted in current event schema",
+        "snapshot_to_agreement_latency": "not persisted in current event schema",
+        "agreement_to_dispatch_latency": "not persisted in current event schema",
+        "round_ids": [
+          "2a1da80eed1b01dae42c9969623ffe9b8b235c0f715165f29f9d5600dcfa9192",
+          "2e0d374e7b46c6b73e858edc51909b0140b4734aa5de0281d0cb2b0bb9020a0d",
+          "3c15f671acacc2019768cb0adc5d3427737949b5945f781f3e5cbb9567fa12e6",
+          "5e657564c96a34e0ff04b5f3dfbe244c6016d328fb05f36e02169178a5e17f11",
+          "86e98c3f87dfb39221ab57c2bd2c18462e3d34a39fb85350b242d6447a415422",
+          "f659d1ced84ddf97047dabbd7a93c0ecd7bcd07ffb92be58044c09c4ad6240d1"
+        ]
+      },
+      "traffic": {
+        "runtime_event_count": 0,
+        "runtime_conflict_count": 0,
+        "runtime_wait_count": 0,
+        "status": "deferred; no Webots doorway validation run"
+      },
+      "exploration": {
+        "combined_gt_distance_m": 32.27360967267175,
+        "known_cell_gain_per_combined_gt_m": 3002.1122825328853,
+        "successful_goals_per_100s": 2.6583729580194393
+      },
+      "terminal_failures": []
+    }
+  ],
+  "aggregate": {
+    "run_count": 3,
+    "durations_s": [
+      325.4691592200252,
+      320.0249544749968,
+      338.5529473150091
+    ],
+    "mean_duration_s": 328.01568700334366,
+    "mean_known_cell_gain": 99183.0,
+    "mean_combined_gt_distance_m": 30.948171767603995,
+    "mean_known_cell_gain_per_combined_gt_m": 3207.8086507043013,
+    "mean_successful_goals_per_100s": 2.9518723388390065,
+    "semantic_agreement_rates": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "duplicate_assignment_attempts": 0,
+    "traffic_runtime_events": 0,
+    "total_goals_accepted": 32,
+    "total_successes": 29,
+    "total_failures": 1
+  },
+  "interpretation": {
+    "bounded_run_validity": "clean observer shutdown with forensic readiness and complete final artifacts; runner timeout is intentional bounded termination, not an infrastructure failure",
+    "map_accuracy_vs_replica_consistency": "direct static-world geometry metrics and within-trial replica metrics are reported separately",
+    "fusion_transform_convention": "map origin and yaw applied once, then captured map-to-shared transform applied once"
+  }
+}

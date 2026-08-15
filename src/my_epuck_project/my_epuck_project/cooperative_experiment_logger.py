@@ -105,6 +105,8 @@ class CooperativeExperimentLogger(Node):
             if forensic_enabled else None)
         self.ground_truth_process = None
         self.ground_truth_log = None
+        self.ground_truth_ready_file = None
+        self.ground_truth_exit_reported = False
         if self.forensic is not None or self.contact_capture:
             self.start_forensic_ground_truth()
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}
@@ -119,6 +121,11 @@ class CooperativeExperimentLogger(Node):
         self._observer_timers.append(self.create_timer(self.p['console_summary_period_s'],lambda:self.safe_call('console_status',self.console)))
         self._observer_timers.append(self.create_timer(1.,lambda:self.safe_call('process_resources',self.sample_process_resources)))
         self._observer_timers.append(self.create_timer(5.,lambda:self.safe_call('file_flush',self.flush)))
+        if self.ground_truth_process is not None:
+            self._observer_timers.append(self.create_timer(
+                1., lambda: self.safe_call(
+                    'forensic_supervisor_monitor',
+                    self.monitor_forensic_ground_truth)))
         if self.forensic is not None:
             self._observer_timers.append(self.create_timer(
                 float(self.p['forensic_snapshot_interval_s']),
@@ -145,6 +152,8 @@ class CooperativeExperimentLogger(Node):
         output = forensic_dir / 'supervisor_ground_truth.csv'
         contact_output = forensic_dir / 'contact_points.csv'
         log_path = forensic_dir / 'supervisor_ground_truth.log'
+        ready_file = forensic_dir / 'supervisor_ready.json'
+        self.ground_truth_ready_file = ready_file
         environment = os.environ.copy()
         try:
             from ament_index_python.packages import get_package_prefix
@@ -168,7 +177,8 @@ class CooperativeExperimentLogger(Node):
         command = [sys.executable, '-m',
                    'my_epuck_project.cooperative_ground_truth_observer',
                    '--output', str(output), '--robot-def', 'robot1',
-                   '--robot-def', 'robot2', '--sample-period-s', '0.10']
+                   '--robot-def', 'robot2', '--sample-period-s', '0.10',
+                   '--ready-file', str(ready_file)]
         if self.contact_capture:
             command.extend([
                 '--contact-output', str(contact_output),
@@ -187,6 +197,41 @@ class CooperativeExperimentLogger(Node):
         except OSError as exc:
             self.event('FORENSIC_SUPERVISOR_START_FAILED', str(exc),
                        severity='WARN', allow_during_shutdown=True)
+
+    def monitor_forensic_ground_truth(self):
+        """Record Supervisor readiness and unexpected child termination.
+
+        The Supervisor is an external diagnostic process.  A failed observer
+        must be visible in the run artifact without taking down the passive
+        ROS logger or changing the production control graph.
+        """
+        process = self.ground_truth_process
+        if process is None:
+            return
+        if (self.ground_truth_ready_file is not None and
+                self.ground_truth_ready_file.exists() and
+                not self.counts['FORENSIC_SUPERVISOR_READY']):
+            try:
+                ready = json.loads(self.ground_truth_ready_file.read_text(
+                    encoding='utf-8'))
+            except (OSError, ValueError) as exc:
+                self.event('FORENSIC_SUPERVISOR_READY_FILE_ERROR', str(exc),
+                           severity='WARN', allow_during_shutdown=True)
+            else:
+                self.event('FORENSIC_SUPERVISOR_READY',
+                           'external Webots Supervisor connected and found all robots',
+                           supervisor_pid=process.pid, **ready,
+                           allow_during_shutdown=True)
+        return_code = process.poll()
+        if return_code is not None and not self.ground_truth_exit_reported:
+            self.ground_truth_exit_reported = True
+            severity = 'INFO' if return_code == 0 else 'ERROR'
+            self.event('FORENSIC_SUPERVISOR_EXITED',
+                       'external Webots ground-truth observer exited',
+                       severity=severity, return_code=return_code,
+                       log_path=str(self.directory / 'forensic' /
+                                    'supervisor_ground_truth.log'),
+                       allow_during_shutdown=True)
 
     def stop_forensic_ground_truth(self):
         process = self.ground_truth_process

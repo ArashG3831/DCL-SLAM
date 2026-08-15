@@ -198,7 +198,7 @@ class DistributedFrontierAssignment(Node):
             'burgard_allow_missing_map_for_test', False,
         ).value)
         self._traffic_scheduler_enabled = bool(self.declare_parameter(
-            'traffic_scheduler_enabled', True,
+            'traffic_scheduler_enabled', False,
         ).value)
         self._traffic_robot1_safe_radius_m = float(self.declare_parameter(
             'traffic_robot1_safe_radius_m', 0.08,
@@ -1124,6 +1124,15 @@ class DistributedFrontierAssignment(Node):
         result = 'SUCCEEDED' if (
             outcome.status == 4 and outcome.error_code == 0
         ) else 'FAILED'
+        if result != 'SUCCEEDED':
+            self.get_logger().warning(
+                'NAV2_TERMINAL_RESULT robot=%s status=%s accepted=%s '
+                'error_code=%s error_message=%r failure_class=%s recoveries=%s '
+                'duration_s=%.3f travelled_m=%.3f' % (
+                    self._robot_id, outcome.status, outcome.accepted,
+                    outcome.error_code, outcome.error_message,
+                    outcome.failure_class.value, outcome.recoveries,
+                    outcome.duration_s, outcome.travelled_distance_m))
         self._emit_event(
             'NAVIGATION_' + result, outcome.error_message or result,
             travelled=outcome.travelled_distance_m,

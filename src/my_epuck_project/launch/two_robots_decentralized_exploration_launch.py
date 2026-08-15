@@ -167,7 +167,7 @@ def generate_launch_description():
         DeclareLaunchArgument('assignment_strategy', default_value='burgard',
                               choices=['burgard', 'legacy_weighted']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
-        DeclareLaunchArgument('traffic_scheduler_enabled', default_value='true',
+        DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('enable_observer', default_value='true',
                               choices=['true', 'false']),

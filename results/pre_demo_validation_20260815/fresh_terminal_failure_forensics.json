@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "failures": [
+    {
+      "run_id": "trial_01_attempt_01",
+      "event": {
+        "schema_version": "1.1.0",
+        "run_id": "trial_01_attempt_01",
+        "event_sequence": 2264,
+        "wall_time_utc": "2026-08-15T19:23:57.088Z",
+        "ros_time_sec": 217,
+        "ros_time_nanosec": 880000000,
+        "elapsed_s": 217.88000000000002,
+        "wall_elapsed_s": 233.72862752800575,
+        "robot_id": "robot2",
+        "source": "/robot2/distributed_event",
+        "severity": "INFO",
+        "event_type": "NAVIGATION_FAILED",
+        "message": "FAILED",
+        "source_session_id": "4c5870bf58914c7da6732a9003392ee3",
+        "round_id": "457796e0162ec2d8477d21819a9989c71fbd11b41895f8c33c868a56cb8153f5",
+        "union_hash": "21683aa161d4869a2702e713b6ce2c292b50815f434336f3dd2a23f0af4bfa15",
+        "decision_hash": "e168800a9f79ec6fe69b9b6d06659cb58b7ae4ff617385bd24504b824f69ccdd",
+        "canonical_task_id": "494e1e23c98f2319ebc922ba",
+        "physical_task_signature": "3dea6a8d8036ee8ac65d45b6",
+        "previous_state": "",
+        "next_state": "",
+        "path_length_m": 0.0,
+        "travelled_distance_m": 4.605185508728027,
+        "navigation_duration_s": 45.48112106323242,
+        "newly_discovered_cells": 0.0,
+        "peer_first_discovered_cells": 0.0,
+        "duplicated_cells": 0.0,
+        "route_overlap_score": 0.0,
+        "sensing_overlap_estimate": 0.0,
+        "result": "NAVIGATION_FAILED",
+        "failure_class": 8,
+        "recoveries": 0,
+        "nav2_error_code": 0,
+        "nav2_error_message": ""
+      },
+      "raw_terminal_results_for_robot": [
+        {
+          "source_log": "results/pre_demo_validation_20260815/pre_demo_burgard_forensic_20260815/attempts/trial_01_attempt_01/ros_logs/python3_321845_1786821547223.log",
+          "robot_id": "robot2",
+          "action_status_value": 6,
+          "action_status_name": "ABORTED",
+          "accepted": true,
+          "error_code": 0,
+          "error_message": "",
+          "failure_class": "UNKNOWN",
+          "recoveries": 0,
+          "duration_s": 45.481,
+          "travelled_m": 4.605,
+          "raw_line": "[WARN] [1786821837.085747100] [robot2.distributed_frontier_assignment]: NAV2_TERMINAL_RESULT robot=robot2 status=6 accepted=True error_code=0 error_message='' failure_class=UNKNOWN recoveries=0 duration_s=45.481 travelled_m=4.605"
+        }
+      ],
+      "supported_cause": "Nav2 NavigateToPose returned an ABORTED action status; the project logger persisted no deeper Nav2 error code/message or BT child status.",
+      "recovery_interpretation": "Zero recovery-count changes were observed; the available telemetry cannot distinguish abort-before-recovery from an unpersisted recovery transition.",
+      "unsupported_causes": [
+        "PLANNER_NO_PATH",
+        "CONTROLLER_NO_VALID_CONTROL",
+        "FAILED_TO_MAKE_PROGRESS",
+        "TF_FAILURE",
+        "RECOVERY_EXHAUSTION",
+        "GOAL_INVALIDATED_BY_MAP"
+      ]
+    }
+  ]
+}

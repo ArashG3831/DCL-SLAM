@@ -1,87 +1,131 @@
 {
-  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/per_run_decision_metrics.json",
   "runs": [
     {
-      "cancellations": 0,
-      "failures": 0,
-      "goals_accepted": 12,
-      "goals_sent": 12,
+      "run_id": "trial_01_attempt_01",
+      "duration_s": 325.4691592200252,
+      "navigation": {
+        "cancellations": 0,
+        "failures": 1,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 10,
+        "timeouts": 0
+      },
       "motion": {
         "bins_per_robot": {
-          "robot1": 445,
-          "robot2": 399
+          "robot1": 458,
+          "robot2": 234
         },
         "cross_robot_bins": 0,
         "cross_robot_overlap_fraction": 0.0,
         "distance_travelled_m": {
-          "robot1": 20.871893461389057,
-          "robot2": 16.672890562515104
+          "robot1": 21.135588225842362,
+          "robot2": 10.509010393491163
         },
         "repeated_visit_distance_m": {
-          "robot1": 18.904246046780454,
-          "robot2": 15.12631829491208
+          "robot1": 19.914505540688445,
+          "robot2": 9.728532655620253
         }
       },
-      "recoveries": 0,
-      "run_id": "pre_demo_burgard_large_01_final",
-      "sim_elapsed_s": 336.5,
-      "successes": 11,
-      "timeouts": 0
+      "terminal_failures": [
+        {
+          "schema_version": "1.1.0",
+          "run_id": "trial_01_attempt_01",
+          "event_sequence": 2264,
+          "wall_time_utc": "2026-08-15T19:23:57.088Z",
+          "ros_time_sec": 217,
+          "ros_time_nanosec": 880000000,
+          "elapsed_s": 217.88000000000002,
+          "wall_elapsed_s": 233.72862752800575,
+          "robot_id": "robot2",
+          "source": "/robot2/distributed_event",
+          "severity": "INFO",
+          "event_type": "NAVIGATION_FAILED",
+          "message": "FAILED",
+          "source_session_id": "4c5870bf58914c7da6732a9003392ee3",
+          "round_id": "457796e0162ec2d8477d21819a9989c71fbd11b41895f8c33c868a56cb8153f5",
+          "union_hash": "21683aa161d4869a2702e713b6ce2c292b50815f434336f3dd2a23f0af4bfa15",
+          "decision_hash": "e168800a9f79ec6fe69b9b6d06659cb58b7ae4ff617385bd24504b824f69ccdd",
+          "canonical_task_id": "494e1e23c98f2319ebc922ba",
+          "physical_task_signature": "3dea6a8d8036ee8ac65d45b6",
+          "previous_state": "",
+          "next_state": "",
+          "path_length_m": 0.0,
+          "travelled_distance_m": 4.605185508728027,
+          "navigation_duration_s": 45.48112106323242,
+          "newly_discovered_cells": 0.0,
+          "peer_first_discovered_cells": 0.0,
+          "duplicated_cells": 0.0,
+          "route_overlap_score": 0.0,
+          "sensing_overlap_estimate": 0.0,
+          "result": "NAVIGATION_FAILED",
+          "failure_class": 8,
+          "recoveries": 0,
+          "nav2_error_code": 0,
+          "nav2_error_message": ""
+        }
+      ]
     },
     {
-      "cancellations": 0,
-      "failures": 2,
-      "goals_accepted": 10,
-      "goals_sent": 10,
+      "run_id": "trial_02_attempt_01",
+      "duration_s": 320.0249544749968,
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 11,
+        "goals_sent": 11,
+        "recoveries": 0,
+        "successes": 10,
+        "timeouts": 0
+      },
       "motion": {
         "bins_per_robot": {
-          "robot1": 284,
-          "robot2": 430
+          "robot1": 324,
+          "robot2": 328
         },
         "cross_robot_bins": 0,
         "cross_robot_overlap_fraction": 0.0,
         "distance_travelled_m": {
-          "robot1": 12.653739341898747,
-          "robot2": 22.290447607788746
+          "robot1": 14.950352034855095,
+          "robot2": 14.012498294441492
         },
         "repeated_visit_distance_m": {
-          "robot1": 11.077161941350242,
-          "robot2": 20.26717517361538
+          "robot1": 13.921312141038445,
+          "robot2": 13.175500328158297
         }
       },
-      "recoveries": 0,
-      "run_id": "pre_demo_burgard_large_02_final",
-      "sim_elapsed_s": 296.0,
-      "successes": 7,
-      "timeouts": 0
+      "terminal_failures": []
     },
     {
-      "cancellations": 0,
-      "failures": 0,
-      "goals_accepted": 11,
-      "goals_sent": 11,
+      "run_id": "trial_03_attempt_01",
+      "duration_s": 338.5529473150091,
+      "navigation": {
+        "cancellations": 0,
+        "failures": 0,
+        "goals_accepted": 10,
+        "goals_sent": 10,
+        "recoveries": 0,
+        "successes": 9,
+        "timeouts": 0
+      },
       "motion": {
         "bins_per_robot": {
-          "robot1": 298,
-          "robot2": 469
+          "robot1": 479,
+          "robot2": 259
         },
         "cross_robot_bins": 0,
         "cross_robot_overlap_fraction": 0.0,
         "distance_travelled_m": {
-          "robot1": 13.007625673900632,
-          "robot2": 22.84710698469576
+          "robot1": 21.0947655832143,
+          "robot2": 11.174749803700491
         },
         "repeated_visit_distance_m": {
-          "robot1": 11.450314867848842,
-          "robot2": 20.829430845826476
+          "robot1": 19.719571960748965,
+          "robot2": 10.270934142958644
         }
       },
-      "recoveries": 0,
-      "run_id": "pre_demo_burgard_large_03_final",
-      "sim_elapsed_s": 315.18,
-      "successes": 9,
-      "timeouts": 0
+      "terminal_failures": []
     }
-  ],
-  "source": "measured run summaries discovered by this report generator"
+  ]
 }

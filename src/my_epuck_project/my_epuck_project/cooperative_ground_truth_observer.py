@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import signal
@@ -17,6 +18,7 @@ import time
 
 
 def _find_named_node(supervisor, name):
+    requested = str(name).casefold()
     node = supervisor.getFromDef(name)
     if node is not None:
         return node
@@ -32,7 +34,12 @@ def _find_named_node(supervisor, name):
         name_field = node.getField('name')
         if name_field is not None:
             try:
-                if name_field.getSFString() == name:
+                # Webots may expose an externally-controlled robot's runtime
+                # name with normalized capitalization even when the WBT
+                # ``name`` field is lower-case.  Supervisor lookup is
+                # diagnostic-only, so a case-insensitive name match is the
+                # least invasive compatibility rule.
+                if name_field.getSFString().casefold() == requested:
                     return node
             except RuntimeError:
                 pass
@@ -60,6 +67,8 @@ def main(argv=None):
     parser.add_argument('--output', required=True)
     parser.add_argument('--robot-def', action='append', required=True)
     parser.add_argument('--sample-period-s', type=float, default=0.10)
+    parser.add_argument('--ready-file', default='')
+    parser.add_argument('--connect-attempts', type=int, default=240)
     parser.add_argument('--contact-output', default='')
     parser.add_argument('--contact-sampling-period-ms', type=int, default=20)
     args = parser.parse_args(argv)
@@ -70,7 +79,7 @@ def main(argv=None):
         return 2
 
     try:
-        supervisor = _connect(Supervisor)
+        supervisor = _connect(Supervisor, attempts=max(1, args.connect_attempts))
     except RuntimeError as exc:
         print(f'SUPERVISOR_CONNECT_FAILED {exc}', file=sys.stderr)
         return 2
@@ -82,6 +91,17 @@ def main(argv=None):
             print(f'SUPERVISOR_ROBOT_NOT_FOUND name={name}', file=sys.stderr)
             return 2
         robots[name] = node
+
+    if args.ready_file:
+        ready_path = os.path.abspath(args.ready_file)
+        os.makedirs(os.path.dirname(ready_path), exist_ok=True)
+        with open(ready_path, 'w', encoding='utf-8') as ready_stream:
+            json.dump({
+                'sim_time_s': supervisor.getTime(),
+                'robot_defs': sorted(robots),
+                'basic_time_step_ms': supervisor.getBasicTimeStep(),
+            }, ready_stream, sort_keys=True)
+        print(f'SUPERVISOR_READY path={ready_path}', flush=True)
 
     timestep = max(1, int(supervisor.getBasicTimeStep()))
     contact_stream = None

@@ -1,5 +1,61 @@
 {
-  "archived_reference": "results/rpp_cooperative_validation_20260815/offline_decision/fusion_fidelity.json",
-  "new_run_count": 3,
-  "source": "archived reference only; new observer runs did not include forensic static-map capture"
+  "runs": [
+    {
+      "run_id": "trial_01_attempt_01",
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7320,
+          "fused_occupied_cells": 7320,
+          "occupied_iou": 1.0,
+          "fused_additional_cells": 0,
+          "source_union_missing_cells": 0
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7320,
+          "fused_occupied_cells": 7303,
+          "occupied_iou": 0.9968592107059948,
+          "fused_additional_cells": 3,
+          "source_union_missing_cells": 20
+        }
+      }
+    },
+    {
+      "run_id": "trial_02_attempt_01",
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7249,
+          "fused_occupied_cells": 7239,
+          "occupied_iou": 0.9969676085458304,
+          "fused_additional_cells": 6,
+          "source_union_missing_cells": 16
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7249,
+          "fused_occupied_cells": 7237,
+          "occupied_iou": 0.9950420052334389,
+          "fused_additional_cells": 12,
+          "source_union_missing_cells": 24
+        }
+      }
+    },
+    {
+      "run_id": "trial_03_attempt_01",
+      "fusion_fidelity": {
+        "robot1": {
+          "source_union_occupied_cells": 7788,
+          "fused_occupied_cells": 7788,
+          "occupied_iou": 1.0,
+          "fused_additional_cells": 0,
+          "source_union_missing_cells": 0
+        },
+        "robot2": {
+          "source_union_occupied_cells": 7788,
+          "fused_occupied_cells": 7769,
+          "occupied_iou": 0.9960225814729279,
+          "fused_additional_cells": 6,
+          "source_union_missing_cells": 25
+        }
+      }
+    }
+  ]
 }

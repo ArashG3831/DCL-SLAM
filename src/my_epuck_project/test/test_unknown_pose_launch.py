@@ -92,6 +92,43 @@ def test_full_exploration_launch_starts_both_unknown_pose_frontends():
     assert "'peer_robot_id': peer" in text
 
 
+def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
+    source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert 'two_robots_decentralized_exploration_launch.py' in text
+    assert "'world_profile': 'large_unknown_pose'" in text
+    assert "'unknown_initial_pose': 'true'" in text
+    assert "'ideal_encoder_sensing': 'true'" in text
+    assert "'sensor_profile': 'full'" in text
+    assert "'controller_variant': 'rpp'" in text
+    assert "'enable_forensic_capture': LaunchConfiguration(" in text
+    assert "'launch_rviz': 'false'" in text
+
+
+def test_explicit_unknown_pose_entrypoint_keeps_runtime_ground_truth_out():
+    source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert 'ground_truth' not in text
+    assert 'Supervisor' not in text
+    assert 'initial_relative' not in text
+    assert 'known_relative_transform' not in text
+
+
+def test_unknown_pose_pre_handoff_gate_is_data_dependent_and_post_handoff_is_gated():
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py')
+    stack_text = stack.read_text(encoding='utf-8')
+    frontend = (LAUNCH.parent / 'my_epuck_project' /
+                'unknown_pose_frontend.py').read_text(encoding='utf-8')
+    fusion = (LAUNCH.parent / 'my_epuck_project' /
+              'source_aware_map_fusion.py').read_text(encoding='utf-8')
+    assert 'alignment = [] if unknown_initial_pose else' in stack_text
+    assert "f'/cslam/unknown_pose/{peer}/local_map'" in stack_text
+    assert 'if self.latest_map is None or self.accepted is None:' in frontend
+    assert 'message.local_evidence_only = True' in frontend
+    assert 'self.map_transform(message)' in fusion
+    assert 'self.local_map is None or self.remote_map is None' in fusion
+
+
 def test_unknown_pose_mode_gates_known_alignment_and_raw_map_export():
     stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py')
     text = stack.read_text(encoding='utf-8')

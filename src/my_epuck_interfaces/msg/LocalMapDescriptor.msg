@@ -1,0 +1,14 @@
+std_msgs/Header header
+string source_robot_id
+string keyframe_id
+uint64 map_epoch
+float32 resolution
+uint16 ring_count
+uint16 sector_count
+uint8 descriptor_version
+uint8[] descriptor_bytes
+float32 crop_origin_x
+float32 crop_origin_y
+uint16 crop_width
+uint16 crop_height
+uint32 checksum

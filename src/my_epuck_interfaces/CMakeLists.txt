@@ -24,6 +24,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DistributedExplorationStatus.msg"
   "msg/ExplorationFailure.msg"
   "msg/DistributedExplorationEvent.msg"
+  "msg/LocalMapDescriptor.msg"
+  "msg/LocalMapCropRequest.msg"
+  "msg/LocalMapCrop.msg"
+  "msg/RelativePoseHypothesis.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs unique_identifier_msgs
 )
 

@@ -39,6 +39,10 @@ setup(
             'my_epuck_project.teammate_scan_filter:main',
             'source_aware_map_fusion = '
             'my_epuck_project.source_aware_map_fusion:main',
+            'unknown_pose_frontend = '
+            'my_epuck_project.unknown_pose_frontend:main',
+            'unknown_pose_motion_fixture = '
+            'my_epuck_project.unknown_pose_motion_fixture:main',
             'twist_stamper = my_epuck_project.twist_stamper:main',
             'cooperative_experiment_logger = '
             'my_epuck_project.cooperative_experiment_logger:main',

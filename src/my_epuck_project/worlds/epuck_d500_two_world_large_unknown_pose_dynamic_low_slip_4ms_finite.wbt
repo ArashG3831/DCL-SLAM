@@ -1,0 +1,402 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "webots://projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "webots://projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "../protos/arena/ThesisRectangleArena.proto"
+EXTERNPROTO "../protos/e-puck/E-puck.proto"
+EXTERNPROTO "webots://projects/robots/gctronic/e-puck/protos/Pi-puck.proto"
+EXTERNPROTO "webots://projects/objects/solids/protos/SolidBox.proto"
+
+WorldInfo {
+  info [
+    "Two custom D500 e-pucks; dynamic_low_slip_4ms_finite simulation profile."
+  ]
+  title "Two active D500 e-pucks dynamic low-slip finite-friction world"
+  basicTimeStep 4
+  CFM 0.00001
+  ERP 0.2
+  optimalThreadCount 1
+  randomSeed 20260818
+  contactProperties [
+    ContactProperties {
+      material1 "epuck_wheel"
+      material2 "epuck_floor"
+      coulombFriction 10
+      rollingFriction 0 0 0
+      forceDependentSlip 0
+      bounce 0
+      softERP 0.2
+      softCFM 0.00001
+    }
+  ]
+}
+Viewpoint {
+  orientation 0.5785561120896737 -0.5767592529883621 -0.5767335513527782 4.180700949830244
+  position -0.08562331275546686 2.4565357895600832 49.80362977360843
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+ThesisRectangleArena {
+  floorSize 40 10
+  wallHeight 0.3
+  floorContactMaterial "epuck_floor"
+  wallContactMaterial "default"
+}
+SolidBox {
+  translation 8 0 0.5
+  size 13 5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 10.91 -3.72 0.5
+  name "box(2)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 17.95 -1.64 0.5
+  name "box(5)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 6.85 4.5 0.5
+  name "box(14)"
+  size 3 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 12.13 4.5 0.5
+  name "box(15)"
+  size 3 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 8.78 2.75 0.5
+  name "box(12)"
+  size 1 0.5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 6.88 3.5 0.5
+  name "box(16)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 0 3.5 0.5
+  name "box(20)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 2 3 0.5
+  name "box(21)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 2 4.5 0.5
+  name "box(22)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 4.99 2.75 0.5
+  name "box(13)"
+  size 1 0.5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 17.95 1.99 0.5
+  name "box(9)"
+  size 2 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 17.45 3.49 0.5
+  name "box(10)"
+  size 1 2 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 16.4 -2.36 0.5
+  name "box(6)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation -16.73 3.4 0.5
+  name "box(19)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 18.01 -3.91 0.5
+  name "box(7)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 18.88 -2.71 0.5
+  name "box(8)"
+  size 0.5 0.5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 18.34 3.37 0.5
+  name "box(11)"
+  size 0.5 0.5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 1 -0.76 0.5
+  name "box(4)"
+  size 1 2 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation 3.78921 -3.14677 0.5
+  rotation 0 0 1 0.261799
+  name "box(3)"
+  size 1 1 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation -17.0247 -0.855118 0.5
+  rotation 0 0 1 0.261799
+  name "box(17)"
+  size 1 5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation -17.0247 -0.855118 0.5
+  rotation 0 0 1 1.8326
+  name "box(18)"
+  size 1 3 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+SolidBox {
+  translation -8 0 0.5
+  name "box(1)"
+  size 13 5 1
+  appearance PBRAppearance {
+    baseColor 0.184314 0.184314 0.184314
+    roughness 0.5
+    metalness 0
+  }
+}
+E-puck {
+  translation 16 0 0.001
+  rotation 0 0 1 1.5707963267948966
+  name "robot1"
+  controller "<extern>"
+  window "<none>"
+  version "2"
+  wheel_contactMaterial "epuck_wheel"
+  camera_width 640
+  camera_height 480
+  turretSlot [
+    Pi-puck {
+    }
+    Solid {
+      translation 0 0 0.055
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.12 0.12 0.12
+            roughness 0.5
+          }
+          geometry Cylinder {
+            height 0.018
+            radius 0.025
+            subdivision 24
+          }
+        }
+      ]
+      name "d500 upper sensor housing"
+      boundingObject Cylinder {
+        height 0.018
+        radius 0.025
+        subdivision 24
+      }
+    }
+    Lidar {
+      translation 0 0 0.055
+      name "d500_lidar"
+      horizontalResolution 720
+      fieldOfView 6.28318530718
+      numberOfLayers 1
+      minRange 0.03
+      maxRange 12
+      noise 0
+      resolution -1
+    }
+    Gyro {
+      name "d500_gyro"
+      lookupTable [
+        -10 -10 0
+        10 10 0
+      ]
+    }
+    Accelerometer {
+      name "d500_accelerometer"
+      lookupTable [
+        -20 -20 0
+        20 20 0
+      ]
+    }
+  ]
+}
+E-puck {
+  translation -18.74 0 0.001
+  rotation 0 0 1 1.5707963267948966
+  name "robot2"
+  controller "<extern>"
+  window "<none>"
+  version "2"
+  wheel_contactMaterial "epuck_wheel"
+  camera_width 640
+  camera_height 480
+  turretSlot [
+    Pi-puck {
+    }
+    Solid {
+      translation 0 0 0.055
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.12 0.12 0.12
+            roughness 0.5
+          }
+          geometry Cylinder {
+            height 0.018
+            radius 0.025
+            subdivision 24
+          }
+        }
+      ]
+      name "d500 upper sensor housing"
+      boundingObject Cylinder {
+        height 0.018
+        radius 0.025
+        subdivision 24
+      }
+    }
+    Lidar {
+      translation 0 0 0.055
+      name "d500_lidar"
+      horizontalResolution 720
+      fieldOfView 6.28318530718
+      numberOfLayers 1
+      minRange 0.03
+      maxRange 12
+      noise 0
+      resolution -1
+    }
+    Gyro {
+      name "d500_gyro"
+      lookupTable [
+        -10 -10 0
+        10 10 0
+      ]
+    }
+    Accelerometer {
+      name "d500_accelerometer"
+      lookupTable [
+        -20 -20 0
+        20 20 0
+      ]
+    }
+  ]
+}

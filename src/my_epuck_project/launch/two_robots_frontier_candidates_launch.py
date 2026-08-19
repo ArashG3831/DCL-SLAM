@@ -85,6 +85,8 @@ def launch_setup(context):
                 'fusion_rebuild_period_s'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'controller_variant': LaunchConfiguration('controller_variant'),
+            'unknown_initial_pose': LaunchConfiguration(
+                'unknown_initial_pose'),
         }.items(),
     )
     return [
@@ -105,7 +107,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'world_profile',
             default_value='small',
-            choices=['large', 'small'],
+            choices=['large', 'small', 'large_unknown_pose'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(
@@ -137,5 +139,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
+        DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

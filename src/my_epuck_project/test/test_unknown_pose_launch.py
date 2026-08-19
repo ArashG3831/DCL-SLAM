@@ -80,3 +80,78 @@ def test_unknown_pose_frontend_rechecks_cached_temporal_support_from_timer():
     assert 'self._compare_peer_descriptors()' in source
     assert 'new_peer_key=key' in source
     assert 'confirmation_window_for_cadence' in source
+
+
+def test_full_exploration_launch_starts_both_unknown_pose_frontends():
+    source = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert "DeclareLaunchArgument('unknown_initial_pose'" in text
+    assert "executable='unknown_pose_frontend'" in text
+    assert "for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1'))" in text
+    assert "'robot_id': robot" in text
+    assert "'peer_robot_id': peer" in text
+
+
+def test_unknown_pose_mode_gates_known_alignment_and_raw_map_export():
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py')
+    text = stack.read_text(encoding='utf-8')
+    slam = (LAUNCH / 'two_robots_teammate_filtered_dual_slam_launch.py')
+    slam_text = slam.read_text(encoding='utf-8')
+    assert 'alignment = [] if unknown_initial_pose else' in text
+    assert 'if not unknown_initial_pose:' in text
+    assert "f'/cslam/unknown_pose/{peer}/local_map'" in text
+    assert "f'/{robot}/scan_d500_fixed'" in slam_text
+    assert "if not unknown_initial_pose:" in slam_text
+    assert "'--frame-id', f'{robot}/local_world'" in slam_text
+
+
+def test_unknown_pose_frontend_handoff_is_the_only_peer_map_enablement():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py')
+    full_text = full.read_text(encoding='utf-8')
+    stack_text = stack.read_text(encoding='utf-8')
+    assert "'peer_map_topic': (" in full_text
+    assert "f'/cslam/unknown_pose/{robot}/local_map'" in full_text
+    assert "f'/cslam/unknown_pose/{peer}/local_map'" in stack_text
+    assert "'output_topic': 'shared_map'" in stack_text
+    assert "'global_frame': 'shared_map'" in (
+        LAUNCH / 'two_robots_frontier_candidates_launch.py').read_text(
+            encoding='utf-8')
+
+
+def test_full_unknown_pose_launch_keeps_observer_artifact_finalization():
+    source = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert "executable='cooperative_experiment_logger'" in text
+    assert "DeclareLaunchArgument('enable_forensic_capture'" in text
+    assert "'enable_forensic_capture': LaunchConfiguration(" in text
+    assert "'enable_trajectory_overlap': LaunchConfiguration(" in text
+    assert "'unknown_pose_diagnostic_output'" in text
+
+
+def test_far_start_campaign_fixture_uses_frozen_physics_and_two_robots():
+    world = (LAUNCH.parent / 'worlds' /
+             'epuck_d500_two_world_large_unknown_pose_dynamic_low_slip_4ms_finite.wbt')
+    text = world.read_text(encoding='utf-8')
+    assert text.count('name "robot1"') == 1
+    assert text.count('name "robot2"') == 1
+    assert 'translation 16 0 0.001' in text
+    assert 'translation -18.74 0 0.001' in text
+    assert 'basicTimeStep 4' in text
+    assert 'coulombFriction 10' in text
+    assert 'optimalThreadCount 1' in text
+    assert 'randomSeed 20260818' in text
+    assert text.count('noise 0') == 2
+    assert text.count('resolution -1') == 2
+
+
+def test_unknown_pose_runtime_has_no_supervisor_pose_input_or_peer_nav2():
+    frontend = (LAUNCH.parent / 'my_epuck_project' /
+                'unknown_pose_frontend.py').read_text(encoding='utf-8')
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
+        encoding='utf-8')
+    assert 'Supervisor' not in frontend
+    assert 'ground_truth' not in frontend
+    assert 'NavigateToPose' not in frontend
+    assert 'cmd_vel' not in frontend
+    assert "'robot_id': robot" in full

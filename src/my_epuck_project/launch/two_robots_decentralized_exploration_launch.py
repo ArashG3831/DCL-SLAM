@@ -36,6 +36,9 @@ def launch_setup(context):
     contact_enabled = (
         LaunchConfiguration('enable_contact_capture').perform(context).lower()
         == 'true')
+    unknown_initial_pose = (
+        LaunchConfiguration('unknown_initial_pose').perform(context).lower()
+        == 'true')
     launch_world_path = world_path or selected['world_path']
     if forensic_enabled or contact_enabled:
         # Keep the source/production world untouched.  Webots requires every
@@ -109,8 +112,32 @@ def launch_setup(context):
             'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
             'terminal_small_frontier_length_m': LaunchConfiguration(
                 'terminal_small_frontier_length_m'),
+            'unknown_initial_pose': LaunchConfiguration(
+                'unknown_initial_pose'),
         }.items(),
     )
+    unknown_pose_frontends = []
+    if unknown_initial_pose:
+        diagnostic_output = LaunchConfiguration(
+            'unknown_pose_diagnostic_output').perform(context)
+        for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
+            unknown_pose_frontends.append(Node(
+                package='my_epuck_project',
+                executable='unknown_pose_frontend',
+                name='unknown_pose_frontend',
+                namespace=robot,
+                output='screen',
+                parameters=[{
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    'robot_id': robot,
+                    'peer_robot_id': peer,
+                    'map_topic': f'/{robot}/map',
+                    'peer_map_topic': (
+                        f'/cslam/unknown_pose/{robot}/local_map'),
+                    'shared_frame': 'shared_map',
+                    'diagnostic_output': diagnostic_output,
+                }],
+            ))
     observer = Node(
         package='my_epuck_project', executable='cooperative_experiment_logger',
         name='cooperative_experiment_logger', output='screen',
@@ -164,6 +191,7 @@ def launch_setup(context):
                     'traffic_scheduler_enabled').perform(context).lower()
                     == 'true',
                 'map_fusion_resolution': selected['fusion_resolution'],
+                'unknown_initial_pose': unknown_initial_pose,
             }, sort_keys=True),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'enable_console_status': LaunchConfiguration('logger_console_status'),
@@ -187,14 +215,15 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
         }],
     )
-    return [assignment, observer]
+    return [assignment, *unknown_pose_frontends, observer]
 
 
 def generate_launch_description():
     """Launch final control graph and its removable passive evaluator."""
     return LaunchDescription([
-        DeclareLaunchArgument('world_profile', default_value='large',
-                              choices=['large', 'small']),
+        DeclareLaunchArgument(
+            'world_profile', default_value='large',
+            choices=['large', 'small', 'large_unknown_pose']),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
@@ -225,6 +254,10 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('unknown_pose_diagnostic_output',
+                              default_value=''),
         DeclareLaunchArgument('assignment_strategy', default_value='burgard',
                               choices=['burgard', 'legacy_weighted']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),

@@ -47,6 +47,28 @@ PROFILE_SETTINGS = {
         'startup_timeout': 300.0,
         'mission_timeout': 1800.0,
     },
+    'large_unknown_pose': {
+        'world': 'epuck_d500_two_world_large_unknown_pose_dynamic_low_slip_4ms_finite.wbt',
+        'baseline_world': 'epuck_d500_two_world_large.wbt',
+        'physics_profile': 'dynamic_low_slip_4ms_finite',
+        'slam_resolution': 0.03,
+        'fusion_resolution': 0.03,
+        'global_costmap_resolution': 0.03,
+        'local_costmap_resolution': 0.02,
+        'minimum_frontier_cells': 2,
+        'minimum_known_cell_gain_for_activity': 1,
+        'coverage_attribution_resolution': 0.03,
+        'map_comparison_shift_window': 1,
+        'rviz': 'cooperative_manual_exploration.rviz',
+        'rviz_view': {
+            'distance': 45,
+            'focal_x': 0,
+            'focal_y': 0,
+            'focal_z': 0,
+        },
+        'startup_timeout': 300.0,
+        'mission_timeout': 1800.0,
+    },
 }
 
 

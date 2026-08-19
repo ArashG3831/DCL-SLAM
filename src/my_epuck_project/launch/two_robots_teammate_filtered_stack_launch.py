@@ -211,6 +211,9 @@ def launch_setup(context):
         'fusion_cpu_quota_percent').perform(context)
     fusion_process_nice = int(LaunchConfiguration(
         'fusion_process_nice').perform(context))
+    unknown_initial_pose = (
+        LaunchConfiguration('unknown_initial_pose').perform(context).lower()
+        == 'true')
     try:
         quota_enabled = float(fusion_quota) > 0.0
     except ValueError:
@@ -240,10 +243,12 @@ def launch_setup(context):
             # The D500 scan-plane silhouette is the measured 26 mm housing,
             # not the historical 35 mm body-radius approximation.
             'teammate_geometry_radius_m': '0.026',
+            'unknown_initial_pose': LaunchConfiguration(
+                'unknown_initial_pose'),
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
-    alignment = [
+    alignment = [] if unknown_initial_pose else [
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
@@ -268,13 +273,10 @@ def launch_setup(context):
     ]
     exchange = []
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
-        exchange.extend([
-            Node(
-                package='my_epuck_project',
-                executable='map_exporter',
-                name='map_exporter',
-                namespace=robot,
-                output='screen',
+        if not unknown_initial_pose:
+            exchange.append(Node(
+                package='my_epuck_project', executable='map_exporter',
+                name='map_exporter', namespace=robot, output='screen',
                 parameters=[{
                     'use_sim_time': LaunchConfiguration('use_sim_time'),
                     'source_robot_id': robot,
@@ -282,8 +284,8 @@ def launch_setup(context):
                     'output_topic': f'/cslam/{robot}/local_map',
                     'export_rate_hz': 1.0,
                 }],
-            ),
-            Node(
+            ))
+        exchange.append(Node(
                 package='my_epuck_project',
                 executable='source_aware_map_fusion',
                 name='map_fusion',
@@ -292,7 +294,10 @@ def launch_setup(context):
                 parameters=[{
                     'use_sim_time': LaunchConfiguration('use_sim_time'),
                     'local_map_topic': f'/{robot}/map',
-                    'remote_peer_topic': f'/cslam/{peer}/local_map',
+                    'remote_peer_topic': (
+                        f'/cslam/unknown_pose/{peer}/local_map'
+                        if unknown_initial_pose else
+                        f'/cslam/{peer}/local_map'),
                     'expected_remote_source': peer,
                     'output_topic': 'shared_map',
                     'metadata_topic': 'shared_map_metadata',
@@ -324,8 +329,7 @@ def launch_setup(context):
                     '-p CPUQuota=' + LaunchConfiguration(
                         'fusion_cpu_quota_percent').perform(context) + '%'
                     if diagnostic_mode and quota_enabled else ''),
-            ),
-        ])
+            ))
     return [
         filtered_slam,
         *alignment,
@@ -342,7 +346,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'world_profile',
             default_value='small',
-            choices=['large', 'small'],
+            choices=['large', 'small', 'large_unknown_pose'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(
@@ -370,5 +374,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
+        DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

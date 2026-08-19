@@ -24,7 +24,7 @@ from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
 
 
 def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
-                 tf_probe_log, tf_publication_mode):
+                 tf_probe_log, tf_publication_mode, unknown_initial_pose):
     probe_env = {}
     if tf_probe_library:
         probe_env = {
@@ -56,6 +56,10 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
                 'use_lifecycle_manager': False,
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'resolution': slam_resolution,
+                'scan_topic': (
+                    f'/{robot}/scan_d500_fixed'
+                    if unknown_initial_pose else
+                    f'/{robot}/scan_d500_slam'),
                 # Runtime-only diagnostic overrides.  The checked-in YAML
                 # remains the production source of truth (false/false).
                 'use_scan_matching': LaunchConfiguration('use_scan_matching'),
@@ -95,6 +99,9 @@ def launch_setup(context):
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
     )
+    unknown_initial_pose = (
+        LaunchConfiguration('unknown_initial_pose').perform(context).lower()
+        == 'true')
     base = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_namespaced_launch.py'
@@ -118,41 +125,60 @@ def launch_setup(context):
             selected['world_metadata']['reverse_relative_transform']),
     }
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
-        filters.append(Node(
-            package='my_epuck_project',
-            executable='teammate_scan_filter',
-            name='teammate_scan_filter',
-            namespace=robot,
-            output='screen',
-            remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
-            parameters=[{
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'input_topic': f'/{robot}/scan_d500_fixed',
-                'output_topic': f'/{robot}/scan_d500_slam',
-                'peer_base_frame': f'{peer}/base_footprint',
-                'expected_lidar_frame': f'{robot}/d500_lidar',
-                'own_odom_frame': f'{robot}/odom',
-                'peer_odom_frame': f'{peer}/odom',
-                'own_odom_to_peer_odom': fixed_odom[robot],
-                'peer_radius_m': 0.060,
-                'range_tolerance_m': 0.005,
-                'teammate_geometry_radius_m': LaunchConfiguration(
-                    'teammate_geometry_radius_m'),
-                'maximum_processing_latency': 0.2,
-                'pending_queue_depth': 4,
-                'transform_retry_period': 0.02,
-                'warning_interval': 2.0,
-                'simulation_free_space_completion': True,
-                'free_space_cap': FREE_SPACE_CAP,
-            }],
-        ))
+        if not unknown_initial_pose:
+            filters.append(Node(
+                package='my_epuck_project',
+                executable='teammate_scan_filter',
+                name='teammate_scan_filter',
+                namespace=robot,
+                output='screen',
+                remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
+                parameters=[{
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    'input_topic': f'/{robot}/scan_d500_fixed',
+                    'output_topic': f'/{robot}/scan_d500_slam',
+                    'peer_base_frame': f'{peer}/base_footprint',
+                    'expected_lidar_frame': f'{robot}/d500_lidar',
+                    'own_odom_frame': f'{robot}/odom',
+                    'peer_odom_frame': f'{peer}/odom',
+                    'own_odom_to_peer_odom': fixed_odom[robot],
+                    'peer_radius_m': 0.060,
+                    'range_tolerance_m': 0.005,
+                    'teammate_geometry_radius_m': LaunchConfiguration(
+                        'teammate_geometry_radius_m'),
+                    'maximum_processing_latency': 0.2,
+                    'pending_queue_depth': 4,
+                    'transform_retry_period': 0.02,
+                    'warning_interval': 2.0,
+                    'simulation_free_space_completion': True,
+                    'free_space_cap': FREE_SPACE_CAP,
+                }],
+            ))
+    local_frame_anchors = []
+    if unknown_initial_pose:
+        for robot in ('robot1', 'robot2'):
+            local_frame_anchors.append(Node(
+                package='tf2_ros',
+                executable='static_transform_publisher',
+                name='local_map_frame_anchor',
+                namespace=robot,
+                output='screen',
+                arguments=[
+                    '--x', '0.0', '--y', '0.0', '--z', '0.0', '--yaw', '0.0',
+                    '--frame-id', f'{robot}/local_world',
+                    '--child-frame-id', f'{robot}/map',
+                ],
+            ))
     return [
         base,
         *filters,
+        *local_frame_anchors,
         *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
-                      tf_probe_library, tf_probe_log, tf_publication_mode),
+                      tf_probe_library, tf_probe_log, tf_publication_mode,
+                      unknown_initial_pose),
         *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
-                      tf_probe_library, tf_probe_log, tf_publication_mode),
+                      tf_probe_library, tf_probe_log, tf_publication_mode,
+                      unknown_initial_pose),
     ]
 
 
@@ -161,7 +187,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'world_profile',
             default_value='small',
-            choices=['large', 'small'],
+            choices=['large', 'small', 'large_unknown_pose'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(
@@ -182,5 +208,8 @@ def generate_launch_description():
                               choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument(
             'teammate_geometry_radius_m', default_value='0.026'),
+        DeclareLaunchArgument(
+            'unknown_initial_pose', default_value='false',
+            choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

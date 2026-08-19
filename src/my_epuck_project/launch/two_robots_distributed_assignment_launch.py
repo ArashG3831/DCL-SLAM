@@ -111,11 +111,13 @@ def generate_launch_description():
                 'fusion_process_nice'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'controller_variant': LaunchConfiguration('controller_variant'),
+            'unknown_initial_pose': LaunchConfiguration(
+                'unknown_initial_pose'),
         }.items(),
     )
     return LaunchDescription([
         DeclareLaunchArgument('world_profile', default_value='large',
-                              choices=['large', 'small']),
+                              choices=['large', 'small', 'large_unknown_pose']),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
@@ -140,6 +142,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
+        DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='false',
                               choices=['true', 'false']),
         # Defaults are the production literature-backed allocator.  These

@@ -13,8 +13,25 @@ struct ClearanceEvidence {
   double nearest_distance_m{0.0}; size_t examined_count{0};
   std::vector<std::string> examined_cells;
 };
+struct FrontierEvaluationRecord {
+  uint64_t id{0};
+  bool never_queried{true};
+  bool invalidated{false};
+  bool transient_failure{false};
+  uint64_t cycles_not_queried{0};
+  int64_t last_query_ns{0};
+};
+
+// Deterministic bounded scheduling: older/starved work wins before score.
+std::vector<std::size_t> fair_frontier_query_order(
+  const std::vector<FrontierEvaluationRecord> & records,
+  std::size_t candidate_limit,
+  std::size_t query_limit);
 uint64_t fnv1a64(const void *data,size_t size,uint64_t seed=14695981039346656037ULL);
 uint64_t map_checksum(const nav_msgs::msg::OccupancyGrid &map);
+uint64_t local_context_checksum(
+  const frontier_exploration_ros2::OccupancyGrid2d & map,
+  double world_x, double world_y, double radius_m);
 uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate &f,const frontier_exploration_ros2::OccupancyGrid2d &map,double quantum);
 std::optional<double> path_length(const nav_msgs::msg::Path &path,double robot_x,double robot_y,double goal_x,double goal_y,double tolerance);
 bool clearance_ok(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold);

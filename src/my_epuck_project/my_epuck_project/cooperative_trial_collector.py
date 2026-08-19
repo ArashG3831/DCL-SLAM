@@ -167,6 +167,30 @@ def distributed_status_dict(message, received_monotonic, now_monotonic=None):
     }
 
 
+def completion_receipt_age(received, now):
+    """Return the age of the active completion channel.
+
+    The distributed allocator publishes ``distributed_status`` without the
+    legacy ``status`` topic.  Completion health must use the same channel
+    selection as ``complete_and_fresh`` and remain safe during finalization.
+    """
+    receipt = received.get('distributed_status')
+    if receipt is None:
+        receipt = received.get('status')
+    if receipt is None:
+        return None
+    return max(0.0, now - receipt)
+
+
+def add_settled_age(robot_document, age):
+    """Attach settled age to whichever completion document is present."""
+    target = robot_document.get('distributed_status')
+    if target is None:
+        target = robot_document.get('status')
+    if target is not None and age is not None:
+        target['age_at_collection_s'] = age
+
+
 def validate_map_message(message, expected_frame='shared_map'):
     """Return a list of lossless-map validation errors."""
     errors = []
@@ -396,8 +420,7 @@ class CooperativeTrialCollector(Node):
         )
         if settled and self.settled_snapshot is None:
             self.settled_snapshot = {
-                robot: max(
-                    0.0, now - self.received[robot]['status'])
+                robot: completion_receipt_age(self.received[robot], now)
                 for robot in self.messages
             }
         return {
@@ -457,8 +480,8 @@ class CooperativeTrialCollector(Node):
                     if distributed is not None else None
                 )
             if self.settled_snapshot is not None:
-                robots[robot]['status']['age_at_collection_s'] = (
-                    self.settled_snapshot[robot])
+                add_settled_age(
+                    robots[robot], self.settled_snapshot[robot])
         return {
             'schema_version': SCHEMA_VERSION,
             'run_id': self.run_id,

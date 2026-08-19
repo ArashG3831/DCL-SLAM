@@ -69,6 +69,13 @@ def _assignment_peer(robot):
             'bid_validity_s': 8.0,
             'decision_validity_s': 8.0,
             'peer_timeout_s': 12.0,
+            'enable_mission_timeout': LaunchConfiguration(
+                'enable_mission_timeout'),
+            'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
+            # Termination-only significance threshold.  The frontier
+            # detector's 0.05 m minimum remains unchanged.
+            'terminal_small_frontier_length_m': LaunchConfiguration(
+                'terminal_small_frontier_length_m'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
@@ -88,8 +95,20 @@ def generate_launch_description():
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'slam_tf_publish_probe_library': LaunchConfiguration(
+                'slam_tf_publish_probe_library'),
+            'slam_tf_publish_probe_log': LaunchConfiguration(
+                'slam_tf_publish_probe_log'),
+            'slam_tf_publication_mode': LaunchConfiguration(
+                'slam_tf_publication_mode'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'diagnostic_frontier_capture': LaunchConfiguration(
+                'diagnostic_frontier_capture'),
+            'fusion_process_nice': LaunchConfiguration(
+                'fusion_process_nice'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'controller_variant': LaunchConfiguration('controller_variant'),
         }.items(),
@@ -102,10 +121,21 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('use_scan_matching', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('do_loop_closing', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
+        DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
+        DeclareLaunchArgument('slam_tf_publication_mode', default_value='',
+                              choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('fusion_process_nice', default_value='0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
@@ -120,6 +150,11 @@ def generate_launch_description():
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
         DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('enable_mission_timeout', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('mission_timeout_s', default_value='1800.0'),
+        DeclareLaunchArgument('terminal_small_frontier_length_m',
+                              default_value='0.20'),
         frontier_stack,
         _proposal_adapter('robot1'),
         _proposal_adapter('robot2'),

@@ -29,6 +29,7 @@ from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from lifecycle_msgs.srv import GetState
 from tf2_ros import Buffer, TransformListener
 
 from .cooperative_regression_report import analyze_campaign, atomic_json
@@ -70,11 +71,21 @@ EXPECTED_NODE_SUFFIXES = (
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
+NAV2_NODES = (
+    'controller_server', 'smoother_server', 'planner_server',
+    'route_server', 'behavior_server', 'velocity_smoother',
+    'collision_monitor', 'bt_navigator', 'waypoint_follower',
+)
 ROS_DOMAIN_MIN = 0
 ROS_DOMAIN_MAX = 232
 WEBOTS_PORT_MIN = 1024
 WEBOTS_PORT_MAX = 65535
 PROGRESS_LOCK = threading.RLock()
+# A fresh TF buffer may initially contain Slam Toolbox map->odom samples that
+# are future-dated relative to the odom->base samples.  Keep this as a bounded
+# startup readiness budget; it does not alter any TF publisher or Nav2
+# transform tolerance.
+TF_READINESS_TIMEOUT_S = 10.0
 
 
 def utc_now():
@@ -301,8 +312,12 @@ def resolve_runner_profile(args):
     workspace = Path(args.workspace).resolve()
     source_worlds = workspace / 'src' / 'my_epuck_project' / 'worlds'
     installed_package = Path(get_package_share_directory('my_epuck_project'))
-    source = profile(args.world_profile, source_worlds)
-    installed = profile(args.world_profile, installed_package / 'worlds')
+    source = profile(
+        args.world_profile, source_worlds,
+        ideal_encoder_sensing=args.ideal_encoder_sensing)
+    installed = profile(
+        args.world_profile, installed_package / 'worlds',
+        ideal_encoder_sensing=args.ideal_encoder_sensing)
     source_hash = source['world_metadata']['sha256']
     installed_hash = installed['world_metadata']['sha256']
     args.source_world_path = source['world_path']
@@ -337,6 +352,10 @@ def print_profile_selection(args, selected):
     print(f'mission_timeout_s={args.mission_timeout}')
     print(f'time_mode={args.time_mode}')
     print(f'use_sim_time={args.time_mode == "sim"}')
+    print(f'use_scan_matching={args.use_scan_matching}')
+    print(f'do_loop_closing={args.do_loop_closing}')
+    print(f'ideal_encoder_sensing={args.ideal_encoder_sensing}')
+    print(f'encoder_profile={selected["encoder_profile"]}')
     print(f'execution_profile={args.execution_profile}')
     print(f'rendering={args.rendering}')
     print(f'rviz={args.rviz}')
@@ -540,7 +559,18 @@ def clock_readiness(domain, timeout_s=4.0):
             os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
-def tf_readiness(domain, timeout_s=4.0):
+def tf_readiness_requirements():
+    """Return the namespaced TF edges required before Nav2 startup."""
+    required = []
+    for robot in ('robot1', 'robot2'):
+        required.extend([
+            (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'),
+            ('shared_map', f'{robot}/base_footprint', 'shared_to_base'),
+        ])
+    return required
+
+
+def tf_readiness(domain, timeout_s=TF_READINESS_TIMEOUT_S):
     """Verify odometry and the global transforms required by costmaps."""
     started = time.monotonic()
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
@@ -572,13 +602,9 @@ def tf_readiness(domain, timeout_s=4.0):
             history=HistoryPolicy.KEEP_LAST, depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE)
-        required = []
         for robot in ('robot1', 'robot2'):
             odom_received[robot] = False
-            required.extend([
-                (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'),
-                ('shared_map', f'{robot}/base_footprint', 'shared_to_base'),
-            ])
+        required = tf_readiness_requirements()
         details['requested_transforms'] = [
             {'target': target, 'source': source, 'role': role}
             for target, source, role in required]
@@ -639,7 +665,62 @@ def tf_readiness(domain, timeout_s=4.0):
             os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
-def activate_nav2(domain, timeout_s=10.0):
+def lifecycle_startup_action(manager_active, prior_state):
+    """Choose a lifecycle action without re-entering an active manager.
+
+    Nav2 1.3.x implements ManageLifecycleNodes.STARTUP as an unconditional
+    configure-then-activate sequence.  The campaign runner may be called again
+    while the other robot's startup is still pending, so a previous per-robot
+    startup state must prevent a second STARTUP request.
+    """
+    if manager_active:
+        return 'ALREADY_ACTIVE'
+    if prior_state in ('STARTING', 'ACTIVE', 'FAILED'):
+        return 'WAIT_FOR_PRIOR_ATTEMPT'
+    return 'SEND_STARTUP'
+
+
+def wait_for_nav2_lifecycle_services(node, timeout_s):
+    """Wait until every namespaced Nav2 lifecycle node exposes get_state."""
+    missing = []
+    deadline = time.monotonic() + timeout_s
+    for robot in ('robot1', 'robot2'):
+        for node_name in NAV2_NODES:
+            service_name = f'/{robot}/{node_name}/get_state'
+            client = node.create_client(GetState, service_name)
+            remaining = max(0.0, deadline - time.monotonic())
+            if not client.wait_for_service(timeout_sec=remaining):
+                missing.append(service_name)
+                return False, missing
+    return True, missing
+
+
+def get_nav2_lifecycle_states(node, executor, timeout_s):
+    """Read every managed lifecycle node without issuing a transition."""
+    states = {}
+    deadline = time.monotonic() + timeout_s
+    for robot in ('robot1', 'robot2'):
+        states[robot] = {}
+        for node_name in NAV2_NODES:
+            client = node.create_client(
+                GetState, f'/{robot}/{node_name}/get_state')
+            remaining = max(0.0, deadline - time.monotonic())
+            if not client.wait_for_service(timeout_sec=remaining):
+                return False, states
+            future = client.call_async(GetState.Request())
+            while not future.done() and time.monotonic() < deadline:
+                executor.spin_once(timeout_sec=0.05)
+            if not future.done():
+                return False, states
+            response = future.result()
+            states[robot][node_name] = {
+                'id': int(response.current_state.id),
+                'label': str(response.current_state.label),
+            }
+    return True, states
+
+
+def activate_nav2(domain, timeout_s=10.0, startup_state=None):
     """Start both Nav2 managers after the required transforms are available.
 
     ``timeout_s`` is deliberately a *per-manager* budget.  Starting robot1
@@ -653,35 +734,72 @@ def activate_nav2(domain, timeout_s=10.0):
     node = None
     executor = None
     details = {'domain_id': int(domain), 'services': {}}
+    startup_state = startup_state if startup_state is not None else {}
     try:
         rclpy.init(args=None, context=context)
         node = rclpy.create_node(
             'regression_nav2_startup_gate', context=context)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
+        services_ready, missing = wait_for_nav2_lifecycle_services(
+            node, timeout_s)
+        if not services_ready:
+            details['status'] = 'LIFECYCLE_SERVICES_NOT_READY'
+            details['missing_services'] = missing
+            return False, details
+        state_services_ready, lifecycle_states = get_nav2_lifecycle_states(
+            node, executor, timeout_s)
+        if not state_services_ready:
+            details['status'] = 'LIFECYCLE_STATE_QUERY_TIMEOUT'
+            details['lifecycle_states'] = lifecycle_states
+            return False, details
+        details['lifecycle_states'] = lifecycle_states
         for robot in ('robot1', 'robot2'):
             robot_started = time.monotonic()
-            service = f'/{robot}/lifecycle_manager_navigation/manage_nodes'
+            manager_prefix = f'/{robot}/lifecycle_manager_navigation'
+            robot_states = lifecycle_states[robot]
+            active = all(
+                state['label'] == 'active'
+                for state in robot_states.values())
+            action = lifecycle_startup_action(
+                active, startup_state.get(robot))
+            if action == 'ALREADY_ACTIVE':
+                startup_state[robot] = 'ACTIVE'
+                details['services'][robot] = 'ALREADY_ACTIVE'
+                continue
+            if action == 'WAIT_FOR_PRIOR_ATTEMPT':
+                details['services'][robot] = 'STARTUP_IN_PROGRESS'
+                return False, details
+
+            if any(state['label'] != 'unconfigured'
+                   for state in robot_states.values()):
+                details['services'][robot] = 'PARTIAL_LIFECYCLE_STATE'
+                return False, details
+
+            service = f'{manager_prefix}/manage_nodes'
             client = node.create_client(ManageLifecycleNodes, service)
             remaining = max(0.0, timeout_s - (time.monotonic() - robot_started))
             if not client.wait_for_service(timeout_sec=remaining):
-                details['services'][robot] = 'SERVICE_TIMEOUT'
+                details['services'][robot] = 'MANAGE_SERVICE_TIMEOUT'
                 return False, details
             request = ManageLifecycleNodes.Request()
             request.command = ManageLifecycleNodes.Request.STARTUP
+            startup_state[robot] = 'STARTING'
             future = client.call_async(request)
             deadline = time.monotonic() + max(
                 0.0, timeout_s - (time.monotonic() - robot_started))
             while not future.done() and time.monotonic() < deadline:
                 executor.spin_once(timeout_sec=0.1)
             if not future.done():
-                details['services'][robot] = 'RESPONSE_TIMEOUT'
+                details['services'][robot] = 'STARTUP_RESPONSE_TIMEOUT'
                 return False, details
             response = future.result()
             details['services'][robot] = (
                 'STARTED' if response.success else 'REJECTED')
             if not response.success:
+                startup_state[robot] = 'FAILED'
                 return False, details
+            startup_state[robot] = 'ACTIVE'
         details['status'] = 'READY'
         return True, details
     except Exception as exc:
@@ -888,6 +1006,108 @@ def required_observer_artifacts(directory):
     }
 
 
+def post_completion_evidence(
+        attempt, final_state, settled_observed, cleanup, process_exit_codes):
+    """Return evidence that completion preceded an artifact-only shutdown issue.
+
+    The passive collector is the authoritative terminal-state witness.  The
+    experiment logger is a diagnostic producer and can be killed by launch
+    teardown after completion while it is flushing large bounded artifacts.
+    This fallback is deliberately narrow: it requires coordinated settled
+    shutdown, a clean process-tree cleanup, and two complete idle distributed
+    states.  It is never used for an active or timed-out attempt.
+    """
+    if not settled_observed or not cleanup.get('all_exited', False):
+        return None
+    if any(code not in (None, 0)
+           for code in (process_exit_codes or {}).values()):
+        return None
+    try:
+        collector = json.loads(
+            (attempt / 'collector_status.json').read_text(
+                encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not (collector.get('both_mission_complete')
+            and collector.get('settled')):
+        return None
+    robots = (final_state or {}).get('robots', {})
+    evidence = {}
+    for robot in ('robot1', 'robot2'):
+        item = robots.get(robot, {})
+        status = item.get('distributed_status')
+        if not status or status.get('state') != 5:
+            return None
+        if item.get('navigation_active') is not False:
+            return None
+        evidence[robot] = {
+            'state': status.get('state'),
+            'reason': status.get('reason'),
+            'navigation_active': item.get('navigation_active'),
+        }
+    return {
+        'source': 'collector_status.json + final_state.json',
+        'robots': evidence,
+        'missing_or_incomplete_observer_artifacts': True,
+    }
+
+
+def persist_post_completion_mission_result(attempt):
+    """Persist terminal success before launch teardown can kill the logger.
+
+    The collector has already written ``final_state.json`` at this point, but
+    the passive experiment logger is still inside the launch process group and
+    may be terminated while flushing its larger diagnostic summary.  This
+    small root-level result is the campaign-facing execution result; it is
+    written only after both distributed terminal states are complete and idle.
+    """
+    try:
+        final_state = json.loads(
+            (attempt / 'final_state.json').read_text(encoding='utf-8'))
+        collector = json.loads(
+            (attempt / 'collector_status.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    if not (collector.get('both_mission_complete')
+            and collector.get('settled')):
+        return False
+    robots = final_state.get('robots', {})
+    statuses = []
+    for robot in ('robot1', 'robot2'):
+        item = robots.get(robot, {})
+        status = item.get('distributed_status') or {}
+        if (status.get('state') != 5
+                or item.get('navigation_active') is not False):
+            return False
+        statuses.append(status)
+    reasons = {str(item.get('reason', '')) for item in statuses}
+    reason = next(iter(reasons), 'MISSION_COMPLETE')
+    if len(reasons) != 1 or not reason.startswith('MISSION_COMPLETE_'):
+        return False
+    atomic_json(attempt / 'mission_result.json', {
+        'schema_version': '1.0.0',
+        'mission_status': 'SUCCEEDED',
+        'terminal_reason': reason,
+        'simulated_duration_s': collector.get('sim_time_seconds'),
+        'wall_duration_s': collector.get('wall_elapsed_s'),
+        'terminal_agreement': True,
+        'robot1_final_state': {
+            'state': statuses[0].get('state'),
+            'terminal_reason': statuses[0].get('reason'),
+            'navigation_active': False,
+        },
+        'robot2_final_state': {
+            'state': statuses[1].get('state'),
+            'terminal_reason': statuses[1].get('reason'),
+            'navigation_active': False,
+        },
+        'completion_committed_before_teardown': True,
+        'result_source': 'cooperative_trial_collector',
+        'recommended_exit_code': 0,
+    })
+    return True
+
+
 def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
                      interrupted, cleanup, settled_observed=False,
                      emergency_wall_timeout=False, process_exit_codes=None):
@@ -919,6 +1139,8 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
     except (OSError, ValueError):
         pass
     log_review = parse_log_errors(attempt / 'launch.log')
+    completion_fallback = post_completion_evidence(
+        attempt, final_state, settled_observed, cleanup, process_exit_codes)
     process_exit_codes = process_exit_codes or {}
     filter_stall = detect_slam_filter_output_stall(observer)
     shutdown_nonzero = {
@@ -941,7 +1163,9 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         classification = 'BOUNDED_DIAGNOSTIC'
     elif final_state is None or not maps_valid or not all(
             observer_files.values()):
-        classification = 'INCOMPLETE_ARTIFACTS'
+        classification = (
+            'MISSION_COMPLETE' if completion_fallback
+            else 'INCOMPLETE_ARTIFACTS')
     else:
         robots = final_state.get('robots', {})
         statuses = [
@@ -990,6 +1214,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             and all(active is False for active in navigation)
             and system.get('internal_logger_error_count', 0) == 0
             and system.get('write_failures', 0) == 0
+            and not shutdown_nonzero
             and cleanup.get('all_exited', False)
         )
         classification = 'MISSION_COMPLETE' if passed else 'SHUTDOWN_DEGRADED'
@@ -1008,6 +1233,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             'CLEAN' if cleanup.get('all_exited', False) else 'DEGRADED'),
         'primary_outcome': classification,
         'slam_filter_output_stall': filter_stall or {},
+        'post_completion_artifact_anomaly': completion_fallback or {},
     }
     return classification, details
 
@@ -1211,6 +1437,10 @@ def internal_trial(args):
             # startup before the mission has begun.
             'enable_mission_timeout': False,
             'use_sim_time': args.time_mode == 'sim',
+            'use_scan_matching': args.use_scan_matching,
+            'do_loop_closing': args.do_loop_closing,
+        'ideal_encoder_sensing': args.ideal_encoder_sensing,
+        'encoder_profile': args.profile_metadata['encoder_profile'],
             'logger_console_status': False,
             'rmw_implementation': rmw_implementation,
             'rmw_fastdds_use_shm': fastdds_use_shm,
@@ -1258,10 +1488,14 @@ def internal_trial(args):
         f'webots_gui:={str(args.webots_gui).lower()}',
         f'sensor_profile:={args.sensor_profile}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
+        f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
         'nav2_autostart:=false',
         'launch_rviz:=false',
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
+        f'use_scan_matching:={str(args.use_scan_matching).lower()}',
+        f'do_loop_closing:={str(args.do_loop_closing).lower()}',
+        f'ideal_encoder_sensing:={str(args.ideal_encoder_sensing).lower()}',
         'logger_console_status:=false',
         f'enable_rosout_collection:={str(args.enable_rosout_collection).lower()}',
         f'enable_coverage_attribution:={str(args.enable_coverage_attribution).lower()}',
@@ -1419,6 +1653,7 @@ def internal_trial(args):
     clock_ok = args.time_mode == 'wall'
     tf_ok = args.time_mode == 'wall'
     nav2_started = args.time_mode == 'wall'
+    nav2_startup_state = {}
     last_clock_probe = 0.0
     status_path = attempt / 'collector_status.json'
     try:
@@ -1451,8 +1686,11 @@ def internal_trial(args):
                     tf_ok, tf_details = tf_readiness(args.ros_domain_id)
                     metadata['tf_readiness'] = tf_details
                     if tf_ok and not nav2_started:
+                        startup_budget = max(
+                            0.0, readiness_deadline - time.monotonic())
                         nav2_started, nav2_details = activate_nav2(
-                            args.ros_domain_id, timeout_s=60.0)
+                            args.ros_domain_id, timeout_s=startup_budget,
+                            startup_state=nav2_startup_state)
                         metadata['nav2_activation'] = nav2_details
                 atomic_json(attempt / 'runner_metadata.json', metadata)
                 # The probe uses a bounded wall-time wait and may finish
@@ -1609,6 +1847,12 @@ def internal_trial(args):
             append_shutdown_event(
                 shutdown_events, 'final_snapshot_complete', process='collector',
                 complete=collector.poll() is not None)
+        if shutdown_reason == 'mission_complete' and not timed_out:
+            committed = persist_post_completion_mission_result(attempt)
+            append_shutdown_event(
+                shutdown_events, 'mission_result_persisted',
+                committed=committed,
+                phase='before_launch_teardown')
         if rviz is not None:
             append_shutdown_event(
                 shutdown_events, 'signal_sent', process='rviz', signal='SIGINT')
@@ -1826,6 +2070,9 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             getattr(args, 'sensor_profile', None) or
             ('throughput' if getattr(args, 'execution_profile', None) ==
              'throughput' else 'full')),
+        use_scan_matching=getattr(args, 'use_scan_matching', False),
+        do_loop_closing=getattr(args, 'do_loop_closing', False),
+        ideal_encoder_sensing=getattr(args, 'ideal_encoder_sensing', True),
         diagnostic_mode=getattr(args, 'diagnostic_mode', False),
         enable_rosout_collection=getattr(args, 'enable_rosout_collection', True),
         enable_coverage_attribution=getattr(args, 'enable_coverage_attribution', True),
@@ -2288,6 +2535,9 @@ def create_manifest(args, campaign, workspace):
         'launch_arguments': {
             'world_profile': args.world_profile,
             'use_sim_time': args.time_mode == 'sim',
+            'use_scan_matching': args.use_scan_matching,
+            'do_loop_closing': args.do_loop_closing,
+            'ideal_encoder_sensing': args.ideal_encoder_sensing,
             'assignment_mode': 'replicated_two_robot_pair',
             'dispatch_enabled': True,
             'launch_rviz': args.rviz,
@@ -2561,6 +2811,7 @@ def campaign_main(args):
     return 0 if (
         summary['valid_trial_count'] == args.trials
         and summary['failure_count'] == 0
+        and summary['mission_completion_rate'] == 1.0
         and summary['all_processes_clean_boolean']
     ) else 2
 
@@ -2597,6 +2848,9 @@ def apply_execution_profile(args):
         'visual': (True, True),
         'rendered': (True, False),
         'headless': (False, False),
+        # Full-sensor diagnostic run with Webots rendering disabled but the
+        # passive RViz2 view visible for human inspection.
+        'rviz': (False, True),
         # Retained for controlled experiments only.  It is not the valid
         # benchmark recommendation because it changes the sensor profile.
         'throughput': (False, False),
@@ -2652,6 +2906,20 @@ def parser():
                         help='Disable the simulated/wall mission timeout.')
     result.add_argument('--time-mode', choices=['sim', 'wall'], default='sim',
                         help='ROS mission clock: Webots simulation or wall time.')
+    result.add_argument(
+        '--use-scan-matching', type=boolean, default=False, metavar='BOOL',
+        help=('Diagnostic Slam Toolbox override. Production YAML default is '
+              'false; this does not alter the YAML.'))
+    result.add_argument(
+        '--do-loop-closing', type=boolean, default=False, metavar='BOOL',
+        help=('Diagnostic Slam Toolbox override. Production YAML default is '
+              'false; this does not alter the YAML.'))
+    result.add_argument(
+        '--ideal-encoder-sensing', type=boolean, default=True, metavar='BOOL',
+        help=('Use the thesis simulation assumption of zero explicitly '
+              'injected encoder/odometry noise. Webots wheel PositionSensor '
+              'measurements still drive normal differential-drive odometry; '
+              'Supervisor pose is never used as /odom.'))
     result.add_argument('--emergency-wall-runtime', type=float,
                         help='Optional wall-clock safety limit for unattended runs.')
     result.add_argument('--settling-period', type=float, default=4.0)
@@ -2673,9 +2941,10 @@ def parser():
         '--rendering', type=boolean, default=None, metavar='BOOL')
     result.add_argument(
         '--execution-profile',
-        choices=['visual', 'rendered', 'headless', 'throughput'], default=None,
+        choices=['visual', 'rendered', 'headless', 'rviz', 'throughput'], default=None,
         help=('Reusable execution configuration. headless is the validated '
-              'full-sensor mode; throughput is experimental/rejected.'))
+              'full-sensor mode; rviz disables Webots rendering while opening '
+              'passive RViz2; throughput is experimental/rejected.'))
     result.add_argument(
         '--hold-open-after-completion',
         type=boolean,
@@ -2783,6 +3052,11 @@ def main(argv=None):
             apply_profile_defaults(args, args.world_profile or 'small')
             if args.source_world_path is None:
                 args.source_world_path = ''
+            # The campaign parent resolves the selected source/installed
+            # worlds before launching a child.  Internal children are also
+            # directly invokable, so resolve the same metadata here instead
+            # of assuming the parent Namespace was serialized into them.
+            resolve_runner_profile(args)
             return internal_trial(args)
         return campaign_main(args)
     except (RuntimeError, ValueError, OSError) as error:

@@ -15,6 +15,12 @@ setup(
         (os.path.join('share', package_name, 'resource'), glob('resource/*')),
         (os.path.join('share', package_name, 'worlds'),
          glob('worlds/*.wbt') + glob('worlds/.*.wbproj')),
+        (os.path.join('share', package_name, 'protos', 'e-puck'),
+         glob('protos/e-puck/*.proto')),
+        (os.path.join('share', package_name, 'protos', 'arena'),
+         glob('protos/arena/*.proto')),
+        (os.path.join('share', package_name, 'protos', 'e-puck', 'textures'),
+         glob('protos/e-puck/textures/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -62,6 +68,10 @@ setup(
             'my_epuck_project.motion_course_supervisor:main',
             'fixed_follow_path_driver = '
             'my_epuck_project.fixed_follow_path_driver:main',
+            'hard_failure_runtime_fixture = '
+            'my_epuck_project.hard_failure_runtime_fixture:main',
+            'terminal_finalization_runtime_fixture = '
+            'my_epuck_project.terminal_finalization_runtime_fixture:main',
             'motion_scan_branch_relay = '
             'my_epuck_project.motion_scan_branch_relay:main',
         ],

@@ -95,8 +95,9 @@ python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --skip-tests
 ```
 
-The manual RViz preset initially shows Robot 1's replicated shared map, the
-grid, and one pose Axes display on each robot's namespaced `base_link`. Robot
+The manual RViz preset initially shows Robot 1's replicated shared map and one
+pose Axes display on each robot's namespaced `base_link`; the Grid display is
+off by default to keep the map view uncluttered. Robot
 2's equivalent shared-map display remains configured but starts disabled: on
 the WSLg/Ogre stack, initializing both indexed occupancy-map displays at once
 can produce a GLSL sampler-link failure and leave the RViz window unusable.
@@ -110,6 +111,25 @@ frontier claims and mission completion are not RViz or infrastructure
 readiness dependencies. If RViz cannot be spawned, the attempt records the
 exact command and spawn error in `runner_metadata.json` instead of silently
 omitting the window.
+
+SLAM diagnostic overrides are available on the same long runner without
+editing the production YAML files. Both default to the production values
+`use_scan_matching=false` and `do_loop_closing=false`:
+
+```bash
+python3 src/my_epuck_project/tools/run_cooperative_regression.py \
+  --trials 1 --maximum-concurrency 1 \
+  --world-profile large \
+  --execution-profile rviz --enable-forensic-capture true \
+  --use-scan-matching true --do-loop-closing false \
+  --mission-timeout 1800 \
+  --fast-mode false --rendering false \
+  --ros-domain-base 151 --webots-port-base 23101
+```
+
+These values are forwarded as runtime parameters to both filtered Slam
+Toolbox nodes and are recorded in campaign metadata. They do not enable
+IMU/EKF, change RPP, or alter any checked-in Slam Toolbox default.
 
 Distributed coordination liveness:
 
@@ -163,6 +183,21 @@ The configurable operational options include `--output-root`,
 `--world-profile` selects `large` or `small`; `--help` lists the complete
 interface. No source edit is needed between campaigns.
 
+Compact professor/demo package:
+
+```bash
+bash /home/arash/get_latest_webots_report.sh [campaign-directory-or-name]
+```
+
+After the campaign has stopped, this command regenerates the maintained
+campaign summary and the Burgard forensic metrics when complete forensic
+attempts are available. It exports final shared-map PNGs with the last
+`shared_map` robot poses, heading arrows, labels, and a padded border, then
+places a compact report archive in Windows Downloads and the PNG directory on
+Windows Desktop. High-rate telemetry, ROS logs, event streams, and periodic
+maps stay in the WSL campaign so a normal report remains small. Use
+`--full-archive` only when the raw campaign must be handed off.
+
 ## Safe interruption and resume
 
 Press Ctrl+C once. Each active attempt receives scoped SIGINT, followed by
@@ -206,3 +241,13 @@ Candidate generation and assignment bidding share one bounded per-robot
 `ComputePathToPose` lease (`/tmp/my_epuck_<robot>_compute_path.lock`) so only
 one local planner request is in flight at a time. A lease wait is retried and
 is not classified as an unreachable task or a peer failure.
+
+## Ideal encoder sensing assumption
+
+The Webots thesis-validation profile uses idealized encoder measurements: no
+explicit encoder or odometry measurement noise is injected. Wheel
+`PositionSensor` readings still pass through the normal differential-drive
+odometry pipeline; Supervisor ground truth is never published as `/odom`.
+Webots contact dynamics, numerical integration, and any residual calibration
+or slip effects remain active. The runner records this assumption explicitly
+with `--ideal-encoder-sensing true`.

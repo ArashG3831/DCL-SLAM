@@ -16,6 +16,14 @@ TEST(Approach,FreeAndDistance){auto m=grid();free_box(m,2,2,5,5);OccupancyGrid2d
 TEST(Approach,ClearanceRejectsInflationAndBounds){auto m=grid();free_box(m,1,1,6,6);m->data[3*8+4]=50;OccupancyGrid2d g(m);auto w=g.mapToWorld(3,3);EXPECT_FALSE(clearance_ok(g,w.first,w.second,.02,1));auto edge=g.mapToWorld(0,0);EXPECT_FALSE(clearance_ok(g,edge.first,edge.second,.02,1));}
 TEST(Approach,PlannerToleranceMarginUsesExclusiveBounds){auto m=grid(200,200,.01);free_box(m,0,0,199,199);OccupancyGrid2d g(m);auto inside=g.mapToWorld(100,100);auto edge=g.mapToWorld(199,100);EXPECT_TRUE(inside_with_margin(g,inside.first,inside.second,.5));EXPECT_FALSE(inside_with_margin(g,edge.first,edge.second,.5));int x,y;EXPECT_FALSE(g.worldToMapNoThrow(2.0,1.0,x,y));}
 TEST(StableId,BoundsOriginAndUnrelatedChange){auto a=grid(8,8,.05,-.2,-.2);free_box(a,2,2,5,5);OccupancyGrid2d ga(a);auto fa=search(a).frontiers;ASSERT_FALSE(fa.empty());auto id=stable_frontier_id(fa[0],ga,.05);auto b=grid(12,12,.05,-.3,-.3);free_box(b,4,4,7,7);OccupancyGrid2d gb(b);auto fb=search(b,1,5,5).frontiers;ASSERT_FALSE(fb.empty());EXPECT_EQ(id,stable_frontier_id(fb[0],gb,.05));b->data.back()=100;EXPECT_EQ(id,stable_frontier_id(fb[0],gb,.05));EXPECT_NE(map_checksum(*a),map_checksum(*b));}
+TEST(StableId,SmallFrontierGrowthPreservesPhysicalIdentity){
+  OccupancyGrid2d map(grid());
+  frontier_exploration_ros2::FrontierCandidate first({1.02,2.04},{1.00,2.00},20);
+  frontier_exploration_ros2::FrontierCandidate grown({1.05,2.07},{1.03,2.03},23);
+  frontier_exploration_ros2::FrontierCandidate separate({1.31,2.34},{1.29,2.30},20);
+  EXPECT_EQ(stable_frontier_id(first,map,.05),stable_frontier_id(grown,map,.05));
+  EXPECT_NE(stable_frontier_id(first,map,.05),stable_frontier_id(separate,map,.05));
+}
 TEST(Path,LengthAndValidation){nav_msgs::msg::Path p;geometry_msgs::msg::PoseStamped a,b,c;a.pose.position.x=0;b.pose.position.x=3;b.pose.position.y=4;c.pose.position.x=6;c.pose.position.y=8;p.poses={a,b,c};auto l=path_length(p,0,0,6,8,.01);ASSERT_TRUE(l);EXPECT_DOUBLE_EQ(*l,10);p.poses.clear();EXPECT_FALSE(path_length(p,0,0,0,0,.1));p.poses={a};EXPECT_TRUE(path_length(p,0,0,0,0,.1));EXPECT_FALSE(path_length(p,1,1,0,0,.1));p.poses={a,b};p.poses[1].pose.position.x=std::numeric_limits<double>::quiet_NaN();EXPECT_FALSE(path_length(p,0,0,0,0,.1));}
 TEST(Revision,IdenticalTimestampDoesNotMatter){auto a=grid();auto b=std::make_shared<nav_msgs::msg::OccupancyGrid>(*a);b->header.stamp.sec=99;EXPECT_EQ(map_checksum(*a),map_checksum(*b));b->data[0]=0;EXPECT_NE(map_checksum(*a),map_checksum(*b));}
 TEST(Architecture,SourceHasNoForbiddenInterfaces){SUCCEED();}
@@ -24,4 +32,56 @@ TEST(AsyncRequests,OldGenerationCannotTouchReplacement){
   EXPECT_FALSE(async_request_is_current(6,7,12,12,true));
   EXPECT_FALSE(async_request_is_current(7,7,11,12,true));
   EXPECT_FALSE(async_request_is_current(7,7,12,12,false));
+}
+TEST(FairEvaluation, SixteenStableFrontiersWithBudgetFiveEventuallyAllQueried){
+  std::vector<FrontierEvaluationRecord> records;
+  for (uint64_t id = 1; id <= 16; ++id) {
+    records.push_back(FrontierEvaluationRecord{id, true, false, false, 0, 0});
+  }
+  std::vector<uint64_t> queried;
+  for (int cycle = 0; cycle < 4; ++cycle) {
+    const auto selected = fair_frontier_query_order(records, 8, 5);
+    ASSERT_LE(selected.size(), 5U);
+    for (const auto index : selected) {
+      queried.push_back(records[index].id);
+      records[index].never_queried = false;
+      records[index].cycles_not_queried = 0;
+      records[index].last_query_ns = cycle + 1;
+    }
+    for (auto & record : records) {
+      if (std::find(queried.begin(), queried.end(), record.id) == queried.end()) {
+        ++record.cycles_not_queried;
+      }
+    }
+  }
+  std::sort(queried.begin(), queried.end());
+  queried.erase(std::unique(queried.begin(), queried.end()), queried.end());
+  EXPECT_EQ(queried.size(), 16U);
+}
+TEST(FairEvaluation, DeterministicTieBreakUsesCanonicalId){
+  std::vector<FrontierEvaluationRecord> records{
+    {20, true, false, false, 0, 0}, {10, true, false, false, 0, 0}};
+  const auto selected = fair_frontier_query_order(records, 2, 2);
+  ASSERT_EQ(selected.size(), 2U);
+  EXPECT_EQ(records[selected[0]].id, 10U);
+  EXPECT_EQ(records[selected[1]].id, 20U);
+}
+TEST(FairEvaluation, NeverQueriedAndInvalidatedWorkPrecedeStableCache){
+  std::vector<FrontierEvaluationRecord> records{
+    {30, false, false, false, 0, 30},
+    {20, false, true, false, 1, 20},
+    {10, false, false, true, 0, 10}};
+  const auto selected = fair_frontier_query_order(records, 3, 3);
+  ASSERT_EQ(selected.size(), 3U);
+  EXPECT_EQ(records[selected[0]].id, 20U);
+  EXPECT_EQ(records[selected[1]].id, 10U);
+  EXPECT_EQ(records[selected[2]].id, 30U);
+}
+TEST(FairEvaluation, TransientPlannerFailureRemainsEligibleForRetry){
+  std::vector<FrontierEvaluationRecord> records{
+    {42, false, false, true, 4, 100},
+    {7, false, false, false, 0, 1}};
+  const auto selected = fair_frontier_query_order(records, 2, 1);
+  ASSERT_EQ(selected.size(), 1U);
+  EXPECT_EQ(records[selected[0]].id, 42U);
 }

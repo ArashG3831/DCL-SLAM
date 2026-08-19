@@ -6,6 +6,27 @@ from typing import Iterable
 from .models import FailureClass, FailureEvidence, FailureRecord, PhysicalTask
 
 
+def classify_compute_path_result(
+        error_code: int,
+        *,
+        timed_out: bool = False,
+        tf_unavailable: bool = False,
+        action_rejected: bool = False) -> FailureClass:
+    """Classify only Nav2 ComputePath evidence exposed by its action result."""
+    if tf_unavailable:
+        return FailureClass.TF_OR_LIFECYCLE
+    if timed_out:
+        return FailureClass.TIMEOUT
+    if action_rejected:
+        return FailureClass.ACTION_REJECTION
+    if int(error_code) in (203, 204, 205, 206, 208):
+        # Nav2 Jazzy: start/goal outside map, start/goal occupied, no path.
+        return FailureClass.HARD_UNREACHABLE
+    if int(error_code) != 0:
+        return FailureClass.PLANNER_FAILURE
+    return FailureClass.UNKNOWN
+
+
 def classify_failure(evidence: FailureEvidence) -> FailureClass:
     """Choose the most specific class supported by direct observable evidence."""
     if evidence.explicitly_cancelled:

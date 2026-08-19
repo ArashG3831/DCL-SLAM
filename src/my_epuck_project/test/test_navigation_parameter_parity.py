@@ -76,6 +76,7 @@ def test_production_follow_path_is_frozen_rpp_on_both_robots():
         "allow_reversing": False,
         "use_collision_detection": True,
         "stateful": True,
+        "approach_velocity_scaling_dist": 0.45,
     }
     for path in (ROBOT1, ROBOT2):
         follow_path = _follow_path(path)

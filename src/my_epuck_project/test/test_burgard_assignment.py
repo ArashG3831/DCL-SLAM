@@ -84,6 +84,24 @@ def test_two_robots_choose_obvious_nearest_tasks():
     assert (decision.robot1_task_id, decision.robot2_task_id) == (ids['west'], ids['east'])
 
 
+def test_exact_pair_search_avoids_greedy_same_task_collision():
+    """The bounded pair solver evaluates the complete team before commit."""
+    first = _task('robot1', 'first', (-20.0, 0.0))
+    second = _task('robot2', 'second', (20.0, 0.0))
+    union = build_canonical_union([first], [second])
+    ids = _ids(union)
+    decision = _solve(
+        union,
+        _batch('robot1', union, {ids['first']: 1.0, ids['second']: 2.0}),
+        _batch('robot2', union, {ids['first']: 1.01, ids['second']: 10.0}),
+    )
+    # A greedy first pick of ``first`` leaves Robot 2 with the very costly
+    # ``second``.  The exact two-robot search keeps both useful assignments.
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        ids['second'], ids['first'])
+    assert decision.diagnostics.strategy == 'burgard'
+
+
 def test_reduction_after_shared_preference_selects_distinct_task():
     shared, alternate = _task('robot1', 'shared', (0.0, 0.0)), _task('robot2', 'alternate', (1.0, 0.0))
     union = build_canonical_union([shared], [alternate])

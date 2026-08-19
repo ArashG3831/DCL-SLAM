@@ -4,8 +4,10 @@ import math
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from my_epuck_interfaces.msg import ExplorationClaim, ExplorationStatus
 from my_epuck_project.cooperative_trial_collector import (
+    add_settled_age,
     atomic_save_map,
     claim_dict,
+    completion_receipt_age,
     map_metadata,
     status_dict,
     validate_map_message,
@@ -113,3 +115,23 @@ def test_stale_status_age_is_recorded_not_hidden():
     result = status_dict(message, 1.0, 10.0)
     assert result['state'] == 'NAVIGATING'
     assert math.isclose(result['age_at_write_s'], 9.0)
+
+
+def test_distributed_completion_receipt_is_used_without_legacy_status():
+    received = {'distributed_status': 10.0}
+    assert completion_receipt_age(received, 11.5) == 1.5
+
+
+def test_legacy_completion_receipt_remains_supported():
+    received = {'status': 20.0}
+    assert completion_receipt_age(received, 21.0) == 1.0
+
+
+def test_settled_age_is_attached_to_distributed_document():
+    document = {'status': None, 'distributed_status': {}}
+    add_settled_age(document, 0.25)
+    assert document['distributed_status']['age_at_collection_s'] == 0.25
+
+
+def test_missing_completion_receipt_is_safe():
+    assert completion_receipt_age({}, 12.0) is None

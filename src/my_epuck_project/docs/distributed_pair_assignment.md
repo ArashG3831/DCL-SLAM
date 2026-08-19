@@ -18,10 +18,16 @@ matching peer decision hash. Each peer has only relative, namespace-local
 `compute_path_to_pose` and `navigate_to_pose` action clients. It has no `cmd_vel` publisher and no
 peer action client.
 
-The pair score logs bounded visible gain, path cost, goal proximity, geometric route-corridor
-overlap, hard-failure, approximate sensing overlap, and workload imbalance separately. Route
-overlap is assignment-cost geometry, not time-parameterized traffic planning. Collision Monitor
-and Nav2 remain responsible for reactive motion safety.
+Production assignment is the task-level Burgard adaptation: each eligible canonical task starts
+with `U=1`, each robot contributes its locally verified Nav2 path cost
+`C=clamp(path_length_m/18.0,0,1)`, and the deterministic selection score is
+`U - beta*C` with `beta=1`. After a task is selected, remaining task utility is reduced by
+`P(d)=1-d/11.98` when the task representatives are within the configured lidar range and the
+shared-map line of sight is clear. The old seven-term score remains available only as explicit
+`legacy_weighted` diagnostic mode; its gain, proximity, route, failure, sensing, and workload
+fields are retained in messages for historical report compatibility, not used by production
+Burgard ranking. Route geometry is not an exploration utility term. Traffic scheduling remains
+separate and disabled by default pending physical bottleneck validation.
 
 The retained `cooperative_frontier_coordinator` is the legacy decentralized claim-only baseline.
 It is not launched by the final distributed launch.
@@ -56,16 +62,23 @@ A fresh peer session is required to leave degraded mode.
 Operational `COMPLETE` requires an agreed empty assignment, fresh task/status messages, stable map
 provenance, no active goals, healthy local and peer candidate/communication state, active local
 Nav2 lifecycle evidence, a healthy required transform, matching peer completion candidacy, and a
-bounded confirmation interval. Missing health evidence produces `BLOCKED`, not completion.
+bounded confirmation interval. Candidate evidence distinguishes no frontiers, only-small
+frontiers, out-of-range frontiers, and verified unreachable frontiers. Planner failures or
+unclassified candidates cannot masquerade as successful completion; repeated matching planner
+infrastructure evidence can produce an explicit abort reason. A mission timeout is also an
+explicit abort. Missing health evidence produces `BLOCKED`, not completion.
 
 ## Passive evidence
 
 The default final launch starts `cooperative_experiment_logger`, a subscription-only evaluator.
 Its `events.jsonl` records bounded task sets, bids, pair score components, decisions, status,
 failures, state transitions, path length, recoveries, duration, and odometry-derived travelled
-distance. Immutable protocol heartbeats are deduplicated. Coverage, first-observer attribution,
-duplicate work, topic health, CPU, and logger RSS retain the existing report schema. Disabling or
-crashing the observer cannot alter robot control.
+distance. ComputePath evidence is attributed to frontier reachability versus allocator bidding
+versus final dispatch validation, including result class and duration where emitted. The compact
+summary adds round outcomes, planner attribution, mission terminal reason, and
+`mission_result.json` with a recommended exit code. Immutable protocol heartbeats are deduplicated.
+Coverage, first-observer attribution, duplicate work, topic health, CPU, and logger RSS retain
+the existing report schema. Disabling or crashing the observer cannot alter robot control.
 
 The current physical-task equivalence is deterministic quantized geometry using approach
 separation together with bounds and sampled frontier overlap. Predicted sensing overlap is a

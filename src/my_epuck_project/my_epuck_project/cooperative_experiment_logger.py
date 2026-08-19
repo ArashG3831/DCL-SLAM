@@ -1,5 +1,5 @@
 """Strictly passive structured observer for two-robot exploration experiments."""
-import csv, hashlib, json, math, os, signal, socket, statistics, subprocess, sys, threading, time, uuid
+import csv, hashlib, json, math, os, re, signal, socket, statistics, subprocess, sys, threading, time, uuid
 from collections import Counter, deque
 from dataclasses import asdict
 from pathlib import Path
@@ -38,7 +38,7 @@ from .forensic_evidence import ForensicEvidenceWriter
 
 SCHEMA='1.1.0'; STATES={0:'UNKNOWN',1:'PROPOSING',2:'NAVIGATING',3:'SUCCEEDED',4:'FAILED',5:'RELEASED',6:'CANCELED'}; STATUS_STATES={0:'STARTING',1:'ACTIVE',2:'NAVIGATING',3:'NO_ELIGIBLE_CANDIDATES',4:'COMPLETE',5:'STOPPED',6:'ERROR'}
 TIME_FIELDS=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','wall_elapsed_s','event_sequence']
-TELEMETRY=TIME_FIELDS+['robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps','angular_speed_radps','commanded_linear_mps','commanded_angular_radps','distance_travelled_m','claim_state','claim_id','frontier_id','goal_x','goal_y','goal_yaw','navigation_active','distance_remaining_m','recoveries','candidate_count','local_known_cells','shared_known_cells','local_costmap_obstacles','global_costmap_known','global_costmap_obstacles','odom_age_s','scan_age_s','map_age_s','shared_map_age_s','claim_age_s','feedback_age_s']
+TELEMETRY=TIME_FIELDS+['robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps','angular_speed_radps','commanded_linear_mps','commanded_angular_radps','cmd_vel_received','cmd_vel_age_s','cmd_vel_source','distance_travelled_m','claim_state','claim_id','frontier_id','goal_x','goal_y','goal_yaw','navigation_active','distance_remaining_m','recoveries','candidate_count','local_known_cells','shared_known_cells','local_costmap_obstacles','global_costmap_known','global_costmap_obstacles','odom_age_s','scan_age_s','map_age_s','shared_map_age_s','claim_age_s','feedback_age_s']
 COVERAGE=TIME_FIELDS+['robot1_local_known','robot2_local_known','robot1_shared_known','robot2_shared_known','shared_free_cells','shared_occupied_cells','shared_unknown_cells','known_area_m2','coverage_gain_cells','coverage_gain_since_start_cells','unique_first_seen_robot1_cells','unique_first_seen_robot2_cells','later_duplicated_by_robot1_cells','later_duplicated_by_robot2_cells','simultaneously_observed_cells','total_known_union_cells','duplicated_known_fraction','shared_maps_equivalent']
 HEALTH=TIME_FIELDS+['robot_id','topic_name','topic_rate_hz','topic_age_s','expected_min_rate_hz','stale']
 
@@ -58,7 +58,7 @@ def default_run_id(): return time.strftime('%Y-%m-%dT%H%M%SZ',time.gmtime())+'_'
 class CooperativeExperimentLogger(Node):
     def __init__(self, **node_kwargs):
         super().__init__('cooperative_experiment_logger', **node_kwargs)
-        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000}
+        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
         defaults.update({
             'world_profile': 'small',
             'source_world_path': '',
@@ -85,14 +85,16 @@ class CooperativeExperimentLogger(Node):
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
-        self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.statuses={}
-        self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
+        self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
         # Protocol counters deliberately separate replicated publications from
         # unique decisions and local navigation outcomes.
         self.unique_agreed_rounds=set(); self.unique_agreed_decisions=set()
+        self.round_outcomes=Counter(); self.planner_query_counts=Counter()
+        self.planner_query_duration_s=Counter()
         self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
-        self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.files=[]; self.writers={}
+        self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.writers={}
         forensic_enabled = self.p['enable_forensic_capture']
         if isinstance(forensic_enabled, str):
             forensic_enabled = forensic_enabled.lower() == 'true'
@@ -241,11 +243,12 @@ class CooperativeExperimentLogger(Node):
             try:
                 process.terminate()
                 process.wait(timeout=8.0)
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
                 try:
-                    process.kill()
+                    if process.poll() is None:
+                        process.kill()
                     process.wait(timeout=3.0)
-                except (OSError, subprocess.TimeoutExpired):
+                except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
                     pass
         if self.ground_truth_log is not None:
             try:
@@ -299,9 +302,11 @@ class CooperativeExperimentLogger(Node):
             self.observe(ExplorationFailure,f'/{r}/exploration_failure',lambda m,x=r:self.distributed_failure(x,m),self.qos(True,True,10),f'{r}.exploration_failure')
             self.observe(NavigateToPose_FeedbackMessage,f'/{r}/navigate_to_pose/_action/feedback',lambda m,x=r:self.feedback(x,m),self.qos(),f'{r}.feedback')
             self.observe(GoalStatusArray,f'/{r}/navigate_to_pose/_action/status',lambda m,x=r:self.mark(x,'navigate_status',m),self.qos(True,True,1),f'{r}.navigate_status')
+            self.observe(GoalStatusArray,f'/{r}/follow_path/_action/status',lambda m,x=r:self.action_status(x,'FOLLOW_PATH',m),self.qos(True,True,1),f'{r}.follow_path_status')
+            self.observe(GoalStatusArray,f'/{r}/compute_path_to_pose/_action/status',lambda m,x=r:self.action_status(x,'COMPUTE_PATH_TO_POSE',m),self.qos(True,True,1),f'{r}.compute_path_status')
             self.observe(NavPath,f'/{r}/plan',lambda m,x=r:self.plan(x,m),self.qos(),f'{r}.plan')
-            self.observe(Twist,f'/{r}/cmd_vel_nav',lambda m,x=r:self.command(x,m),self.qos(),f'{r}.cmd_vel_nav')
-            self.observe(TwistStamped,f'/{r}/cmd_vel',lambda m,x=r:self.command(x,m.twist),self.qos(),f'{r}.cmd_vel')
+            self.observe(Twist,f'/{r}/cmd_vel_nav',lambda m,x=r:self.command(x,m,'cmd_vel_nav'),self.qos(),f'{r}.cmd_vel_nav')
+            self.observe(TwistStamped,f'/{r}/cmd_vel',lambda m,x=r:self.command(x,m.twist,'cmd_vel'),self.qos(),f'{r}.cmd_vel')
         if self.p['enable_rosout_collection']: self.observe(Log,'/rosout',self.rosout,self.qos(True,True,1000),'rosout')
     def ros_seconds(self): return self.get_clock().now().nanoseconds*1e-9
     def ros_now(self): n=self.get_clock().now().nanoseconds; return n//1000000000,n%1000000000
@@ -378,8 +383,34 @@ class CooperativeExperimentLogger(Node):
         self.latest[r]['pose']=(shared_x,shared_y,shared_yaw)
         self.latest[r]['speed']=(msg.twist.twist.linear.x,msg.twist.twist.angular.z)
         if self.p['enable_trajectory_overlap']: self.trajectory.add(r,shared_x,shared_y)
-    def command(self,r,msg): self.mark(r,'cmd_vel',msg); self.latest[r]['command']=(msg.linear.x,msg.angular.z)
+    def command(self,r,msg,source='cmd_vel'):
+        self.mark(r,'cmd_vel',msg)
+        now=self.ros_seconds(); linear=float(msg.linear.x); angular=float(msg.angular.z)
+        self.latest[r].update(command=(linear,angular),cmd_vel_received_ros_s=now,cmd_vel_source=source)
+        zero=(abs(linear)<=float(self.p['cmd_vel_zero_linear_epsilon_mps']) and
+              abs(angular)<=float(self.p['cmd_vel_zero_angular_epsilon_radps']))
+        previous=self.latest[r].get('cmd_vel_effectively_zero')
+        if previous is not None and previous != zero:
+            self.event('CMD_VEL_ZERO_CLEARED' if not zero else 'CMD_VEL_ZERO_STARTED',
+                       'effective command state changed',r,f'/{r}/{source}',
+                       linear_mps=linear,angular_radps=angular,
+                       zero_linear_epsilon_mps=self.p['cmd_vel_zero_linear_epsilon_mps'],
+                       zero_angular_epsilon_radps=self.p['cmd_vel_zero_angular_epsilon_radps'])
+        self.latest[r]['cmd_vel_effectively_zero']=zero
     def plan(self,r,msg): self.mark(r,'plan',msg); self.latest[r]['path_length']=sum(math.hypot(b.pose.position.x-a.pose.position.x,b.pose.position.y-a.pose.position.y) for a,b in zip(msg.poses,msg.poses[1:]))
+    def action_status(self,r,action,msg):
+        self.mark(r,action.lower(),msg)
+        names={0:'UNKNOWN',1:'ACCEPTED',2:'EXECUTING',3:'CANCELING',4:'SUCCEEDED',5:'CANCELED',6:'ABORTED'}
+        for status in msg.status_list:
+            goal_id=bytes(status.goal_info.goal_id.uuid).hex()
+            value=int(status.status); key=(r,action,goal_id); previous=self.action_goal_states.get(key)
+            if previous==value: continue
+            self.action_goal_states[key]=value
+            self.event(f'{action}_STATUS', 'action goal status changed', r,
+                       f'/{r}/{action.lower()}/_action/status',
+                       source_stamp=stamp(msg), action=action,
+                       goal_uuid=goal_id, status_value=value,
+                       status_name=names.get(value,str(value)))
     def candidates(self,r,msg):
         old=self.latest[r].get('candidate_count'); count=len(msg.candidates); self.mark(r,'frontier_candidates',msg); self.latest[r]['candidate_count']=count
         # Keep the observer passive, but retain the bounded candidate evidence
@@ -397,7 +428,23 @@ class CooperativeExperimentLogger(Node):
                      'local_path_length_m':item.local_path_length_m,
                      'local_path_samples':len(item.local_path_samples)}
                     for item in msg.candidates]
-        self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count,candidates=candidates)
+        self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count,detected_frontier_count=msg.detected_frontier_count,detected_not_queried_count=getattr(msg,'detected_not_queried_count',msg.unclassified_frontier_count),small_frontier_count=msg.small_frontier_count,out_of_range_frontier_count=msg.out_of_range_frontier_count,unreachable_frontier_count=msg.unreachable_frontier_count,planner_failure_count=msg.planner_failure_count,unclassified_frontier_count=msg.unclassified_frontier_count,candidates=candidates)
+        diagnostic_regions = getattr(msg, 'diagnostic_regions_json', '')
+        if diagnostic_regions:
+            if self.frontier_regions_file is None:
+                self.frontier_regions_file = open(
+                    self.directory / 'frontier_regions.jsonl', 'a',
+                    encoding='utf-8', buffering=1)
+                self.files.append(self.frontier_regions_file)
+            try:
+                payload = json.loads(diagnostic_regions)
+                payload.update({'capture_robot': r,
+                                'capture_stamp': stamp(msg),
+                                'capture_elapsed_s': self.ros_seconds() - self.start_ros})
+                self.frontier_regions_file.write(
+                    json.dumps(finite(payload), separators=(',', ':')) + '\n')
+            except (TypeError, ValueError, OSError) as exc:
+                self.record_internal_error('frontier_region_capture', exc)
         if old is not None and old!=count:self.event('CANDIDATE_COUNT_CHANGED',f'{old} -> {count}',r)
         if not count:self.event('NO_REACHABLE_CANDIDATES','candidate batch empty',r)
     @staticmethod
@@ -418,7 +465,26 @@ class CooperativeExperimentLogger(Node):
     def distributed_decision(self,r,msg):
         self.mark(r,'pair_decision',msg)
         if not self.distributed_changed((r,'decision'),(msg.round_id,msg.union_hash,msg.decision_hash)):return
-        self.event('DISTRIBUTED_PAIR_DECISION','replicated complete pair decision',r,f'/{r}/pair_decision',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,robot1_snapshot_epoch=msg.robot1_snapshot_epoch,robot2_snapshot_epoch=msg.robot2_snapshot_epoch,robot1_bid_fingerprint=msg.robot1_bid_fingerprint,robot2_bid_fingerprint=msg.robot2_bid_fingerprint,robot1_task=msg.robot1_canonical_task_id or 'IDLE',robot2_task=msg.robot2_canonical_task_id or 'IDLE',decision_hash=msg.decision_hash,total_team_score=msg.total_team_score,team_visible_gain=msg.team_visible_gain,combined_path_cost=msg.combined_path_cost,nearby_goal_penalty=msg.nearby_goal_penalty,route_overlap_penalty=msg.route_overlap_penalty,hard_failure_penalty=msg.hard_failure_penalty,sensing_overlap_penalty=msg.sensing_overlap_penalty,workload_imbalance_penalty=msg.workload_imbalance_penalty,coordinator_state=msg.coordinator_state,decision_diagnostics_json=msg.diagnostics_json)
+        try:
+            diagnostics = json.loads(msg.diagnostics_json or '{}')
+        except (TypeError, ValueError):
+            diagnostics = {}
+        if not msg.robot1_canonical_task_id and not msg.robot2_canonical_task_id:
+            if not diagnostics.get('union_task_count', 0):
+                outcome = 'NO_CANONICAL_TASKS'
+            elif diagnostics.get('rejected_failure_suppression_count', 0):
+                outcome = 'TASK_SUPPRESSED_BY_FAILURE_MEMORY'
+            elif diagnostics.get('rejected_path_threshold_count', 0):
+                outcome = 'TASKS_OUT_OF_RANGE'
+            elif diagnostics.get('robot1_valid_bid_count', 0) == 0 and \
+                    diagnostics.get('robot2_valid_bid_count', 0) == 0:
+                outcome = 'NO_REACHABLE_TASK'
+            else:
+                outcome = 'IDLE_BY_DETERMINISTIC_ASSIGNMENT'
+        else:
+            outcome = 'DISPATCHABLE_ASSIGNMENT'
+        self.round_outcomes[outcome] += 1
+        self.event('DISTRIBUTED_PAIR_DECISION','replicated complete pair decision',r,f'/{r}/pair_decision',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,robot1_snapshot_epoch=msg.robot1_snapshot_epoch,robot2_snapshot_epoch=msg.robot2_snapshot_epoch,robot1_bid_fingerprint=msg.robot1_bid_fingerprint,robot2_bid_fingerprint=msg.robot2_bid_fingerprint,robot1_task=msg.robot1_canonical_task_id or 'IDLE',robot2_task=msg.robot2_canonical_task_id or 'IDLE',decision_hash=msg.decision_hash,total_team_score=msg.total_team_score,team_visible_gain=msg.team_visible_gain,combined_path_cost=msg.combined_path_cost,nearby_goal_penalty=msg.nearby_goal_penalty,route_overlap_penalty=msg.route_overlap_penalty,hard_failure_penalty=msg.hard_failure_penalty,sensing_overlap_penalty=msg.sensing_overlap_penalty,workload_imbalance_penalty=msg.workload_imbalance_penalty,coordinator_state=msg.coordinator_state,decision_diagnostics_json=msg.diagnostics_json,decision_outcome=outcome,decision_idle_reason=diagnostics.get('idle_reason'),decision_availability_reason=diagnostics.get('availability_reason'))
     def distributed_status(self,r,msg):
         self.mark(r,'distributed_status',msg)
         self.latest[r]['distributed_state']=msg.state
@@ -436,9 +502,28 @@ class CooperativeExperimentLogger(Node):
             msg.state, str(msg.state),
         )
         self.latest[r]['navigation_active'] = bool(msg.local_nav_goal_active)
+        self.latest[r].update(
+            terminal=bool(msg.terminal),
+            terminal_reason=msg.terminal_reason,
+            terminal_epoch=int(msg.terminal_epoch),
+            terminal_map_revision=int(msg.terminal_map_revision),
+            remaining_frontier_count=int(msg.remaining_frontier_count),
+            remaining_small_frontier_count=int(msg.remaining_small_frontier_count),
+            remaining_out_of_range_count=int(msg.remaining_out_of_range_count),
+            remaining_unreachable_count=int(msg.remaining_unreachable_count),
+            planner_failure_count=int(msg.planner_failure_count),
+            detected_not_queried_count=int(
+                getattr(msg, 'detected_not_queried_count', 0)),
+            below_minimum_gain_count=int(
+                getattr(msg, 'below_minimum_gain_count', 0)),
+            actionable_reachable_count=int(
+                getattr(msg, 'actionable_reachable_count', 0)),
+        )
         health=(msg.nav2_healthy,msg.tf_healthy,msg.candidate_source_healthy,msg.peer_communication_healthy)
         if not self.distributed_changed((r,'status'),(msg.state,msg.round_id,msg.decision_hash,msg.active_canonical_task_id,health,msg.reason)):return
-        self.event('DISTRIBUTED_STATUS',msg.reason,r,f'/{r}/distributed_status',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),state=msg.state,round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,active_canonical_task_id=msg.active_canonical_task_id,local_nav_goal_active=msg.local_nav_goal_active,nav2_healthy=msg.nav2_healthy,tf_healthy=msg.tf_healthy,candidate_source_healthy=msg.candidate_source_healthy,peer_communication_healthy=msg.peer_communication_healthy)
+        self.event('DISTRIBUTED_STATUS',msg.reason,r,f'/{r}/distributed_status',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),state=msg.state,round_id=msg.round_id,union_hash=msg.union_hash,decision_hash=msg.decision_hash,active_canonical_task_id=msg.active_canonical_task_id,local_nav_goal_active=msg.local_nav_goal_active,nav2_healthy=msg.nav2_healthy,tf_healthy=msg.tf_healthy,candidate_source_healthy=msg.candidate_source_healthy,peer_communication_healthy=msg.peer_communication_healthy,terminal=msg.terminal,terminal_reason=msg.terminal_reason,terminal_epoch=msg.terminal_epoch,remaining_frontier_count=msg.remaining_frontier_count,remaining_small_frontier_count=msg.remaining_small_frontier_count,remaining_out_of_range_count=msg.remaining_out_of_range_count,remaining_unreachable_count=msg.remaining_unreachable_count,planner_failure_count=msg.planner_failure_count,detected_not_queried_count=getattr(msg,'detected_not_queried_count',0),below_minimum_gain_count=getattr(msg,'below_minimum_gain_count',0),actionable_reachable_count=getattr(msg,'actionable_reachable_count',0))
+        if msg.terminal:
+            self.mission_terminal_reason = msg.terminal_reason or msg.reason
         if msg.state == DistributedExplorationStatus.COMPLETE and self.mission_completion_time is None:
             self.mission_completion_time = self.ros_seconds() - self.start_ros
     def distributed_event(self,r,msg):
@@ -540,8 +625,51 @@ class CooperativeExperimentLogger(Node):
         if old!=f.number_of_recoveries:self.event('RECOVERY_COUNT_CHANGED',f'{old} -> {f.number_of_recoveries}',r,f'/{r}/navigate_to_pose/_action/feedback',source_stamp=stamp(f.current_pose),recoveries=f.number_of_recoveries,distance_remaining_m=f.distance_remaining)
     def rosout(self,msg):
         if msg.name.lstrip('/')=='cooperative_experiment_logger':return
+        text=msg.name+' '+msg.msg
+        lower=text.lower()
+        diagnostic_rules=(
+            ('TF_FAILURE',r'unable to transform robot pose into global plan|transform.*global plan|tf error|lookup would require'),
+            ('MISSED_RATE_WARNING',r'missed its desired rate|current loop rate'),
+            ('FOLLOW_PATH',r'\[follow_path\]|followpath'),
+            ('COMPUTE_PATH',r'compute_path_to_pose|computepathtopose'),
+            ('RECOVERY',r'recovery|clear_(local|global|entirely)|\bspin\b|\bback.?up\b|\bwait\b'),
+            ('COLLISION_MONITOR',r'collision.?monitor|stop.?zone|emergency stop'),
+        )
+        diagnostic_category=next((category for category,pattern in diagnostic_rules if re.search(pattern,lower)),None)
+        if 'COMPUTE_PATH_REUSED' in msg.msg:
+            source_match = re.search(r'source=([A-Z0-9_]+)', msg.msg)
+            source = source_match.group(1) if source_match else 'UNKNOWN'
+            self.planner_query_counts[f'{source}.REUSED'] += 1
+        elif 'COMPUTE_PATH_RESULT' in msg.msg or 'CANDIDATE_PATH_RESULT' in msg.msg:
+            source_match = re.search(r'source=([A-Z0-9_]+)', msg.msg)
+            source = source_match.group(1) if source_match else 'UNKNOWN'
+            if re.search(r'\bok=true\b|\bvalid=true\b', msg.msg):
+                outcome = 'SUCCESS'
+            elif re.search(r'TIMEOUT|timeout', msg.msg):
+                outcome = 'TIMEOUT'
+            else:
+                outcome = 'FAILURE'
+            self.planner_query_counts[f'{source}.{outcome}'] += 1
+            duration_match = re.search(r'duration_s=([0-9]+(?:\.[0-9]+)?)', msg.msg)
+            if duration_match:
+                self.planner_query_duration_s[source] += float(
+                    duration_match.group(1))
+        controller_or_planner=(re.search(r'controller|planner',lower) and
+                               re.search(r'failed|failure|abort|progress checker|no valid control|timeout',lower))
+        if controller_or_planner and diagnostic_category is None:
+            diagnostic_category='CONTROLLER_OR_PLANNER_ERROR'
+        if diagnostic_category is not None:
+            source_stamp=(msg.stamp.sec,msg.stamp.nanosec)
+            row=self.common('/rosout:'+msg.name,source_stamp=source_stamp)
+            row.update(severity='ERROR' if msg.level>=Log.ERROR else ('WARN' if msg.level>=Log.WARN else 'INFO'),category=diagnostic_category,message=msg.msg,node=msg.name)
+            key=(msg.name,diagnostic_category,msg.msg); previous=self._diagnostic_last.get(key); now=row['elapsed_s']
+            if (previous is None or now-previous>=0.25) and self.nav2_diagnostic_count<10000:
+                self._diagnostic_last[key]=now; self.nav2_diagnostic_count+=1
+                try:
+                    with self._io_lock:self.nav2_diagnostics.write(json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n')
+                except (OSError,TypeError,ValueError) as exc:self.write_failures+=1; self.get_logger().error(f'Nav2 diagnostic write failed: {exc}',throttle_duration_sec=10.)
         if msg.level<Log.WARN:return
-        severity='ERROR' if msg.level>=Log.ERROR else 'WARN'; text=(msg.name+' '+msg.msg).lower(); category=next((v for k,v in [('costmap','COSTMAP_WARNING'),('controller','CONTROLLER_WARNING'),('slam','SLAM_WARNING'),('scan','SCAN_WARNING'),('transform','TF_WARNING'),(' tf','TF_WARNING')] if k in text),'PROCESS_WARNING')
+        severity='ERROR' if msg.level>=Log.ERROR else 'WARN'; category=next((v for k,v in [('costmap','COSTMAP_WARNING'),('controller','CONTROLLER_WARNING'),('slam','SLAM_WARNING'),('scan','SCAN_WARNING'),('transform','TF_WARNING'),(' tf','TF_WARNING')] if k in lower),'PROCESS_WARNING')
         with self._state_lock:record,new=self.warns.add(msg.name,severity,msg.msg,utc_now(),category)
         if new:self.event(category,msg.msg,source='/rosout:'+msg.name,severity=severity,source_stamp=(msg.stamp.sec,msg.stamp.nanosec),occurrence_count=1)
     def row_time(self):
@@ -564,7 +692,7 @@ class CooperativeExperimentLogger(Node):
             self.stack_ready=True
             self.event('STACK_READY','critical robot telemetry is available',console=True)
         for r in self.robots:
-            d=self.latest[r]; pose=d.get('pose',(None,None,None)); speed=d.get('speed',(0.,0.)); command=d.get('command',(0.,0.)); goal=d.get('goal',(None,None,None)); row=self.row_time(); row.update(robot_id=r,pose_x=pose[0],pose_y=pose[1],pose_yaw=pose[2],linear_speed_mps=speed[0],angular_speed_radps=speed[1],commanded_linear_mps=command[0],commanded_angular_radps=command[1],distance_travelled_m=self.trajectory.total_distance.get(r,0.),claim_state=d.get('claim_state','UNKNOWN'),claim_id=d.get('claim_id'),frontier_id=d.get('frontier_id'),goal_x=goal[0],goal_y=goal[1],goal_yaw=goal[2],navigation_active=d.get('navigation_active',False),distance_remaining_m=d.get('distance_remaining'),recoveries=d.get('recoveries',0),candidate_count=d.get('candidate_count',0),local_known_cells=self.map_counts(r,'map')[0],shared_known_cells=self.map_counts(r,'shared_map')[0],local_costmap_obstacles=self.map_counts(r,'local_costmap/costmap')[2],global_costmap_known=self.map_counts(r,'global_costmap/costmap')[0],global_costmap_obstacles=self.map_counts(r,'global_costmap/costmap')[2],odom_age_s=self.age(r,'odom'),scan_age_s=self.age(r,'scan_d500_slam'),map_age_s=self.age(r,'map'),shared_map_age_s=self.age(r,'shared_map'),claim_age_s=self.age(r,'exploration_claim'),feedback_age_s=self.age(r,'navigate_feedback')); self.csv_row(self.writers[r],row)
+            d=self.latest[r]; pose=d.get('pose',(None,None,None)); speed=d.get('speed',(0.,0.)); command=d.get('command',(0.,0.)); goal=d.get('goal',(None,None,None)); cmd_age=self.age(r,'cmd_vel'); cmd_received=cmd_age is not None and cmd_age<=float(self.p['cmd_vel_no_command_timeout_s']); row=self.row_time(); row.update(robot_id=r,pose_x=pose[0],pose_y=pose[1],pose_yaw=pose[2],linear_speed_mps=speed[0],angular_speed_radps=speed[1],commanded_linear_mps=command[0],commanded_angular_radps=command[1],cmd_vel_received=cmd_received,cmd_vel_age_s=cmd_age,cmd_vel_source=d.get('cmd_vel_source'),distance_travelled_m=self.trajectory.total_distance.get(r,0.),claim_state=d.get('claim_state','UNKNOWN'),claim_id=d.get('claim_id'),frontier_id=d.get('frontier_id'),goal_x=goal[0],goal_y=goal[1],goal_yaw=goal[2],navigation_active=d.get('navigation_active',False),distance_remaining_m=d.get('distance_remaining'),recoveries=d.get('recoveries',0),candidate_count=d.get('candidate_count',0),local_known_cells=self.map_counts(r,'map')[0],shared_known_cells=self.map_counts(r,'shared_map')[0],local_costmap_obstacles=self.map_counts(r,'local_costmap/costmap')[2],global_costmap_known=self.map_counts(r,'global_costmap/costmap')[0],global_costmap_obstacles=self.map_counts(r,'global_costmap/costmap')[2],odom_age_s=self.age(r,'odom'),scan_age_s=self.age(r,'scan_d500_slam'),map_age_s=self.age(r,'map'),shared_map_age_s=self.age(r,'shared_map'),claim_age_s=self.age(r,'exploration_claim'),feedback_age_s=self.age(r,'navigate_feedback')); self.csv_row(self.writers[r],row)
             if pose[0] is not None:
                 sample=MotionSample(row['elapsed_s'],pose[0],pose[1],d.get('distance_remaining'),command[0],command[1]); near=d.get('distance_remaining') is not None and d['distance_remaining']<.08
                 for kind in self.detectors[r].update(sample,d.get('navigation_active',False),near_goal=near):
@@ -681,7 +809,85 @@ class CooperativeExperimentLogger(Node):
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
         total_distance=sum(motion.get('distance_travelled_m',{}).values()); coverage_gain=(self.previous_known or 0)-(self.initial_known or 0)
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal},'continuous_exploration':continuous,'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'oscillation_episodes':self.counts['OSCILLATION_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
+
+    def write_mission_result(self, clean):
+        """Write one compact process-facing terminal result beside summary.json."""
+        reason = self.mission_terminal_reason
+        if reason.startswith('MISSION_COMPLETE_'):
+            status = 'SUCCEEDED'
+            exit_code = 0
+        elif reason.startswith('MISSION_ABORT_'):
+            status = 'FAILED'
+            exit_code = 1
+        else:
+            status = 'INCOMPLETE'
+            exit_code = 2
+        robot_states = {
+            robot: {
+                'state': self.latest[robot].get('claim_state', 'UNKNOWN'),
+                'terminal': self.latest[robot].get('terminal', False),
+                'terminal_reason': self.latest[robot].get('terminal_reason', ''),
+                'navigation_active': self.latest[robot].get(
+                    'navigation_active', False),
+            }
+            for robot in self.robots
+        }
+        terminal_reasons = {
+            self.latest[robot].get('terminal_reason', '')
+            for robot in self.robots
+            if self.latest[robot].get('terminal', False)
+        }
+        evidence = {
+            key: self.latest['robot1'].get(key, 0)
+            for key in (
+                'remaining_frontier_count', 'remaining_small_frontier_count',
+                'remaining_out_of_range_count', 'remaining_unreachable_count',
+                'planner_failure_count', 'detected_not_queried_count',
+                'below_minimum_gain_count',
+                'actionable_reachable_count',
+            )
+        }
+        atomic_json(self.directory / 'mission_result.json', {
+            'mission_status': status,
+            'terminal_reason': reason or 'MISSION_NOT_TERMINATED',
+            'simulated_duration_s': self.ros_seconds() - self.start_ros,
+            'wall_duration_s': time.monotonic() - self.start,
+            'accepted_goals': self.counts['NAV_GOAL_ACCEPTED'],
+            'successful_goals': self.counts['NAVIGATION_SUCCEEDED'],
+            'failed_goals': self.counts['NAVIGATION_FAILED'],
+            'final_known_cells': self.previous_known or 0,
+            'semantic_agreement': bool(self.unique_agreed_rounds),
+            'terminal_agreement': len(terminal_reasons) == 1,
+            'robot1_final_state': robot_states['robot1'],
+            'robot2_final_state': robot_states['robot2'],
+            'remaining_frontier_count': evidence['remaining_frontier_count'],
+            'remaining_small_frontier_count': evidence[
+                'remaining_small_frontier_count'],
+            'remaining_out_of_range_count': evidence[
+                'remaining_out_of_range_count'],
+            'remaining_unreachable_count': evidence[
+                'remaining_unreachable_count'],
+            'planner_failed_count': evidence['planner_failure_count'],
+            'detected_not_queried_count': evidence[
+                'detected_not_queried_count'],
+            'below_minimum_gain_count': evidence['below_minimum_gain_count'],
+            'actionable_reachable_count': evidence[
+                'actionable_reachable_count'],
+            'terminal_small_frontier_length_m': float(
+                self.p.get('terminal_small_frontier_length_m', 0.20)),
+            'final_allocator_epoch': max(
+                (self.latest[robot].get('terminal_epoch', 0)
+                 for robot in self.robots), default=0,
+            ),
+            'final_map_revisions': {
+                robot: self.latest[robot].get('terminal_map_revision', 0)
+                for robot in self.robots
+            },
+            'terminal_time_s': self.mission_completion_time,
+            'shutdown_clean': bool(clean),
+            'recommended_exit_code': exit_code,
+        })
     def finalize(self,clean=True):
         with self._lifecycle_lock:
             if self.finalized or self._finalizing:return False
@@ -704,7 +910,7 @@ class CooperativeExperimentLogger(Node):
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]
             with open(self.directory/'warnings.jsonl','w',encoding='utf-8') as f:
                 for record in warning_records:f.write(json.dumps(finite(record),allow_nan=False)+'\n')
-            atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_manifest(clean,'clean' if clean else 'interrupted'); successful=True
+            atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_mission_result(clean); self.write_manifest(clean,'clean' if clean else 'interrupted'); successful=True
         except Exception as exc:
             self.write_failures+=1
             if self.context.ok():

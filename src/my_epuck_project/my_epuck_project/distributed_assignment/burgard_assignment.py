@@ -22,6 +22,7 @@ from .models import (
     Point,
 )
 from .scoring import bid_fingerprint
+from ..frontier_actionability import gain_meets_minimum
 
 
 IDLE_TASK_ID = ''
@@ -110,8 +111,7 @@ def _task_feasible(
     return bool(
         bid is not None and bid.path_valid and
         task.canonical_id not in hard_failed_tasks and
-        math.isfinite(task.visible_reveal_gain) and
-        task.visible_reveal_gain >= minimum_visible_gain_m and
+        gain_meets_minimum(task.visible_reveal_gain, minimum_visible_gain_m) and
         math.isfinite(bid.path_length_m) and
         0.0 <= bid.path_length_m <= maximum_path_length_m and
         math.isfinite(bid.estimated_travel_cost) and
@@ -138,6 +138,72 @@ def _reduction(
     return distance, True, 1.0 - distance / sensor_max_range_m
 
 
+def _pair_candidate(
+        first_robot: str, first_task_id: str,
+        second_robot: str, second_task_id: str,
+        tasks: Mapping[str, CanonicalTask], bids: Mapping[str, Mapping[str, Bid]],
+        shared_map, sensor_max_range_m: float, occupied_threshold: int,
+        beta: float, maximum_path_length_m: float):
+    """Score one distinct two-robot pair in one Burgard assignment order.
+
+    Burgard's utility reduction is order-dependent.  The production solver
+    therefore evaluates both robot/task orders for a complete pair, rather
+    than committing the first greedy choice before the second robot is known.
+    This keeps the paper-derived utility and the existing Nav2 cost term
+    unchanged while allowing the bounded two-robot problem to be solved
+    exactly.
+    """
+    first_task = tasks[first_task_id]
+    second_task = tasks[second_task_id]
+    first_bid = bids[first_robot][first_task_id]
+    second_bid = bids[second_robot][second_task_id]
+    first_cost = _bounded(first_bid.path_length_m / maximum_path_length_m)
+    first_score = 1.0 - beta * first_cost
+    distance, clear, reduction = _reduction(
+        first_task, second_task, shared_map, sensor_max_range_m,
+        occupied_threshold,
+    )
+    second_utility = 1.0 - reduction
+    second_cost = _bounded(second_bid.path_length_m / maximum_path_length_m)
+    second_score = second_utility - beta * second_cost
+    trace = (
+        {
+            'step': 1, 'robot_id': first_robot,
+            'task_id': first_task_id,
+            'task_centroid': [round(first_task.centroid[0], 6),
+                              round(first_task.centroid[1], 6)],
+            'initial_utility': 1.0, 'utility_before': 1.0,
+            'raw_nav2_path_length_m': round(first_bid.path_length_m, 12),
+            'normalized_cost': round(first_cost, 12), 'beta': beta,
+            'score': round(first_score, 12),
+            'tie_break_order': 'pair_score_then_combined_cost_then_task_ids',
+            'reductions': [{
+                'task_id': second_task_id,
+                'distance_m': round(distance, 12),
+                'line_of_sight_clear': clear,
+                'reduction': round(reduction, 12),
+                'utility_before': 1.0,
+                'utility_after': round(second_utility, 12),
+            }],
+        },
+        {
+            'step': 2, 'robot_id': second_robot,
+            'task_id': second_task_id,
+            'task_centroid': [round(second_task.centroid[0], 6),
+                              round(second_task.centroid[1], 6)],
+            'initial_utility': 1.0,
+            'utility_before': 1.0,
+            'utility_after': round(second_utility, 12),
+            'raw_nav2_path_length_m': round(second_bid.path_length_m, 12),
+            'normalized_cost': round(second_cost, 12), 'beta': beta,
+            'score': round(second_score, 12),
+            'tie_break_order': 'pair_score_then_combined_cost_then_task_ids',
+            'reductions': [],
+        },
+    )
+    return first_score + second_score, trace
+
+
 def choose_burgard_assignment(
         round_id: str, union: CanonicalUnion,
         robot1_bids: BidBatch, robot2_bids: BidBatch,
@@ -145,7 +211,7 @@ def choose_burgard_assignment(
         minimum_visible_gain_m: float = 0.05, sensor_max_range_m: float = 11.98,
         occupied_threshold: int = 50, shared_map=None,
         hard_failed_tasks: frozenset[str] = frozenset()) -> PairDecision:
-    """Run the bounded two-robot Burgard-inspired sequential assignment.
+    """Run the bounded exact two-robot Burgard-inspired assignment.
 
     ``U_t`` starts at one for every eligible canonical task.  ``C_i,t`` is the
     robot's existing Nav2 path length normalized by the already authoritative
@@ -173,73 +239,81 @@ def choose_burgard_assignment(
         for robot_id in ('robot1', 'robot2')
     }
     eligible_tasks = sorted(set(feasible['robot1']) | set(feasible['robot2']))
-    utilities = {task_id: 1.0 for task_id in eligible_tasks}
-    remaining_robots = ['robot1', 'robot2']
-    remaining_tasks = set(eligible_tasks)
-    assigned: dict[str, str] = {'robot1': IDLE_TASK_ID, 'robot2': IDLE_TASK_ID}
-    trace: list[dict[str, object]] = []
-    selected_scores: list[float] = []
-
-    while remaining_robots:
-        candidates = []
-        for robot_id in remaining_robots:
-            for task_id in feasible[robot_id]:
-                if task_id not in remaining_tasks:
-                    continue
-                bid = bids[robot_id][task_id]
-                normalized_cost = _bounded(bid.path_length_m / maximum_path_length_m)
-                score = utilities[task_id] - beta * normalized_cost
-                # Primary score, then lower normalized cost, robot ID, task ID.
-                rank = (-round(score, 12), round(normalized_cost, 12),
-                        _robot_number(robot_id), task_id)
-                candidates.append((rank, robot_id, task_id, bid, normalized_cost, score))
-        if not candidates:
-            for robot_id in remaining_robots:
-                trace.append({
-                    'step': len(trace) + 1,
-                    'robot_id': robot_id,
-                    'task_id': IDLE_TASK_ID,
-                    'reason': 'NO_FEASIBLE_REMAINING_TASK',
-                })
-            break
-        _, robot_id, task_id, bid, normalized_cost, score = min(
-            candidates, key=lambda item: item[0],
-        )
-        task = tasks[task_id]
-        assigned[robot_id] = task_id
-        selected_scores.append(score)
-        reductions = []
-        for other_id in sorted(remaining_tasks - {task_id}):
-            distance, clear, reduction = _reduction(
-                task, tasks[other_id], shared_map, sensor_max_range_m,
-                occupied_threshold,
+    pair_candidates = []
+    for robot1_task in [IDLE_TASK_ID] + feasible['robot1']:
+        for robot2_task in [IDLE_TASK_ID] + feasible['robot2']:
+            if robot1_task and robot2_task and robot1_task == robot2_task:
+                continue
+            if robot1_task and robot2_task:
+                orders = (
+                    ('robot1', robot1_task, 'robot2', robot2_task),
+                    ('robot2', robot2_task, 'robot1', robot1_task),
+                )
+                scored_orders = [
+                    _pair_candidate(
+                        *order, tasks, bids, shared_map,
+                        sensor_max_range_m, occupied_threshold, beta,
+                        maximum_path_length_m,
+                    )
+                    for order in orders
+                ]
+                # If order scores tie, keep robot 1 as the deterministic
+                # first reduction source, matching the old tie convention.
+                selected_score, trace = max(
+                    scored_orders,
+                    key=lambda item: (round(item[0], 12),
+                                      1 if item is scored_orders[0] else 0),
+                )
+            elif robot1_task:
+                bid = bids['robot1'][robot1_task]
+                selected_score = 1.0 - beta * _bounded(
+                    bid.path_length_m / maximum_path_length_m)
+                trace = ({
+                    'step': 1, 'robot_id': 'robot1', 'task_id': robot1_task,
+                    'task_centroid': [round(tasks[robot1_task].centroid[0], 6),
+                                      round(tasks[robot1_task].centroid[1], 6)],
+                    'initial_utility': 1.0, 'utility_before': 1.0,
+                    'raw_nav2_path_length_m': round(bid.path_length_m, 12),
+                    'normalized_cost': round(_bounded(
+                        bid.path_length_m / maximum_path_length_m), 12),
+                    'beta': beta, 'score': round(selected_score, 12),
+                    'reductions': [],
+                },)
+            elif robot2_task:
+                bid = bids['robot2'][robot2_task]
+                selected_score = 1.0 - beta * _bounded(
+                    bid.path_length_m / maximum_path_length_m)
+                trace = ({
+                    'step': 1, 'robot_id': 'robot2', 'task_id': robot2_task,
+                    'task_centroid': [round(tasks[robot2_task].centroid[0], 6),
+                                      round(tasks[robot2_task].centroid[1], 6)],
+                    'initial_utility': 1.0, 'utility_before': 1.0,
+                    'raw_nav2_path_length_m': round(bid.path_length_m, 12),
+                    'normalized_cost': round(_bounded(
+                        bid.path_length_m / maximum_path_length_m), 12),
+                    'beta': beta, 'score': round(selected_score, 12),
+                    'reductions': [],
+                },)
+            else:
+                selected_score, trace = 0.0, ()
+            combined_cost = sum(
+                bids[robot_id][task_id].path_length_m
+                for robot_id, task_id in (
+                    ('robot1', robot1_task), ('robot2', robot2_task))
+                if task_id
             )
-            before = utilities[other_id]
-            utilities[other_id] = before - reduction
-            reductions.append({
-                'task_id': other_id,
-                'distance_m': round(distance, 12),
-                'line_of_sight_clear': clear,
-                'reduction': round(reduction, 12),
-                'utility_before': round(before, 12),
-                'utility_after': round(utilities[other_id], 12),
-            })
-        trace.append({
-            'step': len(trace) + 1,
-            'robot_id': robot_id,
-            'task_id': task_id,
-            'task_centroid': [round(task.centroid[0], 6), round(task.centroid[1], 6)],
-            'initial_utility': 1.0,
-            'utility_before': round(utilities[task_id], 12),
-            'raw_nav2_path_length_m': round(bid.path_length_m, 12),
-            'normalized_cost': round(normalized_cost, 12),
-            'beta': beta,
-            'score': round(score, 12),
-            'tie_break_order': 'score_then_lower_cost_then_robot_id_then_task_id',
-            'reductions': reductions,
-        })
-        remaining_robots.remove(robot_id)
-        remaining_tasks.remove(task_id)
+            # Maximize Burgard pair utility, then prefer less travel and
+            # deterministic canonical task IDs.  This is the only new
+            # cooperation mechanism; no fairness or route term is added.
+            active_count = int(bool(robot1_task)) + int(bool(robot2_task))
+            rank = (-active_count, -round(selected_score, 12),
+                    round(combined_cost, 12), robot1_task, robot2_task)
+            pair_candidates.append((rank, robot1_task, robot2_task,
+                                    selected_score, trace))
+    _, robot1_task, robot2_task, pair_total, trace = min(
+        pair_candidates, key=lambda item: item[0],
+    )
+    assigned = {'robot1': robot1_task, 'robot2': robot2_task}
 
     first_fingerprint = bid_fingerprint(robot1_bids)
     second_fingerprint = bid_fingerprint(robot2_bids)
@@ -251,7 +325,7 @@ def choose_burgard_assignment(
         bids[robot_id][task_id].path_length_m
         for robot_id, task_id in assigned.items() if task_id
     ), default=0.0)
-    score = AssignmentScore(total=sum(selected_scores))
+    score = AssignmentScore(total=pair_total)
     decision_payload = {
         'round_id': round_id,
         'union_hash': union.union_hash,
@@ -260,6 +334,7 @@ def choose_burgard_assignment(
         'robot1_task': assigned['robot1'],
         'robot2_task': assigned['robot2'],
         'burgard_total_millionths': round(score.total * 1_000_000),
+        'pair_solver': 'exact_two_robot_burgard',
     }
     diagnostics = AssignmentDiagnostics(
         idle_reason='NO_TASKS' if not union.tasks else 'OTHER',

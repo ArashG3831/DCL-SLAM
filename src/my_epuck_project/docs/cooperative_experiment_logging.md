@@ -60,3 +60,46 @@ distance travelled from its odometry trajectory. `summary.json` reports
 per-robot cycles, completed and failed goals, mean cycle duration, suppression
 counts, repeated frontier-ID attempts, maximum attempts, locally exhausted
 duration, mission completion time, and coverage gain per travelled metre.
+
+## Compact pause forensics
+
+Each run also writes a bounded `nav2_diagnostics.jsonl` containing only selected
+`/rosout` evidence: FollowPath/ComputePathToPose action-server messages,
+recovery and costmap messages, TF/controller/planner errors, collision-monitor
+messages, and missed-rate warnings. Repeated identical evidence within 0.25 s
+is suppressed and the stream is capped at 10,000 records. It is an observer
+file; it does not publish, call Nav2, or alter production behavior.
+
+The telemetry CSV records `cmd_vel_received`, command age, and command source in
+addition to the command values. The report generator derives zero-command and
+no-command intervals without treating an absent command as an explicit stop.
+The offline Burgard analyzer combines these fields with Supervisor ground
+truth, allocator state transitions, NavigateToPose terminal events, selected
+Nav2 diagnostics, and live parameter snapshots. It emits
+`navigation_pause_forensics.json` and `.md` in the compact analysis bundle,
+including per-goal timing, recovery counts, allocator intervals, stationary
+intervals, evidence-based PAUSE_TIMELINE causes, aggregate pause totals, RPP
+parameters, local costmap dimensions, and startup/permanent-slowdown warnings.
+
+FollowPath and ComputePathToPose lifecycle timing is included when Nav2 emits a
+recognizable lifecycle line. Candidate and bid messages are retained as
+`SUBMISSION_OBSERVED` ComputePath evidence, but the report leaves duration
+unknown when the passive observer did not receive a request/response timestamp;
+it never fabricates a timing or a pause cause.
+
+The compact `webotsreport` command also exports the final merged and per-robot
+shared-map PNGs with final pose/heading overlays.  Additional files ending in
+`_with_paths.png` draw the complete recorded `pose_x`/`pose_y` trajectories
+from the same shared-map frame, using the captured OccupancyGrid origin
+translation/yaw exactly once.  Large capture gaps or implausible jumps become
+separate path segments, and the renderer expands its presentation margin when
+needed so the path is not clipped.  Only these small PNGs and derived JSON
+manifests are copied to the compact report; raw trajectory and map streams
+remain in the WSL campaign directory.
+
+The observer also writes `mission_result.json` at finalization. It records whether the mission
+succeeded, failed, or remained incomplete; both robots' terminal states; terminal agreement;
+accepted/successful/failed goals; final known cells; remaining frontier categories; final
+allocator epoch/map revisions; shutdown cleanliness; and a recommended exit code. A clean report
+with `MISSION_COMPLETE_*` is an exploration completion result. Planner/TF evidence or a bounded
+timeout is never silently converted into successful map completion.

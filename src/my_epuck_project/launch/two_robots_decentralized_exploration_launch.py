@@ -25,6 +25,9 @@ def launch_setup(context):
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
+        ideal_encoder_sensing=(
+            LaunchConfiguration('ideal_encoder_sensing').perform(context).lower()
+            == 'true'),
     )
     summary = profile_summary(selected)
     forensic_enabled = (
@@ -41,10 +44,21 @@ def launch_setup(context):
         source_for_copy = launch_world_path
         forensic_world_dir = tempfile.mkdtemp(
             prefix=f'my_epuck_forensic_{os.getpid()}_')
-        # Preserve the profile's expected basename in the temporary directory;
-        # nested launch files resolve the large/small profile from its parent.
+        # Preserve the source world's ``worlds/`` level and its project-local
+        # ``protos/`` sibling.  The production worlds use relative imports
+        # such as ``../protos/e-puck/E-puck.proto``; copying only the WBT to a
+        # flat temporary directory makes Webots reject those imports before
+        # any robot controller can connect.
+        forensic_worlds_dir = os.path.join(forensic_world_dir, 'worlds')
+        os.makedirs(forensic_worlds_dir, exist_ok=True)
+        source_package_dir = os.path.dirname(
+            os.path.dirname(os.path.abspath(source_for_copy)))
+        source_protos_dir = os.path.join(source_package_dir, 'protos')
+        forensic_protos_dir = os.path.join(forensic_world_dir, 'protos')
+        if os.path.isdir(source_protos_dir):
+            shutil.copytree(source_protos_dir, forensic_protos_dir)
         forensic_world = os.path.join(
-            forensic_world_dir, os.path.basename(source_for_copy))
+            forensic_worlds_dir, os.path.basename(source_for_copy))
         shutil.copyfile(source_for_copy, forensic_world)
         with open(forensic_world, 'a', encoding='utf-8') as stream:
             stream.write(
@@ -69,7 +83,19 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'slam_tf_publish_probe_library': LaunchConfiguration(
+                'slam_tf_publish_probe_library'),
+            'slam_tf_publish_probe_log': LaunchConfiguration(
+                'slam_tf_publish_probe_log'),
+            'slam_tf_publication_mode': LaunchConfiguration(
+                'slam_tf_publication_mode'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'diagnostic_frontier_capture': LaunchConfiguration(
+                'diagnostic_frontier_capture'),
+            'fusion_process_nice': LaunchConfiguration(
+                'fusion_process_nice'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'dispatch_enabled': str(dispatch_enabled).lower(),
@@ -78,6 +104,11 @@ def launch_setup(context):
             'burgard_beta': LaunchConfiguration('burgard_beta'),
             'traffic_scheduler_enabled': LaunchConfiguration(
                 'traffic_scheduler_enabled'),
+            'enable_mission_timeout': LaunchConfiguration(
+                'enable_mission_timeout'),
+            'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
+            'terminal_small_frontier_length_m': LaunchConfiguration(
+                'terminal_small_frontier_length_m'),
         }.items(),
     )
     observer = Node(
@@ -107,16 +138,28 @@ def launch_setup(context):
             'world_sha256': selected['world_metadata']['sha256'],
             'coverage_attribution_resolution':
                 selected['coverage_attribution_resolution'],
+            'terminal_small_frontier_length_m': LaunchConfiguration(
+                'terminal_small_frontier_length_m'),
             'initial_configuration_json': json.dumps({
                 'frontier_engine': 'frontier_exploration_ros2 public core',
                 'maximum_tasks_per_source': 5,
                 'maximum_union_tasks': 10,
                 'maximum_path_queries': 8,
+                'terminal_small_frontier_length_m': float(
+                    LaunchConfiguration('terminal_small_frontier_length_m')
+                    .perform(context)),
                 'dispatch_enabled': dispatch_enabled,
                 'assignment_strategy': LaunchConfiguration(
                     'assignment_strategy').perform(context),
                 'burgard_beta': float(LaunchConfiguration(
                     'burgard_beta').perform(context)),
+                'use_scan_matching': LaunchConfiguration(
+                    'use_scan_matching').perform(context).lower() == 'true',
+            'do_loop_closing': LaunchConfiguration(
+                'do_loop_closing').perform(context).lower() == 'true',
+                'ideal_encoder_sensing': LaunchConfiguration(
+                    'ideal_encoder_sensing').perform(context).lower() == 'true',
+                'encoder_profile': selected['encoder_profile'],
                 'traffic_scheduler_enabled': LaunchConfiguration(
                     'traffic_scheduler_enabled').perform(context).lower()
                     == 'true',
@@ -157,7 +200,25 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        # Production YAML remains false/false.  These are explicit diagnostic
+        # runtime overrides for controlled Slam Toolbox experiments.
+        DeclareLaunchArgument('use_scan_matching', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('do_loop_closing', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
+        DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
+        DeclareLaunchArgument('slam_tf_publication_mode', default_value='',
+                              choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
+        # The active Webots path already uses un-noised PositionSensor
+        # measurements.  This explicit flag records that thesis-simulation
+        # assumption; it never substitutes Supervisor pose for /odom.
+        DeclareLaunchArgument('ideal_encoder_sensing', default_value='true',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false'),
+        DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('fusion_process_nice', default_value='0'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
@@ -174,6 +235,8 @@ def generate_launch_description():
         DeclareLaunchArgument('run_id', default_value=''),
         DeclareLaunchArgument('output_root', default_value='/home/arash/webots_ws/results'),
         DeclareLaunchArgument('mission_timeout_s', default_value='600.0'),
+        DeclareLaunchArgument('terminal_small_frontier_length_m',
+                              default_value='0.20'),
         DeclareLaunchArgument('enable_mission_timeout', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('launch_rviz', default_value='false',

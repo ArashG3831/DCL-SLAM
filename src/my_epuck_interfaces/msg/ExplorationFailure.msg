@@ -23,3 +23,4 @@ builtin_interfaces/Duration validity
 string evidence
 uint16 nav2_error_code
 string nav2_error_message
+string nav2_error_name

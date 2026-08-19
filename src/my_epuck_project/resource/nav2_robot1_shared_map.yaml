@@ -105,6 +105,10 @@ controller_server:
       use_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.50
       regulated_linear_scaling_min_speed: 0.026
+      # The 1.0 m rolling costmap has a 0.5 m forward extent.  Keep the
+      # approach heuristic inside that extent so RPP does not warn that
+      # approach scaling is permanent.
+      approach_velocity_scaling_dist: 0.45
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.785
       rotate_to_heading_angular_vel: 0.35

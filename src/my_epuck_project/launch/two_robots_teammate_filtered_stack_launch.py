@@ -209,6 +209,8 @@ def launch_setup(context):
         LaunchConfiguration('diagnostic_mode').perform(context) == 'true')
     fusion_quota = LaunchConfiguration(
         'fusion_cpu_quota_percent').perform(context)
+    fusion_process_nice = int(LaunchConfiguration(
+        'fusion_process_nice').perform(context))
     try:
         quota_enabled = float(fusion_quota) > 0.0
     except ValueError:
@@ -227,6 +229,14 @@ def launch_setup(context):
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'slam_tf_publish_probe_library': LaunchConfiguration(
+                'slam_tf_publish_probe_library'),
+            'slam_tf_publish_probe_log': LaunchConfiguration(
+                'slam_tf_publish_probe_log'),
+            'slam_tf_publication_mode': LaunchConfiguration(
+                'slam_tf_publication_mode'),
             # The D500 scan-plane silhouette is the measured 26 mm housing,
             # not the historical 35 mm body-radius approximation.
             'teammate_geometry_radius_m': '0.026',
@@ -308,6 +318,9 @@ def launch_setup(context):
                     'sanitize_live_footprints': True,
                 }],
                 prefix=(
+                    'nice -n ' + str(fusion_process_nice)
+                    if fusion_process_nice != 0 and not (
+                        diagnostic_mode and quota_enabled) else
                     'systemd-run --user --scope --quiet '
                     '-p CPUQuota=' + LaunchConfiguration(
                         'fusion_cpu_quota_percent').perform(context) + '%'
@@ -339,11 +352,20 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('use_scan_matching', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('do_loop_closing', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
+        DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
+        DeclareLaunchArgument('slam_tf_publication_mode', default_value='',
+                              choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_process_nice', default_value='0'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),

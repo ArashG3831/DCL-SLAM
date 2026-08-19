@@ -80,6 +80,29 @@ def test_logger_conversion_signature_is_only_accepted_after_context_loss():
         RuntimeError('application callback failure'), True, False)
 
 
+def test_forensic_child_keyboard_interrupt_does_not_abort_finalization(observer, monkeypatch):
+    class Child:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            del timeout
+            raise KeyboardInterrupt
+
+    child = Child()
+    observer.ground_truth_process = child
+    observer.stop_forensic_ground_truth()
+    assert child.returncode == -9
+
+
 def controller_error():
     message = Log()
     message.level = Log.ERROR
@@ -94,6 +117,14 @@ def test_controller_error_after_info_does_not_change_call_site_severity(observer
     events = read_events(observer)
     assert events[-1]["event_type"] == "CONTROLLER_WARNING"
     assert events[-1]["message"] == "Failed to make progress"
+    observer.nav2_diagnostics.flush()
+    diagnostics = [
+        json.loads(line)
+        for line in (observer.directory / "nav2_diagnostics.jsonl").read_text(
+            encoding="utf-8").splitlines()
+    ]
+    assert diagnostics[-1]["category"] == "CONTROLLER_OR_PLANNER_ERROR"
+    assert diagnostics[-1]["message"] == "Failed to make progress"
 
 
 def test_csv_timing_schema_accepts_wall_and_sim_elapsed_fields(observer):

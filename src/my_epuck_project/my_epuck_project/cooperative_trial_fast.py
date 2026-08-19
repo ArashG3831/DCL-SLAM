@@ -91,10 +91,22 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--world-path', default='')
     result.add_argument('--sensor-profile', choices=('full', 'throughput'),
                         default='full')
+    result.add_argument('--ideal-encoder-sensing', type=boolean, default=True,
+                        help='Use project-local noiseless, unlimited-resolution wheel sensors.')
     result.add_argument('--webots-mode', default='fast')
     result.add_argument('--rendering', type=boolean, default=False)
     result.add_argument('--rviz', type=boolean, default=False)
     result.add_argument('--diagnostic-mode', type=boolean, default=False)
+    result.add_argument(
+        '--enable-observer', type=boolean, default=False,
+        help='Enable the passive cooperative evidence recorder.')
+    result.add_argument(
+        '--enable-forensic-capture', type=boolean, default=False,
+        help='Enable passive Webots Supervisor/map forensic capture.')
+    result.add_argument('--fusion-process-nice', type=int, default=0)
+    result.add_argument('--slam-tf-publish-probe-library', default='')
+    result.add_argument('--slam-tf-publish-probe-log', default='')
+    result.add_argument('--slam-tf-publication-mode', default='')
     result.add_argument('--mission-timeout', type=float)
     result.add_argument('--startup-timeout', type=float)
     result.add_argument('--ros-domain-id', type=int, default=100)
@@ -153,7 +165,9 @@ def resolve_world(args: argparse.Namespace) -> Path:
         if not world.is_file():
             raise FastTrialError(f'world path does not exist: {world}')
         return world
-    selected = profile(args.world_profile, source_worlds)
+    selected = profile(
+        args.world_profile, source_worlds,
+        ideal_encoder_sensing=args.ideal_encoder_sensing)
     return Path(selected['world_path']).resolve()
 
 
@@ -167,8 +181,10 @@ def prepare_attempt(args: argparse.Namespace, prefix: str, world: Path):
     return attempt
 
 
-def launch_command(args: argparse.Namespace, world: Path) -> list[str]:
-    return [
+def launch_command(
+        args: argparse.Namespace, world: Path, output_root: Path | None = None,
+        run_id: str = '') -> list[str]:
+    command = [
         'ros2', 'launch', PACKAGE, LAUNCH_FILE,
         f'world_profile:={args.world_profile}',
         f'world_path:={world}',
@@ -176,14 +192,33 @@ def launch_command(args: argparse.Namespace, world: Path) -> list[str]:
         f'webots_mode:={args.webots_mode}',
         f'webots_gui:={str(args.rendering).lower()}',
         f'sensor_profile:={args.sensor_profile}',
+        f'ideal_encoder_sensing:={str(args.ideal_encoder_sensing).lower()}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
+        f'fusion_process_nice:={args.fusion_process_nice}',
         'use_sim_time:=true',
         'nav2_autostart:=false',
         'dispatch_enabled:=true',
-        'enable_observer:=false',
+        f'enable_observer:={str(args.enable_observer).lower()}',
+        f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
         'launch_rviz:=false',
         'enable_mission_timeout:=false',
     ]
+    if output_root is not None:
+        command.extend([
+            f'output_root:={output_root}',
+            f'run_id:={run_id}',
+        ])
+    optional_launch_arguments = (
+        ('slam_tf_publish_probe_library', args.slam_tf_publish_probe_library),
+        ('slam_tf_publish_probe_log', args.slam_tf_publish_probe_log),
+        ('slam_tf_publication_mode', args.slam_tf_publication_mode),
+    )
+    command.extend(
+        f'{name}:={value}'
+        for name, value in optional_launch_arguments
+        if value
+    )
+    return command
 
 
 class ReadyProbe(Node):
@@ -412,7 +447,9 @@ def run(args: argparse.Namespace) -> int:
         if not port_is_free(args.webots_port):
             raise FastTrialError(f'Webots port is already in use: {args.webots_port}')
         attempt = prepare_attempt(args, prefix, world)
-        command = launch_command(args, world)
+        command = launch_command(
+            args, world, output_root=attempt / 'observer',
+            run_id=attempt.name)
         effective = (
             f'ROS_DOMAIN_ID={args.ros_domain_id} '
             + ' '.join(shlex.quote(item) for item in command)

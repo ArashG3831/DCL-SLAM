@@ -23,13 +23,24 @@ from my_epuck_project.cooperative_profiles import profile
 from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
 
 
-def slam_actions(package_dir, robot, slam_resolution):
+def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
+                 tf_probe_log, tf_publication_mode):
+    probe_env = {}
+    if tf_probe_library:
+        probe_env = {
+            'LD_PRELOAD': tf_probe_library,
+            'SLAM_TF_PUBLISH_PROBE_LOG': tf_probe_log,
+            'RMW_IMPLEMENTATION': 'rmw_fastrtps_cpp',
+        }
+        if tf_publication_mode:
+            probe_env['RMW_FASTRTPS_PUBLICATION_MODE'] = tf_publication_mode
     slam = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
         namespace=robot,
         output='screen',
+        additional_env=probe_env,
         remappings=[
             ('tf', '/tf'),
             ('tf_static', '/tf_static'),
@@ -45,6 +56,10 @@ def slam_actions(package_dir, robot, slam_resolution):
                 'use_lifecycle_manager': False,
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'resolution': slam_resolution,
+                # Runtime-only diagnostic overrides.  The checked-in YAML
+                # remains the production source of truth (false/false).
+                'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+                'do_loop_closing': LaunchConfiguration('do_loop_closing'),
             },
         ],
     )
@@ -70,6 +85,12 @@ def slam_actions(package_dir, robot, slam_resolution):
 def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
     world_path = LaunchConfiguration('world_path').perform(context)
+    tf_probe_library = LaunchConfiguration(
+        'slam_tf_publish_probe_library').perform(context)
+    tf_probe_log = LaunchConfiguration(
+        'slam_tf_publish_probe_log').perform(context)
+    tf_publication_mode = LaunchConfiguration(
+        'slam_tf_publication_mode').perform(context)
     selected = profile(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
@@ -128,8 +149,10 @@ def launch_setup(context):
     return [
         base,
         *filters,
-        *slam_actions(package_dir, 'robot1', selected['slam_resolution']),
-        *slam_actions(package_dir, 'robot2', selected['slam_resolution']),
+        *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
+                      tf_probe_library, tf_probe_log, tf_publication_mode),
+        *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
+                      tf_probe_library, tf_probe_log, tf_publication_mode),
     ]
 
 
@@ -147,8 +170,16 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('use_scan_matching', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('do_loop_closing', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
+        DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
+        DeclareLaunchArgument('slam_tf_publication_mode', default_value='',
+                              choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument(
             'teammate_geometry_radius_m', default_value='0.026'),
         OpaqueFunction(function=launch_setup),

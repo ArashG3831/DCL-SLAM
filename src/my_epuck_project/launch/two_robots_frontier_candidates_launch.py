@@ -36,6 +36,8 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'occupied_threshold': 50,
             'visible_gain_range_m': 11.98,
             'forensic_clearance_cells': forensic_clearance_cells,
+            'diagnostic_frontier_capture': LaunchConfiguration(
+                'diagnostic_frontier_capture'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
@@ -58,11 +60,21 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'slam_tf_publish_probe_library': LaunchConfiguration(
+                'slam_tf_publish_probe_library'),
+            'slam_tf_publish_probe_log': LaunchConfiguration(
+                'slam_tf_publish_probe_log'),
+            'slam_tf_publication_mode': LaunchConfiguration(
+                'slam_tf_publication_mode'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'world_path': world_path,
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
             'fusion_cpu_quota_percent': LaunchConfiguration(
                 'fusion_cpu_quota_percent'),
+            'fusion_process_nice': LaunchConfiguration(
+                'fusion_process_nice'),
             'fusion_rebuild_period_s': LaunchConfiguration(
                 'fusion_rebuild_period_s'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
@@ -94,11 +106,22 @@ def generate_launch_description():
         DeclareLaunchArgument('webots_mode', default_value='realtime'),
         DeclareLaunchArgument('webots_gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('use_scan_matching', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('do_loop_closing', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
+        DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
+        DeclareLaunchArgument('slam_tf_publication_mode', default_value='',
+                              choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_process_nice', default_value='0'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
         DeclareLaunchArgument('forensic_clearance_cells', default_value='false',
                               choices=['true', 'false']),

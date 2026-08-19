@@ -4,10 +4,15 @@ import math
 
 from my_epuck_project.distributed_assignment.local_nav2 import (
     LocalNav2,
+    PathEvaluation,
+    classify_follow_path_controller_error,
+    follow_path_controller_error_name,
     downsample_path,
     occupancy_value,
+    upstream_point_validation,
     path_length,
 )
+from my_epuck_project.distributed_assignment.models import FailureClass
 
 from nav_msgs.msg import OccupancyGrid
 
@@ -41,6 +46,23 @@ def test_outside_grid_is_not_confused_with_unknown_cell():
     assert occupancy_value(grid, (-10.0, -10.0)) is None
 
 
+def test_upstream_point_validation_preserves_threshold_and_unknown_semantics():
+    """Mirror v1.6.0 point helper: strict >50, unknown separate."""
+    grid = grid_with_rotation(0.0)
+    grid.data[0] = 50
+    grid.data[1] = 51
+    grid.data[2] = -1
+    assert upstream_point_validation(grid, (1.5, 2.5))['status'] == 'FREE_OR_ACCEPTED'
+    assert upstream_point_validation(grid, (2.5, 2.5))['status'] == 'BLOCKED'
+    assert upstream_point_validation(grid, (3.5, 2.5))['status'] == 'UNKNOWN'
+    assert upstream_point_validation(grid, (-10.0, -10.0))['status'] == 'OUT_OF_BOUNDS'
+
+
+def test_upstream_point_validation_missing_grid_is_not_blocked():
+    """Absent dispatch-time evidence is explicit rather than a rejection."""
+    assert upstream_point_validation(None, (0.0, 0.0))['status'] == 'NO_DATA'
+
+
 def test_path_length_and_samples_are_measured_and_bounded():
     """Keep path endpoints while bounding the transmitted corridor."""
     points = tuple((float(index), 0.0) for index in range(100))
@@ -57,3 +79,52 @@ def test_pending_navigation_goal_counts_as_active_before_handle_arrives():
     nav._navigation_goal_handle = None
     nav._navigation_send_pending = True
     assert nav.local_goal_active
+
+
+def test_bid_path_reuse_requires_unchanged_map_and_costmap_stamps():
+    """A cached bid is rejected after either planning input advances."""
+    nav = LocalNav2.__new__(LocalNav2)
+    nav._map = OccupancyGrid()
+    nav._costmap = OccupancyGrid()
+    nav._map.header.stamp.sec = 10
+    nav._costmap.header.stamp.sec = 20
+    evaluation = PathEvaluation(
+        True, 1.0, ((0.0, 0.0), (1.0, 0.0)), 0, 0, '',
+        failure_class=FailureClass.UNKNOWN,
+        map_stamp_ns=10_000_000_000,
+        costmap_stamp_ns=20_000_000_000,
+    )
+    assert nav.path_context_matches(evaluation)
+    nav._costmap.header.stamp.sec = 21
+    assert not nav.path_context_matches(evaluation)
+
+
+def test_propagated_follow_path_controller_abort_is_hard_failure_evidence():
+    """Nav2 child-controller code 104 must suppress repeated task retries."""
+    assert classify_follow_path_controller_error(104) == FailureClass.CONTROLLER_NO_PROGRESS
+    assert classify_follow_path_controller_error(999) == FailureClass.UNKNOWN
+    assert follow_path_controller_error_name(104) == 'PATIENCE_EXCEEDED'
+    assert follow_path_controller_error_name(107) == 'CONTROLLER_TIMED_OUT'
+    assert follow_path_controller_error_name(999) == ''
+
+
+def test_propagated_follow_path_tf_abort_is_infrastructure_evidence():
+    """Keep FollowPath TF_ERROR separate from structural task failure."""
+    assert classify_follow_path_controller_error(102) == FailureClass.TF_OR_LIFECYCLE
+    assert follow_path_controller_error_name(102) == 'TF_ERROR'
+
+
+def test_bounded_failure_crop_and_geometry_signature_are_deterministic():
+    """Failure snapshots carry bounded local geometry, not an unbounded map."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 0.1
+    grid.info.width = 100
+    grid.info.height = 100
+    grid.data = [0] * (100 * 100)
+    from my_epuck_project.distributed_assignment.local_nav2 import (
+        bounded_grid_crop, execution_geometry_signature,
+    )
+    crop = bounded_grid_crop(grid, (5.0, 5.0), radius_cells=30)
+    assert crop['width'] == 41
+    assert len(crop['values']) == 41 * 41
+    assert len(execution_geometry_signature((5.0, 5.0), crop)) == 20

@@ -18,6 +18,7 @@ from my_epuck_project.cooperative_regression import (
     mission_timeout_expired,
     parse_log_errors,
     parser,
+    persist_post_completion_mission_result,
     perform_attempt,
     readiness_probe_due,
     required_graph_ready,
@@ -115,6 +116,52 @@ def test_headless_profile_selects_full_sensors_and_no_gui():
     assert args.rendering is False
     assert args.rviz is False
     assert args.sensor_profile == 'full'
+
+
+def test_rviz_profile_selects_full_sensors_without_webots_rendering():
+    args = parser().parse_args(['--execution-profile', 'rviz'])
+    from my_epuck_project.cooperative_regression import apply_execution_profile
+    apply_execution_profile(args)
+    assert args.execution_profile == 'rviz'
+    assert args.rendering is False
+    assert args.rviz is True
+    assert args.sensor_profile == 'full'
+
+
+def test_slam_diagnostic_overrides_default_false_and_cross_trial_boundary(
+        tmp_path):
+    """SLAM experiment switches are explicit and survive the supervisor hop."""
+    defaults = parser().parse_args([])
+    assert defaults.use_scan_matching is False
+    assert defaults.do_loop_closing is False
+
+    args = parser().parse_args([
+        '--use-scan-matching', 'true', '--do-loop-closing', 'false'])
+    assert args.use_scan_matching is True
+    assert args.do_loop_closing is False
+
+    args = options(tmp_path, trials=1)
+    args.world_profile = 'large'
+    args.source_world_path = str(tmp_path / 'large.wbt')
+    args.use_scan_matching = True
+    args.do_loop_closing = False
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    assert command[command.index('--use-scan-matching') + 1] == 'true'
+    assert command[command.index('--do-loop-closing') + 1] == 'false'
+
+
+def test_ideal_encoder_sensing_defaults_true_and_crosses_trial_boundary(tmp_path):
+    args = parser().parse_args([])
+    assert args.ideal_encoder_sensing is True
+
+    args = options(tmp_path, trials=1)
+    args.world_profile = 'large'
+    args.source_world_path = str(tmp_path / 'large.wbt')
+    args.ideal_encoder_sensing = True
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    assert command[command.index('--ideal-encoder-sensing') + 1] == 'true'
 
 
 def test_throughput_profile_is_explicit_reduced_sensor_experiment():
@@ -596,6 +643,15 @@ def test_campaign_report_does_not_count_bounded_diagnostic_as_failure(tmp_path):
     assert result['diagnostic_count'] == 1
 
 
+def test_campaign_exit_requires_mission_completion_not_only_clean_cleanup():
+    """A clean bounded diagnostic must not have success exit semantics."""
+    source = (Path(__file__).parents[1] / 'my_epuck_project' /
+              'cooperative_regression.py').read_text()
+    return_block = source[source.index('return 0 if ('):source.index(
+        '\n\n\ndef boolean', source.index('return 0 if ('))]
+    assert "summary['mission_completion_rate'] == 1.0" in return_block
+
+
 def create_attempt(campaign, number, classification='PASS', value=0):
     trial = f'trial_{number:02d}'
     name = f'{trial}_attempt_01'
@@ -719,6 +775,92 @@ def test_settled_observation_proves_freshness_for_legacy_artifact(tmp_path):
         attempt, f'{trial}_attempt_01', True, False, False, False,
         {'all_exited': True}, settled_observed=True)
     assert classification == 'MISSION_COMPLETE'
+
+
+def test_post_completion_collector_evidence_preserves_success_without_logger_artifacts(
+        tmp_path):
+    """Settled distributed completion is not downgraded by logger teardown."""
+    trial, attempt = create_attempt(tmp_path, 1)
+    observer = attempt / 'observer' / f'{trial}_attempt_01'
+    (observer / 'summary.json').unlink()
+    (observer / 'warnings.jsonl').unlink()
+    final_path = attempt / 'final_state.json'
+    final = json.loads(final_path.read_text())
+    for robot in ('robot1', 'robot2'):
+        final['robots'][robot].pop('status')
+        final['robots'][robot]['distributed_status'] = {
+            'state': 5, 'reason': 'MISSION_COMPLETE_NO_FRONTIERS',
+        }
+    final_path.write_text(json.dumps(final))
+    (attempt / 'collector_status.json').write_text(json.dumps({
+        'both_mission_complete': True, 'settled': True,
+    }))
+    classification, details = classify_attempt(
+        attempt, f'{trial}_attempt_01', True, False, False, False,
+        {'all_exited': True}, settled_observed=True)
+    assert classification == 'MISSION_COMPLETE'
+    assert details['post_completion_artifact_anomaly']['source'] == (
+        'collector_status.json + final_state.json')
+
+
+def test_post_completion_fallback_does_not_accept_timeout(tmp_path):
+    """The completion fallback cannot turn a bounded timeout into success."""
+    trial, attempt = create_attempt(tmp_path, 1)
+    (attempt / 'collector_status.json').write_text(json.dumps({
+        'both_mission_complete': True, 'settled': True,
+    }))
+    classification, _ = classify_attempt(
+        attempt, f'{trial}_attempt_01', True, True, False, False,
+        {'all_exited': True}, settled_observed=False)
+    assert classification == 'BOUNDED_DIAGNOSTIC'
+
+
+def test_completed_result_is_persisted_before_logger_teardown(tmp_path):
+    """Collector completion is durable even if launch later kills logger."""
+    _, attempt = create_attempt(tmp_path, 1)
+    final_path = attempt / 'final_state.json'
+    final = json.loads(final_path.read_text())
+    for robot in ('robot1', 'robot2'):
+        final['robots'][robot].pop('status')
+        final['robots'][robot]['distributed_status'] = {
+            'state': 5, 'reason': 'MISSION_COMPLETE_NO_FRONTIERS',
+        }
+    final_path.write_text(json.dumps(final))
+    (attempt / 'collector_status.json').write_text(json.dumps({
+        'both_mission_complete': True,
+        'settled': True,
+        'sim_time_seconds': 42.0,
+        'wall_elapsed_s': 12.0,
+    }))
+    assert persist_post_completion_mission_result(attempt)
+    result = json.loads((attempt / 'mission_result.json').read_text())
+    assert result['mission_status'] == 'SUCCEEDED'
+    assert result['terminal_agreement'] is True
+    assert result['completion_committed_before_teardown'] is True
+    assert result['recommended_exit_code'] == 0
+
+
+def test_result_persistence_rejects_nonterminal_collector_state(tmp_path):
+    """A collector that did not prove completion cannot create success."""
+    _, attempt = create_attempt(tmp_path, 1)
+    (attempt / 'collector_status.json').write_text(json.dumps({
+        'both_mission_complete': False, 'settled': True,
+    }))
+    assert not persist_post_completion_mission_result(attempt)
+    assert not (attempt / 'mission_result.json').exists()
+
+
+def test_post_completion_fallback_does_not_hide_collector_crash(tmp_path):
+    """A nonzero collector exit remains a post-completion failure."""
+    trial, attempt = create_attempt(tmp_path, 1)
+    (attempt / 'collector_status.json').write_text(json.dumps({
+        'both_mission_complete': True, 'settled': True,
+    }))
+    classification, _ = classify_attempt(
+        attempt, f'{trial}_attempt_01', True, False, False, False,
+        {'all_exited': True}, settled_observed=True,
+        process_exit_codes={'collector': 1, 'launch': 0})
+    assert classification == 'SHUTDOWN_DEGRADED'
 
 
 def test_resume_validation_rejects_partial_artifacts(tmp_path):

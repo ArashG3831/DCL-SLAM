@@ -22,3 +22,15 @@ bool candidate_source_healthy
 bool peer_communication_healthy
 builtin_interfaces/Duration validity
 string reason
+bool terminal
+string terminal_reason
+uint64 terminal_epoch
+uint64 terminal_map_revision
+uint32 remaining_frontier_count
+uint32 remaining_small_frontier_count
+uint32 remaining_out_of_range_count
+uint32 remaining_unreachable_count
+uint32 planner_failure_count
+uint32 detected_not_queried_count
+uint32 below_minimum_gain_count
+uint32 actionable_reachable_count

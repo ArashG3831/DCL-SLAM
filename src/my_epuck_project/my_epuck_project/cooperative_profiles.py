@@ -24,7 +24,9 @@ PROFILE_SETTINGS = {
         'mission_timeout': 240.0,
     },
     'large': {
-        'world': 'epuck_d500_two_world_large.wbt',
+        'world': 'epuck_d500_two_world_large_dynamic_low_slip_4ms_finite.wbt',
+        'baseline_world': 'epuck_d500_two_world_large.wbt',
+        'physics_profile': 'dynamic_low_slip_4ms_finite',
         'slam_resolution': 0.03,
         'fusion_resolution': 0.03,
         'global_costmap_resolution': 0.03,
@@ -200,6 +202,8 @@ def parse_world(path):
     path = Path(path).resolve()
     content = path.read_text(encoding='utf-8')
     arenas = list(_blocks(content, 'RectangleArena'))
+    if not arenas:
+        arenas = list(_blocks(content, 'ThesisRectangleArena'))
     viewpoints = list(_blocks(content, 'Viewpoint'))
     robots = [_robot(block) for block in _blocks(content, 'E-puck')]
     if len(arenas) != 1 or len(viewpoints) != 1:
@@ -282,12 +286,17 @@ def parse_world(path):
     }
 
 
-def profile(name, worlds_directory):
+def profile(name, worlds_directory, ideal_encoder_sensing=True):
     """Resolve one named profile and parse its selected installed/source world."""
     if name not in PROFILE_SETTINGS:
         raise ValueError(
             f'world profile must be one of {sorted(PROFILE_SETTINGS)}')
     result = dict(PROFILE_SETTINGS[name])
+    if name == 'large' and not ideal_encoder_sensing:
+        result['world'] = 'epuck_d500_two_world_large_baseline.wbt'
+    result['encoder_profile'] = (
+        'webots_ideal_wheel_encoders'
+        if ideal_encoder_sensing else 'webots_upstream_quantized_wheel_encoders')
     result['name'] = name
     result['world_path'] = str(
         Path(worlds_directory).resolve() / result['world'])
@@ -310,6 +319,15 @@ def profile_summary(value):
     return {
         'world_profile': value['name'],
         'world': value['world'],
+        'physics_profile': value.get('physics_profile', 'default_contacts'),
+        'baseline_world': value.get('baseline_world', value['world']),
+        'encoder_profile': value['encoder_profile'],
+        'wheel_position_sensor': {
+            'noise': 0.0 if value['encoder_profile'] ==
+            'webots_ideal_wheel_encoders' else 'WEBOTS_DEFAULT',
+            'resolution': -1 if value['encoder_profile'] ==
+            'webots_ideal_wheel_encoders' else 0.00628,
+        },
         'world_path': value['world_path'],
         'world_sha256': metadata['sha256'],
         'world_dimensions_m': list(metadata['dimensions']),

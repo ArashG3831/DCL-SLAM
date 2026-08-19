@@ -38,6 +38,20 @@ def test_slam_toolbox_consumes_only_the_teammate_filtered_branch():
         assert 'max_laser_range: 11.98' in params
 
 
+def test_scan_matching_and_loop_closing_are_runtime_only_overrides():
+    """The long runner can vary SLAM diagnostics without editing YAML defaults."""
+    launch = LAUNCH.read_text()
+    assert "'use_scan_matching': LaunchConfiguration('use_scan_matching')" in launch
+    assert "'do_loop_closing': LaunchConfiguration('do_loop_closing')" in launch
+    assert "DeclareLaunchArgument('use_scan_matching', default_value='false'" in launch
+    assert "DeclareLaunchArgument('do_loop_closing', default_value='false'" in launch
+    for robot in ('robot1', 'robot2'):
+        params = (ROOT / 'resource' /
+                  f'slam_toolbox_{robot}_teammate_filtered.yaml').read_text()
+        assert 'use_scan_matching: false' in params
+        assert 'do_loop_closing: false' in params
+
+
 def test_removed_pose_state_and_geometry_parameters_are_absent():
     launch = LAUNCH.read_text()
     removed = (

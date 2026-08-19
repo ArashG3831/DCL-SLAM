@@ -1,0 +1,76 @@
+#VRML_SIM R2025a utf8
+# Project-local RectangleArena variant with separate floor and wall materials.
+
+EXTERNPROTO "webots://projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "webots://projects/appearances/protos/BrushedAluminium.proto"
+EXTERNPROTO "webots://projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "webots://projects/objects/solids/protos/SolidBox.proto"
+
+PROTO ThesisRectangleArena [
+  field SFVec3f    translation          0 0 0
+  field SFRotation rotation             0 0 1 0
+  field SFString   name                 "rectangle arena"
+  field SFString   floorContactMaterial "default"
+  field SFString   wallContactMaterial  "default"
+  field SFVec2f    floorSize            1 1
+  field SFVec2f    floorTileSize        0.5 0.5
+  field SFNode     floorAppearance      Parquetry { type "chequered" }
+  field SFFloat    wallThickness        0.01
+  field SFFloat    wallHeight           0.1
+  field SFNode     wallAppearance       BrushedAluminium {}
+]
+{
+  %<
+    let floorSize = fields.floorSize.value;
+    if (floorSize.x <= 0.0 || floorSize.y <= 0.0)
+      floorSize = fields.floorSize.defaultValue;
+    let wallThickness = fields.wallThickness.value;
+    if (wallThickness <= 0.0)
+      wallThickness = fields.wallThickness.defaultValue;
+    let wallHeight = fields.wallHeight.value;
+    if (wallHeight <= 0.0)
+      wallHeight = fields.wallHeight.defaultValue;
+  >%
+  Solid {
+    translation IS translation
+    rotation IS rotation
+    children [
+      Floor {
+        size %<= floorSize.x >% %<= floorSize.y >%
+        tileSize IS floorTileSize
+        appearance IS floorAppearance
+        contactMaterial IS floorContactMaterial
+      }
+      SolidBox {
+        translation %<= floorSize.x * 0.5 + wallThickness * 0.5 >% 0 %<= wallHeight * 0.5 >%
+        name "wall"
+        size %<= wallThickness >% %<= floorSize.y >% %<= wallHeight >%
+        appearance IS wallAppearance
+        contactMaterial IS wallContactMaterial
+      }
+      SolidBox {
+        translation %<= -(floorSize.x * 0.5 + wallThickness * 0.5) >% 0 %<= wallHeight * 0.5 >%
+        name "wall#2"
+        size %<= wallThickness >% %<= floorSize.y >% %<= wallHeight >%
+        appearance IS wallAppearance
+        contactMaterial IS wallContactMaterial
+      }
+      SolidBox {
+        translation 0 %<= floorSize.y * 0.5 + wallThickness * 0.5 >% %<= wallHeight * 0.5 >%
+        name "wall#3"
+        size %<= floorSize.x + 2 * wallThickness >% %<= wallThickness >% %<= wallHeight >%
+        appearance IS wallAppearance
+        contactMaterial IS wallContactMaterial
+      }
+      SolidBox {
+        translation 0 %<= -(floorSize.y * 0.5 + wallThickness * 0.5) >% %<= wallHeight * 0.5 >%
+        name "wall#4"
+        size %<= floorSize.x + 2 * wallThickness >% %<= wallThickness >% %<= wallHeight >%
+        appearance IS wallAppearance
+        contactMaterial IS wallContactMaterial
+      }
+    ]
+    name IS name
+    model "rectangle arena"
+  }
+}

@@ -10,11 +10,14 @@ from my_epuck_project.cooperative_map_png_export import (
     OCCUPIED_RGB,
     UNCERTAIN_RGB,
     UNKNOWN_RGB,
+    render_map_with_paths,
+    render_map_with_poses,
     difference_rgb,
     occupancy_rgb,
     selected_attempt,
     write_rgb_png,
 )
+from my_epuck_project.occupancy_map_comparison import Geometry
 
 import numpy as np
 
@@ -54,6 +57,58 @@ def test_dependency_free_png_has_expected_dimensions(tmp_path):
     assert not list(tmp_path.glob('*.tmp'))
 
 
+def test_pose_overlay_adds_margin_and_draws_shared_map_pose():
+    """Final pose markers stay inside a padded image instead of being clipped."""
+    geometry = Geometry(
+        width=10, height=8, resolution=0.1,
+        origin_x=-0.5, origin_y=-0.4, yaw=0.0)
+    image, records = render_map_with_poses(
+        np.zeros((8, 10), dtype=np.int8), geometry, {
+            'robot1': {'x_m': -0.5, 'y_m': -0.4, 'yaw_rad': 0.0},
+            'robot2': {'x_m': 0.4, 'y_m': 0.3, 'yaw_rad': 1.57},
+        }, scale=2, margin_cells=4)
+    assert image.shape == (8 * 2 + 8 * 2, 10 * 2 + 8 * 2, 3)
+    assert records['robot1']['in_map_bounds']
+    assert records['robot2']['in_map_bounds']
+    assert np.any(np.all(image == (220, 30, 30), axis=2))
+    assert np.any(np.all(image == (25, 95, 220), axis=2))
+
+
+def test_pose_overlay_respects_rotated_occupancy_origin():
+    """Pose placement uses the OccupancyGrid origin yaw, not array indices."""
+    geometry = Geometry(
+        width=4, height=4, resolution=1.0,
+        origin_x=10.0, origin_y=20.0, yaw=1.5707963267948966)
+    image, records = render_map_with_poses(
+        np.zeros((4, 4), dtype=np.int8), geometry, {
+            'robot1': {'x_m': 10.0, 'y_m': 20.0, 'yaw_rad': 0.0},
+        }, scale=1, margin_cells=2)
+    assert image.shape == (8, 8, 3)
+    assert records['robot1']['image_x_px'] == 2
+    assert records['robot1']['image_y_px'] == 6
+
+
+def test_path_overlay_preserves_rotated_map_transform_and_expands_canvas():
+    """Trajectory overlays are not clipped when a recorded path exceeds map bounds."""
+    geometry = Geometry(
+        width=4, height=4, resolution=1.0,
+        origin_x=10.0, origin_y=20.0, yaw=1.5707963267948966)
+    image, poses, paths = render_map_with_paths(
+        np.zeros((4, 4), dtype=np.int8), geometry, {
+            'robot1': {'x_m': 10.0, 'y_m': 20.0, 'yaw_rad': 0.0},
+        }, {
+            'robot1': {
+                'source': 'test shared-map timeseries',
+                'segments': [[(10.0, 20.0), (10.0, 25.0), (8.0, 25.0)]],
+                'point_count': 3,
+            },
+        }, scale=1, margin_cells=2)
+    assert image.shape[0] > 8 or image.shape[1] > 8
+    assert poses['robot1']['image_x_px'] == 2
+    assert paths['robot1']['point_count'] == 3
+    assert np.any(np.all(image == (220, 30, 30), axis=2))
+
+
 def test_manifest_schema_example_is_strict_json(tmp_path):
     """Boolean and count manifest values remain strict JSON."""
     path = Path(tmp_path) / 'manifest.json'
@@ -83,3 +138,17 @@ def test_interrupted_attempt_requires_explicit_opt_in(tmp_path):
         campaign, 'trial_01', allow_incomplete=True)
     assert selected == attempt
     assert trial == 'trial_01'
+
+
+def test_flat_fast_trial_layout_is_selectable_without_campaign_progress(tmp_path):
+    """The report exporter supports observer-enabled fast-trial campaigns."""
+    campaign = tmp_path / 'ideal_encoder_cooperative'
+    maps = (campaign / 'fast_trial_20260818T173122Z' / 'observer'
+            / 'fast_trial_20260818T173122Z' / 'forensic' / 'maps')
+    maps.mkdir(parents=True)
+    for name in ('robot1_shared_map_final.npz', 'robot2_shared_map_final.npz'):
+        (maps / name).write_bytes(b'placeholder')
+
+    selected, trial = selected_attempt(campaign)
+    assert selected.name == 'fast_trial_20260818T173122Z'
+    assert trial == 'fast_trial_20260818T173122Z'

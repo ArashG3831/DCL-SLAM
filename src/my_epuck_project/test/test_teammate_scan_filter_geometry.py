@@ -77,10 +77,10 @@ def test_wall_before_first_intersection_is_preserved():
     assert_scan_preserved(message, output)
 
 
-def test_return_inside_chord_but_not_at_first_surface_is_preserved():
+def test_return_inside_conservative_endpoint_envelope_is_masked():
     message, output, indices = filter_one(1.0, tolerance=0.01)
-    assert indices == []
-    assert_scan_preserved(message, output)
+    assert indices == [0]
+    assert_scan_preserved(message, output, indices)
 
 
 def test_return_beyond_teammate_is_preserved():

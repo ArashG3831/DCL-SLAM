@@ -71,6 +71,127 @@ def test_large_world_saved_geometry_and_devices():
         assert (robot.camera_width, robot.camera_height) == (640, 480)
 
 
+def test_large_world_selects_project_local_ideal_encoder_model():
+    ideal = selected('large')
+    content = Path(ideal['world_path']).read_text(encoding='utf-8')
+    proto = (PACKAGE / 'protos' / 'e-puck' / 'E-puck.proto').read_text(
+        encoding='utf-8')
+    assert ideal['encoder_profile'] == 'webots_ideal_wheel_encoders'
+    assert '../protos/e-puck/E-puck.proto' in content
+    assert content.count('E-puck {') == 2
+    assert proto.count('PositionSensor {') == 2
+    assert proto.count('noise 0') == 2
+    assert proto.count('resolution -1') == 2
+    assert 'kinematic                    FALSE' in proto
+    assert 'supervisor                   FALSE' in proto
+
+
+def test_large_default_selects_reversible_finite_low_slip_world():
+    value = selected('large')
+    assert value['physics_profile'] == 'dynamic_low_slip_4ms_finite'
+    assert value['baseline_world'] == 'epuck_d500_two_world_large.wbt'
+    content = Path(value['world_path']).read_text(encoding='utf-8')
+    assert 'ThesisRectangleArena.proto' in content
+    assert 'basicTimeStep 4' in content
+    assert 'CFM 0.00001' in content
+    assert 'ERP 0.2' in content
+    assert 'optimalThreadCount 1' in content
+    assert 'randomSeed 20260818' in content
+    assert content.count('wheel_contactMaterial "epuck_wheel"') == 2
+    assert content.count('floorContactMaterial "epuck_floor"') == 1
+    assert content.count('wallContactMaterial "default"') == 1
+    assert 'coulombFriction 10' in content
+    assert 'forceDependentSlip 0' in content
+    assert 'rollingFriction 0 0 0' in content
+    assert 'bounce 0' in content
+    assert 'softCFM 0.00001' in content
+
+
+def test_large_baseline_encoder_model_remains_reproducible():
+    baseline = profile('large', WORLDS, ideal_encoder_sensing=False)
+    content = Path(baseline['world_path']).read_text(encoding='utf-8')
+    assert baseline['encoder_profile'] == (
+        'webots_upstream_quantized_wheel_encoders')
+    assert baseline['world'].endswith('_baseline.wbt')
+    assert 'webots://projects/robots/gctronic/e-puck/protos/E-puck.proto' in content
+    assert '../protos/e-puck/E-puck.proto' not in content
+
+
+def test_ideal_encoder_profile_does_not_add_ground_truth_odom_path():
+    ideal_proto = (PACKAGE / 'protos' / 'e-puck' / 'E-puck.proto').read_text(
+        encoding='utf-8')
+    world = Path(selected('large')['world_path']).read_text(encoding='utf-8')
+    launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
+        encoding='utf-8')
+    assert 'supervisor TRUE' not in ideal_proto
+    assert 'supervisor TRUE' not in world
+    assert 'supervisor TRUE' not in launch
+    assert 'ground_truth_pose' not in launch
+    assert 'Supervisor pose' not in launch
+    assert 'enable_odom_tf: true' in launch
+
+
+def test_motion_comparison_worlds_use_same_start_and_explicit_encoder_variants():
+    ideal = (WORLDS / 'epuck_motion_characterization.wbt').read_text(
+        encoding='utf-8')
+    baseline = (WORLDS / 'epuck_motion_characterization_baseline.wbt').read_text(
+        encoding='utf-8')
+    assert '../protos/e-puck/E-puck.proto' in ideal
+    assert 'webots://projects/robots/gctronic/e-puck/protos/E-puck.proto' in baseline
+    for content in (ideal, baseline):
+        assert 'DEF ROBOT1 E-puck {' in content
+        assert 'translation ' in content
+        assert 'rotation ' in content
+
+
+def test_dynamic_low_slip_profile_is_explicit_and_wheel_floor_only():
+    """Dynamic profile changes contact determinism without changing the robot stack."""
+    world = (WORLDS / 'epuck_motion_characterization_dynamic_low_slip.wbt')
+    content = world.read_text(encoding='utf-8')
+    assert 'ThesisRectangleArena.proto' in content
+    assert 'basicTimeStep 4' in content
+    assert 'optimalThreadCount 1' in content
+    assert 'randomSeed 20260818' in content
+    assert 'floorContactMaterial "epuck_floor"' in content
+    assert 'wallContactMaterial "default"' in content
+    assert 'material1 "epuck_wheel"' in content
+    assert 'material2 "epuck_floor"' in content
+    assert 'coulombFriction -1' in content
+    assert 'forceDependentSlip 0' in content
+    assert 'rollingFriction 0 0 0' in content
+    assert 'softCFM 0.00001' in content
+    assert 'wheel_contactMaterial "epuck_wheel"' in content
+    assert 'kinematic TRUE' not in content
+
+
+def test_kinematic_ideal_profile_is_separate_and_ground_truth_free():
+    """Kinematic fallback selects the PROTO kinematic branch only."""
+    world = (WORLDS / 'epuck_motion_characterization_kinematic_ideal.wbt')
+    content = world.read_text(encoding='utf-8')
+    assert 'kinematic TRUE' in content
+    assert 'MotionGroundTruthSupervisor' in content
+    assert 'ground_truth_pose' not in content
+    assert 'supervisor TRUE' in content
+    assert 'wheel_contactMaterial' not in content
+    proto = (PACKAGE / 'protos' / 'e-puck' / 'E-puck.proto').read_text(
+        encoding='utf-8')
+    assert '%< if (!kinematic) { >%' in proto
+    assert proto.count('wheel_contactMaterial') >= 3
+
+
+def test_physics_profile_timestep_variants_are_reproducible():
+    """The 4/2/1 ms dynamic sweep is explicit and fixed-seed."""
+    for name, timestep in (
+            ('epuck_motion_characterization_dynamic_low_slip.wbt', '4'),
+            ('epuck_motion_characterization_dynamic_low_slip_finite_4ms.wbt', '4'),
+            ('epuck_motion_characterization_dynamic_low_slip_2ms.wbt', '2'),
+            ('epuck_motion_characterization_dynamic_low_slip_1ms.wbt', '1')):
+        content = (WORLDS / name).read_text(encoding='utf-8')
+        assert f'basicTimeStep {timestep}' in content
+        assert 'randomSeed 20260818' in content
+        assert 'optimalThreadCount 1' in content
+
+
 def test_large_world_start_clearance_contact_and_nonintersection():
     metadata = selected('large')['world_metadata']
     robots = metadata['robots']

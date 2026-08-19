@@ -29,9 +29,9 @@ from .unknown_pose_frontend_core import (
     compare_descriptors,
     crop_grid,
     descriptor_checksum,
-    hypothesis_is_acceptable,
     polar_descriptor,
     register_crops,
+    should_accept_hypothesis,
     temporal_consistency,
 )
 
@@ -55,6 +55,7 @@ class UnknownPoseFrontend(Node):
         self.declare_parameter('descriptor_similarity_gate', 0.72)
         self.declare_parameter('descriptor_margin_gate', 0.005)
         self.declare_parameter('minimum_keyframe_confirmations', 2)
+        self.declare_parameter('confirmation_window_s', 8.0)
         self.declare_parameter('shared_frame', 'shared_map')
         self.declare_parameter('diagnostic_output', '')
 
@@ -77,6 +78,8 @@ class UnknownPoseFrontend(Node):
         self.margin_gate = float(self.get_parameter('descriptor_margin_gate').value)
         self.minimum_confirmations = max(2, int(
             self.get_parameter('minimum_keyframe_confirmations').value))
+        self.confirmation_window_ns = int(max(1.0, float(
+            self.get_parameter('confirmation_window_s').value)) * 1.0e9)
         self.shared_frame = str(self.get_parameter('shared_frame').value)
         self.diagnostic_output = str(self.get_parameter('diagnostic_output').value)
         self.counters = {
@@ -97,10 +100,12 @@ class UnknownPoseFrontend(Node):
             'rejected_hypotheses': 0,
             'tf_handoffs': 0,
             'peer_maps_published': 0,
+            'merge_handoff_started': 0,
         }
         self.best_similarity = 0.0
         self.best_margin = 0.0
         self.best_known_fraction = 0.0
+        self.merge_handoff_logged = False
 
         qos = QoSProfile(
             depth=20, reliability=ReliabilityPolicy.RELIABLE,
@@ -143,6 +148,8 @@ class UnknownPoseFrontend(Node):
         self.pending_requests = set()
         self.pending_proposals = {}
         self.peer_proposals = {}
+        self.pending_target_proposal = False
+        self.negotiation_started = False
         self.accepted = None
         self.last_export_wall = 0.0
         self.timer = self.create_timer(0.2, self.tick)
@@ -240,6 +247,50 @@ class UnknownPoseFrontend(Node):
             self.peer_descriptors.popitem(last=False)
         self._compare_peer_descriptors()
 
+    @staticmethod
+    def _stamp_ns(message):
+        return (int(message.header.stamp.sec) * 1_000_000_000 +
+                int(message.header.stamp.nanosec))
+
+    def _temporal_support(self, peer_key, own_key, match):
+        """Count distinct nearby cheap matches for this candidate.
+
+        A descriptor/keyframe pair is advertised once, so counting repeated
+        comparisons of that same pair can never provide confirmation.  Use
+        distinct nearby own/peer keyframes instead; geometric registration is
+        still the authoritative gate after this cheap temporal check.
+        """
+        own_entry = self.keyframes.get(own_key)
+        peer_message = self.peer_descriptors.get(peer_key)
+        if own_entry is None or peer_message is None:
+            return 0
+        own_stamp = self._stamp_ns(own_entry[0])
+        peer_stamp = self._stamp_ns(peer_message)
+        support = set()
+        for (other_peer_key, other_own_key), other_match in self.matches.items():
+            if (other_peer_key, other_own_key) == (peer_key, own_key):
+                support.add((other_peer_key, other_own_key))
+                continue
+            if (other_match.similarity < self.similarity_gate or
+                    other_match.margin < self.margin_gate or
+                    other_match.known_fraction < 0.12):
+                continue
+            other_own_entry = self.keyframes.get(other_own_key)
+            other_peer_message = self.peer_descriptors.get(other_peer_key)
+            if other_own_entry is None or other_peer_message is None:
+                continue
+            if (abs(self._stamp_ns(other_own_entry[0]) - own_stamp) >
+                    self.confirmation_window_ns or
+                    abs(self._stamp_ns(other_peer_message) - peer_stamp) >
+                    self.confirmation_window_ns):
+                continue
+            shift_delta = abs(int(other_match.sector_shift) -
+                              int(match.sector_shift))
+            shift_delta = min(shift_delta, 24 - shift_delta)
+            if shift_delta <= 2:
+                support.add((other_peer_key, other_own_key))
+        return len(support)
+
     def _compare_peer_descriptors(self):
         if not self.keyframes or not self.peer_descriptors:
             return
@@ -265,15 +316,19 @@ class UnknownPoseFrontend(Node):
                     continue
                 self.counters['cheap_candidates'] += 1
                 confirmations = self.confirmations.setdefault(pair, set())
-                confirmations.add((int(own.map_epoch), int(peer.map_epoch)))
-                if len(confirmations) < self.minimum_confirmations:
+                confirmations.add((own_key, peer_key))
+                support_count = self._temporal_support(peer_key, own_key, match)
+                if support_count < self.minimum_confirmations:
                     continue
                 if self.robot_id > self.peer_robot_id:
+                    continue
+                if self.negotiation_started:
                     continue
                 request_key = (peer_key, int(peer.checksum))
                 if request_key in self.pending_requests:
                     continue
                 self.pending_requests.add(request_key)
+                self.negotiation_started = True
                 request = LocalMapCropRequest()
                 request.header = own.header
                 request.requester_robot_id = self.robot_id
@@ -352,6 +407,7 @@ class UnknownPoseFrontend(Node):
                 self.counters['accepted_hypotheses'] += 1
             else:
                 self.counters['rejected_hypotheses'] += 1
+                self.pending_target_proposal = False
             return
         peer_key = message.keyframe_id
         peer_descriptor = self.peer_descriptors.get(peer_key)
@@ -377,6 +433,7 @@ class UnknownPoseFrontend(Node):
         self.counters['proposals_published'] += 1
         if not result.accepted:
             self.counters['rejected_hypotheses'] += 1
+            self.negotiation_started = False
 
     @staticmethod
     def _grid_crop_from_message(message):
@@ -439,12 +496,22 @@ class UnknownPoseFrontend(Node):
         if {message.source_robot_id, message.target_robot_id} != {
                 self.robot_id, self.peer_robot_id}:
             return
+        if self.accepted is not None:
+            return
         if message.status == 'PROPOSED' and self.robot_id == message.target_robot_id:
+            if self.pending_target_proposal:
+                return
+            self.pending_target_proposal = True
             self.peer_proposals[message.source_keyframe_id] = message
             self._request_source_for_confirmation(message)
             return
-        if not hypothesis_is_acceptable(
-                message.status, message.accepted, message.final_confidence):
+        if message.status == 'REJECTED':
+            if self.robot_id == message.source_robot_id:
+                self.negotiation_started = False
+            return
+        if not should_accept_hypothesis(
+                self.accepted, message.status, message.accepted,
+                message.final_confidence):
             return
         if self.robot_id != message.source_robot_id:
             self.accepted = message
@@ -532,6 +599,19 @@ class UnknownPoseFrontend(Node):
     def publish_local_map(self):
         if self.latest_map is None or self.accepted is None:
             return
+        if not self.merge_handoff_logged:
+            self.merge_handoff_logged = True
+            self.counters['merge_handoff_started'] += 1
+            self.get_logger().info(
+                'UNKNOWN_POSE_MERGE_HANDOFF_START '
+                f'confidence={self.accepted.final_confidence:.6f} '
+                f'descriptor_similarity={self.accepted.descriptor_similarity:.6f} '
+                f'geometric_inlier_ratio={self.accepted.geometric_inlier_ratio:.6f} '
+                f'residual_m={self.accepted.registration_residual_m:.6f} '
+                f'overlap_fraction={self.accepted.overlap_fraction:.6f} '
+                f'source_keyframe={self.accepted.source_keyframe_id} '
+                f'target_keyframe={self.accepted.target_keyframe_id} '
+                f'robot={self.robot_id}')
         message = PeerMap()
         message.source_robot_id = self.robot_id
         message.revision = self.map_revision
@@ -559,6 +639,16 @@ class UnknownPoseFrontend(Node):
             'best_similarity': self.best_similarity,
             'best_margin': self.best_margin,
             'best_known_fraction': self.best_known_fraction,
+            'accepted_confidence': (
+                None if self.accepted is None else self.accepted.final_confidence),
+            'accepted_descriptor_similarity': (
+                None if self.accepted is None else self.accepted.descriptor_similarity),
+            'accepted_geometric_inlier_ratio': (
+                None if self.accepted is None else self.accepted.geometric_inlier_ratio),
+            'accepted_registration_residual_m': (
+                None if self.accepted is None else self.accepted.registration_residual_m),
+            'accepted_overlap_fraction': (
+                None if self.accepted is None else self.accepted.overlap_fraction),
             'counters': self.counters,
         }
         output.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')

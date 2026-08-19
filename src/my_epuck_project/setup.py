@@ -43,6 +43,10 @@ setup(
             'my_epuck_project.unknown_pose_frontend:main',
             'unknown_pose_motion_fixture = '
             'my_epuck_project.unknown_pose_motion_fixture:main',
+            'controller_startup_guard = '
+            'my_epuck_project.controller_startup_guard:main',
+            'controller_readiness_gate = '
+            'my_epuck_project.controller_readiness_gate:main',
             'twist_stamper = my_epuck_project.twist_stamper:main',
             'cooperative_experiment_logger = '
             'my_epuck_project.cooperative_experiment_logger:main',

@@ -134,39 +134,40 @@ def launch_setup(context):
             }],
         )
 
+        manager_name = f'/{robot_name}/controller_manager'
         diffdrive_controller_spawner = Node(
-            package='controller_manager',
-            executable='spawner',
+            package='my_epuck_project',
+            executable='controller_startup_guard',
             namespace=robot_name,
             output='screen',
-            prefix=controller_manager_prefix,
-            arguments=[
-                'diffdrive_controller',
-                '--controller-manager', f'/{robot_name}/controller_manager',
-            ] + controller_manager_timeout + [
-                '--controller-ros-args=--ros-args '
-                f'--remap /{robot_name}/diffdrive_controller/odom:=/{robot_name}/odom '
-                f'--remap /{robot_name}/diffdrive_controller/cmd_vel:=/{robot_name}/cmd_vel '
-                f'--param tf_frame_prefix:={robot_name}/',
-            ],
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'controller_name': 'diffdrive_controller',
+                'controller_manager': manager_name,
+                'controller_param_file': robot_control_path,
+                'controller_ros_args': (
+                    '--ros-args '
+                    f'--remap /{robot_name}/diffdrive_controller/odom:=/{robot_name}/odom '
+                    f'--remap /{robot_name}/diffdrive_controller/cmd_vel:=/{robot_name}/cmd_vel '
+                    f'--param tf_frame_prefix:={robot_name}/'),
+            }],
         )
 
         joint_state_broadcaster_spawner = Node(
-            package='controller_manager',
-            executable='spawner',
+            package='my_epuck_project',
+            executable='controller_startup_guard',
             namespace=robot_name,
             output='screen',
-            prefix=controller_manager_prefix,
-            arguments=[
-                'joint_state_broadcaster',
-                '--controller-manager', f'/{robot_name}/controller_manager',
-            ] + controller_manager_timeout + [
-                '--controller-ros-args=--ros-args '
-                f'--remap /joint_states:=/{robot_name}/joint_states '
-                f'--remap /dynamic_joint_states:=/{robot_name}/dynamic_joint_states',
-            ],
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'controller_name': 'joint_state_broadcaster',
+                'controller_manager': manager_name,
+                'controller_param_file': robot_control_path,
+                'controller_ros_args': (
+                    '--ros-args '
+                    f'--remap /joint_states:=/{robot_name}/joint_states '
+                    f'--remap /dynamic_joint_states:=/{robot_name}/dynamic_joint_states'),
+            }],
         )
 
         robot_driver = WebotsController(

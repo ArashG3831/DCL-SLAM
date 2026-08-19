@@ -13,6 +13,7 @@ from my_epuck_project.unknown_pose_frontend_core import (
     polar_descriptor,
     register_crops,
     rigidify_affine,
+    should_accept_hypothesis,
     temporal_consistency,
 )
 
@@ -94,6 +95,11 @@ def test_confidence_and_handoff_gate_require_mutual_acceptance():
     assert not hypothesis_is_acceptable('ACCEPTED', False, 0.99)
     assert not hypothesis_is_acceptable('ACCEPTED', True, 0.64)
     assert hypothesis_is_acceptable('ACCEPTED', True, 0.65)
+
+
+def test_handoff_acceptance_is_one_shot_for_duplicate_messages():
+    assert should_accept_hypothesis(None, 'ACCEPTED', True, 0.80)
+    assert not should_accept_hypothesis(object(), 'ACCEPTED', True, 0.80)
 
 
 def test_temporal_consistency_rejects_single_weak_or_distant_evidence():

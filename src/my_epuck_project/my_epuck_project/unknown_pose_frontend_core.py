@@ -104,6 +104,13 @@ def crop_grid(
     )
 
 
+def should_accept_hypothesis(current, status: str, accepted: bool,
+                             final_confidence: float) -> bool:
+    """Allow only the first mutually accepted hypothesis to trigger handoff."""
+    return current is None and hypothesis_is_acceptable(
+        status, accepted, final_confidence)
+
+
 def polar_descriptor(
         crop: GridCrop,
         rings: int = 12,

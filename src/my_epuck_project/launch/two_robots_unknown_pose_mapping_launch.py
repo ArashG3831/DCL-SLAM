@@ -11,7 +11,11 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
@@ -118,12 +122,25 @@ def launch_setup(context):
                 'publish_on_callback': False,
                 'min_fusion_rebuild_period_s': 1.0,
             }]))
+    readiness_gate = Node(
+        package='my_epuck_project', executable='controller_readiness_gate',
+        name='controller_readiness_gate', output='screen',
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'robot_ids': ['robot1', 'robot2'],
+            'timeout_s': 120.0,
+        }])
+    launch_after_readiness = []
     if LaunchConfiguration('enable_motion_fixture').perform(context).lower() == 'true':
-        nodes.append(Node(
+        launch_after_readiness.append(Node(
             package='my_epuck_project', executable='unknown_pose_motion_fixture',
             name='unknown_pose_motion_fixture', output='screen',
             parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]))
-    return [base, *nodes]
+    readiness_handler = RegisterEventHandler(OnProcessExit(
+        target_action=readiness_gate,
+        on_exit=lambda event, context: (
+            launch_after_readiness if event.returncode == 0 else [])))
+    return [base, *nodes, readiness_gate, readiness_handler]
 
 
 def generate_launch_description():

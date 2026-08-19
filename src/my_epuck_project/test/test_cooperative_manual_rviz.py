@@ -34,6 +34,7 @@ def test_default_layout_orbit_camera_and_tools_are_retained():
     assert panels == [
         'Displays', 'Selection', 'Tool Properties', 'Views', 'Time']
     assert manager['Global Options']['Fixed Frame'] == 'shared_map'
+    assert manager['Global Options']['Frame Rate'] == 10
     view = manager['Views']['Current']
     assert view['Class'] == 'rviz_default_plugins/Orbit'
     assert view['Target Frame'] == 'shared_map'
@@ -61,9 +62,11 @@ def test_clean_robot_pose_axes_replace_initial_full_tf_tree():
     enabled = {
         display['Name'] for display in displays if display['Enabled']}
     assert enabled == {
-        'Grid', 'Robot1 Shared Map',
+        'Robot1 Shared Map',
         'Robot1 Pose Axes', 'Robot2 Pose Axes',
     }
+    assert by_name['Grid']['Enabled'] is False
+    assert by_name['Grid']['Value'] is False
     transform = by_name['TF']
     assert transform['Class'] == 'rviz_default_plugins/TF'
     assert transform['Enabled'] is False
@@ -95,8 +98,8 @@ def test_namespaced_optional_display_topics_are_exact():
         if topic:
             topics[display['Name']] = topic
     assert topics == {
-        'Robot1 Shared Map': '/robot1/shared_map',
-        'Robot2 Shared Map': '/robot2/shared_map',
+        'Robot1 Shared Map': '/robot1/shared_map_visualization',
+        'Robot2 Shared Map': '/robot2/shared_map_visualization',
         'Robot1 LaserScan': '/robot1/scan_d500_fixed',
         'Robot2 LaserScan': '/robot2/scan_d500_fixed',
         'Robot1 Global Costmap': '/robot1/global_costmap/costmap',
@@ -121,3 +124,15 @@ def test_namespaced_optional_display_topics_are_exact():
             'Robot1 Pose Axes', 'Robot2 Pose Axes',
         }]
     assert all(display['Enabled'] is False for display in optional)
+
+
+def test_shared_map_visualization_uses_incremental_update_topics():
+    """Verify RViz uses the bounded visualization stream, not canonical maps."""
+    displays = configuration()['Visualization Manager']['Displays']
+    by_name = {display['Name']: display for display in displays}
+    for robot in ('Robot1', 'Robot2'):
+        display = by_name[f'{robot} Shared Map']
+        assert display['Topic']['Value'] == (
+            f'/{robot.lower()}/shared_map_visualization')
+        assert display['Update Topic']['Value'] == (
+            f'/{robot.lower()}/shared_map_visualization_updates')

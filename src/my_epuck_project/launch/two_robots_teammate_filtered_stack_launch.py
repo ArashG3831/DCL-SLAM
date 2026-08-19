@@ -307,10 +307,9 @@ def launch_setup(context):
                     'live_pose_max_age_s': 0.5,
                     'min_fusion_rebuild_period_s': LaunchConfiguration(
                         'fusion_rebuild_period_s'),
-                    # The accepted baseline retains callback publication.
-                    # The allocator-free diagnostic uses the bounded timer so
-                    # fusion cannot starve Nav2/controller execution.
-                    'publish_on_callback': not diagnostic_mode,
+                    # Coalesce local and peer map callbacks behind one bounded
+                    # timer. Callbacks only mark source state dirty.
+                    'publish_on_callback': False,
                     # A peer silhouette can be observed while its scan-frame
                     # transform is delayed.  Clear both fresh live robot
                     # footprints in every shared map so that transient peer
@@ -366,7 +365,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
         DeclareLaunchArgument('fusion_process_nice', default_value='0'),
-        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='0.0'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',

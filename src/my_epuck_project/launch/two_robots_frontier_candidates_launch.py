@@ -9,10 +9,11 @@ from launch_ros.actions import Node
 from my_epuck_project.cooperative_profiles import profile
 
 def generator(robot, minimum_frontier_cells, approach_clearance,
-              forensic_clearance_cells):
+              forensic_clearance_cells, log_level):
     return Node(
         package='my_epuck_frontier_candidates', executable='frontier_candidate_generator',
         name='frontier_candidate_generator', namespace=robot, output='screen',
+        arguments=['--ros-args', '--log-level', log_level],
         remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
         parameters=[{
             'robot_id': robot,
@@ -49,6 +50,11 @@ def launch_setup(context):
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(project, 'worlds'),
     )
+    diagnostic_capture = (
+        LaunchConfiguration('diagnostic_frontier_capture').perform(context)
+        .lower() == 'true'
+    )
+    frontier_log_level = 'INFO' if diagnostic_capture else 'WARN'
     stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             project, 'launch', 'two_robots_teammate_filtered_stack_launch.py')),
@@ -85,10 +91,12 @@ def launch_setup(context):
         stack,
         generator('robot1', selected['minimum_frontier_cells'],
                   0.15 if selected['name'] == 'large' else 0.06,
-                  LaunchConfiguration('forensic_clearance_cells')),
+                  LaunchConfiguration('forensic_clearance_cells'),
+                  frontier_log_level),
         generator('robot2', selected['minimum_frontier_cells'],
                   0.15 if selected['name'] == 'large' else 0.06,
-                  LaunchConfiguration('forensic_clearance_cells')),
+                  LaunchConfiguration('forensic_clearance_cells'),
+                  frontier_log_level),
     ]
 
 

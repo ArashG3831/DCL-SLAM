@@ -118,6 +118,16 @@ def test_headless_profile_selects_full_sensors_and_no_gui():
     assert args.sensor_profile == 'full'
 
 
+def test_authoritative_launch_contract_never_embeds_rviz():
+    """The authoritative launch hop keeps RViz strictly opt-in."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / 'launch' / 'two_robots_decentralized_exploration_launch.py'
+    ).read_text(encoding='utf-8')
+    assert "DeclareLaunchArgument('launch_rviz', default_value='false'" in source
+    assert "launch_rviz:=false" not in source
+
+
 def test_rviz_profile_selects_full_sensors_without_webots_rendering():
     args = parser().parse_args(['--execution-profile', 'rviz'])
     from my_epuck_project.cooperative_regression import apply_execution_profile

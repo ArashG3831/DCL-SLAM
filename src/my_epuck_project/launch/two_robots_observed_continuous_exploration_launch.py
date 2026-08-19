@@ -135,7 +135,6 @@ def runtime_actions(context):
             '-d',
             manual_rviz_path(selected, os.path.join(project, 'resource')),
         ],
-        additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
     )
     metadata = selected['world_metadata']

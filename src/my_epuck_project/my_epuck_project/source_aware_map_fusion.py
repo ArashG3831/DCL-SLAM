@@ -1,12 +1,14 @@
 import math
 import time
 
+import numpy as np
 from my_epuck_interfaces.msg import PeerMap
 from my_epuck_project.live_map_sanitizer import (
     apply_incremental_patch,
     footprint_cell_indices,
 )
 from nav_msgs.msg import MapMetaData, OccupancyGrid
+from map_msgs.msg import OccupancyGridUpdate
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
@@ -14,6 +16,152 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
+
+
+def _quaternion_yaw(quaternion):
+    return math.atan2(
+        2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
+        1.0 - 2.0 * (quaternion.y * quaternion.y + quaternion.z * quaternion.z),
+    )
+
+
+def _grid_geometry_key(message):
+    origin = message.info.origin
+    orientation = origin.orientation
+    return (
+        message.header.frame_id,
+        int(message.info.width), int(message.info.height),
+        float(message.info.resolution),
+        float(getattr(origin.position, 'x', 0.0)),
+        float(getattr(origin.position, 'y', 0.0)),
+        float(getattr(origin.position, 'z', 0.0)),
+        float(getattr(orientation, 'x', 0.0)),
+        float(getattr(orientation, 'y', 0.0)),
+        float(getattr(orientation, 'z', 0.0)),
+        float(getattr(orientation, 'w', 1.0)),
+    )
+
+
+def _grid_array(message):
+    """View OccupancyGrid data without making Python list copies."""
+    values = np.asarray(message.data, dtype=np.int8)
+    return values.reshape((int(message.info.height), int(message.info.width)))
+
+
+def _same_grid_content(previous, current):
+    if previous is None or _grid_geometry_key(previous) != _grid_geometry_key(current):
+        return False
+    previous_data = np.asarray(previous.data, dtype=np.int8)
+    current_data = np.asarray(current.data, dtype=np.int8)
+    return (previous_data.size == current_data.size
+            and np.array_equal(previous_data, current_data))
+
+
+def _changed_update_bounds(current, previous):
+    """Return the smallest ``x, y, width, height`` changed rectangle."""
+    current = np.asarray(current, dtype=np.int8)
+    previous = np.asarray(previous, dtype=np.int8)
+    if current.shape != previous.shape:
+        return None
+    changed = np.flatnonzero(current != previous)
+    if changed.size == 0:
+        return None
+    rows, columns = np.unravel_index(changed, current.shape)
+    minimum_column, maximum_column = int(columns.min()), int(columns.max())
+    minimum_row, maximum_row = int(rows.min()), int(rows.max())
+    return (
+        minimum_column,
+        minimum_row,
+        maximum_column - minimum_column + 1,
+        maximum_row - minimum_row + 1,
+    )
+
+
+def _scalar_fused_data(messages, transforms, minimum_x, minimum_y, width,
+                       height, resolution):
+    """Retain the scalar reference implementation for equivalence tests."""
+    fused_data = [-1] * (width * height)
+    for message, transform in zip(messages, transforms):
+        source_resolution = message.info.resolution
+        origin_yaw = _quaternion_yaw(message.info.origin.orientation)
+        origin_cos = math.cos(origin_yaw)
+        origin_sin = math.sin(origin_yaw)
+        transform_x, transform_y, transform_yaw = transform
+        transform_cos = math.cos(transform_yaw)
+        transform_sin = math.sin(transform_yaw)
+        for index, value in enumerate(message.data):
+            if value < 0:
+                continue
+            column = index % message.info.width
+            row = index // message.info.width
+            local_x = (column + 0.5) * source_resolution
+            local_y = (row + 0.5) * source_resolution
+            map_x = (message.info.origin.position.x
+                     + origin_cos * local_x - origin_sin * local_y)
+            map_y = (message.info.origin.position.y
+                     + origin_sin * local_x + origin_cos * local_y)
+            output_x = (transform_x + transform_cos * map_x
+                        - transform_sin * map_y)
+            output_y = (transform_y + transform_sin * map_x
+                        + transform_cos * map_y)
+            output_column = int(math.floor(
+                (output_x - minimum_x) / resolution))
+            output_row = int(math.floor(
+                (output_y - minimum_y) / resolution))
+            if 0 <= output_column < width and 0 <= output_row < height:
+                target = output_row * width + output_column
+                fused_data[target] = max(fused_data[target], int(value))
+    return np.asarray(fused_data, dtype=np.int8)
+
+
+def _vectorized_fused_data(messages, transforms, minimum_x, minimum_y, width,
+                           height, resolution, geometry_cache=None):
+    """Vectorized equivalent of the scalar source-aware occupancy merge."""
+    fused_data = np.full(width * height, -1, dtype=np.int8)
+    geometry_cache = geometry_cache if geometry_cache is not None else {}
+    for message, transform in zip(messages, transforms):
+        geometry_key = _grid_geometry_key(message)
+        cached = geometry_cache.get(geometry_key)
+        if cached is None:
+            rows, columns = np.indices(
+                (int(message.info.height), int(message.info.width)),
+                dtype=np.float64,
+            )
+            local_x = (columns + 0.5) * float(message.info.resolution)
+            local_y = (rows + 0.5) * float(message.info.resolution)
+            origin_yaw = _quaternion_yaw(message.info.origin.orientation)
+            origin_cos = math.cos(origin_yaw)
+            origin_sin = math.sin(origin_yaw)
+            map_x = (float(message.info.origin.position.x)
+                     + origin_cos * local_x - origin_sin * local_y)
+            map_y = (float(message.info.origin.position.y)
+                     + origin_sin * local_x + origin_cos * local_y)
+            cached = (map_x, map_y)
+            geometry_cache[geometry_key] = cached
+        map_x, map_y = cached
+        values = _grid_array(message)
+        known = values >= 0
+        if not np.any(known):
+            continue
+        transform_x, transform_y, transform_yaw = transform
+        transform_cos = math.cos(transform_yaw)
+        transform_sin = math.sin(transform_yaw)
+        output_x = (transform_x + transform_cos * map_x[known]
+                    - transform_sin * map_y[known])
+        output_y = (transform_y + transform_sin * map_x[known]
+                    + transform_cos * map_y[known])
+        output_column = np.floor(
+            (output_x - minimum_x) / resolution).astype(np.int64)
+        output_row = np.floor(
+            (output_y - minimum_y) / resolution).astype(np.int64)
+        valid = (
+            (output_column >= 0) & (output_column < width)
+            & (output_row >= 0) & (output_row < height)
+        )
+        if np.any(valid):
+            targets = output_row[valid] * width + output_column[valid]
+            np.maximum.at(fused_data, targets, values[known][valid])
+    return fused_data
 
 
 def message_key(messages, local_revision, remote_revision):
@@ -40,6 +188,9 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('expected_remote_source', '')
         self.declare_parameter('output_topic', 'shared_map')
         self.declare_parameter('metadata_topic', 'shared_map_metadata')
+        self.declare_parameter('visualization_topic', 'shared_map_visualization')
+        self.declare_parameter(
+            'visualization_updates_topic', 'shared_map_visualization_updates')
         self.declare_parameter('output_frame', 'shared_map')
         self.declare_parameter('resolution', 0.01)
         self.declare_parameter(
@@ -48,15 +199,18 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('live_footprint_radius_m', 0.037)
         self.declare_parameter('live_footprint_uncertainty_cells', 1)
         self.declare_parameter('live_pose_max_age_s', 0.5)
-        self.declare_parameter('publish_on_callback', True)
+        self.declare_parameter('publish_on_callback', False)
         self.declare_parameter('sanitize_live_footprints', False)
-        self.declare_parameter('min_fusion_rebuild_period_s', 0.0)
+        self.declare_parameter('min_fusion_rebuild_period_s', 1.0)
 
         local_topic = self.get_parameter('local_map_topic').value
         remote_topic = self.get_parameter('remote_peer_topic').value
         self.expected_source = self.get_parameter('expected_remote_source').value
         output_topic = self.get_parameter('output_topic').value
         metadata_topic = self.get_parameter('metadata_topic').value
+        visualization_topic = self.get_parameter('visualization_topic').value
+        visualization_updates_topic = self.get_parameter(
+            'visualization_updates_topic').value
         self.output_frame = self.get_parameter('output_frame').value
         self.resolution = float(self.get_parameter('resolution').value)
         self.live_robot_frames = list(
@@ -91,6 +245,15 @@ class SourceAwareMapFusion(Node):
         )
         self.map_publisher = self.create_publisher(OccupancyGrid, output_topic, qos)
         self.metadata_publisher = self.create_publisher(MapMetaData, metadata_topic, qos)
+        self.visualization_map_publisher = self.create_publisher(
+            OccupancyGrid, visualization_topic, qos)
+        self.visualization_update_publisher = self.create_publisher(
+            OccupancyGridUpdate, visualization_updates_topic,
+            QoSProfile(
+                depth=5,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            ))
         self.local_subscription = self.create_subscription(
             OccupancyGrid, local_topic, self.local_callback, qos
         )
@@ -112,31 +275,42 @@ class SourceAwareMapFusion(Node):
         self.last_footprint_cells = set()
         self.last_pose_key = None
         self.last_full_rebuild_wall = 0.0
+        self.geometry_cache = {}
+        self.map_dirty = False
+        self.dirty_event_count = 0
+        self.coalesced_event_count = 0
+        self.rebuild_skipped_count = 0
+        self.rebuild_busy = False
+        self.visualization_data = None
+        self.visualization_geometry = None
         self.profile_window = {
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
-            'publications': 0, 'wall_s': 0.0, 'cpu_s': 0.0,
+            'publications': 0, 'visualization_bases': 0,
+            'visualization_updates': 0, 'dirty_events': 0,
+            'coalesced_events': 0, 'rebuild_skipped': 0,
+            'wall_s': 0.0, 'cpu_s': 0.0,
             'last_log_wall': time.monotonic(),
         }
-        self.retry_timer = self.create_timer(0.5, self.try_fuse)
+        self.rebuild_period_s = max(
+            0.1, self.min_fusion_rebuild_period_s or 1.0)
+        self.retry_timer = self.create_timer(
+            self.rebuild_period_s, self.scheduled_fuse)
         self.get_logger().info(
             f'Local {self.resolve_topic_name(local_topic)} + remote-only '
             f'{self.resolve_topic_name(remote_topic)} from {self.expected_source} '
-            f'-> {self.resolve_topic_name(output_topic)}'
+            f'-> {self.resolve_topic_name(output_topic)}; '
+            f'visualization={self.resolve_topic_name(visualization_topic)} '
+            f'period_s={self.rebuild_period_s:.3f} '
+            f'vectorized=True'
         )
 
     def local_callback(self, message):
-        changed = self.local_map is None or (
-            self.local_map.header.stamp != message.header.stamp or
-            self.local_map.info.width != message.info.width or
-            self.local_map.info.height != message.info.height or
-            self.local_map.info.resolution != message.info.resolution or
-            list(self.local_map.data) != list(message.data))
+        changed = not _same_grid_content(self.local_map, message)
         self.local_map = message
         if changed:
             self.local_revision += 1
-        if self.publish_on_callback:
-            self.try_fuse()
+            self.mark_dirty()
 
     def reject(self, reason):
         self.get_logger().warning(reason)
@@ -160,18 +334,21 @@ class SourceAwareMapFusion(Node):
                 f'last accepted is {self.last_remote_revision}'
             )
             return
-        changed = self.remote_map is None or (
-            self.remote_map.header.stamp != message.occupancy_grid.header.stamp or
-            self.remote_map.info.width != message.occupancy_grid.info.width or
-            self.remote_map.info.height != message.occupancy_grid.info.height or
-            self.remote_map.info.resolution != message.occupancy_grid.info.resolution or
-            list(self.remote_map.data) != list(message.occupancy_grid.data))
+        changed = not _same_grid_content(
+            self.remote_map, message.occupancy_grid)
         self.last_remote_revision = message.revision
         self.remote_map = message.occupancy_grid
         if changed:
             self.remote_content_revision += 1
-        if self.publish_on_callback:
-            self.try_fuse()
+            self.mark_dirty()
+
+    def mark_dirty(self):
+        self.dirty_event_count += 1
+        self.profile_window['dirty_events'] += 1
+        if self.map_dirty:
+            self.coalesced_event_count += 1
+            self.profile_window['coalesced_events'] += 1
+        self.map_dirty = True
 
     @staticmethod
     def yaw(quaternion):
@@ -283,30 +460,10 @@ class SourceAwareMapFusion(Node):
     def _make_base_grid(self, messages, transforms, minimum_x, minimum_y,
                         width, height):
         """Build the unsanitized fused base once per map revision."""
-        fused_data = [-1] * (width * height)
-        inspected = 0
-        for message, transform in zip(messages, transforms):
-            source_resolution = message.info.resolution
-            inspected += len(message.data)
-            for index, value in enumerate(message.data):
-                if value < 0:
-                    continue
-                column = index % message.info.width
-                row = index // message.info.width
-                x, y = self.point_in_output(
-                    message, transform,
-                    (column + 0.5) * source_resolution,
-                    (row + 0.5) * source_resolution,
-                )
-                output_column = int(math.floor(
-                    (x - minimum_x) / self.resolution))
-                output_row = int(math.floor(
-                    (y - minimum_y) / self.resolution))
-                if 0 <= output_column < width and 0 <= output_row < height:
-                    target = output_row * width + output_column
-                    current = fused_data[target]
-                    fused_data[target] = (
-                        value if current < 0 else max(current, value))
+        fused_data = _vectorized_fused_data(
+            messages, transforms, minimum_x, minimum_y, width, height,
+            self.resolution, self.geometry_cache)
+        inspected = sum(len(message.data) for message in messages)
         stamp = max(
             (message.header.stamp for message in messages),
             key=lambda value: (value.sec, value.nanosec),
@@ -321,8 +478,59 @@ class SourceAwareMapFusion(Node):
         fused.info.origin.position.x = minimum_x
         fused.info.origin.position.y = minimum_y
         fused.info.origin.orientation.w = 1.0
-        fused.data = fused_data
+        fused.data = fused_data.tolist()
         return fused, inspected
+
+    def _visualization_geometry_key(self, grid):
+        return (
+            grid.header.frame_id,
+            int(grid.info.width), int(grid.info.height),
+            float(grid.info.resolution),
+            float(grid.info.origin.position.x),
+            float(grid.info.origin.position.y),
+            float(grid.info.origin.position.z),
+            float(grid.info.origin.orientation.x),
+            float(grid.info.origin.orientation.y),
+            float(grid.info.origin.orientation.z),
+            float(grid.info.origin.orientation.w),
+        )
+
+    def _publish_visualization(self, grid):
+        """Keep RViz incremental without changing the canonical map topic."""
+        geometry = self._visualization_geometry_key(grid)
+        current = np.asarray(grid.data, dtype=np.int8).reshape(
+            (int(grid.info.height), int(grid.info.width)))
+        if (self.visualization_data is None
+                or self.visualization_geometry != geometry):
+            self.visualization_map_publisher.publish(grid)
+            self.visualization_data = current.copy()
+            self.visualization_geometry = geometry
+            self.profile_window['visualization_bases'] += 1
+            return
+        bounds = _changed_update_bounds(current, self.visualization_data)
+        if bounds is None:
+            return
+        minimum_column, minimum_row, update_width, update_height = bounds
+        update = OccupancyGridUpdate()
+        update.header = grid.header
+        update.x = minimum_column
+        update.y = minimum_row
+        update.width = update_width
+        update.height = update_height
+        update.data = current[
+            minimum_row:minimum_row + update_height,
+            minimum_column:minimum_column + update_width,
+        ].reshape(-1).tolist()
+        self.visualization_update_publisher.publish(update)
+        self.visualization_data = current.copy()
+        self.profile_window['visualization_updates'] += 1
+
+    def _publish_fused(self, grid):
+        if not rclpy.ok():
+            return
+        self.map_publisher.publish(grid)
+        self.metadata_publisher.publish(grid.info)
+        self._publish_visualization(grid)
 
     def _fresh_footprint_cells(self, grid, footprints):
         cells = set()
@@ -369,24 +577,57 @@ class SourceAwareMapFusion(Node):
                 f'full_rebuilds={stats["full_rebuilds"]}',
                 f'pose_updates={stats["pose_updates"]}',
                 f'cells_inspected={stats["cells_inspected"]}',
-                f'cells_copied={stats["cells_copied"]}',
-                f'cells_modified={stats["cells_modified"]}',
-                f'publications={stats["publications"]}',
-                f'wall_duration_s={stats["wall_s"]:.6f}',
-                f'cpu_duration_s={stats["cpu_s"]:.6f}',
+            f'cells_copied={stats["cells_copied"]}',
+            f'cells_modified={stats["cells_modified"]}',
+            f'publications={stats["publications"]}',
+            f'visualization_bases={stats["visualization_bases"]}',
+            f'visualization_updates={stats["visualization_updates"]}',
+            f'dirty_events={stats["dirty_events"]}',
+            f'coalesced_events={stats["coalesced_events"]}',
+            f'rebuild_skipped={stats["rebuild_skipped"]}',
+            f'wall_duration_s={stats["wall_s"]:.6f}',
+            f'cpu_duration_s={stats["cpu_s"]:.6f}',
                 f'window_wall_s={elapsed:.3f}',
             )))
         stats.update({
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
-            'publications': 0, 'wall_s': 0.0, 'cpu_s': 0.0,
+            'publications': 0, 'visualization_bases': 0,
+            'visualization_updates': 0, 'dirty_events': 0,
+            'coalesced_events': 0, 'rebuild_skipped': 0,
+            'wall_s': 0.0, 'cpu_s': 0.0,
             'last_log_wall': now,
         })
 
+    def scheduled_fuse(self):
+        if self.rebuild_busy:
+            self.rebuild_skipped_count += 1
+            self.profile_window['rebuild_skipped'] += 1
+            return
+        self.try_fuse()
+
     def try_fuse(self):
+        if self.rebuild_busy:
+            self.rebuild_skipped_count += 1
+            self.profile_window['rebuild_skipped'] += 1
+            return
+        self.rebuild_busy = True
+        try:
+            self._try_fuse()
+        finally:
+            self.rebuild_busy = False
+
+    def _try_fuse(self):
         started_wall = time.perf_counter()
         started_cpu = time.process_time()
         if self.local_map is None or self.remote_map is None:
+            return
+        if not self.map_dirty and not self.sanitize_live_footprints:
+            self._profile(
+                mode='NOOP', map_changed=False, dimensions=(0, 0),
+                cells_inspected=0, cells_copied=0, cells_modified=0,
+                published=False, wall_s=time.perf_counter() - started_wall,
+                cpu_s=time.process_time() - started_cpu)
             return
         messages = [self.local_map, self.remote_map]
         try:
@@ -417,9 +658,15 @@ class SourceAwareMapFusion(Node):
         if not self.sanitize_live_footprints:
             fused, _ = self._make_base_grid(
                 messages, transforms, minimum_x, minimum_y, width, height)
-            if rclpy.ok():
-                self.map_publisher.publish(fused)
-                self.metadata_publisher.publish(fused.info)
+            self._publish_fused(fused)
+            self.map_dirty = False
+            self._profile(
+                mode='FULL_REBUILD', map_changed=True,
+                dimensions=(width, height), cells_inspected=sum(
+                    len(message.data) for message in messages),
+                cells_copied=len(fused.data), cells_modified=0, published=True,
+                wall_s=time.perf_counter() - started_wall,
+                cpu_s=time.process_time() - started_cpu)
             return
         base_key = (
             self.local_revision, self.remote_content_revision,
@@ -473,8 +720,8 @@ class SourceAwareMapFusion(Node):
             published = modified > 0
         self.last_pose_key = pose_key
         if published and rclpy.ok():
-            self.map_publisher.publish(self.output_grid)
-            self.metadata_publisher.publish(self.output_grid.info)
+            self._publish_fused(self.output_grid)
+        self.map_dirty = False
         self._profile(
             mode=mode, map_changed=map_changed,
             dimensions=(width, height), cells_inspected=inspected,

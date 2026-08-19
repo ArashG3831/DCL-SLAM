@@ -33,7 +33,7 @@ Visualization Manager:
       Cell Size: 0.1
       Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
-      Enabled: true
+      Enabled: false
       Line Style:
         Line Width: 0.03
         Value: Lines
@@ -46,7 +46,7 @@ Visualization Manager:
       Plane: XY
       Plane Cell Count: 20
       Reference Frame: <Fixed Frame>
-      Value: true
+      Value: false
     - Alpha: 1
       Class: rviz_default_plugins/Map
       Color Scheme: map
@@ -58,13 +58,13 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot1/shared_map
+        Value: /robot1/shared_map_visualization
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot1/shared_map_updates
+        Value: /robot1/shared_map_visualization_updates
       Use Timestamp: false
       Value: true
     - Alpha: 0.5
@@ -82,13 +82,13 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot2/shared_map
+        Value: /robot2/shared_map_visualization
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot2/shared_map_updates
+        Value: /robot2/shared_map_visualization_updates
       Use Timestamp: false
       Value: true
     - Class: rviz_default_plugins/TF
@@ -439,7 +439,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: shared_map
-    Frame Rate: 30
+    Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

@@ -8,7 +8,10 @@ same code to be exercised without Webots or a ground-truth transform.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
+import json
 import math
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -29,6 +32,215 @@ UNKNOWN_VALUE = -1
 MINIMUM_ACCEPTED_CONFIDENCE = 0.65
 
 
+class DedicatedDiagnosticJsonl:
+    """Bounded streaming store independent from the protocol-event buffer."""
+
+    def __init__(self, path: str | Path, max_records: int = 8192):
+        self.path = Path(path)
+        self.max_records = max(1, int(max_records))
+        self.records_written = 0
+        self.dropped_records = 0
+        self.write_failures = 0
+        self._stream = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._stream = self.path.open('a', encoding='utf-8', buffering=1)
+        except OSError:
+            self.write_failures += 1
+
+    def write(self, record: dict) -> None:
+        if self.records_written + self.dropped_records >= self.max_records:
+            self.dropped_records += 1
+            return
+        if self._stream is None:
+            self.write_failures += 1
+            return
+        try:
+            self._stream.write(json.dumps(record, sort_keys=True) + '\n')
+            self._stream.flush()
+            self.records_written += 1
+        except (OSError, TypeError, ValueError):
+            self.write_failures += 1
+
+    def close(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+                self._stream.close()
+            except OSError:
+                self.write_failures += 1
+            finally:
+                self._stream = None
+
+
+def crop_batch_is_ready(selected_count: int, minimum_constraints: int) -> bool:
+    """Return whether a selected batch can start crop exchange.
+
+    Selection may briefly produce fewer spatially distinct pairs than the
+    registration contract requires.  Such a partial selection must remain
+    pending; starting one-shot negotiation at that point would permanently
+    prevent the remaining evidence from being requested.
+    """
+    return int(selected_count) >= max(1, int(minimum_constraints))
+
+
+def evidence_pairs_for_selection(active_candidate_pairs, evidence_pairs):
+    """Resolve selected candidates through their stable pair identities."""
+    return [
+        evidence_pairs[(pair[1], pair[0])]
+        for pair in active_candidate_pairs
+        if (pair[1], pair[0]) in evidence_pairs
+    ]
+
+
+def evidence_candidates_for_pool(candidate_pool, evidence_pairs):
+    """Return pooled candidates whose evidence has actually arrived.
+
+    Runtime candidate records may carry a leading similarity sort key while
+    older selection records do not.  Normalize both shapes to the stable
+    ``(peer_key, own_key, peer_descriptor, own_descriptor)`` form and resolve
+    evidence only through the hashable ``(own_key, peer_key)`` identity.
+    Descriptor objects are deliberately never used as dictionary keys.
+    """
+    resolved = []
+    for candidate in candidate_pool:
+        if len(candidate) == 5:
+            _, peer_key, own_key, peer_descriptor, own_descriptor = candidate
+        else:
+            peer_key, own_key, peer_descriptor, own_descriptor = candidate
+        if (own_key, peer_key) in evidence_pairs:
+            resolved.append((peer_key, own_key, peer_descriptor,
+                             own_descriptor))
+    return resolved
+
+
+def bounded_candidate_verification_order(candidate_pool, attempted_pairs,
+                                         budget):
+    """Return a deterministic, bounded ranking of unattempted pair IDs.
+
+    Candidate objects may contain descriptor instances that are deliberately
+    not hashable.  Only the stable ``(own_key, peer_key)`` identity is used for
+    bookkeeping; descriptors never become dictionary/set keys.
+    """
+    attempted = set(attempted_pairs)
+    ranked = []
+    seen = set()
+    for candidate in candidate_pool:
+        if len(candidate) == 5:
+            score, peer_key, own_key = candidate[:3]
+        else:
+            score, peer_key, own_key = 0.0, candidate[0], candidate[1]
+        pair = (own_key, peer_key)
+        if pair in attempted or pair in seen:
+            continue
+        seen.add(pair)
+        ranked.append((float(score), str(peer_key), str(own_key), candidate))
+    ranked.sort(key=lambda item: item[:3])
+    return [item[3] for item in ranked[:max(0, int(budget))]]
+
+
+def _identity_float(value: float) -> float:
+    """Quantize geometry only to suppress serialization-level jitter."""
+    return round(float(value), 6)
+
+
+def physical_crop_identity(crop: GridCrop, map_epoch: int = 0,
+                           checksum: int = 0) -> tuple:
+    """Return a hashable identity for one physical crop.
+
+    Keyframe IDs are deliberately absent.  The map revision/checksum and the
+    complete crop geometry identify the evidence that registration can
+    actually observe; keyframe IDs only identify the advertisement carrying
+    it.  The tuple is intentionally bounded and contains no cell-data copy.
+    """
+    height, width = crop.values.shape[:2]
+    centre_x, centre_y = _crop_center(crop)
+    return (
+        int(map_epoch), int(checksum), _identity_float(crop.resolution),
+        int(width), int(height), _identity_float(crop.origin_x),
+        _identity_float(crop.origin_y), _identity_float(crop.origin_yaw),
+        _identity_float(centre_x), _identity_float(centre_y))
+
+
+def physical_descriptor_identity(descriptor) -> tuple:
+    """Return the corresponding physical identity for a descriptor message."""
+    resolution = float(getattr(descriptor, 'resolution', 0.0))
+    width = int(getattr(descriptor, 'crop_width', 0))
+    height = int(getattr(descriptor, 'crop_height', 0))
+    origin_x = float(getattr(descriptor, 'crop_origin_x', 0.0))
+    origin_y = float(getattr(descriptor, 'crop_origin_y', 0.0))
+    centre_x = origin_x + 0.5 * width * resolution
+    centre_y = origin_y + 0.5 * height * resolution
+    return (
+        int(getattr(descriptor, 'map_epoch', 0)),
+        int(getattr(descriptor, 'checksum', 0)),
+        _identity_float(resolution), width, height,
+        _identity_float(origin_x), _identity_float(origin_y), 0.0,
+        _identity_float(centre_x), _identity_float(centre_y))
+
+
+def physical_candidate_identity(candidate, own_crops: dict) -> tuple:
+    """Identify a candidate by the advertised physical crop pair."""
+    # Runtime eligible tuples carry the descending similarity sort key as a
+    # leading field; pure formation fixtures may use the four-field identity
+    # tuple.  The sort key is not physical evidence and is ignored here.
+    if len(candidate) == 5:
+        _, peer_key, own_key, peer_descriptor, own_descriptor = candidate
+    else:
+        peer_key, own_key, peer_descriptor, own_descriptor = candidate
+    own_crop = own_crops[own_key]
+    own_identity = physical_crop_identity(
+        own_crop, getattr(own_descriptor, 'map_epoch', 0),
+        getattr(own_descriptor, 'checksum', 0))
+    return own_identity, physical_descriptor_identity(peer_descriptor)
+
+
+def deduplicate_physical_candidates(candidates: Iterable, own_crops: dict) -> list:
+    """Keep one deterministic candidate for each physical crop pair."""
+    selected = []
+    seen = set()
+    for candidate in candidates:
+        identity = physical_candidate_identity(candidate, own_crops)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        selected.append(candidate)
+    return selected
+
+
+def accumulate_physical_candidates(candidate_pool: dict, candidates: Iterable,
+                                   own_crops: dict) -> tuple[tuple, tuple]:
+    """Add newly observed physical candidates to a bounded caller-owned pool.
+
+    The returned tuples are ``(added, duplicates)``.  Advertisement/keyframe
+    IDs remain available in each candidate for request routing, but the pool
+    identity is physical evidence, so repeated observations cannot consume
+    additional evidence slots.
+    """
+    added = []
+    duplicates = []
+    for candidate in candidates:
+        identity = physical_candidate_identity(candidate, own_crops)
+        if identity in candidate_pool:
+            duplicates.append((identity, candidate))
+            continue
+        candidate_pool[identity] = candidate
+        added.append((identity, candidate))
+    return tuple(added), tuple(duplicates)
+
+
+def evidence_batch_is_spatially_diverse(crops: Iterable[GridCrop],
+                                        min_spatial_baseline_m: float = 0.75) -> bool:
+    """Apply the existing physical spatial-diversity requirement."""
+    crop_list = list(crops)
+    if len(crop_list) < 2:
+        return False
+    centres = np.asarray([_crop_center(crop) for crop in crop_list])
+    baseline = float(np.max(np.linalg.norm(
+        centres[:, None, :] - centres[None, :, :], axis=2)))
+    return baseline >= float(min_spatial_baseline_m)
+
+
 @dataclass(frozen=True)
 class GridCrop:
     """A bounded occupancy crop expressed in its source map frame."""
@@ -37,6 +249,7 @@ class GridCrop:
     resolution: float
     origin_x: float
     origin_y: float
+    origin_yaw: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +274,20 @@ class RegistrationResult:
     occupied_free_agreement: float
     overlap_fraction: float
     reason: str
+    constraint_count: int = 1
+    consistent_constraint_count: int = 1
+    spatial_baseline_m: float = 0.0
+    angular_spread_rad: float = 0.0
+    median_residual_m: float = math.inf
+    p95_residual_m: float = math.inf
+    translation_uncertainty_m: float = math.inf
+    yaw_uncertainty_rad: float = math.inf
+    condition_number: float = math.inf
+    projected_error_m: float = math.inf
+    final_confidence: float = 0.0
+    # Bounded, JSON-friendly forensic data.  This is diagnostic only and does
+    # not participate in registration or acceptance decisions.
+    consensus_diagnostics: tuple = ()
 
 
 def hypothesis_is_acceptable(status: str, accepted: bool,
@@ -79,7 +306,7 @@ def crop_grid(
         origin_y: float,
         center_x: float | None = None,
         center_y: float | None = None,
-        size_m: float = 8.0) -> GridCrop:
+        size_m: float = 8.0, origin_yaw: float = 0.0) -> GridCrop:
     """Return a bounded square crop without converting unknown to occupied."""
     array = np.asarray(values, dtype=np.int16)
     if array.ndim != 2 or resolution <= 0.0:
@@ -90,18 +317,24 @@ def crop_grid(
                 if center_x is None else center_x)
     center_y = (array.shape[0] * resolution / 2.0
                 if center_y is None else center_y)
-    center_col = int(round((center_x - origin_x) / resolution))
-    center_row = int(round((center_y - origin_y) / resolution))
+    cosine, sine = math.cos(origin_yaw), math.sin(origin_yaw)
+    delta_x, delta_y = center_x - origin_x, center_y - origin_y
+    local_center_x = cosine * delta_x + sine * delta_y
+    local_center_y = -sine * delta_x + cosine * delta_y
+    center_col = int(round(local_center_x / resolution))
+    center_row = int(round(local_center_y / resolution))
     half = side // 2
     col0 = max(0, min(array.shape[1] - side, center_col - half))
     row0 = max(0, min(array.shape[0] - side, center_row - half))
     cropped = array[row0:row0 + side, col0:col0 + side].copy()
+    local_origin = np.array([col0 * resolution, row0 * resolution])
+    world_origin = np.array([origin_x, origin_y]) + np.array([
+        cosine * local_origin[0] - sine * local_origin[1],
+        sine * local_origin[0] + cosine * local_origin[1]])
     return GridCrop(
-        values=cropped,
-        resolution=float(resolution),
-        origin_x=float(origin_x + col0 * resolution),
-        origin_y=float(origin_y + row0 * resolution),
-    )
+        values=cropped, resolution=float(resolution),
+        origin_x=float(world_origin[0]), origin_y=float(world_origin[1]),
+        origin_yaw=float(origin_yaw))
 
 
 def should_accept_hypothesis(current, status: str, accepted: bool,
@@ -233,10 +466,11 @@ def _points(crop: GridCrop, occupied: bool) -> np.ndarray:
     rows, cols = np.nonzero(mask)
     if len(rows) == 0:
         return np.empty((0, 2), dtype=np.float64)
-    return np.column_stack((
-        crop.origin_x + (cols + 0.5) * crop.resolution,
-        crop.origin_y + (rows + 0.5) * crop.resolution,
-    )).astype(np.float64)
+    local = np.column_stack(((cols + 0.5) * crop.resolution,
+                             (rows + 0.5) * crop.resolution)).astype(np.float64)
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    rotation = np.asarray([[cosine, -sine], [sine, cosine]])
+    return local @ rotation.T + np.asarray([crop.origin_x, crop.origin_y])
 
 
 def _apply(points: np.ndarray, transform: tuple[float, float, float]) -> np.ndarray:
@@ -271,104 +505,652 @@ def _rigid_fit(source: np.ndarray, target: np.ndarray) -> tuple[float, float, fl
     )
 
 
-def register_crops(
-        source: GridCrop,
-        target: GridCrop,
-        max_iterations: int = 25,
-        max_correspondence_m: float = 0.30) -> RegistrationResult:
-    """Register occupied geometry with coarse yaw search and robust ICP."""
-    source_points = _points(source, occupied=True)
-    target_points = _points(target, occupied=True)
-    if len(source_points) < 12 or len(target_points) < 12:
-        return RegistrationResult(
-            False, (0.0, 0.0, 0.0), (0.0,) * 36, 0.0, math.inf, 0.0, 0.0,
-            'INSUFFICIENT_OCCUPIED_GEOMETRY')
-    if len(source_points) > 1200:
-        source_points = source_points[::max(1, len(source_points) // 1200)]
-    if len(target_points) > 1200:
-        target_points = target_points[::max(1, len(target_points) // 1200)]
-    source_center = source_points.mean(axis=0)
+def _empty_registration(reason: str) -> RegistrationResult:
+    return RegistrationResult(
+        False, (0.0, 0.0, 0.0), (0.0,) * 36, 0.0, math.inf, 0.0, 0.0,
+        reason, constraint_count=0, consistent_constraint_count=0)
+
+
+def _distance_field(crop: GridCrop):
+    """Return an occupied distance field in metres, when OpenCV is present."""
+    if cv2 is None:
+        return None
+    occupied = (np.asarray(crop.values) >= OCCUPIED_THRESHOLD).astype(np.uint8)
+    # Distance to zero pixels; occupied cells are zero in the input.
+    return cv2.distanceTransform(1 - occupied, cv2.DIST_L2, 3) * crop.resolution
+
+
+def _field_distances(points: np.ndarray, crop: GridCrop, field) -> np.ndarray:
+    """Sample an occupancy distance field at world-frame point coordinates."""
+    if field is None or len(points) == 0:
+        return np.full(len(points), math.inf, dtype=np.float64)
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    delta_x = points[:, 0] - crop.origin_x
+    delta_y = points[:, 1] - crop.origin_y
+    local_x = cosine * delta_x + sine * delta_y
+    local_y = -sine * delta_x + cosine * delta_y
+    columns = np.rint(local_x / crop.resolution - 0.5).astype(np.int64)
+    rows = np.rint(local_y / crop.resolution - 0.5).astype(np.int64)
+    valid = (
+        (columns >= 0) & (columns < crop.values.shape[1]) &
+        (rows >= 0) & (rows < crop.values.shape[0]))
+    distances = np.full(len(points), max(crop.values.shape) * crop.resolution,
+                        dtype=np.float64)
+    distances[valid] = field[rows[valid], columns[valid]]
+    return distances
+
+
+def _world_extent(crop: GridCrop):
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    corners = np.asarray([
+        (0.0, 0.0),
+        (crop.values.shape[1] * crop.resolution, 0.0),
+        (0.0, crop.values.shape[0] * crop.resolution),
+        (crop.values.shape[1] * crop.resolution,
+         crop.values.shape[0] * crop.resolution),
+    ])
+    rotation = np.asarray([[cosine, -sine], [sine, cosine]])
+    world = corners @ rotation.T + np.asarray([crop.origin_x, crop.origin_y])
+    return np.array([
+        world[:, 0].min(), world[:, 1].min(),
+        world[:, 0].max(), world[:, 1].max()], dtype=np.float64)
+
+
+def _coarse_registration_seeds(
+        source_points: np.ndarray, target: GridCrop, target_points: np.ndarray,
+        max_yaw_steps: int = 72, translation_step_m: float = 0.05,
+        translation_radius_m: float = 0.40, keep: int = 8):
+    """Find globally distinct rigid seeds using an occupied distance field.
+
+    This is deliberately bounded.  It is a distance-field correlation rather
+    than ICP, so large initial translation/yaw errors do not depend on the
+    nearest-neighbour basin selected by the first iteration.
+    """
+    field = _distance_field(target)
+    if field is None:
+        return []
+    source = source_points
+    if len(source) > 1000:
+        source = source[::max(1, len(source) // 1000)]
     target_center = target_points.mean(axis=0)
-    best = None
-    for yaw in np.linspace(-math.pi, math.pi, 24, endpoint=False):
-        rotated = _apply(source_points, (0.0, 0.0, float(yaw)))
-        initial = (
-            float(target_center[0] - rotated.mean(axis=0)[0]),
-            float(target_center[1] - rotated.mean(axis=0)[1]),
-            float(yaw),
-        )
-        transformed = _apply(source_points, initial)
-        distances, _ = _nearest(transformed, target_points)
-        inliers = distances[distances <= max_correspondence_m]
-        if len(inliers) < 4:
-            continue
-        score = float(np.median(inliers))
-        if best is None or score < best[0]:
-            best = (score, initial)
-    if best is None:
-        return RegistrationResult(
-            False, (0.0, 0.0, 0.0), (0.0,) * 36, 0.0, math.inf, 0.0, 0.0,
-            'NO_COARSE_ALIGNMENT')
-    transform = best[1]
+    source_center = source.mean(axis=0)
+    candidates = []
+    offsets = np.arange(
+        -translation_radius_m, translation_radius_m + 0.5 * translation_step_m,
+        translation_step_m)
+    for yaw in np.linspace(-math.pi, math.pi, max_yaw_steps, endpoint=False):
+        cosine, sine = math.cos(float(yaw)), math.sin(float(yaw))
+        rotation = np.array([[cosine, -sine], [sine, cosine]])
+        base = target_center - rotation @ source_center
+        rotated = source @ rotation.T
+        for dx in offsets:
+            for dy in offsets:
+                transform = (float(base[0] + dx), float(base[1] + dy),
+                             float(yaw))
+                distances = _field_distances(
+                    rotated + np.array([transform[0], transform[1]]),
+                    target, field)
+                clipped = np.minimum(distances, 0.50)
+                score = float(np.median(clipped) + 0.25 * np.mean(clipped))
+                candidates.append((score, transform))
+    candidates.sort(key=lambda value: (value[0], value[1]))
+    distinct = []
+    for score, transform in candidates:
+        if all(
+                abs(transform[0] - other[1][0]) > 0.20 or
+                abs(transform[1] - other[1][1]) > 0.20 or
+                abs(wrap_angle(transform[2] - other[1][2])) > math.radians(8.0)
+                for other in distinct):
+            distinct.append((score, transform))
+        if len(distinct) >= keep:
+            break
+    return [transform for _, transform in distinct]
+
+
+def _ecc_registration_seed(source: GridCrop, target: GridCrop):
+    """Return a rigid image-correlation seed when crop rasters are compatible.
+
+    OpenCV's ECC result is a pixel-coordinate warp from the source image into
+    the target image.  The half-cell and map-origin terms below convert that
+    result exactly into the same world-frame SE(2) convention used by the
+    point registration code.  ECC is only a seed; geometric verification and
+    multi-keyframe consensus remain authoritative.
+    """
+    if (cv2 is None or source.values.shape != target.values.shape or
+            abs(source.resolution - target.resolution) > 1e-9):
+        return None
+    source_image = (np.asarray(source.values) >= OCCUPIED_THRESHOLD).astype(np.float32)
+    target_image = (np.asarray(target.values) >= OCCUPIED_THRESHOLD).astype(np.float32)
+    if np.count_nonzero(source_image) < 12 or np.count_nonzero(target_image) < 12:
+        return None
+    warp = np.eye(2, 3, dtype=np.float32)
+    try:
+        _, warp = cv2.findTransformECC(
+            source_image, target_image, warp, cv2.MOTION_EUCLIDEAN,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 250, 1e-6),
+            None, 1)
+    except cv2.error:
+        return None
+    linear = np.asarray(warp[:, :2], dtype=np.float64)
+    if np.linalg.det(linear) <= 0.0:
+        return None
+    # Re-orthogonalize tiny raster/ECC scale errors instead of allowing affine
+    # distortion into the runtime hypothesis.
+    u, _, vt = np.linalg.svd(linear)
+    pixel_rotation = u @ vt
+    if np.linalg.det(pixel_rotation) < 0.0:
+        u[:, -1] *= -1.0
+        pixel_rotation = u @ vt
+    half = np.array([0.5, 0.5], dtype=np.float64)
+    source_origin = np.array([source.origin_x, source.origin_y])
+    target_origin = np.array([target.origin_x, target.origin_y])
+    source_cos, source_sin = math.cos(source.origin_yaw), math.sin(source.origin_yaw)
+    target_cos, target_sin = math.cos(target.origin_yaw), math.sin(target.origin_yaw)
+    source_rotation = np.asarray([[source_cos, -source_sin],
+                                   [source_sin, source_cos]])
+    target_rotation = np.asarray([[target_cos, -target_sin],
+                                   [target_sin, target_cos]])
+    rotation = target_rotation @ pixel_rotation @ source_rotation.T
+    translation = (target_origin + target_rotation @ (
+        target.resolution * (np.asarray(warp[:, 2], dtype=np.float64) + half))
+        - rotation @ (source_origin + source_rotation @ (
+            source.resolution * half)))
+    return (float(translation[0]), float(translation[1]),
+            float(math.atan2(rotation[1, 0], rotation[0, 0])))
+
+
+def _refine_registration(source_points, target_points, target, seed,
+                         max_iterations=35, max_correspondence_m=0.30):
+    """Robust trimmed point-to-point refinement from one global seed."""
+    transform = seed
     for _ in range(max_iterations):
         transformed = _apply(source_points, transform)
         distances, indices = _nearest(transformed, target_points)
-        threshold = min(max_correspondence_m,
-                        max(3.0 * source.resolution,
-                            float(np.median(distances)) * 2.5))
+        threshold = min(
+            max_correspondence_m,
+            max(3.0 * source_points.dtype.type(target.resolution),
+                float(np.percentile(distances, 60)) * 2.0))
         mask = distances <= threshold
         if np.count_nonzero(mask) < 8:
             break
-        refined = _rigid_fit(source_points[mask], target_points[indices[mask]])
-        if (np.linalg.norm(np.array(refined[:2]) - np.array(transform[:2])) < 1e-4
-                and abs(math.atan2(math.sin(refined[2] - transform[2]),
-                                   math.cos(refined[2] - transform[2]))) < 1e-4):
-            transform = refined
-            break
+        # Trim the worst tail before fitting so map ghosts do not rotate the
+        # solution.  This keeps the fit rigid and deterministic.
+        selected = np.flatnonzero(mask)
+        if len(selected) > 600:
+            selected = selected[np.argsort(distances[selected])[:600]]
+        refined = _rigid_fit(source_points[selected], target_points[indices[selected]])
+        delta_t = np.linalg.norm(
+            np.asarray(refined[:2]) - np.asarray(transform[:2]))
+        delta_yaw = abs(wrap_angle(refined[2] - transform[2]))
         transform = refined
+        if delta_t < 1e-5 and delta_yaw < 1e-5:
+            break
+    return transform
+
+
+def _registration_quality(source: GridCrop, target: GridCrop,
+                          source_points: np.ndarray,
+                          target_points: np.ndarray, transform,
+                          max_correspondence_m=0.30) -> RegistrationResult:
     transformed = _apply(source_points, transform)
     distances, indices = _nearest(transformed, target_points)
-    threshold = min(max_correspondence_m,
-                    max(3.0 * source.resolution, float(np.median(distances)) * 2.5))
+    threshold = min(
+        max_correspondence_m,
+        max(3.0 * source.resolution, float(np.percentile(distances, 60)) * 2.5))
     mask = distances <= threshold
-    inlier_ratio = float(np.count_nonzero(mask)) / float(len(source_points))
-    residual = float(np.sqrt(np.mean(np.square(distances[mask])))) if np.any(mask) else math.inf
-    target_free = _points(target, occupied=False)
-    if len(target_free) and len(transformed):
-        free_distances, _ = _nearest(transformed, target_free)
-        free_consistency = float(np.mean(free_distances > threshold))
-    else:
-        free_consistency = 0.0
-    occupied_agreement = max(0.0, min(1.0, 0.75 * inlier_ratio + 0.25 * free_consistency))
-    target_extent = np.array([
-        target.origin_x, target.origin_y,
-        target.origin_x + target.values.shape[1] * target.resolution,
-        target.origin_y + target.values.shape[0] * target.resolution,
-    ])
+    inlier_count = int(np.count_nonzero(mask))
+    inlier_ratio = float(inlier_count) / float(max(1, len(source_points)))
+    residuals = distances[mask] if inlier_count else np.empty(0)
+    residual = (float(np.sqrt(np.mean(np.square(residuals))))
+                if inlier_count else math.inf)
+    median_residual = float(np.median(residuals)) if inlier_count else math.inf
+    p95_residual = float(np.percentile(residuals, 95)) if inlier_count else math.inf
+
+    # Verify in both directions.  A one-way nearest-neighbour fit can match a
+    # small repeated fragment in a large unrelated crop.
+    inverse = invert_se2(transform)
+    reverse = _apply(target_points, inverse)
+    reverse_distances, _ = _nearest(reverse, source_points)
+    reverse_threshold = max(3.0 * target.resolution, threshold)
+    reverse_ratio = float(np.count_nonzero(reverse_distances <= reverse_threshold)) / \
+        float(max(1, len(target_points)))
+
+    target_extent = _world_extent(target)
     in_target = (
         (transformed[:, 0] >= target_extent[0]) &
         (transformed[:, 0] <= target_extent[2]) &
         (transformed[:, 1] >= target_extent[1]) &
         (transformed[:, 1] <= target_extent[3]))
-    overlap = float(np.count_nonzero(in_target)) / float(len(transformed))
-    variance = residual * residual / max(1, int(np.count_nonzero(mask)))
+    overlap = float(np.count_nonzero(in_target)) / float(max(1, len(transformed)))
+    target_array = np.asarray(target.values)
+    columns = np.rint(
+        (transformed[:, 0] - target.origin_x) / target.resolution - 0.5).astype(int)
+    rows = np.rint(
+        (transformed[:, 1] - target.origin_y) / target.resolution - 0.5).astype(int)
+    valid = (
+        (columns >= 0) & (columns < target_array.shape[1]) &
+        (rows >= 0) & (rows < target_array.shape[0]))
+    occupied_match = np.zeros(len(transformed), dtype=bool)
+    occupied_match[valid] = target_array[rows[valid], columns[valid]] >= OCCUPIED_THRESHOLD
+    occupied_fraction = float(np.count_nonzero(occupied_match)) / float(max(1, len(transformed)))
+    # Unknown is neutral.  Only known free cells are conflicts.
+    known_free = np.zeros(len(transformed), dtype=bool)
+    known_free[valid] = target_array[rows[valid], columns[valid]] == 0
+    free_consistency = 1.0 - float(np.count_nonzero(known_free)) / float(max(1, len(transformed)))
+    occupied_agreement = max(
+        0.0, min(1.0, 0.55 * min(inlier_ratio, reverse_ratio)
+                 + 0.25 * occupied_fraction + 0.20 * free_consistency))
+
+    centered = source_points - source_points.mean(axis=0)
+    eigenvalues = np.linalg.eigvalsh(centered.T @ centered)
+    condition = (float(eigenvalues[-1] / max(eigenvalues[0], 1e-9))
+                 if len(eigenvalues) == 2 else math.inf)
+    variance = residual * residual / max(1, inlier_count)
     covariance = np.zeros((6, 6), dtype=np.float64)
     covariance[0, 0] = covariance[1, 1] = variance
-    covariance[5, 5] = variance / max(1e-6, float(np.mean(np.square(
-        source_points[mask] - source_points[mask].mean(axis=0)))))
+    yaw_variance = variance / max(1e-6, float(eigenvalues.sum()))
+    covariance[5, 5] = yaw_variance
     accepted = (
-        inlier_ratio >= 0.35 and residual <= max(0.12, 3.0 * source.resolution)
-        and occupied_agreement >= 0.55 and overlap >= 0.15)
+        inlier_ratio >= 0.35 and reverse_ratio >= 0.30 and
+        residual <= max(0.12, 3.0 * source.resolution) and
+        occupied_agreement >= 0.55 and overlap >= 0.15)
+    reason = 'ACCEPTED' if accepted else 'GEOMETRIC_VERIFICATION_REJECTED'
     return RegistrationResult(
-        accepted=accepted,
-        transform=transform,
+        accepted=accepted, transform=transform,
         covariance=tuple(float(value) for value in covariance.ravel()),
-        inlier_ratio=inlier_ratio,
-        residual_m=residual,
-        occupied_free_agreement=occupied_agreement,
-        overlap_fraction=overlap,
-        reason='ACCEPTED' if accepted else 'GEOMETRIC_VERIFICATION_REJECTED',
-    )
+        inlier_ratio=inlier_ratio, residual_m=residual,
+        occupied_free_agreement=occupied_agreement, overlap_fraction=overlap,
+        reason=reason, median_residual_m=median_residual,
+        p95_residual_m=p95_residual,
+        translation_uncertainty_m=math.sqrt(max(0.0, variance)),
+        yaw_uncertainty_rad=math.sqrt(max(0.0, yaw_variance)),
+        condition_number=condition,
+        projected_error_m=math.inf)
+
+
+def register_crops(
+        source: GridCrop,
+        target: GridCrop,
+        max_iterations: int = 25,
+        max_correspondence_m: float = 0.30) -> RegistrationResult:
+    """Register one crop with bounded global hypotheses then robust refinement.
+
+    The function remains the backwards-compatible single-pair diagnostic API.
+    Production acceptance should use :func:`register_crop_set`, which requires
+    independent evidence and a physical projected-error gate.
+    """
+    source_points = _points(source, occupied=True)
+    target_points = _points(target, occupied=True)
+    if len(source_points) < 12 or len(target_points) < 12:
+        return _empty_registration('INSUFFICIENT_OCCUPIED_GEOMETRY')
+    if len(source_points) > 1200:
+        source_points = source_points[::max(1, len(source_points) // 1200)]
+    if len(target_points) > 1200:
+        target_points = target_points[::max(1, len(target_points) // 1200)]
+    seeds = _coarse_registration_seeds(
+        source_points, target, target_points, max_yaw_steps=72,
+        translation_step_m=max(source.resolution * 2.0, 0.05),
+        translation_radius_m=max(0.40, max_correspondence_m * 1.5), keep=6)
+    ecc_seed = _ecc_registration_seed(source, target)
+    if ecc_seed is not None:
+        seeds.insert(0, ecc_seed)
+    if not seeds:
+        return _empty_registration('NO_COARSE_ALIGNMENT')
+    results = []
+    target_field = _distance_field(target)
+    for seed in seeds:
+        seed_result = _registration_quality(
+            source, target, source_points, target_points, seed,
+            max_correspondence_m)
+        transform = _refine_registration(
+            source_points, target_points, target, seed,
+            max_iterations=max_iterations,
+            max_correspondence_m=max_correspondence_m)
+        refined_result = _registration_quality(
+            source, target, source_points, target_points, transform,
+            max_correspondence_m)
+        results.extend((seed_result, refined_result))
+    def ranking(result):
+        if target_field is None:
+            global_score = result.residual_m
+        else:
+            distances = _field_distances(
+                _apply(source_points, result.transform), target, target_field)
+            global_score = float(np.mean(np.minimum(distances, 0.50)))
+        return (-int(result.accepted), global_score, result.residual_m,
+                -result.inlier_ratio, abs(result.transform[2]))
+    return min(results, key=ranking)
+
+
+def wrap_angle(angle: float) -> float:
+    """Return an angle in [-pi, pi)."""
+    return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def compose_se2(first: tuple[float, float, float],
+                second: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Compose transforms using ``T_A_B * T_B_C = T_A_C``."""
+    tx, ty, yaw = first
+    sx, sy, syaw = second
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    return (tx + cosine * sx - sine * sy,
+            ty + sine * sx + cosine * sy,
+            wrap_angle(yaw + syaw))
+
+
+def invert_se2(transform: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Invert an SE(2) transform under the explicit point convention."""
+    tx, ty, yaw = transform
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    return (-cosine * tx - sine * ty,
+            sine * tx - cosine * ty,
+            wrap_angle(-yaw))
+
+
+def projected_registration_error(transform_error: tuple[float, float, float],
+                                 target_map_radius_m: float = 40.0) -> float:
+    """Project SE(2) error to the configured physical map radius."""
+    return (math.hypot(transform_error[0], transform_error[1]) +
+            abs(wrap_angle(transform_error[2])) * float(target_map_radius_m))
+
+
+def _transform_distance(first, second):
+    delta = compose_se2(invert_se2(second), first)
+    return math.hypot(delta[0], delta[1]), abs(wrap_angle(delta[2]))
+
+
+def _crop_center(crop: GridCrop) -> tuple[float, float]:
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    local = np.asarray([
+        0.5 * crop.values.shape[1] * crop.resolution,
+        0.5 * crop.values.shape[0] * crop.resolution])
+    return tuple((np.asarray([crop.origin_x, crop.origin_y]) +
+                  np.asarray([[cosine, -sine], [sine, cosine]]) @ local)
+                 .tolist())
+
+
+def consensus_subset_diagnostics(
+        pairs: list[tuple[GridCrop, GridCrop]],
+        results: list[RegistrationResult],
+        target_map_radius_m: float = 40.0,
+        min_consistent_constraints: int = 3,
+        min_spatial_baseline_m: float = 0.75,
+        max_translation_consistency_m: float = 0.15,
+        max_yaw_consistency_rad: float = math.radians(1.0),
+        max_projected_registration_error_m: float = 0.20,
+        min_inlier_ratio: float = 0.55,
+        max_robust_residual_m: float = 0.08) -> tuple[dict, ...]:
+    """Return bounded per-constraint and subset forensic diagnostics.
+
+    This function intentionally mirrors the existing consensus thresholds but
+    does not choose a cluster or alter the production result.  It makes the
+    distinction between an invalid individual registration, an inconsistent
+    transform subset, and a subset that reaches a later physical gate.
+    """
+    diagnostics = []
+    for index, (pair, result) in enumerate(zip(pairs, results)):
+        diagnostics.append({
+            'kind': 'constraint',
+            'index': index,
+            'source_origin': [float(pair[0].origin_x), float(pair[0].origin_y),
+                              float(pair[0].origin_yaw)],
+            'target_origin': [float(pair[1].origin_x), float(pair[1].origin_y),
+                              float(pair[1].origin_yaw)],
+            'source_center': list(_crop_center(pair[0])),
+            'target_center': list(_crop_center(pair[1])),
+            'accepted_geometric': bool(result.accepted),
+            'transform': [float(value) for value in result.transform],
+            'residual_m': float(result.residual_m),
+            'median_residual_m': float(result.median_residual_m),
+            'p95_residual_m': float(result.p95_residual_m),
+            'inlier_ratio': float(result.inlier_ratio),
+            'occupied_free_agreement': float(result.occupied_free_agreement),
+            'overlap_fraction': float(result.overlap_fraction),
+            'translation_uncertainty_m': float(result.translation_uncertainty_m),
+            'yaw_uncertainty_rad': float(result.yaw_uncertainty_rad),
+            'condition_number': float(result.condition_number),
+            'projected_error_m': float(result.projected_error_m),
+            'registration_reason': str(result.reason),
+        })
+
+    accepted_indices = [index for index, result in enumerate(results)
+                        if result.accepted]
+    for first, second in combinations(accepted_indices, 2):
+        translation, yaw = _transform_distance(
+            results[first].transform, results[second].transform)
+        diagnostics.append({
+            'kind': 'pairwise_comparison',
+            'first_index': first,
+            'second_index': second,
+            'translation_disagreement_m': float(translation),
+            'yaw_disagreement_rad': float(yaw),
+            'max_translation_consistency_m': float(
+                max_translation_consistency_m),
+            'max_yaw_consistency_rad': float(max_yaw_consistency_rad),
+            'consistent': bool(
+                translation <= max_translation_consistency_m and
+                yaw <= max_yaw_consistency_rad),
+        })
+
+    subset_size = max(1, int(min_consistent_constraints))
+    for indices in combinations(range(len(results)), subset_size):
+        subset_results = [results[index] for index in indices]
+        subset_pairs = [pairs[index] for index in indices]
+        reasons = []
+        if not all(result.accepted for result in subset_results):
+            reasons.append('GEOMETRIC_MEMBER_REJECTED')
+        disagreements = [
+            _transform_distance(left.transform, right.transform)
+            for left, right in combinations(subset_results, 2)]
+        max_translation = max((value[0] for value in disagreements),
+                              default=0.0)
+        max_yaw = max((value[1] for value in disagreements), default=0.0)
+        if (max_translation > max_translation_consistency_m or
+                max_yaw > max_yaw_consistency_rad):
+            reasons.append('PAIRWISE_TRANSFORM_INCONSISTENT')
+        centres = np.asarray([_crop_center(pair[0]) for pair in subset_pairs])
+        spatial_baseline = float(np.max(np.linalg.norm(
+            centres[:, None, :] - centres[None, :, :], axis=2))) \
+            if len(centres) > 1 else 0.0
+        if spatial_baseline < min_spatial_baseline_m:
+            reasons.append('INSUFFICIENT_SPATIAL_BASELINE')
+        inlier_ratio = float(np.mean(
+            [result.inlier_ratio for result in subset_results]))
+        if inlier_ratio < min_inlier_ratio:
+            reasons.append('INLIER_RATIO_BELOW_THRESHOLD')
+        robust_residual = float(np.median(
+            [result.residual_m for result in subset_results]))
+        if robust_residual > max_robust_residual_m:
+            reasons.append('ROBUST_RESIDUAL_ABOVE_THRESHOLD')
+        translation_uncertainty = math.sqrt(float(np.mean([
+            result.translation_uncertainty_m ** 2
+            for result in subset_results])))
+        yaw_uncertainty = math.sqrt(float(np.mean([
+            result.yaw_uncertainty_rad ** 2
+            for result in subset_results])))
+        projected = (translation_uncertainty +
+                     float(target_map_radius_m) * yaw_uncertainty)
+        if projected > max_projected_registration_error_m:
+            reasons.append('PROJECTED_ERROR_ABOVE_THRESHOLD')
+        condition = max(result.condition_number for result in subset_results)
+        if condition >= 1e4:
+            reasons.append('CONDITIONING_ABOVE_THRESHOLD')
+        diagnostics.append({
+            'kind': 'subset_comparison',
+            'indices': list(indices),
+            'subset_size': subset_size,
+            'all_geometric_members_accepted': not any(
+                reason == 'GEOMETRIC_MEMBER_REJECTED' for reason in reasons),
+            'max_translation_disagreement_m': max_translation,
+            'max_yaw_disagreement_rad': max_yaw,
+            'spatial_baseline_m': spatial_baseline,
+            'mean_inlier_ratio': inlier_ratio,
+            'median_residual_m': robust_residual,
+            'translation_uncertainty_m': translation_uncertainty,
+            'yaw_uncertainty_rad': yaw_uncertainty,
+            'projected_error_m_at_40m': projected,
+            'target_map_radius_m': float(target_map_radius_m),
+            'condition_number': condition,
+            'thresholds': {
+                'min_consistent_constraints': subset_size,
+                'min_spatial_baseline_m': float(min_spatial_baseline_m),
+                'max_translation_consistency_m': float(
+                    max_translation_consistency_m),
+                'max_yaw_consistency_rad': float(max_yaw_consistency_rad),
+                'max_projected_registration_error_m': float(
+                    max_projected_registration_error_m),
+                'min_inlier_ratio': float(min_inlier_ratio),
+                'max_robust_residual_m': float(max_robust_residual_m),
+            },
+            'rejection_reasons': reasons,
+            'consistent_subset': not reasons,
+        })
+    return tuple(diagnostics)
+
+
+def register_crop_set(
+        pairs: Iterable[tuple[GridCrop, GridCrop]],
+        target_map_radius_m: float = 40.0,
+        min_consistent_constraints: int = 3,
+        min_spatial_baseline_m: float = 0.75,
+        max_translation_consistency_m: float = 0.15,
+        max_yaw_consistency_rad: float = math.radians(1.0),
+        max_projected_registration_error_m: float = 0.20,
+        min_inlier_ratio: float = 0.55,
+        max_robust_residual_m: float = 0.08,
+        min_candidate_margin: float = 0.02) -> RegistrationResult:
+    """Estimate one transform from an independently verified crop set.
+
+    Each pair is registered independently, then transforms are clustered in
+    SE(2).  The surviving cluster is refined by weighted averaging of its
+    translations and circular yaw values.  This is a bounded PCM-like
+    consistency gate: one wrong crop cannot determine the handoff.
+    """
+    pair_list = list(pairs)
+    if not pair_list:
+        return _empty_registration('NO_CONSTRAINTS')
+    results = [register_crops(source, target) for source, target in pair_list]
+    forensic = consensus_subset_diagnostics(
+        pair_list, results,
+        target_map_radius_m=target_map_radius_m,
+        min_consistent_constraints=min_consistent_constraints,
+        min_spatial_baseline_m=min_spatial_baseline_m,
+        max_translation_consistency_m=max_translation_consistency_m,
+        max_yaw_consistency_rad=max_yaw_consistency_rad,
+        max_projected_registration_error_m=max_projected_registration_error_m,
+        min_inlier_ratio=min_inlier_ratio,
+        max_robust_residual_m=max_robust_residual_m)
+    accepted = [result for result in results if result.accepted]
+    if not accepted:
+        return _empty_registration('NO_GEOMETRIC_CONSTRAINT')
+    clusters = []
+    for result in accepted:
+        best = None
+        for cluster in clusters:
+            distance, yaw_distance = _transform_distance(
+                result.transform, cluster['mean'])
+            if (distance <= max_translation_consistency_m and
+                    yaw_distance <= max_yaw_consistency_rad):
+                best = cluster
+                break
+        if best is None:
+            clusters.append({'mean': result.transform, 'items': [result]})
+        else:
+            best['items'].append(result)
+            items = best['items']
+            weights = np.asarray([
+                max(1e-3, item.inlier_ratio / max(item.residual_m, 1e-3))
+                for item in items])
+            translations = np.asarray([item.transform[:2] for item in items])
+            yaw_values = np.asarray([item.transform[2] for item in items])
+            best['mean'] = (
+                float(np.average(translations[:, 0], weights=weights)),
+                float(np.average(translations[:, 1], weights=weights)),
+                float(math.atan2(np.sum(weights * np.sin(yaw_values)),
+                                 np.sum(weights * np.cos(yaw_values)))))
+    cluster = max(clusters, key=lambda item: (
+        len(item['items']),
+        sum(value.inlier_ratio for value in item['items']),
+        -sum(value.residual_m for value in item['items'])))
+    items = cluster['items']
+    transform = cluster['mean']
+    residuals = np.asarray([item.residual_m for item in items])
+    inlier_ratio = float(np.average(
+        [item.inlier_ratio for item in items],
+        weights=np.maximum(1e-3, 1.0 / np.maximum(residuals, 1e-3))))
+    robust_residual = float(np.median(residuals))
+    p95_residual = float(np.percentile(residuals, 95))
+    # Constraint diversity is measured from the observed crop locations, not
+    # from the estimated transforms (a correct rigid transform is expected to
+    # be nearly identical for every crop).
+    selected_result_ids = {id(selected) for selected in items}
+    source_centres = np.asarray([
+        tuple(np.asarray([pair[0].origin_x, pair[0].origin_y]) +
+              np.asarray([[math.cos(pair[0].origin_yaw),
+                           -math.sin(pair[0].origin_yaw)],
+                          [math.sin(pair[0].origin_yaw),
+                           math.cos(pair[0].origin_yaw)]]) @
+              np.asarray([0.5 * pair[0].values.shape[1] * pair[0].resolution,
+                          0.5 * pair[0].values.shape[0] * pair[0].resolution]))
+        for pair, item in zip(pair_list, results)
+        if id(item) in selected_result_ids])
+    if len(source_centres) > 1:
+        spatial_baseline = float(np.max(np.linalg.norm(
+            source_centres[:, None, :] - source_centres[None, :, :], axis=2)))
+    else:
+        spatial_baseline = 0.0
+    yaws = np.asarray([item.transform[2] for item in items])
+    angular_spread = (float(np.max([abs(wrap_angle(yaw - transform[2]))
+                                    for yaw in yaws]))
+                      if len(yaws) > 1 else 0.0)
+    condition = max(item.condition_number for item in items)
+    translation_uncertainty = math.sqrt(max(
+        0.0, float(np.mean([item.translation_uncertainty_m ** 2
+                            for item in items]))))
+    yaw_uncertainty = math.sqrt(max(
+        0.0, float(np.mean([item.yaw_uncertainty_rad ** 2
+                            for item in items]))))
+    confidence = max(0.0, min(1.0,
+        0.25 * min(1.0, len(items) / max(1, min_consistent_constraints)) +
+        0.20 * inlier_ratio +
+        0.15 * max(0.0, 1.0 - robust_residual / max(max_robust_residual_m, 1e-3)) +
+        0.15 * min(1.0, spatial_baseline / max(min_spatial_baseline_m, 1e-3)) +
+        0.15 * min(1.0, sum(item.occupied_free_agreement for item in items) /
+                   max(1, len(items))) +
+        0.10 * min(1.0, sum(item.overlap_fraction for item in items) /
+                   max(1, len(items)))))
+    result = items[0]
+    projected = translation_uncertainty + target_map_radius_m * yaw_uncertainty
+    accepted_final = (
+        len(items) >= min_consistent_constraints and
+        spatial_baseline >= min_spatial_baseline_m and
+        inlier_ratio >= min_inlier_ratio and
+        robust_residual <= max_robust_residual_m and
+        projected <= max_projected_registration_error_m and
+        condition < 1e4 and confidence >= min_candidate_margin)
+    reason = 'ACCEPTED_MULTI_CONSTRAINT' if accepted_final else (
+        'INSUFFICIENT_CONSISTENT_CONSTRAINTS' if len(items) < min_consistent_constraints
+        else 'PHYSICAL_ACCURACY_GATE_REJECTED')
+    covariance = list(result.covariance)
+    covariance[0] = covariance[7] = translation_uncertainty ** 2
+    covariance[35] = yaw_uncertainty ** 2
+    return RegistrationResult(
+        accepted=accepted_final, transform=transform,
+        covariance=tuple(covariance), inlier_ratio=inlier_ratio,
+        residual_m=robust_residual,
+        occupied_free_agreement=float(np.mean([
+            item.occupied_free_agreement for item in items])),
+        overlap_fraction=float(np.mean([
+            item.overlap_fraction for item in items])), reason=reason,
+        constraint_count=len(results), consistent_constraint_count=len(items),
+        spatial_baseline_m=spatial_baseline,
+        angular_spread_rad=angular_spread,
+        median_residual_m=robust_residual,
+        p95_residual_m=p95_residual,
+        translation_uncertainty_m=translation_uncertainty,
+        yaw_uncertainty_rad=yaw_uncertainty, condition_number=condition,
+        projected_error_m=projected, final_confidence=confidence,
+        consensus_diagnostics=forensic)
 
 
 def descriptor_checksum(descriptor: bytes) -> int:
@@ -389,3 +1171,58 @@ def temporal_consistency(stamps_ns: Iterable[int], window_ns: int = 5_000_000_00
         return 0.5
     span = values[-1] - values[0]
     return max(0.0, min(1.0, 1.0 - float(span) / float(window_ns)))
+
+
+def confirmation_window_for_cadence(
+        configured_window_ns: int,
+        observed_intervals_ns: Iterable[int],
+        cadence_factor: float = 2.5) -> int:
+    """Keep temporal confirmation possible at the observed message cadence.
+
+    The configured window remains the lower bound.  When map/keyframe message
+    stamps arrive more slowly than that bound, allow two distinct observations
+    plus normal timing jitter by scaling the robust median interval.  This is
+    deliberately based on observed message-clock cadence, not on a reduced
+    confirmation count or a relaxed descriptor/geometry gate.
+    """
+    configured = max(1, int(configured_window_ns))
+    intervals = sorted(
+        int(value) for value in observed_intervals_ns if int(value) > 0)
+    if not intervals:
+        return configured
+    median = intervals[len(intervals) // 2]
+    return max(configured, int(math.ceil(float(median) * float(cadence_factor))))
+
+
+def temporal_support_count(
+        anchor_pair: tuple[str, str], anchor_own_stamp_ns: int,
+        anchor_peer_stamp_ns: int, anchor_sector_shift: int, observations,
+        similarity_gate: float, margin_gate: float,
+        known_fraction_gate: float, window_ns: int, sector_count: int = 24) -> int:
+    """Count independent keyframe-pair observations for one cheap candidate.
+
+    ``observations`` contains tuples of ``(pair, own_stamp_ns,
+    peer_stamp_ns, similarity, margin, known_fraction, sector_shift)``.  A
+    repeated evaluation of the same pair contributes once; only a distinct
+    own/peer keyframe pair inside the message-clock window and with a nearby
+    angular shift contributes additional evidence.
+    """
+    support = set()
+    anchor_pair = tuple(anchor_pair)
+    for (pair, own_stamp_ns, peer_stamp_ns, similarity, margin,
+         known_fraction, sector_shift) in observations:
+        pair = tuple(pair)
+        if pair == anchor_pair:
+            support.add(pair)
+            continue
+        if (similarity < similarity_gate or margin < margin_gate or
+                known_fraction < known_fraction_gate):
+            continue
+        if (abs(int(own_stamp_ns) - int(anchor_own_stamp_ns)) > window_ns or
+                abs(int(peer_stamp_ns) - int(anchor_peer_stamp_ns)) > window_ns):
+            continue
+        shift_delta = abs(int(sector_shift) - int(anchor_sector_shift))
+        shift_delta = min(shift_delta, sector_count - shift_delta)
+        if shift_delta <= 2:
+            support.add(pair)
+    return len(support)

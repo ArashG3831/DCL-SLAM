@@ -194,6 +194,36 @@ def test_clean_finalization_closes_files_after_internal_error(observer):
     assert summary["system"]["internal_logger_error_count"] == 1
 
 
+def test_finalization_writes_explicit_complete_artifact_contract(observer):
+    assert observer.finalize(True)
+    status = read_json(observer.directory / "artifact_finalization.json")
+    assert status["complete"] is True
+    assert status["missing"] == []
+    assert read_json(observer.directory / "summary.json")[
+        "artifact_finalization"]["complete"] is True
+
+
+def test_missing_forensic_artifact_fails_closed(observer):
+    class FakeForensic:
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+        def manifest(self):
+            return {"files": []}
+
+    observer.forensic = FakeForensic()
+    observer.forensic_snapshot = lambda force=False: None
+    assert observer.finalize(True) is False
+    status = read_json(observer.directory / "artifact_finalization.json")
+    assert status["complete"] is False
+    assert "forensic/transforms.csv" in status["missing"]
+    assert read_json(observer.directory / "mission_result.json")[
+        "artifact_finalization"]["complete"] is False
+
+
 def test_large_occupancy_grid_is_converted_and_counted_once(observer):
     message = OccupancyGrid()
     message.info.width = 320

@@ -85,6 +85,12 @@ class CooperativeExperimentLogger(Node):
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
+        self._artifact_finalization = {
+            'complete': False,
+            'status': 'NOT_FINALIZED',
+            'required': [],
+            'missing': [],
+        }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
         self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
         # Protocol counters deliberately separate replicated publications from
@@ -180,7 +186,9 @@ class CooperativeExperimentLogger(Node):
                    'my_epuck_project.cooperative_ground_truth_observer',
                    '--output', str(output), '--robot-def', 'robot1',
                    '--robot-def', 'robot2', '--sample-period-s', '0.10',
-                   '--ready-file', str(ready_file)]
+                   '--ready-file', str(ready_file),
+                   '--controller-url', environment['WEBOTS_CONTROLLER_URL'],
+                   '--runtime-directory', str(forensic_dir / 'runtime')]
         if self.contact_capture:
             command.extend([
                 '--contact-output', str(contact_output),
@@ -753,6 +761,26 @@ class CooperativeExperimentLogger(Node):
                 self.events.flush()
                 for f in self.files:f.flush()
         except OSError as e:self.write_failures+=1; self.get_logger().error(f'flush failed: {e}',throttle_duration_sec=10.)
+        if self.forensic is not None:
+            try:self.forensic.flush()
+            except OSError as e:self.write_failures+=1; self.get_logger().error(f'forensic flush failed: {e}',throttle_duration_sec=10.)
+
+    def required_artifact_status(self, include_campaign_files=True):
+        """Return the fail-closed artifact contract for this validation."""
+        required=[]
+        if include_campaign_files:
+            required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
+        if self.forensic is not None:
+            required.extend([
+                self.directory/'forensic'/'transforms.csv',
+                self.directory/'forensic'/'supervisor_ground_truth.csv',
+                self.directory/'forensic'/'maps'/'robot1_map_final.npz',
+                self.directory/'forensic'/'maps'/'robot1_shared_map_final.npz',
+                self.directory/'forensic'/'maps'/'robot2_map_final.npz',
+                self.directory/'forensic'/'maps'/'robot2_shared_map_final.npz',
+            ])
+        missing=[str(path.relative_to(self.directory)) for path in required if not path.is_file()]
+        return {'complete':not missing,'status':'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS','required':[str(path.relative_to(self.directory)) for path in required],'missing':missing}
     def git_value(self,args,default):
         try:return subprocess.check_output(['git',*args],cwd='/home/arash/webots_ws',text=True,stderr=subprocess.DEVNULL).strip()
         except Exception:return default
@@ -798,6 +826,7 @@ class CooperativeExperimentLogger(Node):
                 'world_sha256': self.p['world_sha256'],
             },
             'clean_shutdown':clean,'shutdown_status':status,
+            'artifact_finalization':self._artifact_finalization,
         }
         atomic_json(self.directory/'run_manifest.json',value)
     def summary(self,clean):
@@ -809,14 +838,17 @@ class CooperativeExperimentLogger(Node):
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
         total_distance=sum(motion.get('distance_travelled_m',{}).values()); coverage_gain=(self.previous_known or 0)-(self.initial_known or 0)
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)}}
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}
 
     def write_mission_result(self, clean):
         """Write one compact process-facing terminal result beside summary.json."""
         reason = self.mission_terminal_reason
-        if reason.startswith('MISSION_COMPLETE_'):
+        if reason.startswith('MISSION_COMPLETE_') and self._artifact_finalization.get('complete',False):
             status = 'SUCCEEDED'
             exit_code = 0
+        elif reason.startswith('MISSION_COMPLETE_'):
+            status = 'FAILED'
+            exit_code = 1
         elif reason.startswith('MISSION_ABORT_'):
             status = 'FAILED'
             exit_code = 1
@@ -887,6 +919,7 @@ class CooperativeExperimentLogger(Node):
             'terminal_time_s': self.mission_completion_time,
             'shutdown_clean': bool(clean),
             'recommended_exit_code': exit_code,
+            'artifact_finalization': self._artifact_finalization,
         })
     def finalize(self,clean=True):
         with self._lifecycle_lock:
@@ -902,15 +935,30 @@ class CooperativeExperimentLogger(Node):
                 self.forensic_snapshot(force=True)
             self.stop_forensic_ground_truth()
             if self.forensic is not None:
+                # Evidence streams must be closed before their manifest is
+                # committed and before launch shutdown can terminate us.
+                self.forensic.close()
                 atomic_json(self.directory / 'forensic' / 'manifest.json',
                             self.forensic.manifest())
         self.flush()
         successful=False
         try:
+            self._artifact_finalization=self.required_artifact_status(False)
+            clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]
             with open(self.directory/'warnings.jsonl','w',encoding='utf-8') as f:
                 for record in warning_records:f.write(json.dumps(finite(record),allow_nan=False)+'\n')
-            atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_mission_result(clean); self.write_manifest(clean,'clean' if clean else 'interrupted'); successful=True
+            atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_mission_result(clean)
+            self.write_manifest(clean,'clean' if clean else 'interrupted')
+            self._artifact_finalization=self.required_artifact_status(True)
+            clean=bool(clean and self._artifact_finalization['complete'])
+            # Re-emit the three campaign contracts with the final status, so a
+            # missing artifact cannot be mistaken for a successful run.
+            atomic_json(self.directory/'summary.json',self.summary(clean))
+            self.write_mission_result(clean)
+            atomic_json(self.directory/'artifact_finalization.json',self._artifact_finalization)
+            self.write_manifest(clean,'clean' if clean else 'finalization_failed')
+            successful=self._artifact_finalization['complete']
         except Exception as exc:
             self.write_failures+=1
             if self.context.ok():

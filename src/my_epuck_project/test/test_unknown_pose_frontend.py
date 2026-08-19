@@ -1,19 +1,30 @@
 """Deterministic tests for descriptor-first unknown-pose discovery."""
 
+import json
 import math
+from types import SimpleNamespace
 
 import numpy as np
 
 from my_epuck_project.unknown_pose_frontend_core import (
+    DedicatedDiagnosticJsonl,
     GridCrop,
+    accumulate_physical_candidates,
     compare_descriptors,
+    crop_batch_is_ready,
+    deduplicate_physical_candidates,
     crop_grid,
     descriptor_checksum,
+    evidence_pairs_for_selection,
+    evidence_candidates_for_pool,
+    evidence_batch_is_spatially_diverse,
     hypothesis_is_acceptable,
     polar_descriptor,
     register_crops,
     rigidify_affine,
     should_accept_hypothesis,
+    confirmation_window_for_cadence,
+    temporal_support_count,
     temporal_consistency,
 )
 
@@ -108,12 +119,323 @@ def test_temporal_consistency_rejects_single_weak_or_distant_evidence():
     assert temporal_consistency([1, 10_000_000_001]) == 0.0
 
 
+def test_temporal_confirmation_adapts_to_observed_message_cadence():
+    configured = 8_000_000_000
+    observed = [11_600_000_000, 11_900_000_000, 12_100_000_000]
+    assert confirmation_window_for_cadence(configured, observed) == 29_750_000_000
+
+
+def test_temporal_confirmation_counts_distinct_pairs_not_repeated_computation():
+    observations = [
+        (('peer-1', 'own-1'), 100_000_000_000, 200_000_000_000,
+         0.90, 0.05, 0.50, 4),
+        (('peer-1', 'own-1'), 100_000_000_000, 200_000_000_000,
+         0.90, 0.05, 0.50, 4),
+        (('peer-2', 'own-2'), 112_000_000_000, 212_000_000_000,
+         0.88, 0.04, 0.50, 5),
+    ]
+    assert temporal_support_count(
+        ('peer-1', 'own-1'), 100_000_000_000, 200_000_000_000, 4,
+        observations, 0.72, 0.005, 0.12, 30_000_000_000) == 2
+
+
+def test_temporal_confirmation_rejects_unstable_or_distant_observations():
+    observations = [
+        (('peer-1', 'own-1'), 100_000_000_000, 200_000_000_000,
+         0.90, 0.05, 0.50, 4),
+        (('peer-2', 'own-2'), 150_000_000_000, 250_000_000_000,
+         0.88, 0.04, 0.50, 15),
+        (('peer-3', 'own-3'), 112_000_000_000, 212_000_000_000,
+         0.71, 0.05, 0.50, 4),
+    ]
+    assert temporal_support_count(
+        ('peer-1', 'own-1'), 100_000_000_000, 200_000_000_000, 4,
+        observations, 0.72, 0.005, 0.12, 30_000_000_000) == 1
+
+
 def test_crop_is_bounded_and_preserves_unknown_cells():
     values = np.full((400, 400), -1, dtype=np.int16)
     values[180:220, 180:220] = 100
     crop = crop_grid(values, 0.05, -10.0, -10.0, size_m=8.0)
     assert crop.values.shape == (160, 160)
     assert np.count_nonzero(crop.values == -1) > 0
+
+
+def test_crop_exchange_does_not_start_from_partial_spatial_batch():
+    assert not crop_batch_is_ready(1, 3)
+    assert not crop_batch_is_ready(2, 3)
+    assert crop_batch_is_ready(3, 3)
+
+
+def test_crop_exchange_batch_gate_keeps_registration_requirement_unchanged():
+    assert not crop_batch_is_ready(2, 3)
+    assert crop_batch_is_ready(3, 3)
+
+
+def descriptor(key, origin_x, origin_y, epoch=7, checksum=1234):
+    return SimpleNamespace(
+        keyframe_id=key, map_epoch=epoch, checksum=checksum,
+        resolution=0.05, crop_width=20, crop_height=20,
+        crop_origin_x=origin_x, crop_origin_y=origin_y)
+
+
+def candidate(peer, own, peer_descriptor, own_descriptor):
+    return (peer, own, peer_descriptor, own_descriptor)
+
+
+def test_physical_duplicate_descriptors_with_different_ids_count_once():
+    own_crops = {
+        'own-a': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+        'own-b': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+    }
+    own_a = descriptor('own-a', 0.0, 0.0)
+    own_b = descriptor('own-b', 0.0, 0.0)
+    peer_a = descriptor('peer-a', 2.0, 0.0)
+    peer_b = descriptor('peer-b', 2.0, 0.0)
+    candidates = [
+        candidate('peer-a', 'own-a', peer_a, own_a),
+        candidate('peer-b', 'own-b', peer_b, own_b),
+    ]
+    assert len(deduplicate_physical_candidates(candidates, own_crops)) == 1
+
+
+def test_physical_candidate_identity_accepts_runtime_scored_tuple_shape():
+    own_crops = {
+        'own': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0)}
+    own = descriptor('own', 0.0, 0.0)
+    peer = descriptor('peer', 2.0, 0.0)
+    scored = [(-0.9, 'peer', 'own', peer, own)]
+    assert len(deduplicate_physical_candidates(scored, own_crops)) == 1
+
+
+def test_streamed_candidate_accumulation_keeps_one_candidate_pending():
+    own_crops = {
+        'own-1': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0)}
+    pool = {}
+    added, duplicates = accumulate_physical_candidates(
+        pool, [candidate('peer-1', 'own-1', descriptor('peer-1', 3.0, 0.0),
+                          descriptor('own-1', 0.0, 0.0))], own_crops)
+    assert len(added) == 1
+    assert not duplicates
+    assert len(pool) == 1
+
+
+def test_streamed_candidate_accumulation_keeps_two_candidates_pending():
+    own_crops = {
+        f'own-{i}': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             float(i), 0.0) for i in (1, 2)}
+    pool = {}
+    for i in (1, 2):
+        added, duplicates = accumulate_physical_candidates(
+            pool, [candidate(
+                f'peer-{i}', f'own-{i}', descriptor(f'peer-{i}', 3.0 + i, 0.0,
+                                                     checksum=1000 + i),
+                descriptor(f'own-{i}', float(i), 0.0, checksum=2000 + i))],
+            own_crops)
+        assert len(added) == 1
+        assert not duplicates
+    assert len(pool) == 2
+
+
+def test_streamed_accumulation_forms_three_distinct_candidates():
+    own_crops = {
+        f'own-{i}': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             float(i), 0.0) for i in (0, 1, 2)}
+    pool = {}
+    for i in (0, 1, 2):
+        accumulate_physical_candidates(
+            pool, [candidate(
+                f'peer-{i}', f'own-{i}', descriptor(f'peer-{i}', 3.0 + i, 0.0,
+                                                     checksum=3000 + i),
+                descriptor(f'own-{i}', float(i), 0.0, checksum=4000 + i))],
+            own_crops)
+    assert len(pool) == 3
+    assert evidence_batch_is_spatially_diverse(
+        [own_crops[f'own-{i}'] for i in (0, 1, 2)], 0.75)
+
+
+def test_duplicate_ids_and_different_ids_with_same_physical_crop_count_once():
+    own_crops = {
+        'own-a': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+        'own-b': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+    }
+    pool = {}
+    first = candidate('peer-a', 'own-a', descriptor('peer-a', 3.0, 0.0),
+                      descriptor('own-a', 0.0, 0.0))
+    duplicate = candidate('peer-b', 'own-b', descriptor('peer-b', 3.0, 0.0),
+                          descriptor('own-b', 0.0, 0.0))
+    added, duplicates = accumulate_physical_candidates(
+        pool, [first], own_crops)
+    assert len(added) == 1 and not duplicates
+    added, duplicates = accumulate_physical_candidates(
+        pool, [duplicate], own_crops)
+    assert not added and len(duplicates) == 1
+    assert len(pool) == 1
+
+
+def test_later_fourth_candidate_completes_initially_insufficient_batch():
+    own_crops = {
+        f'own-{i}': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             float(i), 0.0) for i in (0, 1, 2, 3)}
+    pool = {}
+    for i in (0, 1):
+        accumulate_physical_candidates(
+            pool, [candidate(
+                f'peer-{i}', f'own-{i}', descriptor(f'peer-{i}', 4.0 + i, 0.0,
+                                                     checksum=5000 + i),
+                descriptor(f'own-{i}', float(i), 0.0, checksum=6000 + i))],
+            own_crops)
+    assert len(pool) == 2
+    accumulate_physical_candidates(
+        pool, [candidate('peer-2', 'own-2', descriptor('peer-2', 6.0, 0.0,
+                                                        checksum=5002),
+                          descriptor('own-2', 2.0, 0.0, checksum=6002))],
+        own_crops)
+    assert len(pool) == 3
+    accumulate_physical_candidates(
+        pool, [candidate('peer-3', 'own-3', descriptor('peer-3', 7.0, 0.0,
+                                                        checksum=5003),
+                          descriptor('own-3', 3.0, 0.0, checksum=6003))],
+        own_crops)
+    assert len(pool) == 4
+    assert evidence_batch_is_spatially_diverse(
+        [own_crops[f'own-{i}'] for i in (0, 1, 2, 3)], 0.75)
+
+
+def test_streamed_accumulation_rejects_batch_without_075m_baseline():
+    crops = [GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, x, 0.0)
+             for x in (0.0, 0.2, 0.4)]
+    assert not evidence_batch_is_spatially_diverse(crops, 0.75)
+
+
+def test_three_spatially_distinct_physical_crops_form_a_valid_batch():
+    own_crops = {}
+    candidates = []
+    for index, x in enumerate((0.0, 1.0, 2.0)):
+        own_key, peer_key = f'own-{index}', f'peer-{index}'
+        own_crops[own_key] = GridCrop(
+            np.zeros((20, 20), dtype=np.int16), 0.05, x, 0.0)
+        own = descriptor(own_key, x, 0.0)
+        peer = descriptor(peer_key, x + 3.0, 0.0, checksum=2000 + index)
+        candidates.append(candidate(peer_key, own_key, peer, own))
+    selected = deduplicate_physical_candidates(candidates, own_crops)
+    assert len(selected) == 3
+    assert evidence_batch_is_spatially_diverse(
+        [own_crops[item[1]] for item in selected], 0.75)
+
+
+def test_duplicate_initial_batch_waits_for_later_distinct_candidate():
+    own_crops = {
+        'own-1': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+        'own-2': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+        'own-3': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 1.0, 0.0),
+        'own-4': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 2.0, 0.0),
+    }
+    shared_peer_a = descriptor('peer-1', 3.0, 0.0)
+    shared_peer_b = descriptor('peer-2', 3.0, 0.0)
+    initial = [
+        candidate('peer-1', 'own-1', shared_peer_a,
+                  descriptor('own-1', 0.0, 0.0)),
+        candidate('peer-2', 'own-2', shared_peer_b,
+                  descriptor('own-2', 0.0, 0.0)),
+        candidate('peer-3', 'own-3', descriptor('peer-3', 4.0, 0.0,
+                                                checksum=3003),
+                  descriptor('own-3', 1.0, 0.0)),
+    ]
+    assert len(deduplicate_physical_candidates(initial, own_crops)) == 2
+    later = initial + [
+        candidate('peer-4', 'own-4', descriptor('peer-4', 5.0, 0.0,
+                                                checksum=3004),
+                  descriptor('own-4', 2.0, 0.0)),
+    ]
+    selected = deduplicate_physical_candidates(later, own_crops)
+    assert len(selected) == 3
+    assert evidence_batch_is_spatially_diverse(
+        [own_crops[item[1]] for item in selected], 0.75)
+
+
+def test_no_spatially_diverse_evidence_batch_remains_pending():
+    crops = [GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, x, 0.0)
+             for x in (0.0, 0.2, 0.4)]
+    assert not evidence_batch_is_spatially_diverse(crops, 0.75)
+
+
+def test_three_crop_evidence_uses_hashable_pair_keys_before_registration():
+    class UnhashableDescriptor:
+        __hash__ = None
+    active_candidate_pairs = []
+    evidence_pairs = {}
+    for index in range(3):
+        peer_key = f'peer-{index}'
+        own_key = f'own-{index}'
+        peer_descriptor = UnhashableDescriptor()
+        own_descriptor = UnhashableDescriptor()
+        active_candidate_pairs.append(
+            (peer_key, own_key, peer_descriptor, own_descriptor))
+        evidence_pairs[(own_key, peer_key)] = (
+            f'source-crop-{index}', f'target-crop-{index}')
+    selected_crops = evidence_pairs_for_selection(
+        active_candidate_pairs, evidence_pairs)
+    registration_stage = lambda pairs: len(pairs)
+
+    assert registration_stage(selected_crops) == 3
+    assert selected_crops == [
+        ('source-crop-0', 'target-crop-0'),
+        ('source-crop-1', 'target-crop-1'),
+        ('source-crop-2', 'target-crop-2'),
+    ]
+    assert all(isinstance(key, tuple) and len(key) == 2
+               for key in evidence_pairs)
+
+
+def test_pooled_evidence_reconsiders_prior_pairs_without_descriptor_keys():
+    class UnhashableDescriptor:
+        __hash__ = None
+
+    pool = [
+        ('peer-1', 'own-1', UnhashableDescriptor(), UnhashableDescriptor()),
+        (-0.9, 'peer-2', 'own-2', UnhashableDescriptor(),
+         UnhashableDescriptor()),
+        ('peer-3', 'own-3', UnhashableDescriptor(), UnhashableDescriptor()),
+    ]
+    evidence_pairs = {
+        ('own-1', 'peer-1'): ('source-1', 'target-1'),
+        ('own-2', 'peer-2'): ('source-2', 'target-2'),
+        ('own-3', 'peer-3'): ('source-3', 'target-3'),
+    }
+
+    resolved = evidence_candidates_for_pool(pool, evidence_pairs)
+
+    assert [(candidate[1], candidate[0]) for candidate in resolved] == [
+        ('own-1', 'peer-1'), ('own-2', 'peer-2'), ('own-3', 'peer-3')]
+    assert [evidence_pairs[(candidate[1], candidate[0])]
+            for candidate in resolved] == [
+                ('source-1', 'target-1'),
+                ('source-2', 'target-2'),
+                ('source-3', 'target-3')]
+
+
+def test_consensus_diagnostic_stream_survives_unrelated_protocol_traffic(tmp_path):
+    path = tmp_path / 'robot1_consensus_diagnostics.jsonl'
+    stream = DedicatedDiagnosticJsonl(path, max_records=8)
+    unrelated_protocol_events = []
+    for index in range(2000):
+        if len(unrelated_protocol_events) < 512:
+            unrelated_protocol_events.append({'event': 'TIMER_TICK',
+                                              'index': index})
+    stream.write({'record_type': 'CONSENSUS_CONSTRAINT_DIAGNOSTIC',
+                  'index': 0, 'transform': [1.0, 2.0, 0.1]})
+    stream.write({'record_type': 'CONSENSUS_SUBSET_COMPARISON',
+                  'indices': [0, 1, 2],
+                  'rejection_reasons': ['PAIRWISE_TRANSFORM_INCONSISTENT']})
+    stream.close()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [record['record_type'] for record in records] == [
+        'CONSENSUS_CONSTRAINT_DIAGNOSTIC',
+        'CONSENSUS_SUBSET_COMPARISON']
+    assert stream.records_written == 2
+    assert stream.dropped_records == 0
+    assert len(unrelated_protocol_events) == 512
 
 
 def test_only_mutually_accepted_hypothesis_reaches_existing_merger_boundary():

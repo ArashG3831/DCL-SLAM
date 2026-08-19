@@ -16,3 +16,16 @@ float32 final_confidence
 string status
 string rejection_reason
 bool accepted
+string evidence_set_hash
+string[] evidence_source_keyframe_ids
+string[] evidence_target_keyframe_ids
+uint32 constraint_count
+uint32 consistent_constraint_count
+float32 spatial_baseline_m
+float32 angular_spread_rad
+float32 median_registration_residual_m
+float32 p95_registration_residual_m
+float32 projected_error_m
+float32 translation_uncertainty_m
+float32 yaw_uncertainty_rad
+float32 condition_number

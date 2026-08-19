@@ -71,7 +71,33 @@ def main(argv=None):
     parser.add_argument('--connect-attempts', type=int, default=240)
     parser.add_argument('--contact-output', default='')
     parser.add_argument('--contact-sampling-period-ms', type=int, default=20)
+    parser.add_argument(
+        '--max-runtime-s', type=float, default=0.0,
+        help='Optional wall-time bound for clean observer finalization.')
+    parser.add_argument(
+        '--controller-url', default='',
+        help='Explicit Webots controller URL; avoids legacy /tmp discovery.')
+    parser.add_argument(
+        '--runtime-directory', default='',
+        help='Fresh campaign-owned directory for observer runtime metadata.')
     args = parser.parse_args(argv)
+    if args.runtime_directory:
+        runtime_directory = os.path.abspath(args.runtime_directory)
+        os.makedirs(runtime_directory, mode=0o700, exist_ok=True)
+        if not os.access(runtime_directory, os.W_OK | os.X_OK):
+            print(
+                f'OBSERVER_RUNTIME_DIRECTORY_NOT_WRITABLE {runtime_directory}',
+                file=sys.stderr)
+            return 2
+    if args.controller_url:
+        os.environ['WEBOTS_CONTROLLER_URL'] = args.controller_url
+    controller_url = os.environ.get('WEBOTS_CONTROLLER_URL', '')
+    if '://' not in controller_url:
+        print(
+            'OBSERVER_CONTROLLER_URL_REQUIRED '
+            'WEBOTS_CONTROLLER_URL must be an explicit tcp:// or ipc:// URL',
+            file=sys.stderr)
+        return 2
     try:
         from controller import Supervisor
     except Exception as exc:
@@ -143,11 +169,16 @@ def main(argv=None):
         max(args.sample_period_s, timestep / 1000.0) /
         (timestep / 1000.0))))
     row_number = 0
+    observer_start_wall = time.monotonic()
     with open(output, 'w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         stream.flush()
-        while not stop['value'] and supervisor.step(timestep) != -1:
+        while (not stop['value']
+               and (args.max_runtime_s <= 0.0
+                    or time.monotonic() - observer_start_wall
+                    < args.max_runtime_s)
+               and supervisor.step(timestep) != -1):
             row_number += 1
             if row_number % sample_steps:
                 continue

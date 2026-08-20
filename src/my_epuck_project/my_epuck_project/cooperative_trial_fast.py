@@ -62,6 +62,12 @@ GRAPH_SUFFIXES = (
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
+LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
+    '/robot1/local_distributed_frontier_assignment',
+    '/robot2/local_distributed_frontier_assignment',
+    '/robot1/unknown_pose_frontend',
+    '/robot2/unknown_pose_frontend',
+)
 SHUTDOWN_GRACE_S = 20.0
 SHUTDOWN_TERM_S = 10.0
 
@@ -358,7 +364,15 @@ class ReadyProbe(Node):
 
     def cooperation_graph_ready(self) -> bool:
         names = self.node_names()
-        return all(item in names for item in GRAPH_SUFFIXES)
+        # Unknown-pose campaigns intentionally do not instantiate shared
+        # fusion/assignment before the first canonical handoff.  Readiness
+        # must therefore accept the complete local pre-handoff graph while
+        # preserving the historical shared graph contract for known-pose
+        # launches.
+        return (
+            all(item in names for item in GRAPH_SUFFIXES) or
+            all(item in names for item in LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES)
+        )
 
     def spin_once(self, timeout_sec: float):
         if self.executor is not None:

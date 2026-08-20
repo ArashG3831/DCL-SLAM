@@ -3,6 +3,7 @@ import inspect
 
 from my_epuck_project.cooperative_trial_fast import (
     GRAPH_SUFFIXES,
+    LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES,
     LAUNCH_FILE,
     LOCAL_NAV2_NODES,
     ReadyProbe,
@@ -33,6 +34,13 @@ def test_fast_runner_does_not_hard_code_original_dirty_workspace():
               'cooperative_trial_fast.py').read_text()
     assert "MY_EPUCK_WORKSPACE" in source
     assert "Path('/home/arash/webots_ws')" not in source
+
+
+def test_unknown_pose_readiness_accepts_local_graph_before_handoff():
+    source = (Path(__file__).resolve().parents[1] / 'my_epuck_project' /
+              'cooperative_trial_fast.py').read_text()
+    assert "LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES" in source
+    assert "all(item in names for item in LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES)" in source
 
 
 def test_boolean_parser():

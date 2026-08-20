@@ -251,6 +251,13 @@ class UnknownPoseFrontend(Node):
         # under a later map revision when its geometry is unchanged.
         self.rejected_physical_geometry_keys = set()
         self._diagnosed_physical_candidates = set()
+        # Repeated observations of an already-pending physical candidate are
+        # represented by the counter below.  Persisting one diagnostic record
+        # per repetition can dominate the single-threaded executor and delay
+        # the actual crop/registration callbacks; the estimator state itself
+        # remains unchanged and every request/result/rejection is still
+        # recorded.
+        self._diagnosed_duplicate_physical_candidates = set()
         self.received_peer_crops = {}
         self.batch_proposal_published = False
         self.pending_target_proposal = False
@@ -818,9 +825,13 @@ class UnknownPoseFrontend(Node):
                     candidate, status='PENDING', compact=True))
         for identity, candidate in duplicates:
             self.counters['physical_candidate_duplicates_suppressed'] += 1
+            if identity in self._diagnosed_duplicate_physical_candidates:
+                continue
+            self._diagnosed_duplicate_physical_candidates.add(identity)
             self._write_physical_evidence_diagnostic(
                 'PENDING_CANDIDATE_DUPLICATE_SUPPRESSED',
-                identity=list(identity), candidate=self._candidate_diagnostic(
+                identity=list(identity), duplicate_record='first_observation',
+                candidate=self._candidate_diagnostic(
                     candidate, status='DUPLICATE',
                     reason='IDENTICAL_PHYSICAL_EVIDENCE', compact=True))
         for identity, candidate in list(self.pending_candidate_pairs.items()):

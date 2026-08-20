@@ -202,6 +202,8 @@ def launch_setup(context):
                         f'/cslam/unknown_pose/{robot}/local_map'),
                     'shared_frame': 'shared_map',
                     'diagnostic_output': diagnostic_output,
+                    'max_verification_batches': LaunchConfiguration(
+                        'max_verification_batches'),
                 }],
             ))
             frontend_watchdogs.append(RegisterEventHandler(
@@ -485,6 +487,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('unknown_pose_diagnostic_output',
                               default_value=''),
+        DeclareLaunchArgument('max_verification_batches', default_value='12'),
         DeclareLaunchArgument('assignment_strategy', default_value='burgard',
                               choices=['burgard', 'legacy_weighted']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),

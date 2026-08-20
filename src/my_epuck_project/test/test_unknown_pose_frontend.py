@@ -142,6 +142,27 @@ def test_batch_reentry_never_changes_three_constraint_consensus_gate():
         budget=8, max_batches=4).max_batches == 4
 
 
+def test_full_exploration_uses_more_than_four_finite_reentry_batches():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'launch' / 'two_robots_decentralized_exploration_launch.py').read_text()
+    wrapper = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'launch' / 'two_robots_unknown_pose_exploration_launch.py').read_text()
+    assert "DeclareLaunchArgument('max_verification_batches', default_value='12')" in source
+    assert "_arg('max_verification_batches', '12')" in wrapper
+    assert 'max_verification_batches' in source
+
+
+def test_duplicate_physical_evidence_diagnostics_are_coalesced_not_state():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert '_diagnosed_duplicate_physical_candidates' in source
+    assert "'physical_candidate_duplicates_suppressed'" in source
+    assert "duplicate_record='first_observation'" in source
+
+
 def test_campaign_pattern_reopens_once_after_late_overlap_without_retrying_old_pairs():
     """Model the 17 m run: exhausted early evidence must wait for novelty."""
     gate = BoundedVerificationBatchController(

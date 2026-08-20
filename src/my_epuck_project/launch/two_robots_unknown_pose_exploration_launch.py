@@ -56,6 +56,8 @@ def generate_launch_description():
             'unknown_initial_pose': 'true',
             'unknown_pose_diagnostic_output': LaunchConfiguration(
                 'unknown_pose_diagnostic_output'),
+            'max_verification_batches': LaunchConfiguration(
+                'max_verification_batches'),
             'assignment_strategy': 'burgard',
             'burgard_beta': '1.0',
             'traffic_scheduler_enabled': 'false',
@@ -99,6 +101,7 @@ def generate_launch_description():
         _arg('diagnostic_mode', 'false', ['true', 'false']),
         _arg('diagnostic_frontier_capture', 'false', ['true', 'false']),
         _arg('unknown_pose_diagnostic_output', ''),
+        _arg('max_verification_batches', '12'),
         _arg('enable_observer', 'true', ['true', 'false']),
         _arg('run_id', ''),
         _arg('output_root', '/home/arash/webots_ws/results'),

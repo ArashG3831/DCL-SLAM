@@ -527,11 +527,14 @@ def run(args: argparse.Namespace) -> int:
 
         phase_start = time.monotonic()
         # Nav2's lifecycle managers can be present before all controller and
-        # costmap services have finished initializing.  Give this final gate
-        # its own bounded service deadline instead of consuming the residual
-        # startup budget left by Webots loading.
-        nav2_deadline = phase_start + 60.0
-        print('nav2_ready_waiting timeout_s=60.0', flush=True)
+        # costmap services have finished initializing.  Keep this final gate
+        # inside the same bounded startup contract, rather than imposing a
+        # shorter fixed deadline that can expire while the second namespaced
+        # manager is still bringing up its nodes.
+        nav2_deadline = readiness_deadline
+        print(
+            'nav2_ready_waiting timeout_s=%.1f' % max(
+                0.0, nav2_deadline - phase_start), flush=True)
         nav2_details = probe.activate_and_check_nav2(nav2_deadline)
         phases['nav2_ready'] = time.monotonic() - phase_start
         print(f'nav2_ready_s={phases["nav2_ready"]:.3f}', flush=True)

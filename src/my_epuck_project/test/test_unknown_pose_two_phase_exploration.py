@@ -116,6 +116,30 @@ def test_prefixed_local_nav2_nodes_receive_frozen_rpp_parameters():
     assert 'controller_server' not in document
 
 
+def test_prefixed_local_nav2_rewrites_local_map_frame_and_topic():
+    module = _load_nav_launch()
+    source = ROOT / 'resource' / 'nav2_robot1_shared_map.yaml'
+    generated = module._diagnostic_params(
+        str(source), 'robot1', 'rpp', node_prefix='local_')
+    try:
+        document = yaml.safe_load(Path(generated).read_text(encoding='utf-8'))
+    finally:
+        Path(generated).unlink(missing_ok=True)
+    assert document['local_bt_navigator']['ros__parameters']['global_frame'] == (
+        'shared_map')
+    # The launch-level RewrittenYaml supplies the phase-specific local frame;
+    # this assertion guards that the prefixed node key is the one rewritten.
+    launch_text = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
+    assert "f'{parameter_node(\"bt_navigator\")}.ros__parameters.global_frame'" in launch_text
+    assert "'global_costmap.global_costmap.ros__parameters.static_layer.map_topic'" in launch_text
+
+
+def test_fast_runner_uses_remaining_startup_deadline_for_nav2():
+    runner = (PY / 'cooperative_trial_fast.py').read_text()
+    assert 'nav2_deadline = readiness_deadline' in runner
+    assert 'phase_start + 60.0' not in runner
+
+
 def test_artifact_observer_remains_in_full_launch():
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
     assert "executable='cooperative_experiment_logger'" in full

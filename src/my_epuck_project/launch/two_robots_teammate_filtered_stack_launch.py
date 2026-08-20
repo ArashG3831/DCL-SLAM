@@ -143,18 +143,35 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
     )
     source = _diagnostic_params(
         source, robot, controller_variant, node_prefix=node_prefix)
+    parameter_node = lambda name: node_prefix + name if node_prefix else name
     diagnostic_rewrites = {
-        'controller_server.ros__parameters.FollowPath.publish_evaluation':
+        f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_evaluation':
             LaunchConfiguration('diagnostic_mode'),
-        'controller_server.ros__parameters.FollowPath.publish_local_plan':
+        f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_local_plan':
             LaunchConfiguration('diagnostic_mode'),
-        'controller_server.ros__parameters.FollowPath.publish_global_plan':
+        f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_global_plan':
             LaunchConfiguration('diagnostic_mode'),
-        'controller_server.ros__parameters.FollowPath.publish_transformed_global_plan':
+        f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_transformed_global_plan':
             LaunchConfiguration('diagnostic_mode'),
-        'controller_server.ros__parameters.FollowPath.publish_cost_grid_pc':
+        f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_cost_grid_pc':
             LaunchConfiguration('diagnostic_mode'),
     } if controller_variant == 'dwb' else {}
+    parameter_rewrites = {
+        f'{parameter_node("bt_navigator")}.ros__parameters.global_frame':
+            global_frame,
+        'global_costmap.global_costmap.ros__parameters.global_frame':
+            global_frame,
+        'global_costmap.global_costmap.ros__parameters.static_layer.map_topic':
+            map_topic or f'/{robot}/shared_map',
+        f'{parameter_node("controller_server")}.ros__parameters.progress_checker.required_movement_radius':
+            '0.08' if selected['name'] == 'large' else '0.5',
+        f'{parameter_node("controller_server")}.ros__parameters.progress_checker.movement_time_allowance':
+            '18.0' if selected['name'] == 'large' else '10.0',
+        f'{parameter_node("collision_monitor")}.ros__parameters.state_topic':
+            'collision_monitor_state',
+        'use_sim_time': LaunchConfiguration('use_sim_time'),
+    }
+    parameter_rewrites.update(diagnostic_rewrites)
     parameters = ParameterFile(
         RewrittenYaml(
             source_file=source,
@@ -164,19 +181,7 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
                     str(selected['local_costmap_resolution']),
                 'global_costmap.global_costmap.ros__parameters.resolution':
                     str(selected['global_costmap_resolution']),
-                'bt_navigator.ros__parameters.global_frame': global_frame,
-                'global_costmap.global_costmap.ros__parameters.global_frame':
-                    global_frame,
-                'global_costmap.global_costmap.ros__parameters.static_layer.map_topic':
-                    map_topic or f'/{robot}/shared_map',
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'controller_server.ros__parameters.progress_checker.required_movement_radius':
-                    '0.08' if selected['name'] == 'large' else '0.5',
-                'controller_server.ros__parameters.progress_checker.movement_time_allowance':
-                    '18.0' if selected['name'] == 'large' else '10.0',
-                'collision_monitor.ros__parameters.state_topic':
-                    'collision_monitor_state',
-                **diagnostic_rewrites,
+                **parameter_rewrites,
             },
             convert_types=True,
         ),

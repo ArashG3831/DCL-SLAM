@@ -338,28 +338,24 @@ def launch_setup(context):
                         'fusion_cpu_quota_percent').perform(context) + '%'
                     if diagnostic_mode and quota_enabled else ''),
             ))
-    return [
-        filtered_slam,
-        *alignment,
-        *exchange,
-        *(
-            nav2_nodes(
+    nav2_actions = []
+    for robot in ('robot1', 'robot2'):
+        if unknown_initial_pose:
+            nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='local_', global_frame=f'{robot}/map',
-                map_topic=f'/{robot}/map', autostart=True)
-            + nav2_nodes(
+                map_topic=f'/{robot}/map', autostart=True))
+            nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='', global_frame='shared_map',
-                map_topic=f'/{robot}/shared_map', autostart=False)
-            if unknown_initial_pose else
-            nav2_nodes(
+                map_topic=f'/{robot}/shared_map', autostart=False))
+        else:
+            nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
-                LaunchConfiguration('controller_variant').perform(context))
-            for robot in ('robot1', 'robot2')
-        ),
-    ]
+                LaunchConfiguration('controller_variant').perform(context)))
+    return [filtered_slam, *alignment, *exchange, *nav2_actions]
 
 
 def generate_launch_description():

@@ -1,8 +1,11 @@
 from pathlib import Path
+import inspect
 
 from my_epuck_project.cooperative_trial_fast import (
     GRAPH_SUFFIXES,
     LAUNCH_FILE,
+    LOCAL_NAV2_NODES,
+    ReadyProbe,
     boolean,
     launch_command,
     parser,
@@ -73,3 +76,13 @@ def test_readiness_graph_is_the_cooperative_graph():
         '/robot1/map_fusion',
         '/robot2/map_fusion',
     )
+
+
+def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
+    assert LOCAL_NAV2_NODES
+    assert all(name.startswith('local_') for name in LOCAL_NAV2_NODES)
+    source = ReadyProbe.tf_ready.__code__.co_consts
+    assert 'shared_map' not in source
+    method_source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
+    assert 'LOCAL_NAV2_NODES' in method_source
+    assert 'lifecycle_manager_navigation/manage_nodes' not in method_source

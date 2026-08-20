@@ -25,7 +25,6 @@ import time
 from ament_index_python.packages import get_package_share_directory
 from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
-from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry
 import rclpy
 import psutil
@@ -54,6 +53,7 @@ NAV2_NODES = (
     'route_server', 'behavior_server', 'velocity_smoother',
     'collision_monitor', 'bt_navigator', 'waypoint_follower',
 )
+LOCAL_NAV2_NODES = tuple(f'local_{name}' for name in NAV2_NODES)
 GRAPH_SUFFIXES = (
     '/robot1/distributed_frontier_assignment',
     '/robot2/distributed_frontier_assignment',
@@ -293,7 +293,7 @@ class ReadyProbe(Node):
     def tf_ready(self) -> bool:
         for robot in ('robot1', 'robot2'):
             for target, source in (
-                    ('shared_map', f'{robot}/base_footprint'),
+                    (f'{robot}/map', f'{robot}/base_footprint'),
                     (f'{robot}/base_footprint', f'{robot}/odom')):
                 if not self.tf_buffer.can_transform(
                         target, source, Time(),
@@ -323,39 +323,41 @@ class ReadyProbe(Node):
         return future.result() if future.done() else None
 
     def activate_and_check_nav2(self, deadline: float) -> dict:
-        details = {}
+        # Unknown-pose exploration starts in local-map mode.  Its local
+        # lifecycle managers autostart; the shared managers must remain
+        # waiting until the frontend handoff.  Poll activation to the same
+        # bounded deadline because the second namespaced manager may still be
+        # bringing up its nodes when the first state query completes.
+        clients = {}
         for robot in ('robot1', 'robot2'):
-            service_name = f'/{robot}/lifecycle_manager_navigation/manage_nodes'
-            client = self.create_client(ManageLifecycleNodes, service_name)
-            while time.monotonic() < deadline and not client.wait_for_service(
-                    timeout_sec=0.2):
-                self.spin_once(0.05)
-            if not client.service_is_ready():
-                raise FastTrialError(f'Nav2 service unavailable: {service_name}')
-            request = ManageLifecycleNodes.Request()
-            request.command = ManageLifecycleNodes.Request.STARTUP
-            response = self._wait_future(client.call_async(request), deadline)
-            if response is None or not response.success:
-                raise FastTrialError(f'Nav2 startup rejected for {robot}')
-
-        for robot in ('robot1', 'robot2'):
-            active = {}
-            for node_name in NAV2_NODES:
+            for node_name in LOCAL_NAV2_NODES:
                 service_name = f'/{robot}/{node_name}/get_state'
-                client = self.create_client(GetState, service_name)
-                while time.monotonic() < deadline and not client.wait_for_service(
-                        timeout_sec=0.2):
-                    self.spin_once(0.05)
-                if not client.service_is_ready():
-                    raise FastTrialError(f'Nav2 state service unavailable: {service_name}')
-                response = self._wait_future(
-                    client.call_async(GetState.Request()), deadline)
-                state_id = response.current_state.id if response else -1
-                active[node_name] = state_id == State.PRIMARY_STATE_ACTIVE
-            details[robot] = active
-            if not all(active.values()):
-                raise FastTrialError(f'not all Nav2 nodes are active for {robot}: {active}')
-        return details
+                clients[(robot, node_name)] = self.create_client(
+                    GetState, service_name)
+        while time.monotonic() < deadline:
+            all_active = True
+            details = {}
+            for robot in ('robot1', 'robot2'):
+                active = {}
+                for node_name in LOCAL_NAV2_NODES:
+                    client = clients[(robot, node_name)]
+                    if not client.service_is_ready():
+                        client.wait_for_service(timeout_sec=0.0)
+                    if not client.service_is_ready():
+                        active[node_name] = False
+                        all_active = False
+                        continue
+                    response = self._wait_future(
+                        client.call_async(GetState.Request()), deadline)
+                    state_id = response.current_state.id if response else -1
+                    active[node_name] = state_id == State.PRIMARY_STATE_ACTIVE
+                    all_active = all_active and active[node_name]
+                details[robot] = active
+            if all_active:
+                return details
+            self.spin_once(0.1)
+        raise FastTrialError(
+            'local Nav2 activation timed out: %s' % details)
 
 
 def pump_output(stream, log_file, lock: threading.Lock):

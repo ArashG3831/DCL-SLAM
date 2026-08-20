@@ -28,6 +28,13 @@ def test_fast_parser_exposes_only_single_trial_options():
             'large_unknown_pose_16m')
 
 
+def test_fast_runner_does_not_hard_code_original_dirty_workspace():
+    source = (Path(__file__).resolve().parents[1] / 'my_epuck_project' /
+              'cooperative_trial_fast.py').read_text()
+    assert "MY_EPUCK_WORKSPACE" in source
+    assert "Path('/home/arash/webots_ws')" not in source
+
+
 def test_boolean_parser():
     assert boolean('true') is True
     assert boolean('false') is False

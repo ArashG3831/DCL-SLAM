@@ -46,7 +46,8 @@ from .cooperative_profiles import (
     PROFILE_SETTINGS, profile_for_world, profile_summary)
 
 
-WORKSPACE = Path('/home/arash/webots_ws')
+_SOURCE_WORKSPACE = Path(__file__).resolve().parents[3]
+WORKSPACE = Path(os.environ.get('MY_EPUCK_WORKSPACE', _SOURCE_WORKSPACE))
 PACKAGE = 'my_epuck_project'
 LAUNCH_FILE = 'two_robots_decentralized_exploration_launch.py'
 NAV2_NODES = (

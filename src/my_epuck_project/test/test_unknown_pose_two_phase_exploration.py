@@ -90,6 +90,10 @@ def test_shared_activation_declares_boolean_launch_parameters_with_boolean_types
     assert "('use_sim_time', True)" in activation
     assert "('use_scan_matching', False)" in activation
     assert "('do_loop_closing', False)" in activation
+    assert "('fusion_process_nice', 0)" in activation
+    assert "('fusion_cpu_quota_percent', 30)" in activation
+    assert "('fusion_rebuild_period_s', 1.0)" in activation
+    assert "('webots_port', 23000)" in activation
     assert "self._parameters[name] = str(bool(value)).lower()" in activation
     assert "Trying to set parameter 'webots_gui'" not in activation
 

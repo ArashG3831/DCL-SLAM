@@ -58,6 +58,8 @@ setup(
             'my_epuck_project.cooperative_regression:main',
             'run_cooperative_trial_fast = '
             'my_epuck_project.cooperative_trial_fast:main',
+            'run_cooperative_campaign = '
+            'my_epuck_project.cooperative_campaign_wrapper:main',
             'nav2_frontier_diagnostic = '
             'my_epuck_project.nav2_frontier_diagnostic:main',
             'export_cooperative_maps_png = '

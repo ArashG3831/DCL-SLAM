@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import my_epuck_project.unknown_pose_frontend_core as frontend_core
+from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
 from my_epuck_project.unknown_pose_frontend_core import (
     GridCrop,
     RegistrationResult,
@@ -295,6 +296,33 @@ def test_rejected_geometry_is_stable_across_map_revisions():
     revision = (0.8, 'peer-b', 'own-b', peer_b, own)
     assert physical_candidate_geometry_identity(first, crops) == \
         physical_candidate_geometry_identity(revision, crops)
+
+
+def test_active_evidence_batch_retries_when_new_candidates_arrive():
+    """A batch opened before a candidate arrives remains requestable."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_acquisition_started = True
+    frontend.batch_proposal_published = False
+    calls = []
+    frontend._request_next_candidate_verification = (
+        lambda: calls.append('request') or True)
+
+    frontend._schedule_active_evidence_request()
+
+    assert calls == ['request']
+
+
+def test_completed_evidence_batch_does_not_retry():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_acquisition_started = False
+    frontend.batch_proposal_published = False
+    calls = []
+    frontend._request_next_candidate_verification = (
+        lambda: calls.append('request') or True)
+
+    frontend._schedule_active_evidence_request()
+
+    assert calls == []
 
 
 def test_one_pair_and_repetitive_or_empty_geometry_do_not_meet_production_gate():

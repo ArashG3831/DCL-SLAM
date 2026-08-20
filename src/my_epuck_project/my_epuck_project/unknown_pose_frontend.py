@@ -922,6 +922,17 @@ class UnknownPoseFrontend(Node):
         # before its unchanged geometric quality gate has passed.
         if selected:
             self._begin_evidence_acquisition()
+            # A batch can open before the next spatially distinct candidate
+            # arrives.  Keep the active batch requestable on subsequent map /
+            # descriptor selection callbacks; otherwise the batch remains
+            # stuck in WAITING after its initial empty request attempt.
+            self._schedule_active_evidence_request()
+
+    def _schedule_active_evidence_request(self):
+        """Request newly available evidence without reopening a batch."""
+        if (self.evidence_acquisition_started and
+                not self.batch_proposal_published):
+            self._request_next_candidate_verification()
 
     @staticmethod
     def _candidate_fields(candidate):

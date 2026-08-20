@@ -39,7 +39,7 @@ def generate_launch_description():
             # This wrapper deliberately selects the committed reviewed
             # fixture.  An explicit world_path is still supported for a
             # campaign-owned staged copy of that same fixture.
-            'world_profile': 'large_unknown_pose',
+            'world_profile': LaunchConfiguration('world_profile'),
             'world_path': LaunchConfiguration('world_path'),
             'webots_port': LaunchConfiguration('webots_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
@@ -89,6 +89,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        _arg('world_profile', 'large_unknown_pose',
+             ['large_unknown_pose', 'large_unknown_pose_16m']),
         _arg('world_path', ''),
         _arg('webots_port', '23000'),
         _arg('webots_mode', 'realtime'),

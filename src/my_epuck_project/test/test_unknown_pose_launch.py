@@ -96,7 +96,8 @@ def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
     source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
     text = source.read_text(encoding='utf-8')
     assert 'two_robots_decentralized_exploration_launch.py' in text
-    assert "'world_profile': 'large_unknown_pose'" in text
+    assert "'world_profile': LaunchConfiguration('world_profile')" in text
+    assert "'large_unknown_pose_16m'" in text
     assert "'unknown_initial_pose': 'true'" in text
     assert "'ideal_encoder_sensing': 'true'" in text
     assert "'sensor_profile': 'full'" in text

@@ -18,7 +18,7 @@ from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import JointState, LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 from my_epuck_interfaces.msg import (
     DistributedExplorationEvent,
@@ -295,6 +295,9 @@ class CooperativeExperimentLogger(Node):
     def subscribe(self):
         for r in self.robots:
             self.observe(Odometry,f'/{r}/odom',lambda m,x=r:self.odom(x,m),qos_profile_sensor_data,f'{r}.odom')
+            # Passive controller-health evidence; it never gates or commands
+            # the running stack.
+            self.observe(JointState,f'/{r}/joint_states',lambda m,x=r:self.mark(x,'joint_states',m),qos_profile_sensor_data,f'{r}.joint_states')
             for s in ('scan_d500_fixed','scan_d500_slam'): self.observe(LaserScan,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),qos_profile_sensor_data,f'{r}.{s}')
             for s in ('map','shared_map','local_costmap/costmap','global_costmap/costmap'): self.observe(OccupancyGrid,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),self.qos(True,True,1),f'{r}.{s}')
             self.observe(PeerMap,f'/cslam/{r}/local_map',lambda m,x=r:self.mark(x,'peer_map',m),self.qos(True,True,1),f'{r}.peer_map')
@@ -730,7 +733,7 @@ class CooperativeExperimentLogger(Node):
                     self.attribution.observe(r,transformed[1],time.monotonic()-self.start); self._last_attributed[r]=snapshot[0]
         a=self.attribution.summary(); row=self.row_time(); row.update(robot1_local_known=self.map_counts('robot1','map')[0],robot2_local_known=self.map_counts('robot2','map')[0],robot1_shared_known=known[0],robot2_shared_known=known[1],shared_free_cells=counts[0][0],shared_occupied_cells=counts[0][1],shared_unknown_cells=counts[0][2],known_area_m2=known[0]*maps[0].info.resolution**2,coverage_gain_cells=gain,coverage_gain_since_start_cells=current-self.initial_known,unique_first_seen_robot1_cells=a['unique_first_seen_cells'].get('robot1',0),unique_first_seen_robot2_cells=a['unique_first_seen_cells'].get('robot2',0),later_duplicated_by_robot1_cells=a['later_duplicated_cells'].get('robot1',0),later_duplicated_by_robot2_cells=a['later_duplicated_cells'].get('robot2',0),simultaneously_observed_cells=a['simultaneously_observed_cells'],total_known_union_cells=a['total_known_union_cells'],duplicated_known_fraction=a['duplicated_known_fraction'],shared_maps_equivalent=equivalent); self.csv_row(self.coverage,row)
     def sample_health(self):
-        limits={'odom':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
+        limits={'odom':self.p['odom_stale_s'],'joint_states':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
         now=time.monotonic()
         for r in self.robots:
             available=self.tf_buffer.can_transform(self.p['global_frame'],f'{r}/base_footprint',Time(),timeout=Duration(seconds=0.0))
@@ -779,6 +782,20 @@ class CooperativeExperimentLogger(Node):
                 self.directory/'forensic'/'maps'/'robot2_map_final.npz',
                 self.directory/'forensic'/'maps'/'robot2_shared_map_final.npz',
             ])
+        try:
+            unknown_pose = bool(json.loads(
+                self.p['initial_configuration_json']).get(
+                    'unknown_initial_pose', False))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown_pose = False
+        if unknown_pose:
+            frontend = self.directory / 'frontend'
+            for robot in self.robots:
+                required.extend([
+                    frontend / f'{robot}_unknown_pose_frontend.json',
+                    frontend / f'{robot}_consensus_diagnostics.jsonl',
+                    frontend / f'{robot}_physical_evidence_diagnostics.jsonl',
+                ])
         missing=[str(path.relative_to(self.directory)) for path in required if not path.is_file()]
         return {'complete':not missing,'status':'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS','required':[str(path.relative_to(self.directory)) for path in required],'missing':missing}
     @staticmethod

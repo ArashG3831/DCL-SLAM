@@ -22,6 +22,9 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert args.hold_open is False
     assert args.enable_observer is False
     assert args.enable_forensic_capture is False
+    assert parser().parse_args([
+        '--world-profile', 'large_unknown_pose_16m']).world_profile == (
+            'large_unknown_pose_16m')
 
 
 def test_boolean_parser():
@@ -68,6 +71,7 @@ def test_launch_command_can_enable_passive_evidence_in_attempt_directory(tmp_pat
     assert 'enable_forensic_capture:=true' in command
     assert f'output_root:={tmp_path / "observer"}' in command
     assert 'run_id:=attempt_01' in command
+    assert f'unknown_pose_diagnostic_output:={tmp_path / "observer" / "attempt_01" / "frontend"}' in command
 
 
 def test_readiness_graph_is_the_cooperative_graph():

@@ -105,6 +105,17 @@ def test_far_start_world_and_frozen_slam_settings_remain_selected():
     assert 'do_loop_closing' in slam
 
 
+def test_feasible_unknown_pose_world_is_16m_and_retains_physics_profile():
+    world = (ROOT / 'worlds' /
+             'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt').read_text()
+    assert 'translation 16 0 0.001' in world
+    assert 'translation -1 0 0.001' in world
+    assert 'basicTimeStep 4' in world
+    assert 'coulombFriction 10' in world
+    assert 'optimalThreadCount 1' in world
+    assert 'randomSeed 20260818' in world
+
+
 def test_known_relative_pose_path_remains_separate():
     stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
     assert 'alignment = [] if unknown_initial_pose else' in stack
@@ -156,6 +167,13 @@ def test_artifact_observer_remains_in_full_launch():
     assert "executable='cooperative_experiment_logger'" in full
     assert "'enable_forensic_capture': LaunchConfiguration(" in full
     assert "'unknown_pose_diagnostic_output'" in full
+
+
+def test_full_campaign_observer_records_joint_state_health():
+    logger = (PY / 'cooperative_experiment_logger.py').read_text()
+    assert "JointState" in logger
+    assert "f'/{r}/joint_states'" in logger
+    assert "'joint_states':self.p['odom_stale_s']" in logger
 
 
 def test_no_path_exchange_or_ghost_cleanup_was_added():

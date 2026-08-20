@@ -224,6 +224,22 @@ def test_missing_forensic_artifact_fails_closed(observer):
         "artifact_finalization"]["complete"] is False
 
 
+def test_unknown_pose_requires_frontend_diagnostics_in_artifact_contract(observer):
+    observer.p['initial_configuration_json'] = json.dumps({
+        'unknown_initial_pose': True,
+    })
+    status = observer.required_artifact_status(False)
+    assert status['complete'] is False
+    assert sorted(status['missing']) == sorted([
+        'frontend/robot1_unknown_pose_frontend.json',
+        'frontend/robot1_consensus_diagnostics.jsonl',
+        'frontend/robot1_physical_evidence_diagnostics.jsonl',
+        'frontend/robot2_unknown_pose_frontend.json',
+        'frontend/robot2_consensus_diagnostics.jsonl',
+        'frontend/robot2_physical_evidence_diagnostics.jsonl',
+    ])
+
+
 def test_large_occupancy_grid_is_converted_and_counted_once(observer):
     message = OccupancyGrid()
     message.info.width = 320

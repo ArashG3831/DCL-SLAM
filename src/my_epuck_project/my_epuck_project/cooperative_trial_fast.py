@@ -86,7 +86,8 @@ def utc_now() -> str:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description='Fast single-trial cooperative Webots runner')
-    result.add_argument('--world-profile', choices=('small', 'large'),
+    result.add_argument('--world-profile', choices=(
+        'small', 'large', 'large_unknown_pose', 'large_unknown_pose_16m'),
                         default='large')
     result.add_argument('--world-path', default='')
     result.add_argument('--sensor-profile', choices=('full', 'throughput'),
@@ -261,6 +262,9 @@ def launch_command(
         command.extend([
             f'output_root:={output_root}',
             f'run_id:={run_id}',
+            # The full unknown-pose launch consumes this supported parameter
+            # directly. Keep frontend diagnostics beside this run's artifacts.
+            f'unknown_pose_diagnostic_output:={output_root / run_id / "frontend"}',
         ])
     optional_launch_arguments = (
         ('slam_tf_publish_probe_library', args.slam_tf_publish_probe_library),

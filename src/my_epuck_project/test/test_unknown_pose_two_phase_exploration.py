@@ -44,8 +44,11 @@ def test_shared_stack_is_inert_until_accepted_handoff():
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     assert 'durability=DurabilityPolicy.VOLATILE' in frontend
     assert 'durability=DurabilityPolicy.VOLATILE' in phase
+    assert 'hypothesis_qos' in assignment
+    assert 'self._handoff_callback, hypothesis_qos' in assignment
     assert 'durability=DurabilityPolicy.TRANSIENT_LOCAL' not in phase
 
 

@@ -352,6 +352,12 @@ class DistributedFrontierAssignment(Node):
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
+        hypothesis_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE,
+            # Accepted hypotheses are one-shot volatile announcements from
+            # the frontend; do not request transient-local durability.
+            durability=DurabilityPolicy.VOLATILE,
+        )
         task_snapshot_topic = str(self.declare_parameter(
             'task_snapshot_topic', 'task_snapshot').value)
         candidate_topic = str(self.declare_parameter(
@@ -391,7 +397,7 @@ class DistributedFrontierAssignment(Node):
         if self._handoff_gated:
             self.create_subscription(
                 RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
-                self._handoff_callback, qos,
+                self._handoff_callback, hypothesis_qos,
             )
         self._bid_publisher = self.create_publisher(TaskBidArrayMsg, 'task_bids', qos)
         self._decision_publisher = self.create_publisher(

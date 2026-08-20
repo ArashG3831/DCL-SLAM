@@ -73,6 +73,121 @@ class DedicatedDiagnosticJsonl:
                 self._stream = None
 
 
+class BoundedVerificationBatchController:
+    """Novelty-gated lifecycle for bounded candidate-verification batches.
+
+    This helper owns scheduling state only.  It never changes descriptor,
+    registration, consensus, or handoff acceptance rules.  Pair identities
+    and rejected physical identities remain owned by the frontend so a new
+    batch cannot retry old evidence merely because its attempt counter reset.
+    """
+
+    def __init__(self, budget=8, max_batches=4, lifetime_s=600.0,
+                 novelty_spacing_m=0.40):
+        self.budget = max(1, int(budget))
+        self.max_batches = max(1, int(max_batches))
+        self.lifetime_s = max(1.0, float(lifetime_s))
+        self.novelty_spacing_m = max(0.01, float(novelty_spacing_m))
+        self.batch_id = 0
+        self.batch_attempts = 0
+        self.batch_opened_at = None
+        self.lifetime_deadline = None
+        self.active = False
+        self.waiting_for_novelty = False
+        self.completed = False
+        self.lifetime_expired = False
+        self.reference_own = {}
+        self.reference_peer = {}
+
+    @staticmethod
+    def _copy_snapshot(snapshot):
+        return {
+            str(key): {
+                'timestamp_ns': int(value['timestamp_ns']),
+                'center': (float(value['center'][0]),
+                           float(value['center'][1])),
+            }
+            for key, value in snapshot.items()
+        }
+
+    def open(self, now, own_snapshot, peer_snapshot, initial=False):
+        """Open one batch, returning its ID, or ``None`` when bounded out."""
+        if self.completed or self.active:
+            return None
+        now = float(now)
+        if self.lifetime_deadline is not None and now > self.lifetime_deadline:
+            self.lifetime_expired = True
+            self.waiting_for_novelty = False
+            return None
+        if self.batch_id >= self.max_batches and not (initial and not self.batch_id):
+            self.waiting_for_novelty = False
+            return None
+        self.batch_id += 1
+        self.batch_attempts = 0
+        self.batch_opened_at = now
+        if self.lifetime_deadline is None:
+            self.lifetime_deadline = now + self.lifetime_s
+        self.active = True
+        self.waiting_for_novelty = False
+        self.reference_own = self._copy_snapshot(own_snapshot)
+        self.reference_peer = self._copy_snapshot(peer_snapshot)
+        return self.batch_id
+
+    def exhaust(self, now, own_snapshot, peer_snapshot):
+        """Close a batch and wait for novel evidence before reopening."""
+        self.active = False
+        self.waiting_for_novelty = True
+        self.reference_own = self._copy_snapshot(own_snapshot)
+        self.reference_peer = self._copy_snapshot(peer_snapshot)
+        if self.lifetime_deadline is not None and float(now) >= self.lifetime_deadline:
+            self.lifetime_expired = True
+            self.waiting_for_novelty = False
+
+    def mark_completed(self):
+        self.active = False
+        self.waiting_for_novelty = False
+        self.completed = True
+
+    def is_novel(self, own_key, peer_key, own_timestamp_ns, peer_timestamp_ns,
+                 own_center, peer_center, attempted_pairs=(),
+                 rejected_physical=False):
+        """Return true only for an unseen, displaced post-batch candidate."""
+        if not self.waiting_for_novelty or self.completed or self.lifetime_expired:
+            return False
+        if (str(own_key), str(peer_key)) in {
+                (str(pair[0]), str(pair[1])) for pair in attempted_pairs}:
+            return False
+        if rejected_physical:
+            return False
+        own_key = str(own_key)
+        peer_key = str(peer_key)
+        def created_after_snapshot(key, timestamp_ns, references):
+            if key in references:
+                return False
+            if not references:
+                return True
+            latest_timestamp = max(
+                value['timestamp_ns'] for value in references.values())
+            return int(timestamp_ns) > int(latest_timestamp)
+
+        own_new = created_after_snapshot(
+            own_key, own_timestamp_ns, self.reference_own)
+        peer_new = created_after_snapshot(
+            peer_key, peer_timestamp_ns, self.reference_peer)
+        if not own_new and not peer_new:
+            return False
+        def displaced(center, references):
+            if not references:
+                return True
+            return any(
+                math.hypot(float(center[0]) - value['center'][0],
+                           float(center[1]) - value['center'][1]) >=
+                self.novelty_spacing_m
+                for value in references.values())
+        return ((own_new and displaced(own_center, self.reference_own)) or
+                (peer_new and displaced(peer_center, self.reference_peer)))
+
+
 def crop_batch_is_ready(selected_count: int, minimum_constraints: int) -> bool:
     """Return whether a selected batch can start crop exchange.
 

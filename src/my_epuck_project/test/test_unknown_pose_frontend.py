@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from my_epuck_project.unknown_pose_frontend_core import (
+    BoundedVerificationBatchController,
     DedicatedDiagnosticJsonl,
     GridCrop,
     accumulate_physical_candidates,
@@ -27,6 +28,165 @@ from my_epuck_project.unknown_pose_frontend_core import (
     temporal_support_count,
     temporal_consistency,
 )
+
+
+def _batch_snapshot(keys_and_centres):
+    return {
+        key: {'timestamp_ns': timestamp, 'center': centre}
+        for key, timestamp, centre in keys_and_centres
+    }
+
+
+def _batch_candidate(own_key, peer_key, own_timestamp, peer_timestamp,
+                     own_center, peer_center):
+    return {
+        'own_key': own_key,
+        'peer_key': peer_key,
+        'own_timestamp_ns': own_timestamp,
+        'peer_timestamp_ns': peer_timestamp,
+        'own_center': own_center,
+        'peer_center': peer_center,
+    }
+
+
+def test_exhausted_verification_batch_waits_without_immediate_retry():
+    gate = BoundedVerificationBatchController(
+        budget=2, max_batches=3, lifetime_s=100.0)
+    snapshot = _batch_snapshot([('own-1', 10, (0.0, 0.0))])
+    peer_snapshot = _batch_snapshot([('peer-1', 11, (0.0, 0.0))])
+    assert gate.open(0.0, snapshot, peer_snapshot, initial=True) == 1
+    gate.batch_attempts = 2
+    gate.exhaust(1.0, snapshot, peer_snapshot)
+    assert gate.waiting_for_novelty
+    old = _batch_candidate(
+        'own-1', 'peer-1', 10, 11, (0.0, 0.0), (0.0, 0.0))
+    assert not gate.is_novel(**old, attempted_pairs=set())
+    assert gate.batch_id == 1
+
+
+def test_new_spatial_keyframes_open_exactly_one_reentry_batch():
+    gate = BoundedVerificationBatchController(
+        budget=2, max_batches=3, lifetime_s=100.0)
+    own = _batch_snapshot([('own-1', 10, (0.0, 0.0))])
+    peer = _batch_snapshot([('peer-1', 11, (0.0, 0.0))])
+    assert gate.open(0.0, own, peer, initial=True) == 1
+    gate.exhaust(1.0, own, peer)
+    novel = _batch_candidate(
+        'own-2', 'peer-2', 20, 21, (1.0, 0.0), (1.0, 0.0))
+    assert gate.is_novel(**novel, attempted_pairs=set())
+    assert gate.open(2.0, own, peer, initial=False) == 2
+    assert gate.open(3.0, own, peer, initial=False) is None
+
+
+def test_nearby_or_duplicate_keyframes_do_not_reopen_batch():
+    gate = BoundedVerificationBatchController(
+        budget=2, max_batches=3, lifetime_s=100.0)
+    own = _batch_snapshot([('own-1', 10, (0.0, 0.0))])
+    peer = _batch_snapshot([('peer-1', 11, (0.0, 0.0))])
+    gate.open(0.0, own, peer, initial=True)
+    gate.exhaust(1.0, own, peer)
+    nearby = _batch_candidate(
+        'own-2', 'peer-2', 20, 21, (0.2, 0.0), (0.2, 0.0))
+    assert not gate.is_novel(**nearby, attempted_pairs=set())
+    delayed_old = _batch_candidate(
+        'own-new-id', 'peer-new-id', 9, 9, (1.0, 0.0), (1.0, 0.0))
+    assert not gate.is_novel(**delayed_old, attempted_pairs=set())
+    duplicate = _batch_candidate(
+        'own-1', 'peer-1', 10, 11, (1.0, 0.0), (1.0, 0.0))
+    assert not gate.is_novel(**duplicate, attempted_pairs=set())
+
+
+def test_previously_attempted_or_rejected_physical_pair_never_reopens():
+    gate = BoundedVerificationBatchController(
+        budget=2, max_batches=3, lifetime_s=100.0)
+    own = _batch_snapshot([('own-1', 10, (0.0, 0.0))])
+    peer = _batch_snapshot([('peer-1', 11, (0.0, 0.0))])
+    gate.open(0.0, own, peer, initial=True)
+    gate.exhaust(1.0, own, peer)
+    candidate = _batch_candidate(
+        'own-2', 'peer-2', 20, 21, (1.0, 0.0), (1.0, 0.0))
+    assert not gate.is_novel(
+        **candidate, attempted_pairs={('own-2', 'peer-2')})
+    assert not gate.is_novel(
+        **candidate, attempted_pairs=set(), rejected_physical=True)
+
+
+def test_batch_limit_and_lifetime_are_finite():
+    gate = BoundedVerificationBatchController(
+        budget=1, max_batches=2, lifetime_s=5.0)
+    own = _batch_snapshot([('own-1', 10, (0.0, 0.0))])
+    peer = _batch_snapshot([('peer-1', 11, (0.0, 0.0))])
+    assert gate.open(0.0, own, peer, initial=True) == 1
+    gate.exhaust(1.0, own, peer)
+    assert gate.open(2.0, own, peer, initial=False) == 2
+    gate.exhaust(3.0, own, peer)
+    gate.lifetime_deadline = 4.0
+    assert gate.open(5.0, own, peer, initial=False) is None
+    assert gate.lifetime_expired
+
+
+def test_batch_diagnostics_contract_keeps_attempt_and_correlation_identity():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'acquisition_batch_id' in source
+    assert 'candidate_correlation_id' in source
+    assert 'keyframe_creation_timestamp_ns' in source
+    assert 'STALE_VERIFICATION_BATCH' in source
+
+
+def test_batch_reentry_never_changes_three_constraint_consensus_gate():
+    assert not crop_batch_is_ready(2, 3)
+    assert crop_batch_is_ready(3, 3)
+    assert BoundedVerificationBatchController(
+        budget=8, max_batches=4).max_batches == 4
+
+
+def test_campaign_pattern_reopens_once_after_late_overlap_without_retrying_old_pairs():
+    """Model the 17 m run: exhausted early evidence must wait for novelty."""
+    gate = BoundedVerificationBatchController(
+        budget=2, max_batches=2, lifetime_s=100.0, novelty_spacing_m=0.40)
+    initial_own = _batch_snapshot([
+        ('own-early-a', 10, (0.0, 0.0)),
+        ('own-early-b', 20, (0.1, 0.0)),
+    ])
+    initial_peer = _batch_snapshot([
+        ('peer-early-a', 11, (0.0, 0.0)),
+        ('peer-early-b', 21, (0.1, 0.0)),
+    ])
+    assert gate.open(0.0, initial_own, initial_peer, initial=True) == 1
+    attempted = {
+        ('own-early-a', 'peer-early-a'),
+        ('own-early-b', 'peer-early-b'),
+    }
+    gate.batch_attempts = 2
+    gate.exhaust(1.0, initial_own, initial_peer)
+    accepted_constraints = [('late-accepted-0', (0.0, 0.0))]
+
+    old_candidate = _batch_candidate(
+        'own-early-a', 'peer-early-a', 10, 11, (0.0, 0.0), (0.0, 0.0))
+    assert not gate.is_novel(
+        **old_candidate, attempted_pairs=attempted)
+    assert gate.batch_id == 1
+
+    late_own = dict(initial_own)
+    late_peer = dict(initial_peer)
+    late_own['own-late'] = {'timestamp_ns': 30, 'center': (1.2, 0.0)}
+    late_peer['peer-late'] = {'timestamp_ns': 31, 'center': (1.2, 0.0)}
+    late_candidate = _batch_candidate(
+        'own-late', 'peer-late', 30, 31, (1.2, 0.0), (1.2, 0.0))
+    assert gate.is_novel(
+        **late_candidate, attempted_pairs=attempted)
+    assert gate.open(2.0, late_own, late_peer, initial=False) == 2
+    assert gate.batch_attempts == 0
+    assert not gate.is_novel(
+        **late_candidate, attempted_pairs=attempted)
+    assert accepted_constraints == [('late-accepted-0', (0.0, 0.0))]
+
+    gate.batch_attempts = 2
+    gate.exhaust(3.0, late_own, late_peer)
+    assert gate.open(4.0, late_own, late_peer, initial=False) is None
+    assert gate.batch_id == 2
 
 
 def scene(size=160):

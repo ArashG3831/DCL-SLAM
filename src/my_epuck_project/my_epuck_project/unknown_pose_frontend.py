@@ -27,6 +27,7 @@ from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformL
 
 from .unknown_pose_frontend_core import (
     DedicatedDiagnosticJsonl,
+    BoundedVerificationBatchController,
     GridCrop,
     compare_descriptors,
     confirmation_window_for_cadence,
@@ -77,6 +78,9 @@ class UnknownPoseFrontend(Node):
         self.declare_parameter('min_consistent_constraints', 3)
         self.declare_parameter('max_evidence_constraints', 5)
         self.declare_parameter('candidate_verification_budget', 8)
+        self.declare_parameter('max_verification_batches', 4)
+        self.declare_parameter('verification_lifetime_s', 600.0)
+        self.declare_parameter('verification_novelty_spacing_m', 0.40)
         self.declare_parameter('evidence_acquisition_window_s', 8.0)
         self.declare_parameter('target_map_radius_m', 40.0)
         self.declare_parameter('max_projected_registration_error_m', 0.20)
@@ -113,6 +117,12 @@ class UnknownPoseFrontend(Node):
         self.candidate_verification_budget = max(
             self.min_consistent_constraints, int(
                 self.get_parameter('candidate_verification_budget').value))
+        self.max_verification_batches = max(1, int(
+            self.get_parameter('max_verification_batches').value))
+        self.verification_lifetime_s = max(1.0, float(
+            self.get_parameter('verification_lifetime_s').value))
+        self.verification_novelty_spacing_m = max(0.01, float(
+            self.get_parameter('verification_novelty_spacing_m').value))
         self.evidence_acquisition_window_s = max(0.5, float(
             self.get_parameter('evidence_acquisition_window_s').value))
         self.target_map_radius_m = max(1.0, float(
@@ -181,6 +191,12 @@ class UnknownPoseFrontend(Node):
             'candidate_verification_accepted': 0,
             'candidate_verification_rejected': 0,
             'candidate_verification_budget_exhausted': 0,
+            'verification_batches_opened': 0,
+            'verification_batches_exhausted': 0,
+            'verification_batch_reentries': 0,
+            'verification_novelty_deferrals': 0,
+            'verification_lifetime_expired': 0,
+            'stale_verification_batch_responses': 0,
         }
         self.gate_rejection_counts = Counter()
         self.temporal_gate_rejection_counts = Counter()
@@ -220,13 +236,23 @@ class UnknownPoseFrontend(Node):
         self.candidate_verification_attempted = set()
         self.candidate_verification_results = {}
         self.request_candidate_by_request_key = {}
+        self.request_metadata_by_request_key = {}
+        self.completed_request_keys = set()
         self.candidate_verification_attempts = 0
+        self.candidate_verification_batch_attempts = 0
+        self.verification_attempt_sequence = 0
+        self.rejected_physical_evidence_keys = set()
         self.received_peer_crops = {}
         self.batch_proposal_published = False
         self.pending_target_proposal = False
         self.registration_callback_depth = 0
         self.evidence_acquisition_deadline_wall = None
         self.evidence_acquisition_started = False
+        self.verification_batches = BoundedVerificationBatchController(
+            budget=self.candidate_verification_budget,
+            max_batches=self.max_verification_batches,
+            lifetime_s=self.verification_lifetime_s,
+            novelty_spacing_m=self.verification_novelty_spacing_m)
 
         qos = QoSProfile(
             depth=20, reliability=ReliabilityPolicy.RELIABLE,
@@ -302,6 +328,9 @@ class UnknownPoseFrontend(Node):
             'peer_robot_id': self.peer_robot_id,
             'wall_monotonic_s': time.monotonic(),
             'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
+            'acquisition_batch_id': int(self.verification_batches.batch_id),
+            'verification_batch_attempts': int(
+                self.candidate_verification_batch_attempts),
         }
         record.update(fields)
         self.consensus_diagnostics.write(record)
@@ -316,6 +345,9 @@ class UnknownPoseFrontend(Node):
             'peer_robot_id': self.peer_robot_id,
             'wall_monotonic_s': time.monotonic(),
             'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
+            'acquisition_batch_id': int(self.verification_batches.batch_id),
+            'verification_batch_attempts': int(
+                self.candidate_verification_batch_attempts),
         }
         record.update(fields)
         self.physical_evidence_diagnostics.write(record)
@@ -339,6 +371,8 @@ class UnknownPoseFrontend(Node):
             'map_epoch': int(descriptor.map_epoch),
             'checksum': int(descriptor.checksum),
             'keyframe_id': str(descriptor.keyframe_id),
+            'keyframe_creation_timestamp_ns': int(
+                UnknownPoseFrontend._stamp_ns(descriptor)),
         }
 
     @staticmethod
@@ -832,7 +866,61 @@ class UnknownPoseFrontend(Node):
             peer_key, own_key, peer, own = candidate
         return peer_key, own_key, peer, own
 
-    def _queue_crop_request(self, peer_key, own_key, peer, own):
+    def _batch_snapshot(self):
+        own = {}
+        for key, (descriptor, crop) in self.keyframes.items():
+            geometry = self._crop_geometry(
+                crop, key, descriptor.map_epoch, descriptor.checksum)
+            own[str(key)] = {
+                'timestamp_ns': self._stamp_ns(descriptor),
+                'center': geometry['center'],
+            }
+        peer = {
+            str(key): {
+                'timestamp_ns': self._stamp_ns(descriptor),
+                'center': self._descriptor_geometry(descriptor)['center'],
+            }
+            for key, descriptor in self.peer_descriptors.items()}
+        return own, peer
+
+    def _candidate_physical_key(self, candidate):
+        peer_key, own_key, peer, own = self._candidate_fields(candidate)
+        own_entry = self.keyframes.get(own_key)
+        if own_entry is None:
+            return None
+        own_crop = own_entry[1]
+        return (
+            physical_crop_identity(
+                own_crop, int(own_entry[0].map_epoch),
+                int(own_entry[0].checksum)),
+            physical_crop_identity(
+                GridCrop(
+                    values=np.empty((int(peer.crop_height), int(peer.crop_width)),
+                                   dtype=np.int16),
+                    resolution=float(peer.resolution),
+                    origin_x=float(peer.crop_origin_x),
+                    origin_y=float(peer.crop_origin_y)),
+                int(peer.map_epoch), int(peer.checksum)))
+
+    def _candidate_is_novel_for_reentry(self, candidate):
+        peer_key, own_key, peer, own = self._candidate_fields(candidate)
+        own_entry = self.keyframes.get(own_key)
+        if own_entry is None:
+            return False
+        own_geometry = self._crop_geometry(
+            own_entry[1], own_key, own_entry[0].map_epoch,
+            own_entry[0].checksum)
+        peer_geometry = self._descriptor_geometry(peer)
+        physical_key = self._candidate_physical_key(candidate)
+        return self.verification_batches.is_novel(
+            own_key, peer_key,
+            self._stamp_ns(own_entry[0]), self._stamp_ns(peer),
+            own_geometry['center'], peer_geometry['center'],
+            attempted_pairs=self.candidate_verification_attempted,
+            rejected_physical=physical_key in self.rejected_physical_evidence_keys)
+
+    def _queue_crop_request(self, peer_key, own_key, peer, own,
+                            batch_id, correlation_id):
         request_key = (peer_key, int(peer.checksum))
         if request_key in self.pending_requests:
             self.counters['crop_request_duplicates_suppressed'] += 1
@@ -843,6 +931,16 @@ class UnknownPoseFrontend(Node):
         self.request_own_by_request_key[request_key] = own_key
         self.request_candidate_by_request_key[request_key] = (
             peer_key, own_key, peer, own)
+        self.request_metadata_by_request_key[request_key] = {
+            'acquisition_batch_id': int(batch_id),
+            'candidate_correlation_id': str(correlation_id),
+            'verification_attempt_id': str(correlation_id),
+            'own_keyframe_id': str(own_key),
+            'peer_keyframe_id': str(peer_key),
+            'request_timestamp_ns': int(self._stamp_ns(own)),
+            'own_keyframe_creation_timestamp_ns': int(self._stamp_ns(own)),
+            'peer_keyframe_creation_timestamp_ns': int(self._stamp_ns(peer)),
+        }
         request = LocalMapCropRequest()
         request.header = own.header
         request.requester_robot_id = self.robot_id
@@ -854,6 +952,7 @@ class UnknownPoseFrontend(Node):
         self._write_physical_evidence_diagnostic(
             'CROP_REQUEST_SENT',
             request_key=[peer_key, int(peer.checksum)],
+            **self.request_metadata_by_request_key[request_key],
             candidate=self._candidate_diagnostic(
                 (peer_key, own_key, peer, own), status='REQUESTED'))
         self._record_diagnostic_event(
@@ -908,6 +1007,15 @@ class UnknownPoseFrontend(Node):
                 continue
             if request_key in self.pending_requests:
                 continue
+            physical_key = self._candidate_physical_key(candidate)
+            if physical_key in self.rejected_physical_evidence_keys:
+                self._write_physical_evidence_diagnostic(
+                    'CANDIDATE_VERIFICATION_SKIPPED',
+                    candidate=self._candidate_diagnostic(
+                        candidate, status='SKIPPED',
+                        reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED'),
+                    reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED')
+                continue
             if not self._candidate_is_distinct_from_evidence(candidate):
                 self._write_physical_evidence_diagnostic(
                     'CANDIDATE_VERIFICATION_SKIPPED',
@@ -922,18 +1030,18 @@ class UnknownPoseFrontend(Node):
         return None if not ranked else ranked[0]
 
     def _request_next_candidate_verification(self):
-        if self.batch_proposal_published:
+        if self.batch_proposal_published or not self.evidence_acquisition_started:
             return False
-        if self.candidate_verification_attempts >= self.candidate_verification_budget:
+        if self.candidate_verification_batch_attempts >= self.candidate_verification_budget:
             self.counters['candidate_verification_budget_exhausted'] += 1
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_VERIFICATION_BUDGET_EXHAUSTED',
                 attempts=self.candidate_verification_attempts,
+                batch_attempts=self.candidate_verification_batch_attempts,
+                acquisition_batch_id=self.verification_batches.batch_id,
                 accepted_count=len(self.evidence_pairs),
                 budget=self.candidate_verification_budget)
-            self.evidence_acquisition_started = False
-            self.evidence_acquisition_deadline_wall = None
-            self._publish_multi_constraint_proposal()
+            self._end_evidence_acquisition('BUDGET_EXHAUSTED')
             return False
         candidate = self._rank_next_verification_candidate()
         if candidate is None:
@@ -946,14 +1054,27 @@ class UnknownPoseFrontend(Node):
         pair_key = (own_key, peer_key)
         self.candidate_verification_attempted.add(pair_key)
         self.candidate_verification_attempts += 1
+        self.candidate_verification_batch_attempts += 1
+        self.verification_batches.batch_attempts += 1
+        self.verification_attempt_sequence += 1
+        correlation_id = (
+            f'{self.robot_id}-b{self.verification_batches.batch_id:04d}-'
+            f'a{self.candidate_verification_batch_attempts:04d}-'
+            f'c{self.verification_attempt_sequence:06d}')
         self.counters['candidate_verification_attempts'] = (
             self.candidate_verification_attempts)
         self._write_physical_evidence_diagnostic(
             'CANDIDATE_VERIFICATION_REQUESTED',
             candidate=self._candidate_diagnostic(candidate, status='REQUESTED'),
             attempt=self.candidate_verification_attempts,
-            budget=self.candidate_verification_budget)
-        return self._queue_crop_request(peer_key, own_key, peer, own)
+            batch_attempt=self.candidate_verification_batch_attempts,
+            budget=self.candidate_verification_budget,
+            acquisition_batch_id=self.verification_batches.batch_id,
+            candidate_correlation_id=correlation_id,
+            verification_attempt_id=correlation_id)
+        return self._queue_crop_request(
+            peer_key, own_key, peer, own,
+            self.verification_batches.batch_id, correlation_id)
 
     def _request_additional_evidence_candidates(self):
         """Request one more candidate; retained as a compatibility wrapper."""
@@ -964,19 +1085,68 @@ class UnknownPoseFrontend(Node):
     def _begin_evidence_acquisition(self):
         if self.evidence_acquisition_started or self.batch_proposal_published:
             return
+        own_snapshot, peer_snapshot = self._batch_snapshot()
+        now = time.monotonic()
+        initial = self.verification_batches.batch_id == 0
+        if not initial and not self.verification_batches.waiting_for_novelty:
+            return
+        if not initial:
+            novel = any(
+                self._candidate_is_novel_for_reentry(candidate)
+                for candidate in self.pending_candidate_pairs.values())
+            if not novel:
+                self.counters['verification_novelty_deferrals'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'VERIFICATION_BATCH_WAITING_FOR_NOVELTY',
+                    acquisition_batch_id=self.verification_batches.batch_id,
+                    pending_candidate_count=len(self.pending_candidate_pairs),
+                    reason='NO_MATERIAL_NEW_SPATIAL_EVIDENCE')
+                return
+        batch_id = self.verification_batches.open(
+            now, own_snapshot, peer_snapshot, initial=initial)
+        if batch_id is None:
+            if self.verification_batches.lifetime_expired:
+                self.counters['verification_lifetime_expired'] += 1
+            return
+        if not initial:
+            self.counters['verification_batch_reentries'] += 1
+        self.counters['verification_batches_opened'] += 1
+        self.candidate_verification_batch_attempts = 0
         self.evidence_acquisition_started = True
         self.evidence_acquisition_deadline_wall = (
             time.monotonic() + self.evidence_acquisition_window_s)
         self._record_diagnostic_event(
             'EVIDENCE_ACQUISITION_STARTED',
+            acquisition_batch_id=batch_id,
             constraints_accumulated=len(self.evidence_physical_keys),
             window_s=self.evidence_acquisition_window_s)
         self._write_physical_evidence_diagnostic(
-            'EVIDENCE_ACQUISITION_STARTED',
+            'VERIFICATION_BATCH_OPENED',
+            acquisition_batch_id=batch_id,
+            batch_attempts=0,
             constraints_accumulated=len(self.evidence_physical_keys),
             window_s=self.evidence_acquisition_window_s,
             deadline_wall=self.evidence_acquisition_deadline_wall)
         self._request_next_candidate_verification()
+
+    def _end_evidence_acquisition(self, reason):
+        if not self.evidence_acquisition_started:
+            return
+        own_snapshot, peer_snapshot = self._batch_snapshot()
+        self.evidence_acquisition_started = False
+        self.evidence_acquisition_deadline_wall = None
+        self.verification_batches.exhaust(
+            time.monotonic(), own_snapshot, peer_snapshot)
+        self.counters['verification_batches_exhausted'] += 1
+        self._write_physical_evidence_diagnostic(
+            'VERIFICATION_BATCH_WAITING',
+            acquisition_batch_id=self.verification_batches.batch_id,
+            batch_attempts=self.candidate_verification_batch_attempts,
+            constraints_accumulated=len(self.evidence_physical_keys),
+            reason=str(reason),
+            state='WAITING_FOR_NOVEL_EVIDENCE')
+        if len(self.evidence_physical_keys) >= self.min_consistent_constraints:
+            self._publish_multi_constraint_proposal()
 
     def _maybe_finalize_evidence_acquisition(self):
         if not self.evidence_acquisition_started:
@@ -984,16 +1154,16 @@ class UnknownPoseFrontend(Node):
         if (self.evidence_acquisition_deadline_wall is None or
                 time.monotonic() < self.evidence_acquisition_deadline_wall):
             return
-        self.evidence_acquisition_started = False
-        self.evidence_acquisition_deadline_wall = None
+        self._end_evidence_acquisition('WINDOW_EXPIRED')
         self._record_diagnostic_event(
             'EVIDENCE_ACQUISITION_TIMEOUT',
+            acquisition_batch_id=self.verification_batches.batch_id,
             constraints_accumulated=len(self.evidence_physical_keys))
         self._write_physical_evidence_diagnostic(
             'EVIDENCE_ACQUISITION_TIMEOUT',
+            acquisition_batch_id=self.verification_batches.batch_id,
             constraints_accumulated=len(self.evidence_physical_keys),
             state_transition='FINALIZE')
-        self._publish_multi_constraint_proposal()
 
     def request_callback(self, request):
         if request.source_robot_id != self.robot_id:
@@ -1046,7 +1216,7 @@ class UnknownPoseFrontend(Node):
             map_epoch=int(descriptor.map_epoch),
             descriptor_checksum=int(descriptor.checksum))
 
-    def _record_crop_rejection(self, reason, message):
+    def _record_crop_rejection(self, reason, message, **fields):
         self.counters['crop_response_rejections'] += 1
         self.crop_response_rejection_counts[str(reason)] += 1
         self._write_physical_evidence_diagnostic(
@@ -1054,14 +1224,14 @@ class UnknownPoseFrontend(Node):
             keyframe_id=str(getattr(message, 'keyframe_id', '')),
             map_epoch=int(getattr(message, 'map_epoch', 0)),
             checksum=int(getattr(message, 'descriptor_checksum', 0)),
-            reason=str(reason), status='REJECTED')
+            reason=str(reason), status='REJECTED', **fields)
         self._record_diagnostic_event(
             'CROP_RESPONSE_REJECTED', reason=str(reason),
             keyframe_id=getattr(message, 'keyframe_id', ''),
             descriptor_checksum=int(getattr(message, 'descriptor_checksum', 0)))
 
     def _verify_candidate_crop(self, pair_key, candidate, own_crop,
-                               received_crop):
+                               received_crop, metadata=None):
         """Run the unchanged single-pair geometric gate before consensus."""
         peer_key, _, _, _ = self._candidate_fields(candidate)
         self.counters['registrations'] += 1
@@ -1093,6 +1263,7 @@ class UnknownPoseFrontend(Node):
             projected_error_m=float(result.projected_error_m))
         self._write_physical_evidence_diagnostic(
             'CANDIDATE_VERIFICATION_RESULT',
+            **(metadata or {}),
             candidate=self._candidate_diagnostic(
                 candidate, status='GEOMETRIC_ACCEPTED' if result.accepted
                 else 'GEOMETRIC_REJECTED', reason=str(result.reason)),
@@ -1199,7 +1370,18 @@ class UnknownPoseFrontend(Node):
                 self.counters['accepted_hypotheses'] += 1
             else:
                 self.counters['rejected_hypotheses'] += 1
-                self.pending_target_proposal = False
+            self.pending_target_proposal = False
+            return
+        response_request_key = (
+            str(message.keyframe_id), int(message.descriptor_checksum))
+        request_metadata = self.request_metadata_by_request_key.get(
+            response_request_key)
+        if response_request_key not in self.pending_requests:
+            self.counters['stale_verification_batch_responses'] += 1
+            self._record_crop_rejection(
+                'STALE_VERIFICATION_BATCH', message,
+                metadata=request_metadata,
+                response_request_key=list(response_request_key))
             return
         peer_key = message.keyframe_id
         request_key = (peer_key, int(message.descriptor_checksum))
@@ -1244,12 +1426,16 @@ class UnknownPoseFrontend(Node):
                 descriptor_checksum=int(message.descriptor_checksum))
             return
         self.pending_requests.discard(request_key)
+        self.completed_request_keys.add(request_key)
+        request_metadata = self.request_metadata_by_request_key.get(
+            request_key, {})
         candidate = self.request_candidate_by_request_key.pop(
             request_key, (peer_key, own_key, expected_peer,
                           self.keyframes[own_key][0]))
         self.counters['crop_responses_accepted'] += 1
         self._write_physical_evidence_diagnostic(
             'CROP_RESPONSE_ACCEPTED',
+            **request_metadata,
             physical_identity=list(physical_key),
             own_keyframe_id=str(own_key),
             peer_keyframe_id=str(peer_key),
@@ -1263,10 +1449,13 @@ class UnknownPoseFrontend(Node):
             constraints_accumulated=len(self.evidence_pairs),
             status='ACCEPTED')
         result = self._verify_candidate_crop(
-            pair_key, candidate, self.keyframes[own_key][1], received_crop)
+            pair_key, candidate, self.keyframes[own_key][1], received_crop,
+            metadata=request_metadata)
         if not result.accepted:
+            self.rejected_physical_evidence_keys.add(physical_key)
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
+                **request_metadata,
                 candidate=self._candidate_diagnostic(
                     candidate, status='REJECTED', reason=str(result.reason)),
                 rejection_reason=str(result.reason))
@@ -1299,6 +1488,7 @@ class UnknownPoseFrontend(Node):
         if consensus.accepted:
             self.evidence_acquisition_started = False
             self.evidence_acquisition_deadline_wall = None
+            self.verification_batches.mark_completed()
             self._publish_multi_constraint_proposal(result=consensus)
             return
         self._write_physical_evidence_diagnostic(
@@ -1482,10 +1672,18 @@ class UnknownPoseFrontend(Node):
             evidence_target_keyframe_ids=target_ids)
         self.hypothesis_pub.publish(proposal)
         self.counters['proposals_published'] += 1
-        self.batch_proposal_published = True
-        if not result.accepted:
+        self.batch_proposal_published = bool(result.accepted)
+        if result.accepted:
+            self.verification_batches.mark_completed()
+        else:
             self.counters['rejected_hypotheses'] += 1
             self.negotiation_started = False
+            self._write_physical_evidence_diagnostic(
+                'VERIFICATION_BATCH_WAITING',
+                acquisition_batch_id=self.verification_batches.batch_id,
+                constraints_accumulated=len(self.evidence_physical_keys),
+                reason='CONSENSUS_REJECTED',
+                state='WAITING_FOR_NOVEL_EVIDENCE')
 
     def _publish_local_evidence_crops(self, keyframe_ids):
         """Make the initiator's bounded evidence available for peer verification."""
@@ -1923,6 +2121,24 @@ class UnknownPoseFrontend(Node):
                 'physical_evidence_diagnostic_write_failures': (
                     0 if self.physical_evidence_diagnostics is None else
                     self.physical_evidence_diagnostics.write_failures),
+                'verification_batch_state': {
+                    'acquisition_batch_id': int(
+                        self.verification_batches.batch_id),
+                    'batch_attempts': int(
+                        self.verification_batches.batch_attempts),
+                    'max_batches': int(
+                        self.verification_batches.max_batches),
+                    'budget': int(self.verification_batches.budget),
+                    'waiting_for_novelty': bool(
+                        self.verification_batches.waiting_for_novelty),
+                    'lifetime_expired': bool(
+                        self.verification_batches.lifetime_expired),
+                    'completed': bool(self.verification_batches.completed),
+                    'lifetime_s': float(
+                        self.verification_batches.lifetime_s),
+                    'novelty_spacing_m': float(
+                        self.verification_batches.novelty_spacing_m),
+                },
                 'pending_candidate_pool_size': len(
                     self.pending_candidate_pairs),
                 'finalized_wall_monotonic_s': time.monotonic(),

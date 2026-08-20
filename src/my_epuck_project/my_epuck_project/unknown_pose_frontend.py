@@ -408,7 +408,8 @@ class UnknownPoseFrontend(Node):
             'keyframe_id': str(keyframe_id),
         }
 
-    def _candidate_diagnostic(self, candidate, status=None, reason=None):
+    def _candidate_diagnostic(self, candidate, status=None, reason=None,
+                              compact=False):
         if len(candidate) == 5:
             _, peer_key, own_key, peer, own = candidate
         else:
@@ -423,10 +424,9 @@ class UnknownPoseFrontend(Node):
                 'rejection_reason': reason,
             }
         match = self.matches.get((peer_key, own_key))
-        return {
+        common = {
             'own_keyframe_id': str(own_key),
             'peer_keyframe_id': str(peer_key),
-            'own_descriptor': self._descriptor_geometry(own),
             'peer_descriptor': self._descriptor_geometry(peer),
             'own_crop': self._crop_geometry(
                 own_crop, own.keyframe_id, own.map_epoch, own.checksum),
@@ -439,6 +439,15 @@ class UnknownPoseFrontend(Node):
             'status': status,
             'rejection_reason': reason,
         }
+        if compact:
+            # Selection/formation diagnostics can contain many candidates.
+            # Keep every field needed to reconstruct physical identity and
+            # geometry without repeating the redundant own descriptor object.
+            common['own_keyframe_creation_timestamp_ns'] = int(
+                self._stamp_ns(own))
+            return common
+        common['own_descriptor'] = self._descriptor_geometry(own)
+        return common
 
     def _record_diagnostic_event(self, event_type, **fields):
         """Retain a bounded wall/ROS timestamped protocol trace."""
@@ -757,7 +766,7 @@ class UnknownPoseFrontend(Node):
         for candidate in physical_eligible:
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_OBSERVED',
-                candidate=self._candidate_diagnostic(candidate))
+                candidate=self._candidate_diagnostic(candidate, compact=True))
         added, duplicates = accumulate_physical_candidates(
             self.pending_candidate_pairs, physical_eligible, own_crops)
         for identity, candidate in added:
@@ -765,14 +774,14 @@ class UnknownPoseFrontend(Node):
             self._write_physical_evidence_diagnostic(
                 'PENDING_CANDIDATE_ADDED',
                 identity=list(identity), candidate=self._candidate_diagnostic(
-                    candidate, status='PENDING'))
+                    candidate, status='PENDING', compact=True))
         for identity, candidate in duplicates:
             self.counters['physical_candidate_duplicates_suppressed'] += 1
             self._write_physical_evidence_diagnostic(
                 'PENDING_CANDIDATE_DUPLICATE_SUPPRESSED',
                 identity=list(identity), candidate=self._candidate_diagnostic(
                     candidate, status='DUPLICATE',
-                    reason='IDENTICAL_PHYSICAL_EVIDENCE'))
+                    reason='IDENTICAL_PHYSICAL_EVIDENCE', compact=True))
         for identity, candidate in list(self.pending_candidate_pairs.items()):
             if len(candidate) == 5:
                 _, peer_key, own_key, _, _ = candidate
@@ -785,7 +794,8 @@ class UnknownPoseFrontend(Node):
             self._write_physical_evidence_diagnostic(
                 'PENDING_CANDIDATE_REMOVED', identity=list(identity),
                 candidate=self._candidate_diagnostic(
-                    candidate, status='REMOVED', reason='KEYFRAME_EXPIRED'))
+                    candidate, status='REMOVED', reason='KEYFRAME_EXPIRED',
+                    compact=True))
         pending_candidates = list(self.pending_candidate_pairs.values())
         pending_candidates.sort(key=lambda value: (
             0 if (value[2], value[1]) in self.evidence_pairs else 1,
@@ -824,7 +834,7 @@ class UnknownPoseFrontend(Node):
         selected_identity = []
         for candidate in selected:
             selected_identity.append(self._candidate_diagnostic(
-                candidate, status='SELECTED'))
+                candidate, status='SELECTED', compact=True))
         centres = []
         for candidate in selected:
             own_crop = self.keyframes[candidate[1]][1]
@@ -841,10 +851,12 @@ class UnknownPoseFrontend(Node):
         self._write_physical_evidence_diagnostic(
             'SELECTION_ATTEMPT',
             candidate_pool=[self._candidate_diagnostic(
-                candidate, status='PENDING') for candidate in pending_candidates],
+                candidate, status='PENDING', compact=True)
+                for candidate in pending_candidates],
             selected_candidates=selected_identity,
             pending_candidates=[self._candidate_diagnostic(
-                candidate, status='PENDING') for candidate in pending_candidates
+                candidate, status='PENDING', compact=True)
+                for candidate in pending_candidates
                 if (candidate[1], candidate[2]) not in selected_pair_ids],
             measured_spatial_baseline_m=baseline,
             minimum_spatial_baseline_m=0.75,
@@ -967,7 +979,8 @@ class UnknownPoseFrontend(Node):
             request_key=[peer_key, int(peer.checksum)],
             **self.request_metadata_by_request_key[request_key],
             candidate=self._candidate_diagnostic(
-                (peer_key, own_key, peer, own), status='REQUESTED'))
+                (peer_key, own_key, peer, own), status='REQUESTED',
+                compact=True))
         self._record_diagnostic_event(
             'CROP_REQUEST_PUBLISHED', peer_key=peer_key,
             own_key=own_key, descriptor_checksum=int(peer.checksum),
@@ -1026,7 +1039,8 @@ class UnknownPoseFrontend(Node):
                     'CANDIDATE_VERIFICATION_SKIPPED',
                     candidate=self._candidate_diagnostic(
                         candidate, status='SKIPPED',
-                        reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED'),
+                        reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED',
+                        compact=True),
                     reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED')
                 continue
             if not self._candidate_is_distinct_from_evidence(candidate):
@@ -1034,7 +1048,7 @@ class UnknownPoseFrontend(Node):
                     'CANDIDATE_VERIFICATION_SKIPPED',
                     candidate=self._candidate_diagnostic(
                         candidate, status='SKIPPED',
-                        reason='TOO_CLOSE_TO_ACCEPTED_EVIDENCE'),
+                        reason='TOO_CLOSE_TO_ACCEPTED_EVIDENCE', compact=True),
                     reason='TOO_CLOSE_TO_ACCEPTED_EVIDENCE')
                 continue
             candidates.append(candidate)
@@ -1078,7 +1092,8 @@ class UnknownPoseFrontend(Node):
             self.candidate_verification_attempts)
         self._write_physical_evidence_diagnostic(
             'CANDIDATE_VERIFICATION_REQUESTED',
-            candidate=self._candidate_diagnostic(candidate, status='REQUESTED'),
+            candidate=self._candidate_diagnostic(
+                candidate, status='REQUESTED', compact=True),
             attempt=self.candidate_verification_attempts,
             batch_attempt=self.candidate_verification_batch_attempts,
             budget=self.candidate_verification_budget,
@@ -1279,7 +1294,8 @@ class UnknownPoseFrontend(Node):
             **(metadata or {}),
             candidate=self._candidate_diagnostic(
                 candidate, status='GEOMETRIC_ACCEPTED' if result.accepted
-                else 'GEOMETRIC_REJECTED', reason=str(result.reason)),
+                else 'GEOMETRIC_REJECTED', reason=str(result.reason),
+                compact=True),
             transform=[float(value) for value in result.transform],
             residual_m=float(result.residual_m),
             median_residual_m=float(result.median_residual_m),
@@ -1476,7 +1492,8 @@ class UnknownPoseFrontend(Node):
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
                 **request_metadata,
                 candidate=self._candidate_diagnostic(
-                    candidate, status='REJECTED', reason=str(result.reason)),
+                    candidate, status='REJECTED', reason=str(result.reason),
+                    compact=True),
                 rejection_reason=str(result.reason))
             self._request_next_candidate_verification()
             return

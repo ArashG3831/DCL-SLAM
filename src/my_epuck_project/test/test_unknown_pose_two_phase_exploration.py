@@ -140,6 +140,15 @@ def test_diagnostic_failures_are_counted_without_frontend_shutdown():
     assert 'UNKNOWN_POSE_DIAGNOSTIC_WRITE_FAILURE' in frontend
 
 
+def test_candidate_diagnostics_have_compact_selection_representation():
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert 'def _candidate_diagnostic(self, candidate, status=None, reason=None,' in frontend
+    assert "if compact:" in frontend
+    assert "'own_keyframe_creation_timestamp_ns'" in frontend
+    assert "status='PENDING', compact=True" in frontend
+    assert "candidate_pool=[self._candidate_diagnostic(" in frontend
+
+
 def test_frontend_exit_watchdog_shuts_down_on_unexpected_exit():
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
     assert 'RegisterEventHandler' in full

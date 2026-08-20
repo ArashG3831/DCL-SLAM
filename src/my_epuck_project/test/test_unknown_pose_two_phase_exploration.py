@@ -1,11 +1,22 @@
 """Static integration guards for the unknown-pose two-phase launch contract."""
 
 from pathlib import Path
+import importlib.util
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / 'launch'
 PY = ROOT / 'my_epuck_project'
+
+
+def _load_nav_launch():
+    source = LAUNCH / 'two_robots_teammate_filtered_stack_launch.py'
+    spec = importlib.util.spec_from_file_location('teammate_nav_launch', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_local_phase_uses_each_robot_local_map_and_local_nav2():
@@ -88,6 +99,21 @@ def test_known_relative_pose_path_remains_separate():
     assert 'alignment = [] if unknown_initial_pose else' in stack
     assert 'if not unknown_initial_pose:' in stack
     assert "f'/cslam/unknown_pose/{peer}/local_map'" in stack
+
+
+def test_prefixed_local_nav2_nodes_receive_frozen_rpp_parameters():
+    module = _load_nav_launch()
+    source = ROOT / 'resource' / 'nav2_robot1_shared_map.yaml'
+    generated = module._diagnostic_params(
+        str(source), 'robot1', 'rpp', node_prefix='local_')
+    try:
+        document = yaml.safe_load(Path(generated).read_text(encoding='utf-8'))
+    finally:
+        Path(generated).unlink(missing_ok=True)
+    params = document['local_controller_server']['ros__parameters']
+    assert params['FollowPath']['plugin'] == (
+        'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
+    assert 'controller_server' not in document
 
 
 def test_artifact_observer_remains_in_full_launch():

@@ -75,15 +75,28 @@ _DWB_DIAGNOSTIC_FOLLOW_PATH = {
 }
 
 
-def _diagnostic_params(source, robot, variant):
+def _diagnostic_params(source, robot, variant, node_prefix=''):
     """Create a temporary controller variant; production YAML stays untouched."""
     # RPP is the authoritative production YAML.  Returning it directly keeps
     # the normal launch free of generated diagnostic files or overrides.
-    if variant == 'rpp':
+    if variant == 'rpp' and not node_prefix:
         return source
     with open(source, encoding='utf-8') as stream:
         document = yaml.safe_load(stream)
-    controller = document['controller_server']['ros__parameters']
+    if node_prefix:
+        # The same Nav2 parameter document serves the normal nodes and the
+        # pre-handoff local nodes.  The latter deliberately have a ``local_``
+        # name so their lifecycle can be switched independently; rewrite only
+        # the YAML node keys so the existing frozen parameters are actually
+        # applied to those renamed nodes instead of falling back to Nav2's
+        # defaults.
+        document = {
+            (node_prefix + key if key in LIFECYCLE_NODES else key): value
+            for key, value in document.items()
+        }
+    controller = document[
+        node_prefix + 'controller_server' if node_prefix else 'controller_server'
+    ]['ros__parameters']
     original = dict(controller['FollowPath'])
     if variant == 'dwb':
         controller['FollowPath'] = dict(_DWB_DIAGNOSTIC_FOLLOW_PATH)
@@ -109,6 +122,9 @@ def _diagnostic_params(source, robot, variant):
         # are special.  A nested mapping is not a ROS parameter namespace.
         shim.update(primary)
         controller['FollowPath'] = shim
+    elif variant == 'rpp':
+        # Prefix-only rewrite: retain the frozen production RPP parameters.
+        pass
     else:
         raise ValueError(f'unknown controller_variant={variant}')
     handle = tempfile.NamedTemporaryFile(
@@ -125,7 +141,8 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
     source = os.path.join(
         package_dir, 'resource', f'nav2_{robot}_shared_map.yaml'
     )
-    source = _diagnostic_params(source, robot, controller_variant)
+    source = _diagnostic_params(
+        source, robot, controller_variant, node_prefix=node_prefix)
     diagnostic_rewrites = {
         'controller_server.ros__parameters.FollowPath.publish_evaluation':
             LaunchConfiguration('diagnostic_mode'),

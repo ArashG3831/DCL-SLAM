@@ -30,7 +30,10 @@ class UnknownPosePhaseManager(Node):
             raise ValueError('robot_id and lifecycle manager services are required')
         qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # The frontend publishes accepted hypotheses with volatile
+            # durability.  Matching it is required for the phase transition
+            # subscriber to receive the one-shot handoff announcement.
+            durability=DurabilityPolicy.VOLATILE,
         )
         self._local_client = self.create_client(
             ManageLifecycleNodes, local_service)

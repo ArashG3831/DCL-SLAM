@@ -103,7 +103,7 @@ def generate_launch_description():
         _arg('diagnostic_mode', 'false', ['true', 'false']),
         _arg('diagnostic_frontier_capture', 'false', ['true', 'false']),
         _arg('unknown_pose_diagnostic_output', ''),
-        _arg('max_verification_batches', '12'),
+        _arg('max_verification_batches', '32'),
         _arg('verification_lifetime_s', '1100.0'),
         _arg('enable_observer', 'true', ['true', 'false']),
         _arg('run_id', ''),

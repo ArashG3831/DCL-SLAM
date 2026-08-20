@@ -489,7 +489,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('unknown_pose_diagnostic_output',
                               default_value=''),
-        DeclareLaunchArgument('max_verification_batches', default_value='12'),
+        DeclareLaunchArgument('max_verification_batches', default_value='32'),
         DeclareLaunchArgument('verification_lifetime_s',
                               default_value='1100.0'),
         DeclareLaunchArgument('assignment_strategy', default_value='burgard',

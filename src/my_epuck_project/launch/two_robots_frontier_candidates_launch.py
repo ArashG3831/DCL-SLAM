@@ -6,7 +6,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from my_epuck_project.cooperative_profiles import profile
+from my_epuck_project.cooperative_profiles import profile_for_world
 
 def generator(robot, minimum_frontier_cells, approach_clearance,
               forensic_clearance_cells, log_level):
@@ -46,9 +46,10 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
 def launch_setup(context):
     project = get_package_share_directory('my_epuck_project')
     world_path = LaunchConfiguration('world_path').perform(context)
-    selected = profile(
+    selected = profile_for_world(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(project, 'worlds'),
+        explicit_world_path=world_path,
     )
     diagnostic_capture = (
         LaunchConfiguration('diagnostic_frontier_capture').perform(context)

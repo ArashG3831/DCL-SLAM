@@ -28,7 +28,7 @@ from launch_ros.events.lifecycle import ChangeState
 from launch.events import matches_action
 from launch.actions import EmitEvent, LogInfo, RegisterEventHandler
 from lifecycle_msgs.msg import Transition
-from my_epuck_project.cooperative_profiles import profile
+from my_epuck_project.cooperative_profiles import profile_for_world
 
 
 def stage_forensic_world(source_world, staging_directory=''):
@@ -107,12 +107,15 @@ def slam_node(package_dir, robot, use_sim_time):
 
 def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
-    selected = profile(
+    launch_world_path = LaunchConfiguration('world_path').perform(context)
+    selected = profile_for_world(
         LaunchConfiguration('world_profile').perform(context),
-        os.path.join(package_dir, 'worlds'))
+        os.path.dirname(launch_world_path)
+        if launch_world_path else os.path.join(package_dir, 'worlds'),
+        explicit_world_path=launch_world_path,
+    )
     forensic_enabled = LaunchConfiguration(
         'enable_forensic_capture').perform(context).lower() == 'true'
-    launch_world_path = LaunchConfiguration('world_path').perform(context)
     if forensic_enabled:
         launch_world_path = stage_forensic_world(
             launch_world_path or selected['world_path'],

@@ -16,7 +16,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
-from my_epuck_project.cooperative_profiles import profile
+from my_epuck_project.cooperative_profiles import profile_for_world
 from nav2_common.launch import RewrittenYaml
 
 
@@ -231,9 +231,10 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
 def launch_setup(context):
     package_dir = get_package_share_directory('my_epuck_project')
     world_path = LaunchConfiguration('world_path').perform(context)
-    selected = profile(
+    selected = profile_for_world(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
+        explicit_world_path=world_path,
     )
     diagnostic_mode = (
         LaunchConfiguration('diagnostic_mode').perform(context) == 'true')

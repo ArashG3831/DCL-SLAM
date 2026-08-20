@@ -10,6 +10,7 @@ from my_epuck_project.cooperative_trial_fast import (
     is_campaign_webots_driver,
     launch_command,
     parser,
+    resolve_world,
 )
 
 
@@ -72,6 +73,60 @@ def test_launch_command_can_enable_passive_evidence_in_attempt_directory(tmp_pat
     assert f'output_root:={tmp_path / "observer"}' in command
     assert 'run_id:=attempt_01' in command
     assert f'unknown_pose_diagnostic_output:={tmp_path / "observer" / "attempt_01" / "frontend"}' in command
+
+
+def test_fast_runner_resolves_and_records_canonical_16m_profile(tmp_path, monkeypatch):
+    worktree = Path(__file__).resolve().parents[3]
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_trial_fast.WORKSPACE', worktree)
+    world = worktree / 'src' / 'my_epuck_project' / 'worlds' / (
+        'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')
+    args = parser().parse_args([
+        '--world-profile', 'large_unknown_pose_16m',
+        '--world-path', str(world),
+    ])
+    resolved = resolve_world(args)
+    assert resolved == world.resolve()
+    assert args.profile_metadata['world_profile'] == 'large_unknown_pose_16m'
+    assert args.profile_metadata['world'] == world.name
+    assert args.profile_metadata['initial_separation_m'] == 17.0
+
+
+def test_fast_runner_rejects_explicit_generic_world_for_16m_profile(tmp_path, monkeypatch):
+    worktree = Path(__file__).resolve().parents[3]
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_trial_fast.WORKSPACE', worktree)
+    generic = worktree / 'src' / 'my_epuck_project' / 'worlds' / (
+        'epuck_d500_two_world_large_dynamic_low_slip_4ms_finite.wbt')
+    args = parser().parse_args([
+        '--world-profile', 'large_unknown_pose_16m',
+        '--world-path', str(generic),
+    ])
+    try:
+        resolve_world(args)
+    except ValueError as error:
+        assert 'world profile/path mismatch' in str(error)
+    else:
+        raise AssertionError('fast runner accepted a conflicting world path')
+
+
+def test_16m_profile_and_world_path_are_forwarded_together():
+    args = parser().parse_args([
+        '--world-profile', 'large_unknown_pose_16m',
+    ])
+    world = Path('/tmp/epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')
+    command = launch_command(args, world)
+    assert 'world_profile:=large_unknown_pose_16m' in command
+    assert f'world_path:={world}' in command
+
+
+def test_full_launch_records_source_and_staged_profile_hashes():
+    source = (Path(__file__).resolve().parents[1] / 'launch' /
+              'two_robots_decentralized_exploration_launch.py').read_text()
+    for marker in (
+            'WORLD_PROFILE_SELECTED', 'staged_source_sha256',
+            'staged_sha256', 'ForensicGroundTruthSupervisor'):
+        assert marker in source
 
 
 def test_readiness_graph_is_the_cooperative_graph():

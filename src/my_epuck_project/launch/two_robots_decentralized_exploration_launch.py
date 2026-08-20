@@ -2,34 +2,41 @@
 """Final two-robot decentralized mapping, pair assignment, and local Nav2 launch."""
 
 import json
+import hashlib
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from my_epuck_project.cooperative_profiles import profile, profile_summary
+from my_epuck_project.cooperative_profiles import profile_for_world, profile_summary
 
 
 def launch_setup(context):
     """Resolve the exact world once for both control and passive metadata."""
     package_dir = get_package_share_directory('my_epuck_project')
     world_path = LaunchConfiguration('world_path').perform(context)
-    selected = profile(
+    selected = profile_for_world(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
+        explicit_world_path=world_path,
         ideal_encoder_sensing=(
             LaunchConfiguration('ideal_encoder_sensing').perform(context).lower()
             == 'true'),
     )
     summary = profile_summary(selected)
+    source_world_sha256 = selected['world_metadata']['sha256']
+    staged_source_world_sha256 = source_world_sha256
+    staged_world_sha256 = source_world_sha256
     forensic_enabled = (
         LaunchConfiguration('enable_forensic_capture').perform(context).lower()
         == 'true')
@@ -63,6 +70,8 @@ def launch_setup(context):
         forensic_world = os.path.join(
             forensic_worlds_dir, os.path.basename(source_for_copy))
         shutil.copyfile(source_for_copy, forensic_world)
+        staged_source_world_sha256 = hashlib.sha256(
+            Path(forensic_world).read_bytes()).hexdigest()
         with open(forensic_world, 'a', encoding='utf-8') as stream:
             stream.write(
                 '\nRobot {\n'
@@ -70,6 +79,8 @@ def launch_setup(context):
                 '  controller "<extern>"\n'
                 '  supervisor TRUE\n'
                 '}\n')
+        staged_world_sha256 = hashlib.sha256(
+            Path(forensic_world).read_bytes()).hexdigest()
         launch_world_path = forensic_world
     dispatch_enabled = (
         LaunchConfiguration('dispatch_enabled').perform(context).lower()
@@ -320,7 +331,16 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
         }],
     )
-    return [assignment, *unknown_pose_frontends, *local_phase_nodes, observer]
+    profile_log = LogInfo(msg=(
+        'WORLD_PROFILE_SELECTED '
+        f'profile={selected["name"]} '
+        f'source_world={selected["world_path"]} '
+        f'launch_world={launch_world_path} '
+        f'source_sha256={source_world_sha256} '
+        f'staged_source_sha256={staged_source_world_sha256} '
+        f'staged_sha256={staged_world_sha256}'))
+    return [profile_log, assignment, *unknown_pose_frontends,
+            *local_phase_nodes, observer]
 
 
 def generate_launch_description():

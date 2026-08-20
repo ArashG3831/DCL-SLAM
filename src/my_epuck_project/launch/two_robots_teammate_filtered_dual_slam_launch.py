@@ -19,7 +19,7 @@ from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
-from my_epuck_project.cooperative_profiles import profile
+from my_epuck_project.cooperative_profiles import profile_for_world
 from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
 
 
@@ -95,9 +95,10 @@ def launch_setup(context):
         'slam_tf_publish_probe_log').perform(context)
     tf_publication_mode = LaunchConfiguration(
         'slam_tf_publication_mode').perform(context)
-    selected = profile(
+    selected = profile_for_world(
         LaunchConfiguration('world_profile').perform(context),
         os.path.dirname(world_path) if world_path else os.path.join(package_dir, 'worlds'),
+        explicit_world_path=world_path,
     )
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()

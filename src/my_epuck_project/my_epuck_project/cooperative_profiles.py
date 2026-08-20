@@ -348,6 +348,23 @@ def profile(name, worlds_directory, ideal_encoder_sensing=True):
     return result
 
 
+def profile_for_world(name, worlds_directory, explicit_world_path='',
+                      ideal_encoder_sensing=True):
+    """Resolve a profile and reject conflicting explicit world paths."""
+    selected = profile(
+        name, worlds_directory,
+        ideal_encoder_sensing=ideal_encoder_sensing)
+    if explicit_world_path:
+        explicit = Path(explicit_world_path).expanduser().resolve()
+        expected = Path(selected['world_path']).resolve()
+        if explicit != expected:
+            raise ValueError(
+                'world profile/path mismatch: '
+                f'profile={name!r} expects {expected}, '
+                f'explicit path is {explicit}')
+    return selected
+
+
 def profile_summary(value):
     """Return strict manifest-friendly metadata without dataclass instances."""
     metadata = value['world_metadata']

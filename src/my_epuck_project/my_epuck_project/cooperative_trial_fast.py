@@ -42,7 +42,8 @@ from sensor_msgs.msg import LaserScan
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
-from .cooperative_profiles import PROFILE_SETTINGS, profile
+from .cooperative_profiles import (
+    PROFILE_SETTINGS, profile_for_world, profile_summary)
 
 
 WORKSPACE = Path('/home/arash/webots_ws')
@@ -207,14 +208,11 @@ def cleanup_campaign_webots_drivers(created_after: float) -> list[int]:
 
 def resolve_world(args: argparse.Namespace) -> Path:
     source_worlds = WORKSPACE / 'src' / PACKAGE / 'worlds'
-    if args.world_path:
-        world = Path(args.world_path).expanduser().resolve()
-        if not world.is_file():
-            raise FastTrialError(f'world path does not exist: {world}')
-        return world
-    selected = profile(
+    selected = profile_for_world(
         args.world_profile, source_worlds,
+        explicit_world_path=args.world_path,
         ideal_encoder_sensing=args.ideal_encoder_sensing)
+    args.profile_metadata = profile_summary(selected)
     return Path(selected['world_path']).resolve()
 
 
@@ -670,6 +668,7 @@ def run(args: argparse.Namespace) -> int:
             'launch_return_code': launch_return_code,
             'world_profile': args.world_profile,
             'world_path': str(world) if world else args.world_path,
+            'profile_metadata': getattr(args, 'profile_metadata', {}),
             'sensor_profile': args.sensor_profile,
             'rendering': args.rendering,
             'rviz': args.rviz,

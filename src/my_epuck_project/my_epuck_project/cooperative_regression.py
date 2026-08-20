@@ -2891,7 +2891,8 @@ def parser():
     result.add_argument('--workspace', default='/home/arash/webots_ws')
     result.add_argument(
         '--world-profile',
-        choices=['large', 'small'],
+        choices=['large', 'small', 'large_unknown_pose',
+                 'large_unknown_pose_16m'],
         default=None,
         help=(
             'World/configuration profile; defaults to large for new runs and '

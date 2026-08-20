@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import math
+import hashlib
 from pathlib import Path
 import re
 import tempfile
@@ -17,6 +18,7 @@ from my_epuck_project.cooperative_profiles import (
     manual_rviz_path,
     parse_world,
     profile,
+    profile_for_world,
     relative_transform,
 )
 
@@ -28,6 +30,66 @@ LAUNCH = PACKAGE / 'launch'
 
 def selected(name):
     return profile(name, WORLDS)
+
+
+def test_large_unknown_pose_16m_is_the_canonical_far_start_profile():
+    value = selected('large_unknown_pose_16m')
+    metadata = value['world_metadata']
+    assert value['world'] == (
+        'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')
+    assert metadata['robot_order'] == ('robot1', 'robot2')
+    assert metadata['robots']['robot1'].translation[:2] == (16.0, 0.0)
+    assert metadata['robots']['robot2'].translation[:2] == (-1.0, 0.0)
+    assert math.isclose(metadata['initial_separation_m'], 17.0, abs_tol=1e-6)
+    assert metadata['robots']['robot1'].lidar_maximum_range == 12.0
+    assert value['physics_profile'] == 'dynamic_low_slip_4ms_finite'
+
+
+def test_profile_for_world_requires_matching_path_and_hash(tmp_path):
+    source = WORLDS / (
+        'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')
+    staged_worlds = tmp_path / 'worlds'
+    staged_worlds.mkdir()
+    staged = staged_worlds / source.name
+    staged.write_bytes(source.read_bytes())
+    value = profile_for_world(
+        'large_unknown_pose_16m', staged_worlds, explicit_world_path=staged)
+    assert Path(value['world_path']) == staged.resolve()
+    assert value['world_metadata']['sha256'] == hashlib.sha256(
+        staged.read_bytes()).hexdigest()
+    assert value['world'] != 'epuck_d500_two_world_large_dynamic_low_slip_4ms_finite.wbt'
+
+
+def test_profile_for_world_rejects_generic_or_conflicting_world_path(tmp_path):
+    staged_worlds = tmp_path / 'worlds'
+    staged_worlds.mkdir()
+    expected = staged_worlds / (
+        'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')
+    expected.write_bytes(
+        (WORLDS / expected.name).read_bytes())
+    generic = staged_worlds / 'epuck_d500_two_world_large_dynamic_low_slip_4ms_finite.wbt'
+    generic.write_bytes(
+        (WORLDS / 'epuck_d500_two_world_large_dynamic_low_slip_4ms_finite.wbt')
+        .read_bytes())
+    try:
+        profile_for_world(
+            'large_unknown_pose_16m', staged_worlds,
+            explicit_world_path=generic)
+    except ValueError as error:
+        assert 'world profile/path mismatch' in str(error)
+    else:
+        raise AssertionError('conflicting generic world path was accepted')
+
+
+def test_full_launch_chain_uses_one_profile_path_resolver():
+    for name in (
+            'two_robots_decentralized_exploration_launch.py',
+            'two_robots_frontier_candidates_launch.py',
+            'two_robots_teammate_filtered_stack_launch.py',
+            'two_robots_teammate_filtered_dual_slam_launch.py'):
+        source = (LAUNCH / name).read_text(encoding='utf-8')
+        assert 'profile_for_world' in source
+        assert 'explicit_world_path=world_path' in source
 
 
 def point_to_box_distance(point, obstacle):

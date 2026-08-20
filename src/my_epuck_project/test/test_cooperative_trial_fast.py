@@ -7,6 +7,7 @@ from my_epuck_project.cooperative_trial_fast import (
     LOCAL_NAV2_NODES,
     ReadyProbe,
     boolean,
+    is_campaign_webots_driver,
     launch_command,
     parser,
 )
@@ -86,3 +87,17 @@ def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
     method_source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
     assert 'LOCAL_NAV2_NODES' in method_source
     assert 'lifecycle_manager_navigation/manage_nodes' not in method_source
+
+
+def test_campaign_driver_filter_is_namespaced_and_not_broad_kill():
+    valid = [
+        '/home/arash/webots_ws/install/webots_ros2_driver/lib/webots_ros2_driver/driver',
+        '-r', '__ns:=/robot1',
+        '--params-file', '/tmp/my_epuck_project_robot1_ros2_control.yml',
+    ]
+    unrelated = [
+        '/opt/other_driver', '-r', '__ns:=/robot1',
+        '--params-file', '/tmp/other.yml',
+    ]
+    assert is_campaign_webots_driver(valid)
+    assert not is_campaign_webots_driver(unrelated)

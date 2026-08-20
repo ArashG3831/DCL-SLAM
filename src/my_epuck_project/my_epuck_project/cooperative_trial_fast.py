@@ -158,6 +158,52 @@ def port_is_free(port: int) -> bool:
     return True
 
 
+def is_campaign_webots_driver(command: list[str]) -> bool:
+    """Identify only this project's namespaced ros2_control driver processes."""
+    text = ' '.join(command)
+    return (
+        'webots_ros2_driver/lib/webots_ros2_driver/driver' in text and
+        any(
+            f'__ns:=/{robot}' in text and
+            f'/tmp/my_epuck_project_{robot}_ros2_control.yml' in text
+            for robot in ('robot1', 'robot2')
+        )
+    )
+
+
+def campaign_webots_drivers(created_after: float | None = None):
+    drivers = []
+    for process in psutil.process_iter(['pid', 'cmdline', 'create_time']):
+        try:
+            command = process.info.get('cmdline') or []
+            if not is_campaign_webots_driver(command):
+                continue
+            if (created_after is not None and
+                    process.info.get('create_time', 0.0) < created_after):
+                continue
+            drivers.append(process)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return drivers
+
+
+def cleanup_campaign_webots_drivers(created_after: float) -> list[int]:
+    drivers = campaign_webots_drivers(created_after)
+    pids = [process.pid for process in drivers]
+    for process in drivers:
+        try:
+            process.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _, alive = psutil.wait_procs(drivers, timeout=5.0)
+    for process in alive:
+        try:
+            process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return pids
+
+
 def resolve_world(args: argparse.Namespace) -> Path:
     source_worlds = WORKSPACE / 'src' / PACKAGE / 'worlds'
     if args.world_path:
@@ -420,6 +466,7 @@ def rviz_command() -> list[str]:
 
 def run(args: argparse.Namespace) -> int:
     started = time.monotonic()
+    started_wall = time.time()
     start_time = utc_now()
     attempt = None
     launch = None
@@ -454,6 +501,11 @@ def run(args: argparse.Namespace) -> int:
     try:
         prefix = package_prefix()
         world = resolve_world(args)
+        stale_drivers = campaign_webots_drivers()
+        if stale_drivers:
+            raise FastTrialError(
+                'stale campaign Webots drivers are still running: %s' %
+                [process.pid for process in stale_drivers])
         if not port_is_free(args.webots_port):
             raise FastTrialError(f'Webots port is already in use: {args.webots_port}')
         attempt = prepare_attempt(args, prefix, world)
@@ -595,6 +647,8 @@ def run(args: argparse.Namespace) -> int:
             launch_return_code = cleanup['launch_return_code']
         else:
             cleanup = {}
+        cleanup['campaign_webots_driver_pids'] = cleanup_campaign_webots_drivers(
+            started_wall)
         if log_file is not None:
             for thread in output_threads:
                 thread.join(timeout=2.0)

@@ -149,8 +149,8 @@ def test_full_exploration_uses_more_than_four_finite_reentry_batches():
     wrapper = (
         __import__('pathlib').Path(__file__).parents[1] /
         'launch' / 'two_robots_unknown_pose_exploration_launch.py').read_text()
-    assert "DeclareLaunchArgument('max_verification_batches', default_value='32')" in source
-    assert "_arg('max_verification_batches', '32')" in wrapper
+    assert "DeclareLaunchArgument('max_verification_batches', default_value='64')" in source
+    assert "_arg('max_verification_batches', '64')" in wrapper
     assert 'max_verification_batches' in source
     assert "DeclareLaunchArgument('verification_lifetime_s'" in source
     assert "_arg('verification_lifetime_s', '1100.0')" in wrapper

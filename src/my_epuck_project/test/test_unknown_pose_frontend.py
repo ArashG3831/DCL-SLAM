@@ -152,6 +152,8 @@ def test_full_exploration_uses_more_than_four_finite_reentry_batches():
     assert "DeclareLaunchArgument('max_verification_batches', default_value='12')" in source
     assert "_arg('max_verification_batches', '12')" in wrapper
     assert 'max_verification_batches' in source
+    assert "DeclareLaunchArgument('verification_lifetime_s'" in source
+    assert "_arg('verification_lifetime_s', '1100.0')" in wrapper
 
 
 def test_duplicate_physical_evidence_diagnostics_are_coalesced_not_state():

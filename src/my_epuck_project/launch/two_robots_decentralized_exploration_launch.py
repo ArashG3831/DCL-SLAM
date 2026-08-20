@@ -204,6 +204,8 @@ def launch_setup(context):
                     'diagnostic_output': diagnostic_output,
                     'max_verification_batches': LaunchConfiguration(
                         'max_verification_batches'),
+                    'verification_lifetime_s': LaunchConfiguration(
+                        'verification_lifetime_s'),
                 }],
             ))
             frontend_watchdogs.append(RegisterEventHandler(
@@ -488,6 +490,8 @@ def generate_launch_description():
         DeclareLaunchArgument('unknown_pose_diagnostic_output',
                               default_value=''),
         DeclareLaunchArgument('max_verification_batches', default_value='12'),
+        DeclareLaunchArgument('verification_lifetime_s',
+                              default_value='1100.0'),
         DeclareLaunchArgument('assignment_strategy', default_value='burgard',
                               choices=['burgard', 'legacy_weighted']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),

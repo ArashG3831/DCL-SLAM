@@ -198,6 +198,9 @@ def launch_command(
         'use_sim_time:=true',
         'nav2_autostart:=false',
         'dispatch_enabled:=true',
+        # This runner is the unknown-pose full-exploration campaign entry
+        # point; do not silently fall back to the known-relative launch mode.
+        'unknown_initial_pose:=true',
         # The authoritative unknown-pose wrapper uses the frozen production
         # RPP controller.  Pass this explicitly through the nested launch
         # chain so an inherited/duplicate launch argument cannot select the

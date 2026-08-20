@@ -346,6 +346,7 @@ def launch_setup(context):
                     # Coalesce local and peer map callbacks behind one bounded
                     # timer. Callbacks only mark source state dirty.
                     'publish_on_callback': False,
+                    'handoff_gated': unknown_initial_pose,
                     # A peer silhouette can be observed while its scan-frame
                     # transform is delayed.  Clear both fresh live robot
                     # footprints in every shared map so that transient peer

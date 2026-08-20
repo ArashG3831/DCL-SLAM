@@ -16,6 +16,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <my_epuck_interfaces/msg/frontier_candidate.hpp>
 #include <my_epuck_interfaces/msg/frontier_candidate_array.hpp>
+#include <my_epuck_interfaces/msg/relative_pose_hypothesis.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -112,6 +113,7 @@ public:
     P(std::string, marker_topic, "frontier_candidate_markers");
     P(std::string, path_query_lock_path, "");
     P(double, processing_rate_hz, .5);
+    P(bool, handoff_gated, false);
     P(int, occupied_threshold, 50);
     P(int, costmap_blocked_threshold, 1);
     P(int, minimum_frontier_cells, 5);
@@ -160,15 +162,35 @@ public:
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       marker_topic_, rclcpp::QoS(1).reliable());
     planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
-    timer_ = create_wall_timer(
-      std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
-      [this] {tick();});
-    receipt_summary_timer_ = create_wall_timer(1s, [this] {emit_receipt_summary();});
+    if (handoff_gated_) {
+      handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
+        "/cslam/relative_pose/hypotheses", rclcpp::QoS(1).reliable(),
+        [this](my_epuck_interfaces::msg::RelativePoseHypothesis::ConstSharedPtr message) {
+          if (!message->accepted || message->status != "ACCEPTED" || processing_active_) {
+            return;
+          }
+          processing_active_ = true;
+          timer_ = create_wall_timer(
+            std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
+            [this] {tick();});
+          receipt_summary_timer_ = create_wall_timer(
+            1s, [this] {emit_receipt_summary();});
+          RCLCPP_INFO(get_logger(), "FRONTIER_PHASE post_handoff=true processing_active=true");
+        });
+    } else {
+      processing_active_ = true;
+      timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
+        [this] {tick();});
+    }
+    if (!handoff_gated_) {
+      receipt_summary_timer_ = create_wall_timer(1s, [this] {emit_receipt_summary();});
+    }
     RCLCPP_INFO(
       get_logger(),
-      "candidate generator: persistent fair frontier evaluation map=%s costmap=%s planner=%s budget=%d",
+      "candidate generator: persistent fair frontier evaluation map=%s costmap=%s planner=%s budget=%d handoff_gated=%s",
       map_topic_.c_str(), global_costmap_topic_.c_str(), compute_path_action_.c_str(),
-      maximum_path_queries_per_cycle_);
+      maximum_path_queries_per_cycle_, handoff_gated_ ? "true" : "false");
   }
 
   ~Generator() override
@@ -184,6 +206,7 @@ public:
 private:
   void map_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
   {
+    if (handoff_gated_ && !processing_active_) {return;}
     const auto checksum = map_checksum(*message);
     const auto receipt = std::chrono::steady_clock::now().time_since_epoch();
     std::lock_guard<std::mutex> lock(mu_);
@@ -201,6 +224,7 @@ private:
 
   void cost_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
   {
+    if (handoff_gated_ && !processing_active_) {return;}
     const auto checksum = map_checksum(*message);
     const auto receipt = std::chrono::steady_clock::now().time_since_epoch();
     std::lock_guard<std::mutex> lock(mu_);
@@ -1094,6 +1118,7 @@ private:
   rclcpp_action::Client<Action>::SharedPtr planner_;
   GoalHandle::SharedPtr active_;
   rclcpp::TimerBase::SharedPtr timer_, timeout_timer_, retry_timer_, receipt_summary_timer_;
+  rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;
   rclcpp::Publisher<my_epuck_interfaces::msg::FrontierCandidateArray>::SharedPtr pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
@@ -1102,6 +1127,8 @@ private:
   std::string compute_path_action_, candidate_topic_, marker_topic_, path_query_lock_path_;
   std::string planner_id_;
   double processing_rate_hz_, minimum_frontier_length_m_, stable_id_quantization_m_;
+  bool handoff_gated_{false};
+  bool processing_active_{false};
   double approach_clearance_m_, planner_tolerance_m_, minimum_robot_distance_m_;
   double path_query_timeout_s_, maximum_feasible_path_m_, gain_weight_, distance_weight_;
   double path_weight_, heading_weight_, unreachable_suppression_s_, goal_tolerance_m_;

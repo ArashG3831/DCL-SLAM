@@ -306,9 +306,10 @@ def occupancy_value(grid: OccupancyGrid, point: Point) -> Optional[int]:
 class LocalNav2:
     """Own only this node namespace's planner, navigator, state, TF, and odometry."""
 
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, *, phase_gated: bool = False):
         """Create relative interfaces that resolve inside the local robot namespace."""
         self._node = node
+        self._phase_inputs_active = not phase_gated
         self._robot_id = node.get_namespace().strip('/') or 'root'
         self._global_frame = node.declare_parameter('global_frame', 'shared_map').value
         self._base_frame = node.declare_parameter('robot_base_frame', 'base_footprint').value
@@ -355,28 +356,17 @@ class LocalNav2:
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        map_topic = str(node.declare_parameter('map_topic', 'shared_map').value)
-        node.create_subscription(
-            OccupancyGrid, map_topic, self._on_map, transient_qos,
-        )
-        node.create_subscription(
-            OccupancyGrid, 'global_costmap/costmap', self._on_costmap, transient_qos,
-        )
-        node.create_subscription(
-            OccupancyGrid, 'local_costmap/costmap', self._on_local_costmap,
-            transient_qos,
-        )
-        node.create_subscription(Odometry, 'odom', self._on_odom, 20)
+        self._map_topic = str(node.declare_parameter('map_topic', 'shared_map').value)
+        self._phase_subscriptions = []
         # Scan freshness is diagnostic-only.  The production Nav2/SLAM stack
         # publishes the corrected scan as scan_d500_fixed.  The allocator
         # intentionally does not create a cmd_vel interface; command capture
         # belongs to the observer node so exploration remains a local Nav2
         # action boundary.
-        scan_topic = str(node.declare_parameter(
+        self._scan_topic = str(node.declare_parameter(
             'diagnostic_scan_topic', 'scan_d500_fixed').value)
-        node.create_subscription(LaserScan, scan_topic, self._on_scan, 20)
         self._tf_buffer = Buffer(node=node)
-        self._tf_listener = TransformListener(self._tf_buffer, node, spin_thread=False)
+        self._tf_listener = None
         self._map: Optional[OccupancyGrid] = None
         self._costmap: Optional[OccupancyGrid] = None
         self._local_costmap: Optional[OccupancyGrid] = None
@@ -418,7 +408,37 @@ class LocalNav2:
         self._recent_odom_samples = deque(maxlen=32)
         self._last_lifecycle_active: Optional[bool] = None
         self._lifecycle_health_pending = False
-        self._timer = node.create_timer(0.1, self._check_timeouts)
+        self._timer = None
+        if self._phase_inputs_active:
+            self._activate_phase_inputs(transient_qos)
+
+    def _activate_phase_inputs(self, transient_qos=None) -> None:
+        """Start map/health callbacks for a post-handoff shared phase."""
+        if self._phase_inputs_active and self._timer is not None:
+            return
+        if transient_qos is None:
+            transient_qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+        self._phase_inputs_active = True
+        if self._tf_listener is None:
+            self._tf_listener = TransformListener(
+                self._tf_buffer, self._node, spin_thread=False)
+        self._phase_subscriptions.extend([
+            self._node.create_subscription(
+                OccupancyGrid, self._map_topic, self._on_map, transient_qos),
+            self._node.create_subscription(
+                OccupancyGrid, 'global_costmap/costmap', self._on_costmap,
+                transient_qos),
+            self._node.create_subscription(
+                OccupancyGrid, 'local_costmap/costmap', self._on_local_costmap,
+                transient_qos),
+            self._node.create_subscription(Odometry, 'odom', self._on_odom, 20),
+            self._node.create_subscription(LaserScan, self._scan_topic,
+                                            self._on_scan, 20),
+        ])
+        self._timer = self._node.create_timer(0.1, self._check_timeouts)
 
     @property
     def local_goal_active(self) -> bool:

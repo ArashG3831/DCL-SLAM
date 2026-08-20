@@ -157,6 +157,8 @@ class DistributedFrontierAssignment(Node):
         self._local_only = bool(self.declare_parameter('local_only', False).value)
         self._handoff_gated = bool(self.declare_parameter(
             'handoff_gated', False).value)
+        self._phase_gated = bool(self.declare_parameter(
+            'phase_gated', False).value)
         self._handoff_complete = False
         self._dispatch_enabled = bool(
             self.declare_parameter('dispatch_enabled', False).value,
@@ -340,7 +342,7 @@ class DistributedFrontierAssignment(Node):
         self._candidate_region_snapshots: dict[
             str, tuple[FrontierRegionEvidence, ...]] = {}
         self._candidate_evidence_seen = set()
-        self._nav2 = LocalNav2(self)
+        self._nav2 = LocalNav2(self, phase_gated=self._phase_gated)
         qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -363,37 +365,16 @@ class DistributedFrontierAssignment(Node):
         candidate_topic = str(self.declare_parameter(
             'candidate_topic', 'frontier_candidates').value)
         robot_ids = (self._robot_id,) if self._local_only else ('robot1', 'robot2')
-        for robot_id in robot_ids:
-            self.create_subscription(
-                FrontierCandidateArray,
-                candidate_topic if self._local_only else
-                f'/{robot_id}/frontier_candidates',
-                self._candidate_callback, candidate_qos,
-            )
-            self.create_subscription(
-                TaskSnapshotMsg,
-                task_snapshot_topic if self._local_only else
-                f'/{robot_id}/task_snapshot',
-                self._snapshot_callback, qos,
-            )
-        if not self._local_only:
-            for robot_id in ('robot1', 'robot2'):
-                self.create_subscription(
-                    TaskBidArrayMsg, f'/{robot_id}/task_bids',
-                    self._bid_callback, qos,
-                )
-                self.create_subscription(
-                    PairDecisionMsg, f'/{robot_id}/pair_decision',
-                    self._decision_callback, qos,
-                )
-                self.create_subscription(
-                    DistributedExplorationStatus, f'/{robot_id}/distributed_status',
-                    self._status_callback, qos,
-                )
-                self.create_subscription(
-                    ExplorationFailure, f'/{robot_id}/exploration_failure',
-                    self._failure_callback, qos,
-                )
+        self._phase_subscriptions = []
+        self._phase_protocol = {
+            'qos': qos,
+            'candidate_qos': candidate_qos,
+            'task_snapshot_topic': task_snapshot_topic,
+            'candidate_topic': candidate_topic,
+            'robot_ids': robot_ids,
+        }
+        if not self._phase_gated:
+            self._activate_protocol_inputs()
         if self._handoff_gated:
             self.create_subscription(
                 RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
@@ -412,8 +393,10 @@ class DistributedFrontierAssignment(Node):
         self._event_publisher = self.create_publisher(
             DistributedExplorationEvent, 'distributed_event', 50,
         )
-        self._tick_timer = self.create_timer(0.1, self._tick)
-        self._status_timer = self.create_timer(1.0, self._publish_status)
+        self._tick_timer = None
+        self._status_timer = None
+        if not self._phase_gated:
+            self._activate_assignment_timers()
         interfaces = self._nav2.interface_names()
         self.get_logger().info(
             'DISTRIBUTED_ASSIGNMENT robot=%s peer=%s dispatch=%s strategy=%s '
@@ -433,6 +416,64 @@ class DistributedFrontierAssignment(Node):
             )
         )
 
+    def _activate_protocol_inputs(self) -> None:
+        """Subscribe to task/bid traffic only in the active shared phase."""
+        if self._phase_subscriptions:
+            return
+        qos = self._phase_protocol['qos']
+        candidate_qos = self._phase_protocol['candidate_qos']
+        task_snapshot_topic = self._phase_protocol['task_snapshot_topic']
+        candidate_topic = self._phase_protocol['candidate_topic']
+        for robot_id in self._phase_protocol['robot_ids']:
+            self._phase_subscriptions.extend([
+                self.create_subscription(
+                    FrontierCandidateArray,
+                    candidate_topic if self._local_only else
+                    f'/{robot_id}/frontier_candidates',
+                    self._candidate_callback, candidate_qos),
+                self.create_subscription(
+                    TaskSnapshotMsg,
+                    task_snapshot_topic if self._local_only else
+                    f'/{robot_id}/task_snapshot',
+                    self._snapshot_callback, qos),
+            ])
+        if not self._local_only:
+            for robot_id in ('robot1', 'robot2'):
+                self._phase_subscriptions.extend([
+                    self.create_subscription(
+                        TaskBidArrayMsg, f'/{robot_id}/task_bids',
+                        self._bid_callback, qos),
+                    self.create_subscription(
+                        PairDecisionMsg, f'/{robot_id}/pair_decision',
+                        self._decision_callback, qos),
+                    self.create_subscription(
+                        DistributedExplorationStatus,
+                        f'/{robot_id}/distributed_status',
+                        self._status_callback, qos),
+                    self.create_subscription(
+                        ExplorationFailure,
+                        f'/{robot_id}/exploration_failure',
+                        self._failure_callback, qos),
+                ])
+
+    def _activate_assignment_timers(self) -> None:
+        """Start assignment work only after the canonical handoff."""
+        if self._tick_timer is None:
+            self._tick_timer = self.create_timer(0.1, self._tick)
+        if self._status_timer is None:
+            self._status_timer = self.create_timer(1.0, self._publish_status)
+
+    def _activate_shared_phase(self) -> None:
+        if not self._phase_gated:
+            return
+        self._phase_gated = False
+        self._activate_protocol_inputs()
+        self._nav2._activate_phase_inputs()
+        self._activate_assignment_timers()
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE shared_assignment_active=true '
+            'protocol_inputs=true timers=true')
+
     def _handoff_callback(self, message: RelativePoseHypothesis) -> None:
         """Switch local-only dispatch off only after canonical acceptance."""
         if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
@@ -440,6 +481,7 @@ class DistributedFrontierAssignment(Node):
         if self._handoff_complete:
             return
         self._handoff_complete = True
+        self._activate_shared_phase()
         self._dispatch_enabled = False if self._local_only else True
         if self._local_only and self._nav2.local_goal_active:
             self._nav2.cancel_navigation()

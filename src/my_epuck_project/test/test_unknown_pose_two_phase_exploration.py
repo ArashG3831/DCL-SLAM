@@ -33,12 +33,52 @@ def test_local_phase_uses_each_robot_local_map_and_local_nav2():
 def test_shared_stack_is_inert_until_accepted_handoff():
     stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assignment_launch = (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text()
+    frontier_launch = (LAUNCH / 'two_robots_frontier_candidates_launch.py').read_text()
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
+    fusion = (PY / 'source_aware_map_fusion.py').read_text()
+    generator = (ROOT.parent / 'my_epuck_frontier_candidates' / 'src' /
+                 'frontier_candidate_generator.cpp').read_text()
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()
     assert "autostart=False" in stack
     assert "shared_dispatch_enabled = False if unknown_initial_pose" in full
+    assert "'handoff_gated': unknown_initial_pose" in stack
+    assert "'phase_gated': LaunchConfiguration('unknown_initial_pose')" in assignment_launch
+    assert "'handoff_gated': LaunchConfiguration('unknown_initial_pose')" in frontier_launch
+    assert "if not self._phase_gated:" in assignment
+    assert "self._tick_timer = None" in assignment
+    assert "self._activate_shared_phase()" in assignment
+    assert "FUSION_PHASE pre_handoff=true map_inputs=false timer=false" in fusion
+    assert "if not self.phase_active:" in fusion
+    assert "handoff_gated_" in generator
+    assert "if (handoff_gated_ && !processing_active_)" in generator
+    assert "FRONTIER_PHASE post_handoff=true processing_active=true" in generator
     assert "ManageLifecycleNodes.Request.STARTUP" in phase
     assert "ManageLifecycleNodes.Request.SHUTDOWN" in phase
     assert "message.accepted" in phase
+
+
+def test_shared_inputs_are_created_once_after_handoff():
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
+    fusion = (PY / 'source_aware_map_fusion.py').read_text()
+    generator = (ROOT.parent / 'my_epuck_frontier_candidates' / 'src' /
+                 'frontier_candidate_generator.cpp').read_text()
+    assert assignment.count('def _activate_shared_phase') == 1
+    assert assignment.count('self._activate_protocol_inputs()') == 2
+    assert fusion.count('def _activate_fusion_phase') == 1
+    assert fusion.count('self._activate_fusion_phase(') == 2
+    assert generator.count('processing_active_ = true;') == 2
+
+
+def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
+    fusion = (PY / 'source_aware_map_fusion.py').read_text()
+    generator = (ROOT.parent / 'my_epuck_frontier_candidates' / 'src' /
+                 'frontier_candidate_generator.cpp').read_text()
+    assert "if not bool(message.accepted) or str(message.status) != 'ACCEPTED'" in assignment
+    assert "if not bool(message.accepted) or str(message.status) != 'ACCEPTED'" in fusion
+    assert 'if (!message->accepted || message->status != "ACCEPTED"' in generator
+    assert "'shared_map'" not in (PY / 'unknown_pose_phase_manager.py').read_text()
 
 
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():

@@ -2,7 +2,7 @@ import math
 import time
 
 import numpy as np
-from my_epuck_interfaces.msg import PeerMap
+from my_epuck_interfaces.msg import PeerMap, RelativePoseHypothesis
 from my_epuck_project.live_map_sanitizer import (
     apply_incremental_patch,
     footprint_cell_indices,
@@ -202,6 +202,7 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('publish_on_callback', False)
         self.declare_parameter('sanitize_live_footprints', False)
         self.declare_parameter('min_fusion_rebuild_period_s', 1.0)
+        self.declare_parameter('handoff_gated', False)
 
         local_topic = self.get_parameter('local_map_topic').value
         remote_topic = self.get_parameter('remote_peer_topic').value
@@ -231,6 +232,9 @@ class SourceAwareMapFusion(Node):
             self.get_parameter('publish_on_callback').value)
         self.sanitize_live_footprints = bool(
             self.get_parameter('sanitize_live_footprints').value)
+        self.handoff_gated = bool(
+            self.get_parameter('handoff_gated').value)
+        self.phase_active = not self.handoff_gated
         self.min_fusion_rebuild_period_s = max(
             0.0, float(self.get_parameter('min_fusion_rebuild_period_s').value))
         if not self.expected_source:
@@ -254,14 +258,11 @@ class SourceAwareMapFusion(Node):
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.VOLATILE,
             ))
-        self.local_subscription = self.create_subscription(
-            OccupancyGrid, local_topic, self.local_callback, qos
-        )
-        self.peer_subscription = self.create_subscription(
-            PeerMap, remote_topic, self.peer_callback, qos
-        )
+        self.local_subscription = None
+        self.peer_subscription = None
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_listener = (
+            None if self.handoff_gated else TransformListener(self.tf_buffer, self))
         self.local_map = None
         self.remote_map = None
         self.local_revision = 0
@@ -294,8 +295,23 @@ class SourceAwareMapFusion(Node):
         }
         self.rebuild_period_s = max(
             0.1, self.min_fusion_rebuild_period_s or 1.0)
-        self.retry_timer = self.create_timer(
-            self.rebuild_period_s, self.scheduled_fuse)
+        self.retry_timer = None
+        self.handoff_subscription = None
+        if self.handoff_gated:
+            self.handoff_subscription = self.create_subscription(
+                RelativePoseHypothesis,
+                '/cslam/relative_pose/hypotheses',
+                self._handoff_callback,
+                QoSProfile(
+                    depth=1,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.VOLATILE,
+                ),
+            )
+            self.get_logger().info(
+                'FUSION_PHASE pre_handoff=true map_inputs=false timer=false')
+        else:
+            self._activate_fusion_phase(local_topic, remote_topic, qos)
         self.get_logger().info(
             f'Local {self.resolve_topic_name(local_topic)} + remote-only '
             f'{self.resolve_topic_name(remote_topic)} from {self.expected_source} '
@@ -303,6 +319,34 @@ class SourceAwareMapFusion(Node):
             f'visualization={self.resolve_topic_name(visualization_topic)} '
             f'period_s={self.rebuild_period_s:.3f} '
             f'vectorized=True'
+        )
+
+    def _activate_fusion_phase(self, local_topic, remote_topic, qos):
+        """Start map subscriptions and the rebuild scheduler after handoff."""
+        if self.phase_active and self.retry_timer is not None:
+            return
+        self.phase_active = True
+        if self.tf_listener is None:
+            self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.local_subscription = self.create_subscription(
+            OccupancyGrid, local_topic, self.local_callback, qos)
+        self.peer_subscription = self.create_subscription(
+            PeerMap, remote_topic, self.peer_callback, qos)
+        self.retry_timer = self.create_timer(
+            self.rebuild_period_s, self.scheduled_fuse)
+        self.get_logger().info(
+            'FUSION_PHASE post_handoff=true map_inputs=true timer=true')
+
+    def _handoff_callback(self, message):
+        if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
+            return
+        self._activate_fusion_phase(
+            self.get_parameter('local_map_topic').value,
+            self.get_parameter('remote_peer_topic').value,
+            QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
         )
 
     def local_callback(self, message):
@@ -600,6 +644,8 @@ class SourceAwareMapFusion(Node):
         })
 
     def scheduled_fuse(self):
+        if not self.phase_active:
+            return
         if self.rebuild_busy:
             self.rebuild_skipped_count += 1
             self.profile_window['rebuild_skipped'] += 1

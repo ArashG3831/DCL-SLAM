@@ -277,6 +277,42 @@ def physical_crop_identity(crop: GridCrop, map_epoch: int = 0,
         _identity_float(centre_x), _identity_float(centre_y))
 
 
+def physical_crop_geometry_identity(crop: GridCrop) -> tuple:
+    """Identify the physical view independently of revision metadata.
+
+    Epochs and checksums remain part of the exact evidence identity and are
+    still required for request/response freshness.  This second, geometry-only
+    identity is used for negative scheduling evidence: a map revision that
+    advertises the same crop footprint must not consume another verification
+    attempt after that footprint already failed geometric verification.
+    """
+    height, width = crop.values.shape[:2]
+    centre_x, centre_y = _crop_center(crop)
+    return (
+        _identity_float(crop.resolution), int(width), int(height),
+        _identity_float(crop.origin_x), _identity_float(crop.origin_y),
+        _identity_float(crop.origin_yaw), _identity_float(centre_x),
+        _identity_float(centre_y))
+
+
+def physical_candidate_geometry_identity(candidate, own_crops: dict) -> tuple:
+    """Return revision-independent geometry for a candidate crop pair."""
+    if len(candidate) == 5:
+        _, peer_key, own_key, peer_descriptor, _ = candidate
+    else:
+        peer_key, own_key, peer_descriptor, _ = candidate
+    own_crop = own_crops[own_key]
+    peer_crop = GridCrop(
+        values=np.empty((int(peer_descriptor.crop_height),
+                         int(peer_descriptor.crop_width)), dtype=np.int16),
+        resolution=float(peer_descriptor.resolution),
+        origin_x=float(peer_descriptor.crop_origin_x),
+        origin_y=float(peer_descriptor.crop_origin_y),
+        origin_yaw=float(getattr(peer_descriptor, 'crop_origin_yaw', 0.0)))
+    return (physical_crop_geometry_identity(own_crop),
+            physical_crop_geometry_identity(peer_crop))
+
+
 def physical_descriptor_identity(descriptor) -> tuple:
     """Return the corresponding physical identity for a descriptor message."""
     resolution = float(getattr(descriptor, 'resolution', 0.0))

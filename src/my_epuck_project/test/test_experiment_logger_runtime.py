@@ -240,6 +240,25 @@ def test_unknown_pose_requires_frontend_diagnostics_in_artifact_contract(observe
     ])
 
 
+def test_unknown_pose_artifacts_resolve_logger_run_id_collision(observer):
+    """Frontend files may be created before logger collision suffixing."""
+    observer.p['initial_configuration_json'] = json.dumps({
+        'unknown_initial_pose': True,
+    })
+    sibling = observer.directory.parent / f'{observer.run_id}-01' / 'frontend'
+    sibling.mkdir(parents=True)
+    for robot in ('robot1', 'robot2'):
+        for suffix in (
+                'unknown_pose_frontend.json',
+                'consensus_diagnostics.jsonl',
+                'physical_evidence_diagnostics.jsonl'):
+            (sibling / f'{robot}_{suffix}').write_text('{}\n')
+    status = observer.required_artifact_status(False)
+    assert status['complete'] is True
+    assert status['missing'] == []
+    assert status['frontend_directory'] == f'{observer.run_id}-01/frontend'
+
+
 def test_large_occupancy_grid_is_converted_and_counted_once(observer):
     message = OccupancyGrid()
     message.info.width = 320

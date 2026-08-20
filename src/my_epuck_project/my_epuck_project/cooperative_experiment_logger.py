@@ -788,16 +788,72 @@ class CooperativeExperimentLogger(Node):
                     'unknown_initial_pose', False))
         except (TypeError, ValueError, json.JSONDecodeError):
             unknown_pose = False
+        frontend_directory = None
         if unknown_pose:
-            frontend = self.directory / 'frontend'
+            frontend_directory = self.frontend_diagnostic_directory()
             for robot in self.robots:
                 required.extend([
-                    frontend / f'{robot}_unknown_pose_frontend.json',
-                    frontend / f'{robot}_consensus_diagnostics.jsonl',
-                    frontend / f'{robot}_physical_evidence_diagnostics.jsonl',
+                    frontend_directory / f'{robot}_unknown_pose_frontend.json',
+                    frontend_directory / f'{robot}_consensus_diagnostics.jsonl',
+                    frontend_directory / f'{robot}_physical_evidence_diagnostics.jsonl',
                 ])
-        missing=[str(path.relative_to(self.directory)) for path in required if not path.is_file()]
-        return {'complete':not missing,'status':'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS','required':[str(path.relative_to(self.directory)) for path in required],'missing':missing}
+        def logical_name(path):
+            if frontend_directory is not None and path.parent == frontend_directory:
+                return f'frontend/{path.name}'
+            try:
+                return str(path.relative_to(self.directory))
+            except ValueError:
+                return str(path)
+        missing=[logical_name(path) for path in required if not path.is_file()]
+        result = {
+            'complete': not missing,
+            'status': 'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS',
+            'required': [logical_name(path) for path in required],
+            'missing': missing,
+        }
+        if frontend_directory is not None:
+            try:
+                result['frontend_directory'] = str(
+                    frontend_directory.relative_to(self.directory.parent))
+            except ValueError:
+                result['frontend_directory'] = str(frontend_directory)
+        return result
+
+    def frontend_diagnostic_directory(self):
+        """Resolve frontend artifacts from the manifest-owned run directory.
+
+        The launch graph can create the frontend output directory before the
+        logger allocates its own collision-safe run directory.  In that case
+        the logger receives ``run_id-01`` while frontend files remain under
+        ``run_id/frontend``.  Resolve both locations within the same campaign
+        root instead of manufacturing a missing-artifact failure.
+        """
+        direct = self.directory / 'frontend'
+        candidates = [direct]
+        parent = self.directory.parent
+        try:
+            siblings = sorted(parent.iterdir(), key=lambda path: path.name)
+        except OSError:
+            siblings = []
+        prefix = f'{self.run_id}-'
+        for sibling in siblings:
+            if (sibling.is_dir() and sibling != self.directory and
+                    (sibling.name == self.run_id or
+                     sibling.name.startswith(prefix))):
+                candidates.append(sibling / 'frontend')
+        required_names = [
+            f'{robot}_{suffix}'
+            for robot in self.robots
+            for suffix in (
+                'unknown_pose_frontend.json',
+                'consensus_diagnostics.jsonl',
+                'physical_evidence_diagnostics.jsonl')]
+        return max(
+            candidates,
+            key=lambda path: (
+                sum((path / name).is_file() for name in required_names),
+                int(path == direct)),
+        )
     @staticmethod
     def runtime_worktree():
         """Find the checkout that supplied this running package."""

@@ -42,6 +42,7 @@ from .unknown_pose_frontend_core import (
     evidence_pairs_for_selection,
     polar_descriptor,
     physical_crop_identity,
+    physical_candidate_geometry_identity,
     physical_candidate_identity,
     register_crops,
     register_crop_set,
@@ -178,6 +179,7 @@ class UnknownPoseFrontend(Node):
             'candidate_selections': 0,
             'candidate_selection_deferrals': 0,
             'physical_candidate_duplicates_suppressed': 0,
+            'physical_geometry_rejections_suppressed': 0,
             'physical_evidence_duplicates_suppressed': 0,
             'spatial_diversity_deferrals': 0,
             'pending_candidate_additions': 0,
@@ -243,6 +245,10 @@ class UnknownPoseFrontend(Node):
         self.candidate_verification_batch_attempts = 0
         self.verification_attempt_sequence = 0
         self.rejected_physical_evidence_keys = set()
+        # Exact physical identities retain epoch/checksum freshness.  This
+        # companion set prevents a rejected crop footprint from being retried
+        # under a later map revision when its geometry is unchanged.
+        self.rejected_physical_geometry_keys = set()
         self._diagnosed_physical_candidates = set()
         self.received_peer_crops = {}
         self.batch_proposal_published = False
@@ -961,6 +967,11 @@ class UnknownPoseFrontend(Node):
                     origin_y=float(peer.crop_origin_y)),
                 int(peer.map_epoch), int(peer.checksum)))
 
+    def _candidate_physical_geometry_key(self, candidate):
+        """Return the revision-independent geometry of one candidate pair."""
+        own_crops = {key: value[1] for key, value in self.keyframes.items()}
+        return physical_candidate_geometry_identity(candidate, own_crops)
+
     def _candidate_is_novel_for_reentry(self, candidate):
         peer_key, own_key, peer, own = self._candidate_fields(candidate)
         own_entry = self.keyframes.get(own_key)
@@ -976,7 +987,10 @@ class UnknownPoseFrontend(Node):
             self._stamp_ns(own_entry[0]), self._stamp_ns(peer),
             own_geometry['center'], peer_geometry['center'],
             attempted_pairs=self.candidate_verification_attempted,
-            rejected_physical=physical_key in self.rejected_physical_evidence_keys)
+            rejected_physical=(
+                physical_key in self.rejected_physical_evidence_keys or
+                self._candidate_physical_geometry_key(candidate) in
+                self.rejected_physical_geometry_keys))
 
     def _queue_crop_request(self, peer_key, own_key, peer, own,
                             batch_id, correlation_id):
@@ -1076,6 +1090,17 @@ class UnknownPoseFrontend(Node):
                         reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED',
                         compact=True),
                     reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED')
+                continue
+            geometry_key = self._candidate_physical_geometry_key(candidate)
+            if geometry_key in self.rejected_physical_geometry_keys:
+                self.counters['physical_geometry_rejections_suppressed'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'CANDIDATE_VERIFICATION_SKIPPED',
+                    candidate=self._candidate_diagnostic(
+                        candidate, status='SKIPPED',
+                        reason='PHYSICAL_GEOMETRY_PREVIOUSLY_REJECTED',
+                        compact=True),
+                    reason='PHYSICAL_GEOMETRY_PREVIOUSLY_REJECTED')
                 continue
             if not self._candidate_is_distinct_from_evidence(candidate):
                 self._write_physical_evidence_diagnostic(
@@ -1522,6 +1547,8 @@ class UnknownPoseFrontend(Node):
             metadata=request_metadata)
         if not result.accepted:
             self.rejected_physical_evidence_keys.add(physical_key)
+            self.rejected_physical_geometry_keys.add(
+                self._candidate_physical_geometry_key(candidate))
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
                 **request_metadata,

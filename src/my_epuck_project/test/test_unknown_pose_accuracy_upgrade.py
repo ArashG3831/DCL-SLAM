@@ -1,6 +1,7 @@
 """Deterministic accuracy and long-baseline gates for unknown-pose matching."""
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from my_epuck_project.unknown_pose_frontend_core import (
     invert_se2,
     polar_descriptor,
     projected_registration_error,
+    physical_candidate_geometry_identity,
     register_crop_set,
     register_crops,
     wrap_angle,
@@ -275,6 +277,24 @@ def test_candidate_verification_budget_is_deterministic_and_bounded():
     assert [(item[2], item[1]) for item in ordered] == [
         ('own-1', 'peer-1'), ('own-1', 'peer-1-duplicate')]
     assert len(ordered) == 2
+
+
+def test_rejected_geometry_is_stable_across_map_revisions():
+    """A changed checksum must not retry the same physical crop footprint."""
+    values = np.zeros((20, 20), dtype=np.int16)
+    own_crop = GridCrop(values, 0.05, 1.0, 2.0)
+    own = SimpleNamespace(map_epoch=1, checksum=11)
+    peer_a = SimpleNamespace(
+        map_epoch=4, checksum=101, resolution=0.05,
+        crop_width=20, crop_height=20, crop_origin_x=3.0,
+        crop_origin_y=4.0, crop_origin_yaw=0.0)
+    peer_b = SimpleNamespace(**{**peer_a.__dict__, 'map_epoch': 5,
+                                'checksum': 202})
+    crops = {'own-a': own_crop, 'own-b': own_crop}
+    first = (0.9, 'peer-a', 'own-a', peer_a, own)
+    revision = (0.8, 'peer-b', 'own-b', peer_b, own)
+    assert physical_candidate_geometry_identity(first, crops) == \
+        physical_candidate_geometry_identity(revision, crops)
 
 
 def test_one_pair_and_repetitive_or_empty_geometry_do_not_meet_production_gate():

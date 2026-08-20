@@ -243,6 +243,7 @@ class UnknownPoseFrontend(Node):
         self.candidate_verification_batch_attempts = 0
         self.verification_attempt_sequence = 0
         self.rejected_physical_evidence_keys = set()
+        self._diagnosed_physical_candidates = set()
         self.received_peer_crops = {}
         self.batch_proposal_published = False
         self.pending_target_proposal = False
@@ -448,6 +449,35 @@ class UnknownPoseFrontend(Node):
             return common
         common['own_descriptor'] = self._descriptor_geometry(own)
         return common
+
+    def _candidate_diagnostic_reference(self, candidate, status=None,
+                                        reason=None):
+        """Return a small reference for repeated selection-attempt records."""
+        if len(candidate) == 5:
+            _, peer_key, own_key, peer, own = candidate
+        else:
+            peer_key, own_key, peer, own = candidate
+        match = self.matches.get((peer_key, own_key))
+        own_entry = self.keyframes.get(own_key)
+        own_crop = None if own_entry is None else own_entry[1]
+        return {
+            'own_keyframe_id': str(own_key),
+            'peer_keyframe_id': str(peer_key),
+            'physical_identity': list(self._candidate_physical_key(candidate)),
+            'own_crop': None if own_crop is None else self._crop_geometry(
+                own_crop, own_key, own.map_epoch, own.checksum),
+            'peer_crop': self._descriptor_geometry(peer),
+            'own_map_epoch': int(own.map_epoch),
+            'own_checksum': int(own.checksum),
+            'peer_map_epoch': int(peer.map_epoch),
+            'peer_checksum': int(peer.checksum),
+            'descriptor_similarity': (
+                None if match is None else float(match.similarity)),
+            'descriptor_margin': (
+                None if match is None else float(match.margin)),
+            'status': status,
+            'rejection_reason': reason,
+        }
 
     def _record_diagnostic_event(self, event_type, **fields):
         """Retain a bounded wall/ROS timestamped protocol trace."""
@@ -764,6 +794,10 @@ class UnknownPoseFrontend(Node):
         self.counters['physical_candidate_duplicates_suppressed'] += (
             len(eligible) - len(physical_eligible))
         for candidate in physical_eligible:
+            physical_key = self._candidate_physical_key(candidate)
+            if physical_key in self._diagnosed_physical_candidates:
+                continue
+            self._diagnosed_physical_candidates.add(physical_key)
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_OBSERVED',
                 candidate=self._candidate_diagnostic(candidate, compact=True))
@@ -833,8 +867,8 @@ class UnknownPoseFrontend(Node):
                             for item in selected])
         selected_identity = []
         for candidate in selected:
-            selected_identity.append(self._candidate_diagnostic(
-                candidate, status='SELECTED', compact=True))
+            selected_identity.append(self._candidate_diagnostic_reference(
+                candidate, status='SELECTED'))
         centres = []
         for candidate in selected:
             own_crop = self.keyframes[candidate[1]][1]
@@ -850,12 +884,12 @@ class UnknownPoseFrontend(Node):
                              for candidate in selected}
         self._write_physical_evidence_diagnostic(
             'SELECTION_ATTEMPT',
-            candidate_pool=[self._candidate_diagnostic(
-                candidate, status='PENDING', compact=True)
+            candidate_pool=[self._candidate_diagnostic_reference(
+                candidate, status='PENDING')
                 for candidate in pending_candidates],
             selected_candidates=selected_identity,
-            pending_candidates=[self._candidate_diagnostic(
-                candidate, status='PENDING', compact=True)
+            pending_candidates=[self._candidate_diagnostic_reference(
+                candidate, status='PENDING')
                 for candidate in pending_candidates
                 if (candidate[1], candidate[2]) not in selected_pair_ids],
             measured_spatial_baseline_m=baseline,

@@ -146,7 +146,9 @@ def test_candidate_diagnostics_have_compact_selection_representation():
     assert "if compact:" in frontend
     assert "'own_keyframe_creation_timestamp_ns'" in frontend
     assert "status='PENDING', compact=True" in frontend
-    assert "candidate_pool=[self._candidate_diagnostic(" in frontend
+    assert 'def _candidate_diagnostic_reference(' in frontend
+    assert 'self._diagnosed_physical_candidates' in frontend
+    assert "candidate_pool=[self._candidate_diagnostic_reference(" in frontend
 
 
 def test_frontend_exit_watchdog_shuts_down_on_unexpected_exit():

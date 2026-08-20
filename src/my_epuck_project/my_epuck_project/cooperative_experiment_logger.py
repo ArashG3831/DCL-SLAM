@@ -117,7 +117,7 @@ class CooperativeExperimentLogger(Node):
         self.ground_truth_exit_reported = False
         if self.forensic is not None or self.contact_capture:
             self.start_forensic_ground_truth()
-        self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}
+        self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}; self.shared_map_seen=set()
         self.tf_buffer=Buffer(); self.tf_listener=TransformListener(self.tf_buffer,self)
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
         self.coverage=self.csv_file('coverage.csv',COVERAGE); self.health=self.csv_file('topic_health.csv',HEALTH)
@@ -365,6 +365,8 @@ class CooperativeExperimentLogger(Node):
         now=self.ros_seconds()
         with self._state_lock:
             self.last[(r,key)]=now; self.windows.setdefault((r,key),deque()).append(now); self.latest[r][key]=msg
+            if key == 'shared_map':
+                self.shared_map_seen.add(r)
         if self.forensic is not None and key == 'peer_map':
             self.forensic.record_peer_map(
                 r, msg, now, time.monotonic() - self.start)
@@ -778,10 +780,18 @@ class CooperativeExperimentLogger(Node):
                 self.directory/'forensic'/'transforms.csv',
                 self.directory/'forensic'/'supervisor_ground_truth.csv',
                 self.directory/'forensic'/'maps'/'robot1_map_final.npz',
-                self.directory/'forensic'/'maps'/'robot1_shared_map_final.npz',
                 self.directory/'forensic'/'maps'/'robot2_map_final.npz',
-                self.directory/'forensic'/'maps'/'robot2_shared_map_final.npz',
             ])
+            # Shared-map exports are a post-handoff contract.  A valid
+            # no-handoff run must not be marked incomplete merely because
+            # those files correctly do not exist.  If either shared-map topic
+            # was observed, require both final shared exports so a partial
+            # handoff still fails closed.
+            if self.shared_map_seen:
+                required.extend([
+                    self.directory/'forensic'/'maps'/'robot1_shared_map_final.npz',
+                    self.directory/'forensic'/'maps'/'robot2_shared_map_final.npz',
+                ])
         try:
             unknown_pose = bool(json.loads(
                 self.p['initial_configuration_json']).get(

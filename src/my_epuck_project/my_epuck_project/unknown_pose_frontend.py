@@ -1113,7 +1113,15 @@ class UnknownPoseFrontend(Node):
             (float(np.linalg.norm(peer_center - reference))
              for reference in reference_peer), default=0.0)
         similarity = float(candidate[0]) if len(candidate) == 5 else 0.0
-        return (-own_distance, -peer_distance, similarity,
+        # A useful cross-robot evidence view must move on both sides of the
+        # candidate pair.  Prioritising own_distance first selected very far
+        # local crops whose peer crop was still inside the existing physical
+        # baseline, starving the consensus pool of independent views.  Rank
+        # by the weaker displacement first; this changes acquisition order
+        # only and leaves every geometric/consensus gate unchanged.
+        balanced_distance = min(own_distance, peer_distance)
+        total_distance = max(own_distance, peer_distance)
+        return (-balanced_distance, -total_distance, similarity,
                 str(peer_key), str(own_key))
 
     def _rank_next_verification_candidate(self):

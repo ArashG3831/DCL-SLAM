@@ -382,6 +382,45 @@ def test_next_verification_candidate_prefers_spatially_displaced_view():
         frontend._candidate_spatial_novelty_key(near))
 
 
+def test_next_verification_candidate_balances_both_crop_displacements():
+    """A far local crop cannot outrank a genuinely displaced pair."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {('own-0', 'peer-0'): (None, None)}
+    frontend.keyframes = {}
+    frontend.peer_descriptors = {}
+
+    def crop(center):
+        return GridCrop(np.zeros((2, 2), dtype=np.int16), 1.0,
+                        center[0] - 1.0, center[1] - 1.0)
+
+    def descriptor(center):
+        return SimpleNamespace(
+            crop_origin_x=center[0] - 1.0, crop_origin_y=center[1] - 1.0,
+            crop_width=2, crop_height=2, resolution=1.0)
+
+    frontend.keyframes['own-0'] = (SimpleNamespace(map_epoch=1, checksum=1),
+                                   crop((0.0, 0.0)))
+    frontend.keyframes['own-far-peer-near'] = (
+        SimpleNamespace(map_epoch=2, checksum=2), crop((2.0, 0.0)))
+    frontend.keyframes['own-balanced'] = (
+        SimpleNamespace(map_epoch=3, checksum=3), crop((1.0, 0.0)))
+    frontend.peer_descriptors['peer-0'] = descriptor((0.0, 0.0))
+    frontend.peer_descriptors['peer-near'] = descriptor((0.2, 0.0))
+    frontend.peer_descriptors['peer-balanced'] = descriptor((1.0, 0.0))
+    frontend._crop_geometry = lambda value, *args: {
+        'center': [value.origin_x + 1.0, value.origin_y + 1.0]}
+    frontend._descriptor_geometry = lambda value: {
+        'center': [value.crop_origin_x + 1.0, value.crop_origin_y + 1.0]}
+
+    far_local = (-0.90, 'peer-near', 'own-far-peer-near',
+                 frontend.peer_descriptors['peer-near'], None)
+    balanced = (-0.80, 'peer-balanced', 'own-balanced',
+                frontend.peer_descriptors['peer-balanced'], None)
+
+    assert frontend._candidate_spatial_novelty_key(balanced) < (
+        frontend._candidate_spatial_novelty_key(far_local))
+
+
 def test_one_pair_and_repetitive_or_empty_geometry_do_not_meet_production_gate():
     values = structured_scene()
     pair = (GridCrop(values, 0.05, 0.0, 0.0),

@@ -280,6 +280,37 @@ def test_unknown_pose_artifacts_resolve_unsuffixed_frontend_run(observer):
     assert status['frontend_directory'] == f'{base_run_id}/frontend'
 
 
+def test_no_handoff_does_not_require_shared_map_exports(observer):
+    """Shared exports are required only after a shared-map topic is seen."""
+    class PassiveForensic:
+        def save_final_maps(self, *args, **kwargs):
+            pass
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+        def manifest(self):
+            return {'files': []}
+
+        def record_transform(self, *args, **kwargs):
+            pass
+
+    observer.forensic = PassiveForensic()
+    observer.p['initial_configuration_json'] = json.dumps({
+        'unknown_initial_pose': True,
+    })
+    status = observer.required_artifact_status(False)
+    assert 'forensic/maps/robot1_shared_map_final.npz' not in status['required']
+    assert 'forensic/maps/robot2_shared_map_final.npz' not in status['required']
+    observer.shared_map_seen.add('robot1')
+    status = observer.required_artifact_status(False)
+    assert 'forensic/maps/robot1_shared_map_final.npz' in status['required']
+    assert 'forensic/maps/robot2_shared_map_final.npz' in status['required']
+
+
 def test_large_occupancy_grid_is_converted_and_counted_once(observer):
     message = OccupancyGrid()
     message.info.width = 320

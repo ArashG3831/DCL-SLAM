@@ -396,7 +396,7 @@ def launch_setup(context):
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='', global_frame='shared_map',
                 map_topic=f'/{robot}/shared_map', autostart=False))
-        else:
+        elif not unknown_initial_pose:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context)))

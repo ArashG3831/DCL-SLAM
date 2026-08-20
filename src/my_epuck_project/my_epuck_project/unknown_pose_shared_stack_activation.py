@@ -29,35 +29,49 @@ class UnknownPoseSharedStackActivation(Node):
         self._activated = False
         self._shutdown_requested = False
         self._ros2 = shutil.which('ros2') or 'ros2'
-        self._parameters = {
-            name: str(self.declare_parameter(name, default).value)
-            for name, default in (
+        boolean_parameters = {
+            'webots_gui',
+            'use_sim_time',
+            'use_scan_matching',
+            'do_loop_closing',
+            'diagnostic_mode',
+            'diagnostic_frontier_capture',
+            'traffic_scheduler_enabled',
+            'enable_mission_timeout',
+        }
+        parameter_defaults = (
                 ('world_profile', 'large_unknown_pose_16m'),
                 ('world_path', ''),
                 ('webots_mode', 'fast'),
-                ('webots_gui', 'false'),
-                ('use_sim_time', 'true'),
-                ('use_scan_matching', 'false'),
-                ('do_loop_closing', 'false'),
+                ('webots_gui', False),
+                ('use_sim_time', True),
+                ('use_scan_matching', False),
+                ('do_loop_closing', False),
                 ('sensor_profile', 'full'),
-                ('diagnostic_mode', 'false'),
-                ('diagnostic_frontier_capture', 'false'),
+                ('diagnostic_mode', False),
+                ('diagnostic_frontier_capture', False),
                 ('fusion_process_nice', '0'),
                 ('fusion_cpu_quota_percent', '30'),
                 ('fusion_rebuild_period_s', '1.0'),
                 ('controller_variant', 'rpp'),
                 ('assignment_strategy', 'burgard'),
                 ('burgard_beta', '1.0'),
-                ('traffic_scheduler_enabled', 'false'),
-                ('enable_mission_timeout', 'false'),
+                ('traffic_scheduler_enabled', False),
+                ('enable_mission_timeout', False),
                 ('mission_timeout_s', '600.0'),
                 ('terminal_small_frontier_length_m', '0.20'),
                 ('slam_tf_publish_probe_library', ''),
                 ('slam_tf_publish_probe_log', ''),
                 ('slam_tf_publication_mode', ''),
                 ('webots_port', '23000'),
-            )
-        }
+        )
+        self._parameters = {}
+        for name, default in parameter_defaults:
+            value = self.declare_parameter(name, default).value
+            if name in boolean_parameters:
+                self._parameters[name] = str(bool(value)).lower()
+            else:
+                self._parameters[name] = str(value)
         qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,

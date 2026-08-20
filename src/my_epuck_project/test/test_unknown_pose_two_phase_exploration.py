@@ -84,6 +84,16 @@ def test_shared_stack_is_started_only_by_one_shot_handoff_activation():
     assert 'shell=True' not in activation
 
 
+def test_shared_activation_declares_boolean_launch_parameters_with_boolean_types():
+    activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    assert "('webots_gui', False)" in activation
+    assert "('use_sim_time', True)" in activation
+    assert "('use_scan_matching', False)" in activation
+    assert "('do_loop_closing', False)" in activation
+    assert "self._parameters[name] = str(bool(value)).lower()" in activation
+    assert "Trying to set parameter 'webots_gui'" not in activation
+
+
 def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
     assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     fusion = (PY / 'source_aware_map_fusion.py').read_text()

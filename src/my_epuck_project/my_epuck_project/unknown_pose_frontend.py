@@ -236,6 +236,7 @@ class UnknownPoseFrontend(Node):
         self.request_own_by_request_key = {}
         self.evidence_pairs = {}
         self.evidence_physical_keys = {}
+        self.evidence_physical_geometry_keys = set()
         self.candidate_verification_attempted = set()
         self.candidate_verification_results = {}
         self.request_candidate_by_request_key = {}
@@ -1103,6 +1104,16 @@ class UnknownPoseFrontend(Node):
                     reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED')
                 continue
             geometry_key = self._candidate_physical_geometry_key(candidate)
+            if geometry_key in self.evidence_physical_geometry_keys:
+                self.counters['physical_evidence_duplicates_suppressed'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'CANDIDATE_VERIFICATION_SKIPPED',
+                    candidate=self._candidate_diagnostic(
+                        candidate, status='SKIPPED',
+                        reason='PHYSICAL_GEOMETRY_ALREADY_ACCEPTED',
+                        compact=True),
+                    reason='PHYSICAL_GEOMETRY_ALREADY_ACCEPTED')
+                continue
             if geometry_key in self.rejected_physical_geometry_keys:
                 self.counters['physical_geometry_rejections_suppressed'] += 1
                 self._write_physical_evidence_diagnostic(
@@ -1524,6 +1535,20 @@ class UnknownPoseFrontend(Node):
                 own_key=own_key, peer_key=peer_key,
                 descriptor_checksum=int(message.descriptor_checksum))
             return
+        candidate_geometry_key = self._candidate_physical_geometry_key(candidate)
+        if candidate_geometry_key in self.evidence_physical_geometry_keys:
+            self.counters['physical_evidence_duplicates_suppressed'] += 1
+            self._write_physical_evidence_diagnostic(
+                'CROP_RESPONSE_DUPLICATE_SUPPRESSED',
+                physical_identity=list(physical_key),
+                own_keyframe_id=str(own_key),
+                peer_keyframe_id=str(peer_key),
+                reason='PHYSICAL_GEOMETRY_ALREADY_ACCEPTED')
+            self.pending_requests.discard(request_key)
+            self.completed_request_keys.add(request_key)
+            self.request_candidate_by_request_key.pop(request_key, None)
+            self._request_next_candidate_verification()
+            return
         self.pending_requests.discard(request_key)
         self.completed_request_keys.add(request_key)
         request_metadata = self.request_metadata_by_request_key.get(
@@ -1572,6 +1597,7 @@ class UnknownPoseFrontend(Node):
         self.evidence_pairs[pair_key] = (
             self.keyframes[own_key][1], received_crop)
         self.evidence_physical_keys[pair_key] = physical_key
+        self.evidence_physical_geometry_keys.add(candidate_geometry_key)
         self.counters['constraints_accumulated'] = len(
             self.evidence_physical_keys)
         self._record_diagnostic_event(

@@ -298,6 +298,25 @@ def test_rejected_geometry_is_stable_across_map_revisions():
         physical_candidate_geometry_identity(revision, crops)
 
 
+def test_accepted_geometry_revisions_are_not_independent_constraints():
+    values = np.zeros((20, 20), dtype=np.int16)
+    own_crop = GridCrop(values, 0.05, 1.0, 2.0)
+    own = SimpleNamespace(map_epoch=1, checksum=11)
+    peer_a = SimpleNamespace(
+        map_epoch=4, checksum=101, resolution=0.05,
+        crop_width=20, crop_height=20, crop_origin_x=3.0,
+        crop_origin_y=4.0, crop_origin_yaw=0.0)
+    peer_revision = SimpleNamespace(
+        **{**peer_a.__dict__, 'map_epoch': 5, 'checksum': 202})
+    crops = {'own-a': own_crop}
+    accepted = (0.9, 'peer-a', 'own-a', peer_a, own)
+    revision = (0.8, 'peer-revision', 'own-a', peer_revision, own)
+    accepted_geometry = {physical_candidate_geometry_identity(accepted, crops)}
+
+    assert physical_candidate_geometry_identity(revision, crops) in (
+        accepted_geometry)
+
+
 def test_active_evidence_batch_retries_when_new_candidates_arrive():
     """A batch opened before a candidate arrives remains requestable."""
     frontend = object.__new__(UnknownPoseFrontend)

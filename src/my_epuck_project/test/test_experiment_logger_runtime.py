@@ -259,6 +259,27 @@ def test_unknown_pose_artifacts_resolve_logger_run_id_collision(observer):
     assert status['frontend_directory'] == f'{observer.run_id}-01/frontend'
 
 
+def test_unknown_pose_artifacts_resolve_unsuffixed_frontend_run(observer):
+    """A suffixed logger finds the launcher's unsuffixed frontend sibling."""
+    observer.p['initial_configuration_json'] = json.dumps({
+        'unknown_initial_pose': True,
+    })
+    base_run_id = observer.run_id
+    observer.run_id = f'{base_run_id}-01'
+    sibling = observer.directory.parent / base_run_id / 'frontend'
+    sibling.mkdir(parents=True)
+    for robot in ('robot1', 'robot2'):
+        for suffix in (
+                'unknown_pose_frontend.json',
+                'consensus_diagnostics.jsonl',
+                'physical_evidence_diagnostics.jsonl'):
+            (sibling / f'{robot}_{suffix}').write_text('{}\n')
+    status = observer.required_artifact_status(False)
+    assert status['complete'] is True
+    assert status['missing'] == []
+    assert status['frontend_directory'] == f'{base_run_id}/frontend'
+
+
 def test_large_occupancy_grid_is_converted_and_counted_once(observer):
     message = OccupancyGrid()
     message.info.width = 320

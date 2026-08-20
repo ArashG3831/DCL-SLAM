@@ -835,11 +835,13 @@ class CooperativeExperimentLogger(Node):
             siblings = sorted(parent.iterdir(), key=lambda path: path.name)
         except OSError:
             siblings = []
-        prefix = f'{self.run_id}-'
         for sibling in siblings:
-            if (sibling.is_dir() and sibling != self.directory and
-                    (sibling.name == self.run_id or
-                     sibling.name.startswith(prefix))):
+            # The launch runner may allocate the logger directory with a
+            # collision suffix while the frontend keeps the manifest-owned
+            # unsuffixed run directory.  Both are campaign-owned siblings
+            # below this observer root; select only directories that actually
+            # contain the required frontend contract.
+            if sibling.is_dir() and sibling != self.directory:
                 candidates.append(sibling / 'frontend')
         required_names = [
             f'{robot}_{suffix}'

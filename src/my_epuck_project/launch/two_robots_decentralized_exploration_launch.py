@@ -12,13 +12,26 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction)
+    DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo,
+    OpaqueFunction, RegisterEventHandler)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from my_epuck_project.cooperative_profiles import profile_for_world, profile_summary
+
+
+def _frontend_exit_handler(robot):
+    def on_exit(event, context):
+        if event.returncode in (0, -2, -15):
+            return []
+        return [EmitEvent(event=Shutdown(
+            reason=(f'{robot} unknown-pose frontend exited with '
+                    f'code {event.returncode}')))]
+    return on_exit
 
 
 def launch_setup(context):
@@ -86,10 +99,9 @@ def launch_setup(context):
         LaunchConfiguration('dispatch_enabled').perform(context).lower()
         == 'true'
     )
-    # Unknown-pose mode starts its existing shared assignment peer inert.  It
-    # enables dispatch only after the frontend has published the canonical
-    # accepted hypothesis; the per-robot local-only peers below are the sole
-    # pre-handoff goal owners.
+    # The known-pose launch keeps the existing shared assignment include.  In
+    # unknown-pose mode it is deliberately omitted from the returned action
+    # graph; a one-shot activation node launches it after acceptance.
     shared_dispatch_enabled = False if unknown_initial_pose else dispatch_enabled
     assignment = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -132,8 +144,45 @@ def launch_setup(context):
                 'unknown_initial_pose'),
         }.items(),
     )
+    unknown_local_mapping = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            package_dir, 'launch',
+            'two_robots_teammate_filtered_stack_launch.py',
+        )),
+        launch_arguments={
+            'world_profile': selected['name'],
+            'webots_port': LaunchConfiguration('webots_port'),
+            'world_path': launch_world_path,
+            'webots_mode': LaunchConfiguration('webots_mode'),
+            'webots_gui': LaunchConfiguration('webots_gui'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'slam_tf_publish_probe_library': LaunchConfiguration(
+                'slam_tf_publish_probe_library'),
+            'slam_tf_publish_probe_log': LaunchConfiguration(
+                'slam_tf_publish_probe_log'),
+            'slam_tf_publication_mode': LaunchConfiguration(
+                'slam_tf_publication_mode'),
+            'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+            'fusion_cpu_quota_percent': LaunchConfiguration(
+                'fusion_cpu_quota_percent'),
+            'fusion_process_nice': LaunchConfiguration('fusion_process_nice'),
+            'fusion_rebuild_period_s': LaunchConfiguration(
+                'fusion_rebuild_period_s'),
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
+            'controller_variant': LaunchConfiguration('controller_variant'),
+            'unknown_initial_pose': 'true',
+            'launch_mapping': 'true',
+            'launch_shared_stack': 'false',
+            'phase_already_aligned': 'false',
+        }.items(),
+    )
     unknown_pose_frontends = []
     local_phase_nodes = []
+    frontend_watchdogs = []
+    shared_activation = None
     if unknown_initial_pose:
         diagnostic_output = LaunchConfiguration(
             'unknown_pose_diagnostic_output').perform(context)
@@ -155,6 +204,11 @@ def launch_setup(context):
                     'diagnostic_output': diagnostic_output,
                 }],
             ))
+            frontend_watchdogs.append(RegisterEventHandler(
+                OnProcessExit(
+                    target_action=unknown_pose_frontends[-1],
+                    on_exit=_frontend_exit_handler(robot),
+                )))
             local_phase_nodes.extend([
                 Node(
                     package='my_epuck_frontier_candidates',
@@ -254,6 +308,48 @@ def launch_setup(context):
                     }],
                 ),
             ])
+        shared_activation = Node(
+            package='my_epuck_project',
+            executable='unknown_pose_shared_stack_activation',
+            name='unknown_pose_shared_stack_activation',
+            output='screen',
+            parameters=[{
+                'world_profile': selected['name'],
+                'world_path': launch_world_path,
+                'webots_mode': LaunchConfiguration('webots_mode'),
+                'webots_gui': LaunchConfiguration('webots_gui'),
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+                'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+                'sensor_profile': LaunchConfiguration('sensor_profile'),
+                'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
+                'diagnostic_frontier_capture': LaunchConfiguration(
+                    'diagnostic_frontier_capture'),
+                'fusion_process_nice': LaunchConfiguration(
+                    'fusion_process_nice'),
+                'fusion_cpu_quota_percent': LaunchConfiguration(
+                    'fusion_cpu_quota_percent'),
+                'fusion_rebuild_period_s': LaunchConfiguration(
+                    'fusion_rebuild_period_s'),
+                'controller_variant': LaunchConfiguration('controller_variant'),
+                'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+                'burgard_beta': LaunchConfiguration('burgard_beta'),
+                'traffic_scheduler_enabled': LaunchConfiguration(
+                    'traffic_scheduler_enabled'),
+                'enable_mission_timeout': LaunchConfiguration(
+                    'enable_mission_timeout'),
+                'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
+                'terminal_small_frontier_length_m': LaunchConfiguration(
+                    'terminal_small_frontier_length_m'),
+                'slam_tf_publish_probe_library': LaunchConfiguration(
+                    'slam_tf_publish_probe_library'),
+                'slam_tf_publish_probe_log': LaunchConfiguration(
+                    'slam_tf_publish_probe_log'),
+                'slam_tf_publication_mode': LaunchConfiguration(
+                    'slam_tf_publication_mode'),
+                'webots_port': LaunchConfiguration('webots_port'),
+            }],
+        )
     observer = Node(
         package='my_epuck_project', executable='cooperative_experiment_logger',
         name='cooperative_experiment_logger', output='screen',
@@ -339,8 +435,11 @@ def launch_setup(context):
         f'source_sha256={source_world_sha256} '
         f'staged_source_sha256={staged_source_world_sha256} '
         f'staged_sha256={staged_world_sha256}'))
-    return [profile_log, assignment, *unknown_pose_frontends,
-            *local_phase_nodes, observer]
+    if unknown_initial_pose:
+        return [profile_log, unknown_local_mapping, *unknown_pose_frontends,
+                *local_phase_nodes, shared_activation, *frontend_watchdogs,
+                observer]
+    return [profile_log, assignment, observer]
 
 
 def generate_launch_description():
@@ -374,6 +473,8 @@ def generate_launch_description():
         DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_process_nice', default_value='0'),
+        DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',

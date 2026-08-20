@@ -42,9 +42,11 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()
     assert "autostart=False" in stack
     assert "shared_dispatch_enabled = False if unknown_initial_pose" in full
-    assert "'handoff_gated': unknown_initial_pose" in stack
-    assert "'phase_gated': LaunchConfiguration('unknown_initial_pose')" in assignment_launch
-    assert "'handoff_gated': LaunchConfiguration('unknown_initial_pose')" in frontier_launch
+    assert "'launch_shared_stack': 'false'" in full
+    assert "'launch_mapping': 'true'" in full
+    assert "'handoff_gated': handoff_gated" in stack
+    assert "'phase_gated': LaunchConfiguration('phase_gated')" in assignment_launch
+    assert "'handoff_gated': LaunchConfiguration('handoff_gated')" in frontier_launch
     assert "if not self._phase_gated:" in assignment
     assert "self._tick_timer = None" in assignment
     assert "self._activate_shared_phase()" in assignment
@@ -70,6 +72,18 @@ def test_shared_inputs_are_created_once_after_handoff():
     assert generator.count('processing_active_ = true;') == 2
 
 
+def test_shared_stack_is_started_only_by_one_shot_handoff_activation():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    assert "executable='unknown_pose_shared_stack_activation'" in full
+    assert "two_robots_distributed_assignment_launch.py" in activation
+    assert "'phase_already_aligned': 'true'" in activation
+    assert "'launch_mapping': 'false'" in activation
+    assert "'launch_shared_stack': 'true'" in activation
+    assert 'start_new_session=True' in activation
+    assert 'shell=True' not in activation
+
+
 def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
     assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     fusion = (PY / 'source_aware_map_fusion.py').read_text()
@@ -79,6 +93,38 @@ def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
     assert "if not bool(message.accepted) or str(message.status) != 'ACCEPTED'" in fusion
     assert 'if (!message->accepted || message->status != "ACCEPTED"' in generator
     assert "'shared_map'" not in (PY / 'unknown_pose_phase_manager.py').read_text()
+
+
+def test_unknown_mode_does_not_include_shared_assignment_before_handoff():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assert "return [profile_log, unknown_local_mapping" in full
+    assert "return [profile_log, assignment, observer]" in full
+    assert "'launch_shared_stack': 'false'" in full
+
+
+def test_frontend_diagnostic_collision_is_merged_before_write():
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert 'accepted_metadata = dict(request_metadata or {})' in frontend
+    assert 'accepted_metadata.update({' in frontend
+    accepted = frontend[
+        frontend.index("'CROP_RESPONSE_ACCEPTED'"):
+        frontend.index('result = self._verify_candidate_crop(')]
+    assert '**accepted_metadata' in accepted
+    assert '**request_metadata' not in accepted
+
+
+def test_diagnostic_failures_are_counted_without_frontend_shutdown():
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert "'diagnostic_write_failures': 0" in frontend
+    assert 'diagnostics must never kill estimation' in frontend
+    assert 'UNKNOWN_POSE_DIAGNOSTIC_WRITE_FAILURE' in frontend
+
+
+def test_frontend_exit_watchdog_shuts_down_on_unexpected_exit():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assert 'RegisterEventHandler' in full
+    assert 'OnProcessExit' in full
+    assert 'unknown-pose frontend exited with' in full
 
 
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():

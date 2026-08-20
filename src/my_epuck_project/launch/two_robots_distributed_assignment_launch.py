@@ -44,8 +44,8 @@ def _assignment_peer(robot):
             'robot_base_frame': f'{robot}/base_footprint',
             'global_frame': 'shared_map',
             'dispatch_enabled': LaunchConfiguration('dispatch_enabled'),
-            'handoff_gated': LaunchConfiguration('unknown_initial_pose'),
-            'phase_gated': LaunchConfiguration('unknown_initial_pose'),
+            'handoff_gated': LaunchConfiguration('handoff_gated'),
+            'phase_gated': LaunchConfiguration('phase_gated'),
             'synthetic_bids': False,
             'maximum_tasks_per_source': 5,
             'maximum_union_tasks': 10,
@@ -111,10 +111,18 @@ def generate_launch_description():
                 'diagnostic_frontier_capture'),
             'fusion_process_nice': LaunchConfiguration(
                 'fusion_process_nice'),
+            'fusion_cpu_quota_percent': LaunchConfiguration(
+                'fusion_cpu_quota_percent'),
+            'fusion_rebuild_period_s': LaunchConfiguration(
+                'fusion_rebuild_period_s'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'controller_variant': LaunchConfiguration('controller_variant'),
             'unknown_initial_pose': LaunchConfiguration(
                 'unknown_initial_pose'),
+            'launch_mapping': LaunchConfiguration('launch_mapping'),
+            'launch_shared_stack': LaunchConfiguration('launch_shared_stack'),
+            'phase_already_aligned': LaunchConfiguration(
+                'phase_already_aligned'),
         }.items(),
     )
     return LaunchDescription([
@@ -141,12 +149,28 @@ def generate_launch_description():
         DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_process_nice', default_value='0'),
+        DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
+        DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('unknown_initial_pose', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('launch_mapping', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_shared_stack', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('phase_already_aligned', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('handoff_gated', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('phase_gated', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('handoff_transform_x', default_value='0.0'),
+        DeclareLaunchArgument('handoff_transform_y', default_value='0.0'),
+        DeclareLaunchArgument('handoff_transform_yaw', default_value='0.0'),
+        DeclareLaunchArgument('handoff_evidence_set_hash', default_value=''),
         DeclareLaunchArgument('dispatch_enabled', default_value='false',
                               choices=['true', 'false']),
         # Defaults are the production literature-backed allocator.  These

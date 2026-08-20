@@ -245,6 +245,16 @@ def launch_setup(context):
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()
         == 'true')
+    phase_already_aligned = (
+        LaunchConfiguration('phase_already_aligned').perform(context).lower()
+        == 'true')
+    launch_mapping = (
+        LaunchConfiguration('launch_mapping').perform(context).lower()
+        == 'true')
+    launch_shared_stack = (
+        LaunchConfiguration('launch_shared_stack').perform(context).lower()
+        == 'true')
+    handoff_gated = unknown_initial_pose and not phase_already_aligned
     try:
         quota_enabled = float(fusion_quota) > 0.0
     except ValueError:
@@ -276,6 +286,9 @@ def launch_setup(context):
             'teammate_geometry_radius_m': '0.026',
             'unknown_initial_pose': LaunchConfiguration(
                 'unknown_initial_pose'),
+            'launch_mapping': LaunchConfiguration('launch_mapping'),
+            'phase_already_aligned': LaunchConfiguration(
+                'phase_already_aligned'),
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
@@ -316,7 +329,8 @@ def launch_setup(context):
                     'export_rate_hz': 1.0,
                 }],
             ))
-        exchange.append(Node(
+        if launch_shared_stack:
+            exchange.append(Node(
                 package='my_epuck_project',
                 executable='source_aware_map_fusion',
                 name='map_fusion',
@@ -346,7 +360,7 @@ def launch_setup(context):
                     # Coalesce local and peer map callbacks behind one bounded
                     # timer. Callbacks only mark source state dirty.
                     'publish_on_callback': False,
-                    'handoff_gated': unknown_initial_pose,
+                    'handoff_gated': handoff_gated,
                     # A peer silhouette can be observed while its scan-frame
                     # transform is delayed.  Clear both fresh live robot
                     # footprints in every shared map so that transient peer
@@ -361,15 +375,16 @@ def launch_setup(context):
                     '-p CPUQuota=' + LaunchConfiguration(
                         'fusion_cpu_quota_percent').perform(context) + '%'
                     if diagnostic_mode and quota_enabled else ''),
-            ))
+                ))
     nav2_actions = []
     for robot in ('robot1', 'robot2'):
-        if unknown_initial_pose:
+        if unknown_initial_pose and launch_mapping:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='local_', global_frame=f'{robot}/map',
                 map_topic=f'/{robot}/map', autostart=True))
+        if unknown_initial_pose and launch_shared_stack:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
@@ -417,6 +432,12 @@ def generate_launch_description():
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_mapping', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_shared_stack', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('phase_already_aligned', default_value='false',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

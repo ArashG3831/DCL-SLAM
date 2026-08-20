@@ -197,6 +197,7 @@ class UnknownPoseFrontend(Node):
             'verification_novelty_deferrals': 0,
             'verification_lifetime_expired': 0,
             'stale_verification_batch_responses': 0,
+            'diagnostic_write_failures': 0,
         }
         self.gate_rejection_counts = Counter()
         self.temporal_gate_rejection_counts = Counter()
@@ -322,35 +323,47 @@ class UnknownPoseFrontend(Node):
         """Stream consensus records independently of bounded protocol events."""
         if self.consensus_diagnostics is None:
             return
-        record = {
-            'record_type': str(record_type),
-            'robot_id': self.robot_id,
-            'peer_robot_id': self.peer_robot_id,
-            'wall_monotonic_s': time.monotonic(),
-            'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
-            'acquisition_batch_id': int(self.verification_batches.batch_id),
-            'verification_batch_attempts': int(
-                self.candidate_verification_batch_attempts),
-        }
-        record.update(fields)
-        self.consensus_diagnostics.write(record)
+        try:
+            record = {
+                'record_type': str(record_type),
+                'robot_id': self.robot_id,
+                'peer_robot_id': self.peer_robot_id,
+                'wall_monotonic_s': time.monotonic(),
+                'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
+                'acquisition_batch_id': int(self.verification_batches.batch_id),
+                'verification_batch_attempts': int(
+                    self.candidate_verification_batch_attempts),
+            }
+            record.update(fields)
+            self.consensus_diagnostics.write(record)
+        except Exception as error:  # diagnostics must never kill estimation
+            self.counters['diagnostic_write_failures'] += 1
+            self.get_logger().error(
+                'UNKNOWN_POSE_DIAGNOSTIC_WRITE_FAILURE record=%s error=%s' %
+                (record_type, error))
 
     def _write_physical_evidence_diagnostic(self, record_type, **fields):
         """Stream formation evidence independently of protocol-event storage."""
         if self.physical_evidence_diagnostics is None:
             return
-        record = {
-            'record_type': str(record_type),
-            'robot_id': self.robot_id,
-            'peer_robot_id': self.peer_robot_id,
-            'wall_monotonic_s': time.monotonic(),
-            'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
-            'acquisition_batch_id': int(self.verification_batches.batch_id),
-            'verification_batch_attempts': int(
-                self.candidate_verification_batch_attempts),
-        }
-        record.update(fields)
-        self.physical_evidence_diagnostics.write(record)
+        try:
+            record = {
+                'record_type': str(record_type),
+                'robot_id': self.robot_id,
+                'peer_robot_id': self.peer_robot_id,
+                'wall_monotonic_s': time.monotonic(),
+                'ros_time_s': self.get_clock().now().nanoseconds / 1.0e9,
+                'acquisition_batch_id': int(self.verification_batches.batch_id),
+                'verification_batch_attempts': int(
+                    self.candidate_verification_batch_attempts),
+            }
+            record.update(fields)
+            self.physical_evidence_diagnostics.write(record)
+        except Exception as error:  # diagnostics must never kill estimation
+            self.counters['diagnostic_write_failures'] += 1
+            self.get_logger().error(
+                'UNKNOWN_POSE_DIAGNOSTIC_WRITE_FAILURE record=%s error=%s' %
+                (record_type, error))
 
     @staticmethod
     def _descriptor_geometry(descriptor):
@@ -1433,12 +1446,18 @@ class UnknownPoseFrontend(Node):
             request_key, (peer_key, own_key, expected_peer,
                           self.keyframes[own_key][0]))
         self.counters['crop_responses_accepted'] += 1
+        accepted_metadata = dict(request_metadata or {})
+        # Keep the request metadata schema, while making the response's
+        # canonical identities authoritative without passing duplicate Python
+        # keyword arguments.
+        accepted_metadata.update({
+            'own_keyframe_id': str(own_key),
+            'peer_keyframe_id': str(peer_key),
+        })
         self._write_physical_evidence_diagnostic(
             'CROP_RESPONSE_ACCEPTED',
-            **request_metadata,
+            **accepted_metadata,
             physical_identity=list(physical_key),
-            own_keyframe_id=str(own_key),
-            peer_keyframe_id=str(peer_key),
             own_crop=self._crop_geometry(
                 self.keyframes[own_key][1], own_key,
                 self.keyframes[own_key][0].map_epoch,

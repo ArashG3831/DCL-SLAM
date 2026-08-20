@@ -103,6 +103,12 @@ def launch_setup(context):
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()
         == 'true')
+    launch_mapping = (
+        LaunchConfiguration('launch_mapping').perform(context).lower()
+        == 'true')
+    phase_already_aligned = (
+        LaunchConfiguration('phase_already_aligned').perform(context).lower()
+        == 'true')
     base = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_namespaced_launch.py'
@@ -156,7 +162,7 @@ def launch_setup(context):
                 }],
             ))
     local_frame_anchors = []
-    if unknown_initial_pose:
+    if unknown_initial_pose and not phase_already_aligned:
         for robot in ('robot1', 'robot2'):
             local_frame_anchors.append(Node(
                 package='tf2_ros',
@@ -170,17 +176,20 @@ def launch_setup(context):
                     '--child-frame-id', f'{robot}/map',
                 ],
             ))
-    return [
-        base,
-        *filters,
-        *local_frame_anchors,
-        *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
-                      tf_probe_library, tf_probe_log, tf_publication_mode,
-                      unknown_initial_pose),
-        *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
-                      tf_probe_library, tf_probe_log, tf_publication_mode,
-                      unknown_initial_pose),
-    ]
+    mapping_actions = []
+    if launch_mapping:
+        mapping_actions = [
+            base,
+            *filters,
+            *local_frame_anchors,
+            *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
+                          tf_probe_library, tf_probe_log, tf_publication_mode,
+                          unknown_initial_pose),
+            *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
+                          tf_probe_library, tf_probe_log, tf_publication_mode,
+                          unknown_initial_pose),
+        ]
+    return mapping_actions
 
 
 def generate_launch_description():
@@ -213,5 +222,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'unknown_initial_pose', default_value='false',
             choices=['true', 'false']),
+        DeclareLaunchArgument('launch_mapping', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('phase_already_aligned', default_value='false',
+                              choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

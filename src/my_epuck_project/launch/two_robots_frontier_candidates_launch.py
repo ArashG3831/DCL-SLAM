@@ -25,7 +25,7 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'candidate_topic': f'/{robot}/frontier_candidates',
             'marker_topic': f'/{robot}/frontier_candidate_markers',
             'processing_rate_hz': 0.5,
-            'handoff_gated': LaunchConfiguration('unknown_initial_pose'),
+            'handoff_gated': LaunchConfiguration('handoff_gated'),
             'minimum_frontier_cells': minimum_frontier_cells,
             'minimum_frontier_length_m': 0.05,
             'stable_id_quantization_m': 0.05,
@@ -89,6 +89,11 @@ def launch_setup(context):
             'controller_variant': LaunchConfiguration('controller_variant'),
             'unknown_initial_pose': LaunchConfiguration(
                 'unknown_initial_pose'),
+            'launch_mapping': LaunchConfiguration('launch_mapping'),
+            'launch_shared_stack': LaunchConfiguration('launch_shared_stack'),
+            'phase_already_aligned': LaunchConfiguration(
+                'phase_already_aligned'),
+            'handoff_gated': LaunchConfiguration('handoff_gated'),
         }.items(),
     )
     return [
@@ -143,6 +148,14 @@ def generate_launch_description():
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('unknown_initial_pose', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_mapping', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_shared_stack', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('phase_already_aligned', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('handoff_gated', default_value='false',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

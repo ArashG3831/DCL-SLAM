@@ -37,6 +37,7 @@ def test_launch_command_reuses_authoritative_campaign_launch(tmp_path):
     assert 'enable_observer:=false' in command
     assert 'enable_forensic_capture:=false' in command
     assert 'nav2_autostart:=false' in command
+    assert 'controller_variant:=rpp' in command
     assert 'sensor_profile:=throughput' in command
     assert not any(
         item.startswith('slam_tf_publish_probe_library:=')

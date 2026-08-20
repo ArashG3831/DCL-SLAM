@@ -198,6 +198,11 @@ def launch_command(
         'use_sim_time:=true',
         'nav2_autostart:=false',
         'dispatch_enabled:=true',
+        # The authoritative unknown-pose wrapper uses the frozen production
+        # RPP controller.  Pass this explicitly through the nested launch
+        # chain so an inherited/duplicate launch argument cannot select the
+        # historical DWB diagnostic variant for the pre-handoff local stack.
+        'controller_variant:=rpp',
         f'enable_observer:={str(args.enable_observer).lower()}',
         f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
         'launch_rviz:=false',

@@ -1535,6 +1535,9 @@ class UnknownPoseFrontend(Node):
                 own_key=own_key, peer_key=peer_key,
                 descriptor_checksum=int(message.descriptor_checksum))
             return
+        candidate = self.request_candidate_by_request_key.get(
+            request_key, (peer_key, own_key, expected_peer,
+                          self.keyframes[own_key][0]))
         candidate_geometry_key = self._candidate_physical_geometry_key(candidate)
         if candidate_geometry_key in self.evidence_physical_geometry_keys:
             self.counters['physical_evidence_duplicates_suppressed'] += 1
@@ -1554,8 +1557,7 @@ class UnknownPoseFrontend(Node):
         request_metadata = self.request_metadata_by_request_key.get(
             request_key, {})
         candidate = self.request_candidate_by_request_key.pop(
-            request_key, (peer_key, own_key, expected_peer,
-                          self.keyframes[own_key][0]))
+            request_key, candidate)
         self.counters['crop_responses_accepted'] += 1
         accepted_metadata = dict(request_metadata or {})
         # Keep the request metadata schema, while making the response's

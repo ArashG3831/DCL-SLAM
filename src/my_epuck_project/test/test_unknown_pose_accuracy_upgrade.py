@@ -344,6 +344,44 @@ def test_completed_evidence_batch_does_not_retry():
     assert calls == []
 
 
+def test_next_verification_candidate_prefers_spatially_displaced_view():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {('own-0', 'peer-0'): (None, None)}
+    frontend.keyframes = {}
+    frontend.peer_descriptors = {}
+
+    def crop(center):
+        return GridCrop(np.zeros((2, 2), dtype=np.int16), 1.0,
+                        center[0] - 1.0, center[1] - 1.0)
+
+    def descriptor(center):
+        return SimpleNamespace(
+            crop_origin_x=center[0] - 1.0, crop_origin_y=center[1] - 1.0,
+            crop_width=2, crop_height=2, resolution=1.0)
+
+    frontend.keyframes['own-0'] = (SimpleNamespace(map_epoch=1, checksum=1),
+                                   crop((0.0, 0.0)))
+    frontend.keyframes['own-near'] = (
+        SimpleNamespace(map_epoch=2, checksum=2), crop((0.1, 0.0)))
+    frontend.keyframes['own-far'] = (
+        SimpleNamespace(map_epoch=3, checksum=3), crop((1.2, 0.0)))
+    frontend.peer_descriptors['peer-0'] = descriptor((0.0, 0.0))
+    frontend.peer_descriptors['peer-near'] = descriptor((0.1, 0.0))
+    frontend.peer_descriptors['peer-far'] = descriptor((1.2, 0.0))
+    frontend._crop_geometry = lambda value, *args: {
+        'center': [value.origin_x + 1.0, value.origin_y + 1.0]}
+    frontend._descriptor_geometry = lambda value: {
+        'center': [value.crop_origin_x + 1.0, value.crop_origin_y + 1.0]}
+
+    near = (-0.99, 'peer-near', 'own-near',
+            frontend.peer_descriptors['peer-near'], None)
+    far = (-0.80, 'peer-far', 'own-far',
+           frontend.peer_descriptors['peer-far'], None)
+
+    assert frontend._candidate_spatial_novelty_key(far) < (
+        frontend._candidate_spatial_novelty_key(near))
+
+
 def test_one_pair_and_repetitive_or_empty_geometry_do_not_meet_production_gate():
     values = structured_scene()
     pair = (GridCrop(values, 0.05, 0.0, 0.0),

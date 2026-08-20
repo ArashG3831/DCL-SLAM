@@ -1077,9 +1077,44 @@ class UnknownPoseFrontend(Node):
                                for prior in own_centers):
             return False
         if peer_centers and all(np.linalg.norm(peer_center - prior) < 0.40
-                                for prior in peer_centers):
+                               for prior in peer_centers):
             return False
         return True
+
+    def _candidate_spatial_novelty_key(self, candidate):
+        """Prefer displaced views when choosing the next crop request."""
+        peer_key, own_key, peer, _ = self._candidate_fields(candidate)
+        own_entry = self.keyframes.get(own_key)
+        if own_entry is None:
+            return (0.0, 0.0, 0.0, str(peer_key), str(own_key))
+        own_center = np.asarray(self._crop_geometry(
+            own_entry[1], own_key, own_entry[0].map_epoch,
+            own_entry[0].checksum)['center'], dtype=np.float64)
+        peer_center = np.asarray(
+            self._descriptor_geometry(peer)['center'], dtype=np.float64)
+        reference_own = []
+        reference_peer = []
+        for evidence_own_key, evidence_peer_key in self.evidence_pairs:
+            evidence_own = self.keyframes.get(evidence_own_key)
+            evidence_peer = self.peer_descriptors.get(evidence_peer_key)
+            if evidence_own is not None:
+                reference_own.append(np.asarray(self._crop_geometry(
+                    evidence_own[1], evidence_own_key,
+                    evidence_own[0].map_epoch,
+                    evidence_own[0].checksum)['center'], dtype=np.float64))
+            if evidence_peer is not None:
+                reference_peer.append(np.asarray(
+                    self._descriptor_geometry(evidence_peer)['center'],
+                    dtype=np.float64))
+        own_distance = min(
+            (float(np.linalg.norm(own_center - reference))
+             for reference in reference_own), default=0.0)
+        peer_distance = min(
+            (float(np.linalg.norm(peer_center - reference))
+             for reference in reference_peer), default=0.0)
+        similarity = float(candidate[0]) if len(candidate) == 5 else 0.0
+        return (-own_distance, -peer_distance, similarity,
+                str(peer_key), str(own_key))
 
     def _rank_next_verification_candidate(self):
         candidates = []
@@ -1134,7 +1169,9 @@ class UnknownPoseFrontend(Node):
                 continue
             candidates.append(candidate)
         ranked = bounded_candidate_verification_order(
-            candidates, self.candidate_verification_attempted, 1)
+            candidates, self.candidate_verification_attempted,
+            len(candidates))
+        ranked.sort(key=self._candidate_spatial_novelty_key)
         return None if not ranked else ranked[0]
 
     def _request_next_candidate_verification(self):

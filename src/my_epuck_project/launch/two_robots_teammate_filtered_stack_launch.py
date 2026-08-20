@@ -119,7 +119,9 @@ def _diagnostic_params(source, robot, variant):
     return handle.name
 
 
-def nav2_nodes(package_dir, robot, selected, controller_variant):
+def nav2_nodes(package_dir, robot, selected, controller_variant,
+               *, node_prefix='', global_frame='shared_map',
+               map_topic=None, autostart=None):
     source = os.path.join(
         package_dir, 'resource', f'nav2_{robot}_shared_map.yaml'
     )
@@ -145,6 +147,11 @@ def nav2_nodes(package_dir, robot, selected, controller_variant):
                     str(selected['local_costmap_resolution']),
                 'global_costmap.global_costmap.ros__parameters.resolution':
                     str(selected['global_costmap_resolution']),
+                'bt_navigator.ros__parameters.global_frame': global_frame,
+                'global_costmap.global_costmap.ros__parameters.global_frame':
+                    global_frame,
+                'global_costmap.global_costmap.ros__parameters.static_layer.map_topic':
+                    map_topic or f'/{robot}/shared_map',
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'controller_server.ros__parameters.progress_checker.required_movement_radius':
                     '0.08' if selected['name'] == 'large' else '0.5',
@@ -175,7 +182,7 @@ def nav2_nodes(package_dir, robot, selected, controller_variant):
         Node(
             package=package,
             executable=executable,
-            name=executable,
+            name=node_prefix + executable,
             namespace=robot,
             output='screen',
             parameters=[parameters],
@@ -186,13 +193,14 @@ def nav2_nodes(package_dir, robot, selected, controller_variant):
     nodes.append(Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
-        name='lifecycle_manager_navigation',
+        name=node_prefix + 'lifecycle_manager_navigation',
         namespace=robot,
         output='screen',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'autostart': LaunchConfiguration('nav2_autostart'),
-            'node_names': LIFECYCLE_NODES,
+            'autostart': (LaunchConfiguration('nav2_autostart')
+                          if autostart is None else autostart),
+            'node_names': [node_prefix + name for name in LIFECYCLE_NODES],
         }],
     ))
     return nodes
@@ -334,10 +342,23 @@ def launch_setup(context):
         filtered_slam,
         *alignment,
         *exchange,
-        *nav2_nodes(package_dir, 'robot1', selected,
-                    LaunchConfiguration('controller_variant').perform(context)),
-        *nav2_nodes(package_dir, 'robot2', selected,
-                    LaunchConfiguration('controller_variant').perform(context)),
+        *(
+            nav2_nodes(
+                package_dir, robot, selected,
+                LaunchConfiguration('controller_variant').perform(context),
+                node_prefix='local_', global_frame=f'{robot}/map',
+                map_topic=f'/{robot}/map', autostart=True)
+            + nav2_nodes(
+                package_dir, robot, selected,
+                LaunchConfiguration('controller_variant').perform(context),
+                node_prefix='', global_frame='shared_map',
+                map_topic=f'/{robot}/shared_map', autostart=False)
+            if unknown_initial_pose else
+            nav2_nodes(
+                package_dir, robot, selected,
+                LaunchConfiguration('controller_variant').perform(context))
+            for robot in ('robot1', 'robot2')
+        ),
     ]
 
 

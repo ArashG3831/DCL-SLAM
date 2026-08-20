@@ -312,6 +312,8 @@ class LocalNav2:
         self._robot_id = node.get_namespace().strip('/') or 'root'
         self._global_frame = node.declare_parameter('global_frame', 'shared_map').value
         self._base_frame = node.declare_parameter('robot_base_frame', 'base_footprint').value
+        self._nav2_node_prefix = str(node.declare_parameter(
+            'nav2_node_prefix', '').value)
         self._planner_id = node.declare_parameter('planner_id', 'GridBased').value
         self._path_timeout_s = float(node.declare_parameter('path_query_timeout_s', 1.5).value)
         self._navigation_timeout_s = float(
@@ -345,15 +347,17 @@ class LocalNav2:
         )
         self._navigate_client = ActionClient(node, NavigateToPose, 'navigate_to_pose')
         self._lifecycle_clients = {
-            name: node.create_client(GetState, f'{name}/get_state')
+            name: node.create_client(
+                GetState, f'{self._nav2_node_prefix}{name}/get_state')
             for name in ('planner_server', 'controller_server', 'bt_navigator')
         }
         transient_qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        map_topic = str(node.declare_parameter('map_topic', 'shared_map').value)
         node.create_subscription(
-            OccupancyGrid, 'shared_map', self._on_map, transient_qos,
+            OccupancyGrid, map_topic, self._on_map, transient_qos,
         )
         node.create_subscription(
             OccupancyGrid, 'global_costmap/costmap', self._on_costmap, transient_qos,

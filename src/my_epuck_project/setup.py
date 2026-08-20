@@ -41,6 +41,8 @@ setup(
             'my_epuck_project.source_aware_map_fusion:main',
             'unknown_pose_frontend = '
             'my_epuck_project.unknown_pose_frontend:main',
+            'unknown_pose_phase_manager = '
+            'my_epuck_project.unknown_pose_phase_manager:main',
             'unknown_pose_motion_fixture = '
             'my_epuck_project.unknown_pose_motion_fixture:main',
             'controller_startup_guard = '

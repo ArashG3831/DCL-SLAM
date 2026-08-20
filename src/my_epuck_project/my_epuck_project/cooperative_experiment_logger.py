@@ -781,16 +781,36 @@ class CooperativeExperimentLogger(Node):
             ])
         missing=[str(path.relative_to(self.directory)) for path in required if not path.is_file()]
         return {'complete':not missing,'status':'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS','required':[str(path.relative_to(self.directory)) for path in required],'missing':missing}
+    @staticmethod
+    def runtime_worktree():
+        """Find the checkout that supplied this running package."""
+        candidates = [Path(__file__).resolve(), Path.cwd().resolve()]
+        for candidate in candidates:
+            for parent in (candidate, *candidate.parents):
+                if (parent / '.git').exists():
+                    return parent
+        return None
+
     def git_value(self,args,default):
-        try:return subprocess.check_output(['git',*args],cwd='/home/arash/webots_ws',text=True,stderr=subprocess.DEVNULL).strip()
-        except Exception:return default
+        try:
+            root = self.runtime_worktree()
+            if root is None:
+                return default
+            return subprocess.check_output(
+                ['git', *args], cwd=str(root), text=True,
+                stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            return default
     def write_manifest(self,clean,status):
         value={
             'schema_version':SCHEMA,'run_id':self.run_id,
             'utc_start_time':self.start_utc,
             'utc_end_time':utc_now() if status!='running' else None,
             'elapsed_duration_s':time.monotonic()-self.start,
+            'runtime_worktree': str(self.runtime_worktree() or ''),
             'git_commit':self.git_value(['rev-parse','HEAD'],'unknown'),
+            'git_branch':self.git_value(
+                ['symbolic-ref','--short','-q','HEAD'], 'DETACHED'),
             'worktree_dirty':bool(self.git_value(['status','--porcelain'],'')),
             'launch_file':self.p['launch_file'],
             'launch_arguments':'recorded in logger parameters',

@@ -75,6 +75,11 @@ def launch_setup(context):
         LaunchConfiguration('dispatch_enabled').perform(context).lower()
         == 'true'
     )
+    # Unknown-pose mode starts its existing shared assignment peer inert.  It
+    # enables dispatch only after the frontend has published the canonical
+    # accepted hypothesis; the per-robot local-only peers below are the sole
+    # pre-handoff goal owners.
+    shared_dispatch_enabled = False if unknown_initial_pose else dispatch_enabled
     assignment = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_distributed_assignment_launch.py',
@@ -101,7 +106,7 @@ def launch_setup(context):
                 'fusion_process_nice'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
-            'dispatch_enabled': str(dispatch_enabled).lower(),
+            'dispatch_enabled': str(shared_dispatch_enabled).lower(),
             'controller_variant': LaunchConfiguration('controller_variant'),
             'assignment_strategy': LaunchConfiguration('assignment_strategy'),
             'burgard_beta': LaunchConfiguration('burgard_beta'),
@@ -117,6 +122,7 @@ def launch_setup(context):
         }.items(),
     )
     unknown_pose_frontends = []
+    local_phase_nodes = []
     if unknown_initial_pose:
         diagnostic_output = LaunchConfiguration(
             'unknown_pose_diagnostic_output').perform(context)
@@ -138,6 +144,105 @@ def launch_setup(context):
                     'diagnostic_output': diagnostic_output,
                 }],
             ))
+            local_phase_nodes.extend([
+                Node(
+                    package='my_epuck_frontier_candidates',
+                    executable='frontier_candidate_generator',
+                    name='local_frontier_candidate_generator',
+                    namespace=robot,
+                    output='screen',
+                    remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
+                    parameters=[{
+                        'robot_id': robot,
+                        'map_topic': f'/{robot}/map',
+                        'global_costmap_topic': f'/{robot}/global_costmap/costmap',
+                        'global_frame': f'{robot}/map',
+                        'robot_base_frame': f'{robot}/base_footprint',
+                        'compute_path_action': f'/{robot}/compute_path_to_pose',
+                        'candidate_topic': f'/{robot}/local_frontier_candidates',
+                        'marker_topic': f'/{robot}/local_frontier_candidate_markers',
+                        'processing_rate_hz': 0.5,
+                        'minimum_frontier_cells': selected['minimum_frontier_cells'],
+                        'minimum_frontier_length_m': 0.05,
+                        'stable_id_quantization_m': 0.05,
+                        'approach_clearance_m': 0.15,
+                        'minimum_robot_distance_m': 0.08,
+                        'maximum_candidates_before_path_check': 8,
+                        'maximum_path_queries_per_cycle': 5,
+                        'path_query_timeout_s': 1.0,
+                        'planner_id': 'GridBased',
+                        'occupied_threshold': 50,
+                        'visible_gain_range_m': 11.98,
+                        'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    }],
+                ),
+                Node(
+                    package='my_epuck_project',
+                    executable='frontier_proposal_adapter',
+                    name='local_frontier_proposal_adapter',
+                    namespace=robot,
+                    output='screen',
+                    parameters=[{
+                        'robot_id': robot,
+                        'candidate_topic': f'/{robot}/local_frontier_candidates',
+                        'task_snapshot_topic': f'/{robot}/local_task_snapshot',
+                        'maximum_tasks': 5,
+                        'validity_s': 8.0,
+                        'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    }],
+                ),
+                Node(
+                    package='my_epuck_project',
+                    executable='distributed_frontier_assignment',
+                    name='local_distributed_frontier_assignment',
+                    namespace=robot,
+                    output='screen',
+                    remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
+                    parameters=[{
+                        'robot_id': robot,
+                        'robot_base_frame': f'{robot}/base_footprint',
+                        'global_frame': f'{robot}/map',
+                        'map_topic': 'map',
+                        'nav2_node_prefix': 'local_',
+                        'candidate_topic': f'/{robot}/local_frontier_candidates',
+                        'task_snapshot_topic': f'/{robot}/local_task_snapshot',
+                        'local_only': True,
+                        'handoff_gated': True,
+                        'dispatch_enabled': True,
+                        'synthetic_bids': False,
+                        'maximum_tasks_per_source': 5,
+                        'maximum_union_tasks': 5,
+                        'maximum_path_queries': 5,
+                        'minimum_solo_visible_gain_m': 0.05,
+                        'minimum_solo_ordering_score': 0.0,
+                        'maximum_solo_path_m': 18.0,
+                        'bid_validity_s': 8.0,
+                        'decision_validity_s': 8.0,
+                        'peer_timeout_s': 0.0,
+                        'assignment_strategy': 'burgard',
+                        'burgard_beta': 1.0,
+                        'traffic_scheduler_enabled': False,
+                        'terminal_small_frontier_length_m': LaunchConfiguration(
+                            'terminal_small_frontier_length_m'),
+                        'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    }],
+                ),
+                Node(
+                    package='my_epuck_project',
+                    executable='unknown_pose_phase_manager',
+                    name='unknown_pose_phase_manager',
+                    namespace=robot,
+                    output='screen',
+                    parameters=[{
+                        'use_sim_time': LaunchConfiguration('use_sim_time'),
+                        'robot_id': robot,
+                        'local_manager_service':
+                            f'/{robot}/local_lifecycle_manager_navigation/manage_nodes',
+                        'shared_manager_service':
+                            f'/{robot}/lifecycle_manager_navigation/manage_nodes',
+                    }],
+                ),
+            ])
     observer = Node(
         package='my_epuck_project', executable='cooperative_experiment_logger',
         name='cooperative_experiment_logger', output='screen',
@@ -215,7 +320,7 @@ def launch_setup(context):
             'webots_port': LaunchConfiguration('webots_port'),
         }],
     )
-    return [assignment, *unknown_pose_frontends, observer]
+    return [assignment, *unknown_pose_frontends, *local_phase_nodes, observer]
 
 
 def generate_launch_description():

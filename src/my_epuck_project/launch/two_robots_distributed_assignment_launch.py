@@ -44,6 +44,7 @@ def _assignment_peer(robot):
             'robot_base_frame': f'{robot}/base_footprint',
             'global_frame': 'shared_map',
             'dispatch_enabled': LaunchConfiguration('dispatch_enabled'),
+            'handoff_gated': LaunchConfiguration('unknown_initial_pose'),
             'synthetic_bids': False,
             'maximum_tasks_per_source': 5,
             'maximum_union_tasks': 10,

@@ -15,6 +15,7 @@ from my_epuck_interfaces.msg import (
     PairDecision as PairDecisionMsg,
     TaskBidArray as TaskBidArrayMsg,
     TaskSnapshot as TaskSnapshotMsg,
+    RelativePoseHypothesis,
 )
 
 import rclpy
@@ -153,6 +154,10 @@ class DistributedFrontierAssignment(Node):
         if self._robot_id not in ('robot1', 'robot2'):
             raise ValueError('robot_id must be exactly robot1 or robot2')
         self._peer_id = 'robot2' if self._robot_id == 'robot1' else 'robot1'
+        self._local_only = bool(self.declare_parameter('local_only', False).value)
+        self._handoff_gated = bool(self.declare_parameter(
+            'handoff_gated', False).value)
+        self._handoff_complete = False
         self._dispatch_enabled = bool(
             self.declare_parameter('dispatch_enabled', False).value,
         )
@@ -347,30 +352,46 @@ class DistributedFrontierAssignment(Node):
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
-        for robot_id in ('robot1', 'robot2'):
+        task_snapshot_topic = str(self.declare_parameter(
+            'task_snapshot_topic', 'task_snapshot').value)
+        candidate_topic = str(self.declare_parameter(
+            'candidate_topic', 'frontier_candidates').value)
+        robot_ids = (self._robot_id,) if self._local_only else ('robot1', 'robot2')
+        for robot_id in robot_ids:
             self.create_subscription(
-                FrontierCandidateArray, f'/{robot_id}/frontier_candidates',
+                FrontierCandidateArray,
+                candidate_topic if self._local_only else
+                f'/{robot_id}/frontier_candidates',
                 self._candidate_callback, candidate_qos,
             )
             self.create_subscription(
-                TaskSnapshotMsg, f'/{robot_id}/task_snapshot',
+                TaskSnapshotMsg,
+                task_snapshot_topic if self._local_only else
+                f'/{robot_id}/task_snapshot',
                 self._snapshot_callback, qos,
             )
+        if not self._local_only:
+            for robot_id in ('robot1', 'robot2'):
+                self.create_subscription(
+                    TaskBidArrayMsg, f'/{robot_id}/task_bids',
+                    self._bid_callback, qos,
+                )
+                self.create_subscription(
+                    PairDecisionMsg, f'/{robot_id}/pair_decision',
+                    self._decision_callback, qos,
+                )
+                self.create_subscription(
+                    DistributedExplorationStatus, f'/{robot_id}/distributed_status',
+                    self._status_callback, qos,
+                )
+                self.create_subscription(
+                    ExplorationFailure, f'/{robot_id}/exploration_failure',
+                    self._failure_callback, qos,
+                )
+        if self._handoff_gated:
             self.create_subscription(
-                TaskBidArrayMsg, f'/{robot_id}/task_bids',
-                self._bid_callback, qos,
-            )
-            self.create_subscription(
-                PairDecisionMsg, f'/{robot_id}/pair_decision',
-                self._decision_callback, qos,
-            )
-            self.create_subscription(
-                DistributedExplorationStatus, f'/{robot_id}/distributed_status',
-                self._status_callback, qos,
-            )
-            self.create_subscription(
-                ExplorationFailure, f'/{robot_id}/exploration_failure',
-                self._failure_callback, qos,
+                RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
+                self._handoff_callback, qos,
             )
         self._bid_publisher = self.create_publisher(TaskBidArrayMsg, 'task_bids', qos)
         self._decision_publisher = self.create_publisher(
@@ -393,7 +414,7 @@ class DistributedFrontierAssignment(Node):
             'beta=%.3f path_limit=%.3f sensor_range=%.3f traffic=%s '
             'terminal_small_frontier_length_m=%.3f '
             'traffic_radii=(%.3f,%.3f) traffic_speed=%.3f compute=%s navigate=%s '
-            'no_peer_clients=true no_cmd_vel=true' % (
+            'local_only=%s no_peer_clients=%s no_cmd_vel=true' % (
                 self._robot_id, self._peer_id, self._dispatch_enabled,
                 self._assignment_strategy, self._burgard_beta,
                 self._maximum_solo_path_m, self._burgard_sensor_max_range_m,
@@ -402,8 +423,23 @@ class DistributedFrontierAssignment(Node):
                 self._traffic_robot1_safe_radius_m,
                 self._traffic_robot2_safe_radius_m, self._traffic_reference_speed_mps,
                 interfaces['compute_path'], interfaces['navigate'],
+                self._local_only, self._local_only,
             )
         )
+
+    def _handoff_callback(self, message: RelativePoseHypothesis) -> None:
+        """Switch local-only dispatch off only after canonical acceptance."""
+        if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
+            return
+        if self._handoff_complete:
+            return
+        self._handoff_complete = True
+        self._dispatch_enabled = False if self._local_only else True
+        if self._local_only and self._nav2.local_goal_active:
+            self._nav2.cancel_navigation()
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s phase=POST_HANDOFF dispatch=%s' %
+            (self._robot_id, self._dispatch_enabled))
 
     def _candidate_callback(self, message: FrontierCandidateArray) -> None:
         """Keep bounded generator evidence separate from reachable task bids."""
@@ -742,6 +778,15 @@ class DistributedFrontierAssignment(Node):
                 'timer callback',
             )
         self._expire_failures(now)
+        if self._local_only:
+            if self._handoff_complete:
+                return
+            if self._nav2.local_goal_active or self._dispatch_in_progress:
+                return
+            local = self._fresh_snapshot(self._robot_id, now)
+            if local is not None:
+                self._continue_degraded_solo(local)
+            return
         if self._terminal or self._state == CoordinatorState.COMPLETE:
             return
         peer_status = self._peer_status

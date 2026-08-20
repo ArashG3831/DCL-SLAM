@@ -102,6 +102,12 @@ def test_unknown_mode_does_not_include_shared_assignment_before_handoff():
     assert "'launch_shared_stack': 'false'" in full
 
 
+def test_unknown_stack_requires_aligned_phase_before_shared_components():
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
+    assert 'requested_shared_stack and (' in stack
+    assert 'not unknown_initial_pose or phase_already_aligned' in stack
+
+
 def test_frontend_diagnostic_collision_is_merged_before_write():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     assert 'accepted_metadata = dict(request_metadata or {})' in frontend

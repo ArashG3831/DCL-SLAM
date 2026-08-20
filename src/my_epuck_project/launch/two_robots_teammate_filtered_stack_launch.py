@@ -251,9 +251,15 @@ def launch_setup(context):
     launch_mapping = (
         LaunchConfiguration('launch_mapping').perform(context).lower()
         == 'true')
-    launch_shared_stack = (
+    requested_shared_stack = (
         LaunchConfiguration('launch_shared_stack').perform(context).lower()
         == 'true')
+    # Unknown-pose pre-handoff is structurally local-only.  The explicit
+    # phase marker is required in addition to the request flag so a nested
+    # launch default or scope collision cannot instantiate shared Nav2/fusion
+    # before the canonical handoff.
+    launch_shared_stack = requested_shared_stack and (
+        not unknown_initial_pose or phase_already_aligned)
     handoff_gated = unknown_initial_pose and not phase_already_aligned
     try:
         quota_enabled = float(fusion_quota) > 0.0

@@ -77,7 +77,10 @@ def test_unknown_pose_frontend_records_each_descriptor_gate_reason():
 def test_unknown_pose_frontend_rechecks_cached_temporal_support_from_timer():
     source = (LAUNCH.parent / 'my_epuck_project' /
               'unknown_pose_frontend.py').read_text(encoding='utf-8')
-    assert 'self._compare_peer_descriptors()' in source
+    assert 'self._compare_peer_descriptors(new_peer_key=key)' in source
+    assert 'self._compare_peer_descriptors(new_own_key=key)' in source
+    assert 'pending_peer_descriptor_keys' in source
+    assert 'pending_own_descriptor_keys' in source
     assert 'new_peer_key=key' in source
     assert 'confirmation_window_for_cadence' in source
 
@@ -104,6 +107,16 @@ def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
     assert "'controller_variant': 'rpp'" in text
     assert "'enable_forensic_capture': LaunchConfiguration(" in text
     assert "'launch_rviz': 'false'" in text
+
+
+def test_close_start_profile_is_propagated_through_full_unknown_pose_launch():
+    entrypoint = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')
+    for source in (entrypoint, full):
+        text = source.read_text(encoding='utf-8')
+        assert 'large_unknown_pose_close_start' in text
+        assert "'world_profile': LaunchConfiguration('world_profile')" in text \
+            or "world_profile', default_value='large'" in text
 
 
 def test_explicit_unknown_pose_entrypoint_keeps_runtime_ground_truth_out():

@@ -95,7 +95,8 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description='Fast single-trial cooperative Webots runner')
     result.add_argument('--world-profile', choices=(
-        'small', 'large', 'large_unknown_pose', 'large_unknown_pose_16m'),
+        'small', 'large', 'large_unknown_pose', 'large_unknown_pose_16m',
+        'large_unknown_pose_close_start'),
                         default='large')
     result.add_argument('--world-path', default='')
     result.add_argument('--sensor-profile', choices=('full', 'throughput'),

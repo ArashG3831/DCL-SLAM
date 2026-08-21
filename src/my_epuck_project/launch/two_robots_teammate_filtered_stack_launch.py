@@ -409,7 +409,8 @@ def generate_launch_description():
             'world_profile',
             default_value='small',
             choices=['large', 'small', 'large_unknown_pose',
-                     'large_unknown_pose_16m'],
+                     'large_unknown_pose_16m',
+                     'large_unknown_pose_close_start'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(

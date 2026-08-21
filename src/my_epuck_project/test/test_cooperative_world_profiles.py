@@ -45,6 +45,27 @@ def test_large_unknown_pose_16m_is_the_canonical_far_start_profile():
     assert value['physics_profile'] == 'dynamic_low_slip_4ms_finite'
 
 
+def test_close_start_profile_matches_manual_saved_world_poses():
+    value = selected('large_unknown_pose_close_start')
+    metadata = value['world_metadata']
+    assert value['world'] == (
+        'epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_4ms_finite.wbt')
+    assert metadata['robot_order'] == ('robot1', 'robot2')
+    assert metadata['robots']['robot1'].translation == (16.0, 0.0, 0.001)
+    assert metadata['robots']['robot2'].translation == (
+        18.77, -1.6718e-17, 0.001)
+    assert metadata['robots']['robot1'].rotation == (
+        0.0, 0.0, 1.0, 1.5707963267948966)
+    assert metadata['robots']['robot2'].rotation == (
+        0.0, 0.0, 1.0, 1.5707963267948966)
+    assert math.isclose(metadata['initial_separation_m'], 2.77, abs_tol=1e-9)
+    content = Path(value['world_path']).read_text(encoding='utf-8')
+    assert 'basicTimeStep 4' in content
+    assert content.count('noise 0') >= 2
+    assert content.count('resolution -1') >= 2
+    assert content.count('E-puck {') == 2
+
+
 def test_profile_for_world_requires_matching_path_and_hash(tmp_path):
     source = WORLDS / (
         'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')

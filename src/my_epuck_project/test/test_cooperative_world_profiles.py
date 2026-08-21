@@ -66,6 +66,25 @@ def test_close_start_profile_matches_manual_saved_world_poses():
     assert content.count('E-puck {') == 2
 
 
+def test_close_start_20ms_profile_changes_only_basic_time_step():
+    value = selected('large_unknown_pose_close_start_20ms')
+    reference = selected('large_unknown_pose_close_start')
+    assert value['world'] == (
+        'epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt')
+    assert value['physics_profile'] == 'dynamic_low_slip_20ms_finite'
+    assert value['world_metadata']['robots'] == reference['world_metadata']['robots']
+    assert value['world_metadata']['initial_separation_m'] == (
+        reference['world_metadata']['initial_separation_m'])
+    reference_text = Path(reference['world_path']).read_text(encoding='utf-8')
+    actual_text = Path(value['world_path']).read_text(encoding='utf-8')
+    assert actual_text.replace('basicTimeStep 20', 'basicTimeStep 4') == reference_text
+    assert 'CFM 0.00001' in actual_text
+    assert 'ERP 0.2' in actual_text
+    assert 'randomSeed 20260818' in actual_text
+    assert actual_text.count('noise 0') >= 2
+    assert actual_text.count('resolution -1') >= 2
+
+
 def test_profile_for_world_requires_matching_path_and_hash(tmp_path):
     source = WORLDS / (
         'epuck_d500_two_world_unknown_pose_16m_dynamic_low_slip_4ms_finite.wbt')

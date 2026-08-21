@@ -27,6 +27,9 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert parser().parse_args([
         '--world-profile', 'large_unknown_pose_16m']).world_profile == (
             'large_unknown_pose_16m')
+    assert parser().parse_args([
+        '--world-profile', 'large_unknown_pose_close_start_20ms'
+    ]).world_profile == 'large_unknown_pose_close_start_20ms'
 
 
 def test_fast_runner_does_not_hard_code_original_dirty_workspace():

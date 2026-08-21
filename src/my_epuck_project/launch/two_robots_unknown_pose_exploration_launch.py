@@ -95,7 +95,8 @@ def generate_launch_description():
     return LaunchDescription([
         _arg('world_profile', 'large_unknown_pose_close_start',
              ['large_unknown_pose', 'large_unknown_pose_16m',
-              'large_unknown_pose_close_start']),
+              'large_unknown_pose_close_start',
+              'large_unknown_pose_close_start_20ms']),
         _arg('world_path', ''),
         _arg('webots_port', '23000'),
         _arg('webots_mode', 'realtime'),

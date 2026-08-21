@@ -165,6 +165,16 @@ def test_duplicate_physical_evidence_diagnostics_are_coalesced_not_state():
     assert "duplicate_record='first_observation'" in source
 
 
+def test_descriptor_callbacks_defer_heavy_comparison_to_bounded_timer_work():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'pending_peer_descriptor_keys' in source
+    assert 'pending_own_descriptor_keys' in source
+    assert 'at most one descriptor key per timer tick' in source
+    assert 'self._compare_peer_descriptors()' not in source
+
+
 def test_campaign_pattern_reopens_once_after_late_overlap_without_retrying_old_pairs():
     """Model the 17 m run: exhausted early evidence must wait for novelty."""
     gate = BoundedVerificationBatchController(

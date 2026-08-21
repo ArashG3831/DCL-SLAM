@@ -318,7 +318,14 @@ class UnknownPoseFrontend(Node):
         self.effective_confirmation_window_ns = self.confirmation_window_ns
         self.matches = {}
         self.compared_pairs = set()
+        # Descriptor subscriptions are serviced by the ROS executor.  Keep
+        # their callbacks bounded: comparison work is drained by the existing
+        # timer one keyframe at a time so a busy peer cannot starve receipt of
+        # newer descriptors.
+        self.pending_peer_descriptor_keys = deque(maxlen=self.max_keyframes)
+        self.pending_own_descriptor_keys = deque(maxlen=self.max_keyframes)
         self.descriptor_gate_status = {}
+        self.temporal_support_cache = {}
         self.temporal_gate_rejected_pairs = set()
         self.confirmations = {}
         self.pending_requests = set()
@@ -644,16 +651,24 @@ class UnknownPoseFrontend(Node):
         while len(self.keyframes) > self.max_keyframes:
             self.keyframes.popitem(last=False)
         self.last_descriptor_wall = time.monotonic()
-        self._compare_peer_descriptors(new_own_key=keyframe_id)
+        self.pending_own_descriptor_keys.append(keyframe_id)
 
     def tick(self):
         self._sample_cpu()
         if time.monotonic() - self.last_descriptor_wall >= self.descriptor_period_s:
             self.publish_descriptor()
-        # Re-evaluate cached matches for newly available temporal support.  No
-        # descriptor comparison is repeated because compared_pairs is bounded
-        # by the retained keyframe histories.
-        self._compare_peer_descriptors()
+        # Drain at most one descriptor key per timer tick.  Descriptor
+        # callbacks only retain messages and enqueue keys, preventing the
+        # single-threaded executor from losing current peer views while
+        # descriptor/temporal work is performed.
+        if self.pending_peer_descriptor_keys:
+            key = self.pending_peer_descriptor_keys.popleft()
+            if key in self.peer_descriptors:
+                self._compare_peer_descriptors(new_peer_key=key)
+        elif self.pending_own_descriptor_keys:
+            key = self.pending_own_descriptor_keys.popleft()
+            if key in self.keyframes:
+                self._compare_peer_descriptors(new_own_key=key)
         self._maybe_finalize_evidence_acquisition()
 
     def descriptor_callback(self, message):
@@ -672,7 +687,7 @@ class UnknownPoseFrontend(Node):
         self.peer_descriptors[key] = message
         while len(self.peer_descriptors) > self.max_keyframes:
             self.peer_descriptors.popitem(last=False)
-        self._compare_peer_descriptors(new_peer_key=key)
+        self.pending_peer_descriptor_keys.append(key)
 
     @staticmethod
     def _stamp_ns(message):
@@ -710,13 +725,36 @@ class UnknownPoseFrontend(Node):
             match.sector_shift, observations, self.similarity_gate,
             self.margin_gate, 0.12, self.effective_confirmation_window_ns)
 
+    def _temporal_candidate_affected(self, pair_key, changed_pair_keys):
+        """Return whether a newly queued descriptor can change this gate."""
+        if not changed_pair_keys or pair_key in changed_pair_keys:
+            return bool(changed_pair_keys)
+        peer_key, own_key = pair_key
+        own_entry = self.keyframes.get(own_key)
+        peer = self.peer_descriptors.get(peer_key)
+        if own_entry is None or peer is None:
+            return False
+        own_stamp = self._stamp_ns(own_entry[0])
+        peer_stamp = self._stamp_ns(peer)
+        for changed_peer_key, changed_own_key in changed_pair_keys:
+            changed_peer = self.peer_descriptors.get(changed_peer_key)
+            changed_own_entry = self.keyframes.get(changed_own_key)
+            if changed_peer is None or changed_own_entry is None:
+                continue
+            if (abs(self._stamp_ns(changed_own_entry[0]) - own_stamp) <=
+                    self.effective_confirmation_window_ns and
+                    abs(self._stamp_ns(changed_peer) - peer_stamp) <=
+                    self.effective_confirmation_window_ns):
+                return True
+        return False
+
     def _compare_peer_descriptors(self, new_peer_key=None, new_own_key=None):
         if not self.keyframes or not self.peer_descriptors:
             return
         if self.robot_id > self.peer_robot_id or self.batch_proposal_published:
             return
         if new_peer_key is None and new_own_key is None:
-            new_pairs = []
+            return
         else:
             peer_items = list(self.peer_descriptors.items())
             own_items = list(self.keyframes.items())
@@ -730,6 +768,9 @@ class UnknownPoseFrontend(Node):
                 (peer_key, own_key, peer, own)
                 for peer_key, peer in peer_items
                 for own_key, own in own_items]
+        changed_pair_keys = {
+            (peer_key, own_key)
+            for peer_key, own_key, _, _ in new_pairs}
         for peer_key, own_key, peer, own_entry in new_pairs:
             own = own_entry[0]
             if (peer_key, own_key) in self.compared_pairs:
@@ -778,16 +819,27 @@ class UnknownPoseFrontend(Node):
             if peer is None or own_entry is None:
                 continue
             own = own_entry[0]
+            pair_key = (peer_key, own_key)
+            affected = self._temporal_candidate_affected(
+                pair_key, changed_pair_keys)
+            if pair_key not in changed_pair_keys and not affected:
+                support_count = self.temporal_support_cache.get(pair_key)
+                if support_count is None:
+                    continue
+            else:
+                support_count = self._temporal_support(
+                    peer_key, own_key, match)
+                self.temporal_support_cache[pair_key] = support_count
             confirmations = self.confirmations.setdefault(
-                (peer_key, own_key), set())
+                pair_key, set())
             confirmations.add((own_key, peer_key))
-            support_count = self._temporal_support(peer_key, own_key, match)
-            self.counters['temporal_support_evaluations'] += 1
+            if affected:
+                self.counters['temporal_support_evaluations'] += 1
             self.counters['temporal_support_max'] = max(
                 self.counters['temporal_support_max'], support_count)
             if support_count < self.minimum_confirmations:
-                if (peer_key, own_key) not in self.temporal_gate_rejected_pairs:
-                    self.temporal_gate_rejected_pairs.add((peer_key, own_key))
+                if pair_key not in self.temporal_gate_rejected_pairs:
+                    self.temporal_gate_rejected_pairs.add(pair_key)
                     self.counters['temporal_gate_rejections'] += 1
                     self.temporal_gate_rejection_counts[
                         'INSUFFICIENT_CONFIRMATIONS'] += 1

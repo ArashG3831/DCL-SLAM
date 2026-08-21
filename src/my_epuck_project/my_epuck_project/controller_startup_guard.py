@@ -8,8 +8,10 @@ controller is observed ACTIVE.  It does not synthesize readiness.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import rclpy
@@ -35,6 +37,28 @@ def controller_action(state):
     if state in {'inactive', 'configured'}:
         return 'ACTIVATE'
     return 'RETRY'
+
+
+def spawner_ros_home(manager: str, process_id: int | None = None) -> str:
+    """Return an isolated ROS home for this guard's controller spawner.
+
+    controller_manager.spawner uses a file lock under ``$ROS_HOME``.  The two
+    robot managers are independent, so sharing that lock lets a blocked
+    spawner for one manager prevent the other manager from starting.  A
+    process-specific directory also prevents a stale lock from a prior
+    campaign from being reused.
+    """
+    robot = manager.strip('/').split('/', 1)[0] or 'controller'
+    owner = os.getpid() if process_id is None else int(process_id)
+    path = os.path.join(tempfile.gettempdir(),
+                        f'my_epuck_controller_spawner_{robot}_{owner}')
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def manager_state_available(states) -> bool:
+    """Whether the manager service returned a controller-state response."""
+    return states is not None
 
 
 class ControllerStartupGuard(Node):
@@ -91,7 +115,9 @@ class ControllerStartupGuard(Node):
         self.get_logger().info(
             f'Loading {self.controller_name} through controller_manager '
             f'(attempted standard spawner): {self.manager}')
-        completed = subprocess.run(command, check=False)
+        child_env = os.environ.copy()
+        child_env['ROS_HOME'] = spawner_ros_home(self.manager)
+        completed = subprocess.run(command, check=False, env=child_env)
         return completed.returncode == 0
 
     def configure(self):
@@ -120,6 +146,16 @@ class ControllerStartupGuard(Node):
                 f'action={action}, attempt={attempt}/{self.max_attempts}')
             if action == 'READY':
                 return True
+            if not manager_state_available(states):
+                # Do not invoke the standard spawner until this manager's
+                # services exist.  Invoking it early can hold its global
+                # file lock while another independent manager is still
+                # starting, starving both controller bootstrap paths.
+                self.get_logger().info(
+                    f'{self.manager}: controller-manager services are not '
+                    'ready; retrying without spawning')
+                time.sleep(self.retry_delay_s)
+                continue
             if action == 'LOAD':
                 self.invoke_standard_spawner()
             elif action == 'CONFIGURE':

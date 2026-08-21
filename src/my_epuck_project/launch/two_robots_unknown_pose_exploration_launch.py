@@ -51,7 +51,10 @@ def generate_launch_description():
                 'diagnostic_frontier_capture'),
             'fusion_process_nice': '0',
             'sensor_profile': 'full',
-            'nav2_autostart': 'true',
+            # Preserve the caller's readiness contract.  The bounded campaign
+            # runner passes false and activates both managers only after their
+            # services are ready; manual launches retain the declared default.
+            'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'dispatch_enabled': 'true',
             'unknown_initial_pose': 'true',
             'unknown_pose_diagnostic_output': LaunchConfiguration(
@@ -102,6 +105,7 @@ def generate_launch_description():
         _arg('webots_mode', 'realtime'),
         _arg('webots_gui', 'false', ['true', 'false']),
         _arg('use_sim_time', 'true', ['true', 'false']),
+        _arg('nav2_autostart', 'true', ['true', 'false']),
         _arg('diagnostic_mode', 'false', ['true', 'false']),
         _arg('diagnostic_frontier_capture', 'false', ['true', 'false']),
         _arg('unknown_pose_diagnostic_output', ''),

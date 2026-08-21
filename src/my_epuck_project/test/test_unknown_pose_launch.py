@@ -109,6 +109,14 @@ def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
     assert "'launch_rviz': 'false'" in text
 
 
+def test_unknown_pose_entrypoint_preserves_nav2_readiness_gate():
+    source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert "_arg('nav2_autostart', 'true', ['true', 'false'])" in text
+    assert "'nav2_autostart': LaunchConfiguration('nav2_autostart')" in text
+    assert "'nav2_autostart': 'true'" not in text
+
+
 def test_close_start_profile_is_propagated_through_full_unknown_pose_launch():
     entrypoint = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')

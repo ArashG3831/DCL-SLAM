@@ -534,6 +534,36 @@ def test_accepted_evidence_cannot_reuse_one_physical_view():
         new_view, accepted, own_crops)
 
 
+def test_next_verification_rejects_local_view_near_any_accepted_source():
+    """A peer-keyframe change cannot increase the source spatial baseline."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {
+        ('own-a', 'peer-a'): (None, None),
+        ('own-b', 'peer-b'): (None, None),
+    }
+    frontend.keyframes = {
+        'own-a': (descriptor('own-a', 0.0, 0.0),
+                  GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0)),
+        'own-b': (descriptor('own-b', 1.0, 0.0),
+                  GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 1.0, 0.0)),
+        'own-near-a': (descriptor('own-near-a', 0.1, 0.0),
+                       GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                                0.1, 0.0)),
+    }
+    frontend.peer_descriptors = {
+        'peer-a': descriptor('peer-a', 0.0, 0.0),
+        'peer-b': descriptor('peer-b', 1.0, 0.0),
+        'peer-new': descriptor('peer-new', 2.0, 0.0),
+    }
+    frontend._descriptor_geometry = lambda value: {
+        'center': [float(value.crop_origin_x),
+                   float(value.crop_origin_y)]}
+    candidate = ('peer-new', 'own-near-a',
+                 frontend.peer_descriptors['peer-new'],
+                 frontend.keyframes['own-near-a'][0])
+    assert not frontend._candidate_is_distinct_from_evidence(candidate)
+
+
 def test_physical_candidate_identity_accepts_runtime_scored_tuple_shape():
     own_crops = {
         'own': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0)}

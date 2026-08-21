@@ -1272,7 +1272,13 @@ class UnknownPoseFrontend(Node):
             peer_centers.append(np.asarray(
                 self._descriptor_geometry(evidence_peer)['center'],
                 dtype=np.float64))
-        if own_centers and all(np.linalg.norm(own_center - prior) < 0.40
+        # The production spatial-baseline gate is measured from source/own
+        # crop centres.  Do not spend verification attempts pairing one local
+        # view with many peer keyframes: a local crop that is near any
+        # accepted source view cannot increase that baseline.  This is an
+        # acquisition-order filter only; registration and consensus gates
+        # remain unchanged.
+        if own_centers and any(np.linalg.norm(own_center - prior) < 0.40
                                for prior in own_centers):
             return False
         if peer_centers and all(np.linalg.norm(peer_center - prior) < 0.40

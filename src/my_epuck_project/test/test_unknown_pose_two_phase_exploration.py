@@ -84,6 +84,12 @@ def test_shared_stack_is_started_only_by_one_shot_handoff_activation():
     assert 'shell=True' not in activation
 
 
+def test_shared_activation_omits_empty_optional_launch_arguments():
+    activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    assert "if value != ''" in activation
+    assert "f'{key}:={value}'" in activation
+
+
 def test_shared_activation_declares_boolean_launch_parameters_with_boolean_types():
     activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
     assert "('webots_gui', False)" in activation

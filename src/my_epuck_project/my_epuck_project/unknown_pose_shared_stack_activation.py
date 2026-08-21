@@ -124,7 +124,12 @@ class UnknownPoseSharedStackActivation(Node):
             'handoff_transform_yaw': f'{yaw:.12g}',
             'handoff_evidence_set_hash': evidence_hash,
         })
-        args.extend(f'{key}:={value}' for key, value in values.items())
+        # Optional probe parameters are intentionally empty when no probe is
+        # configured.  Do not emit malformed ``name:=`` launch tokens: ROS 2
+        # rejects those before the post-handoff stack can start.
+        args.extend(
+            f'{key}:={value}' for key, value in values.items()
+            if value != '')
         self.get_logger().info(
             'UNKNOWN_POSE_SHARED_ACTIVATION starting=true evidence_set_hash=%s '
             'argv=%s' % (evidence_hash, ' '.join(args)))

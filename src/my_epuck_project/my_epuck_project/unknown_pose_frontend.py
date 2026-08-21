@@ -28,6 +28,7 @@ from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformL
 from .unknown_pose_frontend_core import (
     DedicatedDiagnosticJsonl,
     BoundedVerificationBatchController,
+    candidate_reuses_accepted_physical_view,
     GridCrop,
     compare_descriptors,
     compare_descriptor_pairs,
@@ -1345,6 +1346,17 @@ class UnknownPoseFrontend(Node):
                     reason='PHYSICAL_EVIDENCE_PREVIOUSLY_REJECTED')
                 continue
             geometry_key = self._candidate_physical_geometry_key(candidate)
+            if candidate_reuses_accepted_physical_view(
+                    candidate, self.evidence_physical_geometry_keys,
+                    {key: value[1] for key, value in self.keyframes.items()}):
+                self.counters['physical_evidence_duplicates_suppressed'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'CANDIDATE_VERIFICATION_SKIPPED',
+                    candidate=self._candidate_diagnostic(
+                        candidate, status='SKIPPED',
+                        reason='PHYSICAL_VIEW_ALREADY_ACCEPTED', compact=True),
+                    reason='PHYSICAL_VIEW_ALREADY_ACCEPTED')
+                continue
             if geometry_key in self.evidence_physical_geometry_keys:
                 self.counters['physical_evidence_duplicates_suppressed'] += 1
                 self._write_physical_evidence_diagnostic(

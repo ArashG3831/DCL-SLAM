@@ -314,6 +314,23 @@ def physical_candidate_geometry_identity(candidate, own_crops: dict) -> tuple:
             physical_crop_geometry_identity(peer_crop))
 
 
+def candidate_reuses_accepted_physical_view(
+        candidate, accepted_geometry_keys: Iterable, own_crops: dict) -> bool:
+    """Reject a pair that reuses either crop footprint already accepted.
+
+    A pair can be geometrically distinct while still reusing the same peer
+    crop (or the same local crop).  Such a pair is not an independent
+    cross-robot view and can admit a locally plausible but globally
+    inconsistent registration.  This is an acquisition rule only; the
+    registration and consensus thresholds remain unchanged.
+    """
+    own_geometry, peer_geometry = physical_candidate_geometry_identity(
+        candidate, own_crops)
+    return any(
+        own_geometry == accepted[0] or peer_geometry == accepted[1]
+        for accepted in accepted_geometry_keys)
+
+
 def physical_descriptor_identity(descriptor) -> tuple:
     """Return the corresponding physical identity for a descriptor message."""
     resolution = float(getattr(descriptor, 'resolution', 0.0))

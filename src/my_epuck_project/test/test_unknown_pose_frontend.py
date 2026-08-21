@@ -9,6 +9,7 @@ import numpy as np
 from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
 from my_epuck_project.unknown_pose_frontend_core import (
     BoundedVerificationBatchController,
+    candidate_reuses_accepted_physical_view,
     DedicatedDiagnosticJsonl,
     GridCrop,
     accumulate_physical_candidates,
@@ -22,6 +23,7 @@ from my_epuck_project.unknown_pose_frontend_core import (
     evidence_batch_is_spatially_diverse,
     hypothesis_is_acceptable,
     polar_descriptor,
+    physical_candidate_geometry_identity,
     register_crops,
     rigidify_affine,
     should_accept_hypothesis,
@@ -463,6 +465,28 @@ def test_physical_duplicate_descriptors_with_different_ids_count_once():
         candidate('peer-b', 'own-b', peer_b, own_b),
     ]
     assert len(deduplicate_physical_candidates(candidates, own_crops)) == 1
+
+
+def test_accepted_evidence_cannot_reuse_one_physical_view():
+    own_crops = {
+        'own-a': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 0.0, 0.0),
+        'own-b': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 1.0, 0.0),
+        'own-c': GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05, 2.0, 0.0),
+    }
+    first = candidate(
+        'peer-a', 'own-a', descriptor('peer-a', 3.0, 0.0),
+        descriptor('own-a', 0.0, 0.0))
+    same_peer = candidate(
+        'peer-b', 'own-b', descriptor('peer-b', 3.0, 0.0, checksum=2),
+        descriptor('own-b', 1.0, 0.0, checksum=2))
+    new_view = candidate(
+        'peer-c', 'own-c', descriptor('peer-c', 5.0, 0.0, checksum=3),
+        descriptor('own-c', 2.0, 0.0, checksum=3))
+    accepted = {physical_candidate_geometry_identity(first, own_crops)}
+    assert candidate_reuses_accepted_physical_view(
+        same_peer, accepted, own_crops)
+    assert not candidate_reuses_accepted_physical_view(
+        new_view, accepted, own_crops)
 
 
 def test_physical_candidate_identity_accepts_runtime_scored_tuple_shape():

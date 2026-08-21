@@ -152,6 +152,37 @@ def test_hypothesis_callback_persists_directional_protocol_diagnostics():
     assert "'HYPOTHESIS_ACK_IGNORED_NO_PENDING_PROPOSAL'" in source
 
 
+def test_accepted_alignment_is_published_as_persistent_static_tf():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.accepted = SimpleNamespace(
+        source_to_target=SimpleNamespace(
+            translation=SimpleNamespace(x=1.25, y=-0.5),
+            rotation=SimpleNamespace(z=0.0, w=1.0),
+        )
+    )
+    frontend.robot_id = 'robot1'
+    frontend.peer_robot_id = 'robot2'
+    frontend.shared_frame = 'shared_map'
+    frontend.tf_broadcaster = SimpleNamespace(sent=[])
+    frontend.tf_broadcaster.sendTransform = (
+        lambda message: frontend.tf_broadcaster.sent.append(message))
+    frontend.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(to_msg=lambda: SimpleNamespace()))
+    frontend.counters = {'tf_handoffs': 0}
+
+    frontend.publish_accepted_tf()
+
+    assert len(frontend.tf_broadcaster.sent) == 2
+    assert frontend.tf_broadcaster.sent[0].header.frame_id == 'shared_map'
+    assert frontend.tf_broadcaster.sent[0].child_frame_id == 'robot1/local_world'
+    assert frontend.tf_broadcaster.sent[1].child_frame_id == 'robot2/local_world'
+    assert frontend.counters['tf_handoffs'] == 1
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'StaticTransformBroadcaster' in source
+
+
 def test_rejected_proposal_releases_target_confirmation_latch():
     frontend = object.__new__(UnknownPoseFrontend)
     frontend.robot_id = 'robot2'

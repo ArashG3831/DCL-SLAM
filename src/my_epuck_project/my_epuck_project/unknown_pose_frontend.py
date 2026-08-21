@@ -23,7 +23,12 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
+from tf2_ros import (
+    Buffer,
+    StaticTransformBroadcaster,
+    TransformException,
+    TransformListener,
+)
 
 from .unknown_pose_frontend_core import (
     DedicatedDiagnosticJsonl,
@@ -315,7 +320,11 @@ class UnknownPoseFrontend(Node):
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.tf_broadcaster = TransformBroadcaster(self)
+        # The accepted alignment is immutable for the lifetime of this
+        # frontend. Publish it on /tf_static so a post-handoff fusion process
+        # can start later and still resolve the canonical map chain; a
+        # one-shot dynamic /tf sample expires from a late listener's buffer.
+        self.tf_broadcaster = StaticTransformBroadcaster(self)
         self.latest_map = None
         self.map_revision = 0
         self.last_descriptor_wall = 0.0

@@ -183,6 +183,17 @@ def test_accepted_alignment_is_published_as_persistent_static_tf():
     assert 'StaticTransformBroadcaster' in source
 
 
+def test_descriptor_comparisons_are_queued_and_bounded_per_timer_tick():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'pending_descriptor_pair_keys' in source
+    assert 'pending_descriptor_pair_key_set' in source
+    assert 'descriptor_pair_budget_per_tick = 16' in source
+    assert 'len(uncomputed_pairs) < self.descriptor_pair_budget_per_tick' in source
+    assert "if self.pending_descriptor_pair_keys:" in source
+
+
 def test_rejected_proposal_releases_target_confirmation_latch():
     frontend = object.__new__(UnknownPoseFrontend)
     frontend.robot_id = 'robot2'

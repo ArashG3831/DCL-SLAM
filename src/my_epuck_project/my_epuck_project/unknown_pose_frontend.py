@@ -341,6 +341,9 @@ class UnknownPoseFrontend(Node):
         # newer descriptors.
         self.pending_peer_descriptor_keys = deque(maxlen=self.max_keyframes)
         self.pending_own_descriptor_keys = deque(maxlen=self.max_keyframes)
+        self.pending_descriptor_pair_keys = deque(maxlen=8192)
+        self.pending_descriptor_pair_key_set = set()
+        self.descriptor_pair_budget_per_tick = 16
         self.descriptor_gate_status = {}
         self.temporal_support_cache = {}
         self.temporal_gate_rejected_pairs = set()
@@ -679,7 +682,10 @@ class UnknownPoseFrontend(Node):
         # callbacks only retain messages and enqueue keys, preventing the
         # single-threaded executor from losing current peer views while
         # descriptor/temporal work is performed.
-        if self.pending_peer_descriptor_keys:
+        if self.pending_descriptor_pair_keys:
+            self._compare_peer_descriptors(
+                new_peer_key=None, new_own_key=None)
+        elif self.pending_peer_descriptor_keys:
             key = self.pending_peer_descriptor_keys.popleft()
             if key in self.peer_descriptors:
                 self._compare_peer_descriptors(new_peer_key=key)
@@ -884,9 +890,7 @@ class UnknownPoseFrontend(Node):
             return
         if self.robot_id > self.peer_robot_id or self.batch_proposal_published:
             return
-        if new_peer_key is None and new_own_key is None:
-            return
-        else:
+        if new_peer_key is not None or new_own_key is not None:
             peer_items = list(self.peer_descriptors.items())
             own_items = list(self.keyframes.items())
             if new_peer_key is not None:
@@ -899,9 +903,26 @@ class UnknownPoseFrontend(Node):
                 (peer_key, own_key, peer, own)
                 for peer_key, peer in peer_items
                 for own_key, own in own_items]
-        uncomputed_pairs = [
-            pair for pair in new_pairs
-            if (pair[0], pair[1]) not in self.compared_pairs]
+            for peer_key, own_key, _, _ in new_pairs:
+                pair_key = (peer_key, own_key)
+                if (pair_key not in self.compared_pairs and
+                        pair_key not in self.pending_descriptor_pair_key_set):
+                    self.pending_descriptor_pair_keys.append(pair_key)
+                    self.pending_descriptor_pair_key_set.add(pair_key)
+
+        uncomputed_pairs = []
+        while (self.pending_descriptor_pair_keys and
+               len(uncomputed_pairs) < self.descriptor_pair_budget_per_tick):
+            pair_key = self.pending_descriptor_pair_keys.popleft()
+            self.pending_descriptor_pair_key_set.discard(pair_key)
+            if pair_key in self.compared_pairs:
+                continue
+            peer_key, own_key = pair_key
+            peer = self.peer_descriptors.get(peer_key)
+            own_entry = self.keyframes.get(own_key)
+            if peer is None or own_entry is None:
+                continue
+            uncomputed_pairs.append((peer_key, own_key, peer, own_entry))
         changed_pair_keys = {
             (peer_key, own_key)
             for peer_key, own_key, _, _ in uncomputed_pairs}

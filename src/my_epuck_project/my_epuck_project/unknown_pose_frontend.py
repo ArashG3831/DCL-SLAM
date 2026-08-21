@@ -2245,6 +2245,15 @@ class UnknownPoseFrontend(Node):
         if message.status == 'REJECTED':
             if self.robot_id == message.source_robot_id:
                 self.negotiation_started = False
+            if self.robot_id == message.target_robot_id:
+                # A rejected proposal terminates the responder's pending
+                # confirmation too.  Without this reset, the responder
+                # remains latched forever and ignores every later proposal,
+                # including a valid multi-keyframe consensus from a new
+                # acquisition batch.
+                self.pending_target_proposal = False
+                self.peer_proposals.pop(
+                    str(message.source_keyframe_id), None)
             self._record_diagnostic_event(
                 'HYPOTHESIS_REJECTED',
                 source_robot_id=str(message.source_robot_id),

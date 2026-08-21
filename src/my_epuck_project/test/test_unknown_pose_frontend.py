@@ -151,6 +151,29 @@ def test_hypothesis_callback_persists_directional_protocol_diagnostics():
     assert "'HYPOTHESIS_ACK_IGNORED_NO_PENDING_PROPOSAL'" in source
 
 
+def test_rejected_proposal_releases_target_confirmation_latch():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.robot_id = 'robot2'
+    frontend.peer_robot_id = 'robot1'
+    frontend.accepted = None
+    frontend.pending_target_proposal = True
+    frontend.negotiation_started = True
+    frontend.peer_proposals = {'robot1-00000055': object()}
+    frontend._record_diagnostic_event = lambda *args, **kwargs: None
+    message = SimpleNamespace(
+        source_robot_id='robot1', target_robot_id='robot2',
+        source_keyframe_id='robot1-00000055',
+        target_keyframe_id='robot2-00000035', status='REJECTED',
+        accepted=False, final_confidence=0.0,
+        rejection_reason='INSUFFICIENT_CONSISTENT_CONSTRAINTS')
+
+    frontend.hypothesis_callback(message)
+
+    assert frontend.pending_target_proposal is False
+    assert frontend.peer_proposals == {}
+    assert frontend.negotiation_started is True
+
+
 def test_batch_reentry_never_changes_three_constraint_consensus_gate():
     assert not crop_batch_is_ready(2, 3)
     assert crop_batch_is_ready(3, 3)

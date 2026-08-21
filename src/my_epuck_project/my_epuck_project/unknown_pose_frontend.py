@@ -1800,6 +1800,29 @@ class UnknownPoseFrontend(Node):
             request_key, (peer_key, own_key, expected_peer,
                           self.keyframes[own_key][0]))
         candidate_geometry_key = self._candidate_physical_geometry_key(candidate)
+        # A response can arrive after another in-flight request has already
+        # accepted the same local or peer crop footprint.  Exact pair
+        # deduplication is insufficient here: reusing either physical view
+        # creates a second, non-independent registration constraint and can
+        # poison the unchanged multi-constraint consensus gate.  Apply the
+        # existing acquisition-only physical-view rule again at response
+        # time, when the accepted-evidence set is authoritative.
+        if candidate_reuses_accepted_physical_view(
+                candidate, self.evidence_physical_geometry_keys,
+                {key: value[1] for key, value in self.keyframes.items()}):
+            self.counters['physical_evidence_duplicates_suppressed'] += 1
+            self._write_physical_evidence_diagnostic(
+                'CROP_RESPONSE_DUPLICATE_SUPPRESSED',
+                physical_identity=list(physical_key),
+                own_keyframe_id=str(own_key),
+                peer_keyframe_id=str(peer_key),
+                reason='PHYSICAL_VIEW_ALREADY_ACCEPTED')
+            self.pending_requests.discard(request_key)
+            self.completed_request_keys.add(request_key)
+            self.request_candidate_by_request_key.pop(request_key, None)
+            self.request_metadata_by_request_key.pop(request_key, None)
+            self._request_next_candidate_verification()
+            return
         if candidate_geometry_key in self.evidence_physical_geometry_keys:
             self.counters['physical_evidence_duplicates_suppressed'] += 1
             self._write_physical_evidence_diagnostic(

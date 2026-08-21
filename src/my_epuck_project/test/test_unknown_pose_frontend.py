@@ -530,6 +530,11 @@ def test_accepted_evidence_cannot_reuse_one_physical_view():
     accepted = {physical_candidate_geometry_identity(first, own_crops)}
     assert candidate_reuses_accepted_physical_view(
         same_peer, accepted, own_crops)
+    same_own = candidate(
+        'peer-c', 'own-a', descriptor('peer-c', 5.0, 0.0, checksum=3),
+        descriptor('own-a', 0.0, 0.0, checksum=3))
+    assert candidate_reuses_accepted_physical_view(
+        same_own, accepted, own_crops)
     assert not candidate_reuses_accepted_physical_view(
         new_view, accepted, own_crops)
 

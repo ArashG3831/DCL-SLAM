@@ -12,14 +12,58 @@ from my_epuck_project.unknown_pose_frontend_core import (
     RegistrationResult,
     bounded_candidate_verification_order,
     compose_se2,
+    compare_descriptors,
+    compare_descriptor_pairs,
     invert_se2,
     polar_descriptor,
     projected_registration_error,
     physical_candidate_geometry_identity,
     register_crop_set,
     register_crops,
+    _field_distances,
+    _translation_grid_field_distances,
+    _distance_field,
     wrap_angle,
 )
+
+
+def _scalar_polar_descriptor_reference(crop, rings=12, sectors=24):
+    """Reference implementation for the optimized descriptor reduction."""
+    values = np.asarray(crop.values)
+    height, width = values.shape
+    yy, xx = np.indices((height, width), dtype=np.float64)
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    dx = (xx - cx) * crop.resolution
+    dy = (yy - cy) * crop.resolution
+    radius = np.hypot(dx, dy)
+    max_radius = max(crop.resolution, float(radius.max()))
+    ring_index = np.minimum(
+        rings - 1, (radius / max_radius * rings).astype(np.int32))
+    angle = (np.arctan2(dy, dx) + 2.0 * math.pi) % (2.0 * math.pi)
+    sector_index = np.minimum(
+        sectors - 1,
+        (angle / (2.0 * math.pi) * sectors).astype(np.int32))
+    known = values != -1
+    occupied = known & (values >= 100)
+    total = np.zeros((rings, sectors), dtype=np.float64)
+    known_count = np.zeros_like(total)
+    occupied_count = np.zeros_like(total)
+    for ring in range(rings):
+        for sector in range(sectors):
+            mask = (ring_index == ring) & (sector_index == sector)
+            total[ring, sector] = float(np.count_nonzero(mask))
+            known_count[ring, sector] = float(np.count_nonzero(mask & known))
+            occupied_count[ring, sector] = float(
+                np.count_nonzero(mask & occupied))
+    known_fraction = np.divide(
+        known_count, total, out=np.zeros_like(total), where=total > 0.0)
+    occupied_fraction = np.divide(
+        occupied_count, known_count, out=np.zeros_like(total),
+        where=known_count > 0.0)
+    encoded = np.empty((rings, sectors, 2), dtype=np.uint8)
+    encoded[:, :, 0] = np.rint(occupied_fraction * 255.0).astype(np.uint8)
+    encoded[:, :, 1] = np.rint(known_fraction * 255.0).astype(np.uint8)
+    return encoded.tobytes()
 
 
 def structured_scene(size=180):
@@ -50,6 +94,47 @@ def test_se2_composition_and_inverse_are_explicit_and_closed():
     assert compose_se2(first, second) == compose_se2(
         first, second)
     assert abs(wrap_angle(compose_se2(first, second)[2] - 0.1)) < 1e-9
+
+
+def test_vectorized_polar_descriptor_matches_scalar_reference():
+    rng = np.random.default_rng(42)
+    values = rng.choice(np.asarray([-1, 0, 100], dtype=np.int16),
+                        size=(37, 43), p=[0.25, 0.60, 0.15])
+    crop = GridCrop(values, 0.05, -1.2, 0.7, math.radians(13.0))
+    expected = _scalar_polar_descriptor_reference(crop)
+    actual = polar_descriptor(crop)
+    assert actual == expected
+    assert compare_descriptors(actual, expected).similarity == 1.0
+
+
+def test_descriptor_pair_batch_matches_individual_scores():
+    """Batching removes setup work without changing any pair result."""
+    rng = np.random.default_rng(17)
+    first = [rng.bytes(12 * 24 * 2) for _ in range(4)]
+    second = [rng.bytes(12 * 24 * 2) for _ in range(4)]
+    batched = compare_descriptor_pairs(first, second)
+    individual = tuple(compare_descriptors(a, b) for a, b in zip(first, second))
+    assert batched == individual
+
+
+def test_translation_grid_sampling_matches_world_sampling():
+    values = np.zeros((60, 70), dtype=np.int16)
+    values[::5, 8:55] = 100
+    crop = GridCrop(values, 0.05, -1.3, 2.7, math.radians(17.0))
+    field = _distance_field(crop)
+    offsets = np.stack(np.meshgrid(
+        np.arange(-0.4, 0.401, 0.05),
+        np.arange(-0.4, 0.401, 0.05), indexing='ij'), axis=-1).reshape(-1, 2)
+    rotated = np.asarray([[0.3, 1.1], [1.7, 2.4], [2.2, 0.8]])
+    base = np.asarray([-0.2, 0.4])
+    world_points = (
+        rotated[None, :, :] + base[None, None, :] + offsets[:, None, :]
+    ).reshape(-1, 2)
+    reference = _field_distances(
+        world_points, crop, field).reshape(len(offsets), len(rotated))
+    optimized = _translation_grid_field_distances(
+        rotated, base, crop, field, offsets)
+    assert np.array_equal(optimized, reference)
 
 
 def test_map_origin_translation_is_not_double_applied():

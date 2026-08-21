@@ -90,6 +90,16 @@ def test_launch_command_can_enable_passive_evidence_in_attempt_directory(tmp_pat
     assert f'unknown_pose_diagnostic_output:={tmp_path / "observer" / "attempt_01" / "frontend"}' in command
 
 
+def test_headless_benchmark_does_not_enable_frontend_evidence_stream(tmp_path):
+    args = parser().parse_args([])
+    command = launch_command(
+        args, Path('/tmp/test_world.wbt'),
+        output_root=tmp_path / 'benchmark', run_id='attempt_01')
+    assert 'enable_observer:=false' in command
+    assert not any(item.startswith('unknown_pose_diagnostic_output:=')
+                   for item in command)
+
+
 def test_fast_runner_resolves_and_records_canonical_16m_profile(tmp_path, monkeypatch):
     worktree = Path(__file__).resolve().parents[3]
     monkeypatch.setattr(

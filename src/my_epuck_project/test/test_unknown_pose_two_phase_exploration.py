@@ -293,6 +293,14 @@ def test_full_campaign_observer_records_joint_state_health():
     assert "'joint_states':self.p['odom_stale_s']" in logger
 
 
+def test_local_prehandoff_assignment_uses_single_executor_without_changing_shared_default():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
+    assert "'executor_threads': 1" in full
+    assert "'executor_threads', 4" in assignment
+    assert 'SingleThreadedExecutor' in assignment
+
+
 def test_no_path_exchange_or_ghost_cleanup_was_added():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()

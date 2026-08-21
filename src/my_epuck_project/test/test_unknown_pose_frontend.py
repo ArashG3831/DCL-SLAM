@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
 from my_epuck_project.unknown_pose_frontend_core import (
     BoundedVerificationBatchController,
     DedicatedDiagnosticJsonl,
@@ -173,6 +174,67 @@ def test_descriptor_callbacks_defer_heavy_comparison_to_bounded_timer_work():
     assert 'pending_own_descriptor_keys' in source
     assert 'at most one descriptor key per timer tick' in source
     assert 'self._compare_peer_descriptors()' not in source
+
+
+def test_expired_descriptor_pair_caches_are_pruned_with_bounded_history():
+    """Historical Cartesian matches must not grow beyond live keyframes."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.keyframes = {'own-live': object()}
+    frontend.peer_descriptors = {'peer-live': object()}
+    live = ('peer-live', 'own-live')
+    expired = ('peer-expired', 'own-expired')
+    frontend.matches = {live: 'live', expired: 'expired'}
+    frontend.compared_pairs = {live, expired}
+    frontend.descriptor_gate_status = {live: None, expired: 'old'}
+    frontend.temporal_support_cache = {live: 2, expired: 1}
+    frontend.temporal_gate_rejected_pairs = {live, expired}
+    frontend.confirmations = {live: {live}, expired: {expired}}
+    frontend.descriptor_gate_survivors = {live, expired}
+    frontend.temporal_gate_survivors = {live, expired}
+
+    frontend._prune_expired_descriptor_state()
+
+    assert set(frontend.matches) == {live}
+    assert frontend.compared_pairs == {live}
+    assert set(frontend.descriptor_gate_status) == {live}
+    assert set(frontend.temporal_support_cache) == {live}
+    assert frontend.temporal_gate_rejected_pairs == {live}
+    assert set(frontend.confirmations) == {live}
+    assert frontend.descriptor_gate_survivors == {live}
+    assert frontend.temporal_gate_survivors == {live}
+
+
+def test_temporal_support_cache_adds_only_new_valid_observations():
+    """A new pair updates cached anchors without replaying old pairs."""
+    def stamped(seconds):
+        return SimpleNamespace(
+            header=SimpleNamespace(
+                stamp=SimpleNamespace(sec=seconds, nanosec=0)))
+
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.keyframes = {
+        'own-old': (stamped(0), None),
+        'own-new': (stamped(2), None),
+    }
+    frontend.peer_descriptors = {
+        'peer-old': stamped(0),
+        'peer-new': stamped(2),
+    }
+    old = ('peer-old', 'own-old')
+    new = ('peer-new', 'own-new')
+    match = SimpleNamespace(
+        similarity=0.9, margin=0.1, known_fraction=0.5, sector_shift=0)
+    frontend.matches = {old: match, new: match}
+    frontend.descriptor_gate_status = {old: None, new: None}
+    frontend.temporal_support_cache = {old: 1}
+    frontend.similarity_gate = 0.72
+    frontend.margin_gate = 0.005
+    frontend.effective_confirmation_window_ns = 8_000_000_000
+
+    frontend._update_temporal_support_cache({new})
+
+    assert frontend.temporal_support_cache[old] == 2
+    assert frontend.temporal_support_cache[new] == 2
 
 
 def test_campaign_pattern_reopens_once_after_late_overlap_without_retrying_old_pairs():

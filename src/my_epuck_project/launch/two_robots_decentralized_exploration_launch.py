@@ -187,12 +187,17 @@ def launch_setup(context):
         diagnostic_output = LaunchConfiguration(
             'unknown_pose_diagnostic_output').perform(context)
         for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
+            profile_prefix = os.environ.get(
+                'MY_EPUCK_UNKNOWN_POSE_CPROFILE_PREFIX', '')
+            if profile_prefix:
+                profile_prefix = profile_prefix.format(robot=robot)
             unknown_pose_frontends.append(Node(
                 package='my_epuck_project',
                 executable='unknown_pose_frontend',
                 name='unknown_pose_frontend',
                 namespace=robot,
                 output='screen',
+                prefix=profile_prefix,
                 parameters=[{
                     'use_sim_time': LaunchConfiguration('use_sim_time'),
                     'robot_id': robot,
@@ -266,6 +271,9 @@ def launch_setup(context):
                     name='local_distributed_frontier_assignment',
                     namespace=robot,
                     output='screen',
+                    prefix=os.environ.get(
+                        'MY_EPUCK_LOCAL_ASSIGNMENT_CPROFILE_PREFIX',
+                        '').format(robot=robot),
                     remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
                     parameters=[{
                         'robot_id': robot,
@@ -277,6 +285,10 @@ def launch_setup(context):
                         'task_snapshot_topic': f'/{robot}/local_task_snapshot',
                         'local_only': True,
                         'handoff_gated': True,
+                        # Local pre-handoff assignment is a single-owner
+                        # action boundary; one executor avoids four-worker
+                        # waitable/GIL contention without changing task logic.
+                        'executor_threads': 1,
                         'dispatch_enabled': True,
                         'synthetic_bids': False,
                         'maximum_tasks_per_source': 5,

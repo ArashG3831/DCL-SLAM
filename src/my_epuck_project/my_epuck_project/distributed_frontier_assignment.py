@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
+import os
 import time
 from typing import Optional
 
@@ -19,7 +20,7 @@ from my_epuck_interfaces.msg import (
 )
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
@@ -255,6 +256,8 @@ class DistributedFrontierAssignment(Node):
         self._traffic_dispatch_grace_s = float(self.declare_parameter(
             'traffic_dispatch_grace_s', 8.0,
         ).value)
+        self._executor_threads = max(1, int(self.declare_parameter(
+            'executor_threads', 4).value))
         if (self._burgard_beta < 0.0 or self._burgard_sensor_max_range_m <= 0.0 or
                 self._traffic_robot1_safe_radius_m <= 0.0 or
                 self._traffic_robot2_safe_radius_m <= 0.0 or
@@ -323,7 +326,11 @@ class DistributedFrontierAssignment(Node):
         self._active_round_id = ''
         self._active_decision_hash = ''
         self._traffic_hold: Optional[TrafficHold] = None
-        self._last_solo_snapshot_key: Optional[tuple[str, int]] = None
+        # Local-only work is keyed by semantic task content, not heartbeat
+        # epoch.  The key is cleared on a terminal result or failure so a
+        # fresh path/action attempt still occurs when the previous attempt
+        # actually ended.
+        self._last_solo_snapshot_key: Optional[tuple[str, str]] = None
         self._map_versions: dict[str, tuple[str, int, str]] = {}
         self._maps_stable_since_steady_s = time.monotonic()
         self._completion_candidate_since_steady_s: Optional[float] = None
@@ -459,7 +466,9 @@ class DistributedFrontierAssignment(Node):
     def _activate_assignment_timers(self) -> None:
         """Start assignment work only after the canonical handoff."""
         if self._tick_timer is None:
-            self._tick_timer = self.create_timer(0.1, self._tick)
+            tick_period_s = max(0.05, float(os.environ.get(
+                'MY_EPUCK_ASSIGNMENT_TICK_PERIOD_S', '0.1')))
+            self._tick_timer = self.create_timer(tick_period_s, self._tick)
         if self._status_timer is None:
             self._status_timer = self.create_timer(1.0, self._publish_status)
 
@@ -1322,7 +1331,14 @@ class DistributedFrontierAssignment(Node):
         """Dispatch at most one locally proposed task per epoch without team claims."""
         if not self._dispatch_enabled or self._dispatch_in_progress:
             return
-        key = (snapshot.source_session_id, snapshot.epoch)
+        # Proposal epochs may advance for heartbeats or unchanged reachability
+        # metadata.  Reusing the existing semantic fingerprint avoids
+        # repeating an identical local path/action decision while preserving
+        # all behavior when task content changes.
+        key = (
+            snapshot.source_session_id,
+            self._snapshot_content_fingerprint(snapshot, snapshot),
+        )
         if self._last_solo_snapshot_key == key:
             return
         candidates = tuple(
@@ -1826,6 +1842,7 @@ class DistributedFrontierAssignment(Node):
         # goal must permit a fresh auction even when the task-set fingerprint
         # is unchanged.
         self._last_semantic_fingerprint = ''
+        self._last_solo_snapshot_key = None
         self._reset_round('navigation terminal result')
 
     def _invalidate_round(
@@ -1841,6 +1858,7 @@ class DistributedFrontierAssignment(Node):
         # published task geometry is unchanged.  Permit exactly one fresh
         # semantic round so failure suppression can take effect.
         self._last_semantic_fingerprint = ''
+        self._last_solo_snapshot_key = None
         self._settle_until_steady_s = time.monotonic() + self._post_goal_settle_s
         self._reset_round('round invalidated')
 
@@ -2098,7 +2116,12 @@ def main(args=None):
     """Run one namespaced replicated assignment peer."""
     rclpy.init(args=args)
     node = DistributedFrontierAssignment()
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor_override = os.environ.get('MY_EPUCK_ASSIGNMENT_EXECUTOR_THREADS')
+    executor_threads = max(1, int(executor_override or node._executor_threads))
+    if executor_threads == 1:
+        executor = SingleThreadedExecutor()
+    else:
+        executor = MultiThreadedExecutor(num_threads=executor_threads)
     executor.add_node(node)
     try:
         executor.spin()

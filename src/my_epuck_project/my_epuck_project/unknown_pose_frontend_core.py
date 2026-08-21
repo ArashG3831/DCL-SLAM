@@ -8,6 +8,7 @@ same code to be exercised without Webots or a ground-truth transform.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import combinations
 import json
 import math
@@ -525,16 +526,20 @@ def polar_descriptor(
         (angle / (2.0 * math.pi) * sectors).astype(np.int32))
     known = values != UNKNOWN_VALUE
     occupied = known & (values >= OCCUPIED_THRESHOLD)
-    total = np.zeros((rings, sectors), dtype=np.float64)
-    known_count = np.zeros_like(total)
-    occupied_count = np.zeros_like(total)
-    for ring in range(rings):
-        for sector in range(sectors):
-            mask = (ring_index == ring) & (sector_index == sector)
-            total[ring, sector] = float(np.count_nonzero(mask))
-            known_count[ring, sector] = float(np.count_nonzero(mask & known))
-            occupied_count[ring, sector] = float(
-                np.count_nonzero(mask & occupied))
+    # The bin populations are reductions over a fixed integer index.  Using
+    # bincount is exactly equivalent to the previous ring/sector mask loop,
+    # while avoiding 2 * rings * sectors full-grid temporary masks for every
+    # descriptor period.
+    bin_index = (ring_index * sectors + sector_index).ravel()
+    total = np.bincount(
+        bin_index, minlength=rings * sectors).astype(np.float64).reshape(
+            rings, sectors)
+    known_count = np.bincount(
+        bin_index, weights=known.ravel().astype(np.float64),
+        minlength=rings * sectors).reshape(rings, sectors)
+    occupied_count = np.bincount(
+        bin_index, weights=occupied.ravel().astype(np.float64),
+        minlength=rings * sectors).reshape(rings, sectors)
     known_fraction = np.divide(
         known_count, total, out=np.zeros_like(total), where=total > 0.0)
     occupied_fraction = np.divide(
@@ -543,6 +548,23 @@ def polar_descriptor(
     encoded[:, :, 0] = np.rint(occupied_fraction * 255.0).astype(np.uint8)
     encoded[:, :, 1] = np.rint(known_fraction * 255.0).astype(np.uint8)
     return encoded.tobytes()
+
+
+@lru_cache(maxsize=256)
+def _prepared_descriptor(data: bytes, rings: int, sectors: int):
+    """Decode one bounded descriptor and materialize its cyclic shifts once.
+
+    Descriptor matching is repeated across the Cartesian product of the
+    bounded local/peer keyframe histories.  The descriptor bytes are stable,
+    so caching this immutable-by-convention numeric representation removes
+    repeated conversion and ``roll`` allocations without changing the score.
+    The cache is bounded to keep the frontend memory bounded.
+    """
+    array = np.frombuffer(data, dtype=np.uint8).reshape(rings, sectors, 2)
+    array_float = array.astype(np.float32)
+    shifted = np.stack(
+        [np.roll(array, shift, axis=1) for shift in range(sectors)], axis=0)
+    return array_float, shifted
 
 
 def compare_descriptors(
@@ -555,26 +577,26 @@ def compare_descriptors(
     expected = rings * sectors * 2
     if len(first) != expected or len(second) != expected:
         raise ValueError('descriptor size/version mismatch')
-    a = np.frombuffer(first, dtype=np.uint8).reshape(rings, sectors, 2)
-    b = np.frombuffer(second, dtype=np.uint8).reshape(rings, sectors, 2)
-    scores = []
-    known_scores = []
-    for shift in range(sectors):
-        shifted = np.roll(b, shift, axis=1)
-        known = (a[:, :, 1].astype(np.float32) / 255.0 +
-                 shifted[:, :, 1].astype(np.float32) / 255.0) / 2.0
-        weight = np.where(known >= minimum_known_fraction, known, 0.0)
-        denominator = float(weight.sum())
-        if denominator <= 1e-6:
-            scores.append(0.0)
-            known_scores.append(0.0)
-            continue
-        diff = np.abs(a.astype(np.float32) - shifted.astype(np.float32)) / 255.0
-        score = 1.0 - float((diff * weight[:, :, None]).sum() /
-                             (denominator * 2.0))
-        scores.append(max(0.0, min(1.0, score)))
-        known_scores.append(float(weight.mean()))
-    order = np.argsort(scores)[::-1]
+    a_float, _ = _prepared_descriptor(first, rings, sectors)
+    _, shifted = _prepared_descriptor(second, rings, sectors)
+    # Compare all cyclic sector shifts together.  This preserves the same
+    # weighted occupied/known objective while avoiding repeated conversion,
+    # roll, and reduction work for every candidate pair.
+    known = (a_float[None, :, :, 1] +
+             shifted[:, :, :, 1].astype(np.float32)) / 510.0
+    weight = np.where(known >= minimum_known_fraction, known, 0.0)
+    denominator = weight.sum(axis=(1, 2))
+    diff = np.abs(a_float[None, :, :, :] -
+                  shifted.astype(np.float32)) / 255.0
+    weighted_error = (diff * weight[:, :, :, None]).sum(axis=(1, 2, 3))
+    errors = np.divide(
+        weighted_error, denominator * 2.0,
+        out=np.ones_like(denominator), where=denominator > 1e-6)
+    scores_array = np.clip(1.0 - errors, 0.0, 1.0)
+    known_scores_array = weight.mean(axis=(1, 2))
+    scores = scores_array.tolist()
+    known_scores = known_scores_array.tolist()
+    order = np.argsort(scores_array)[::-1]
     best = int(order[0])
     second = float(scores[order[1]]) if len(order) > 1 else 0.0
     return DescriptorMatch(
@@ -583,6 +605,73 @@ def compare_descriptors(
         sector_shift=best,
         known_fraction=float(known_scores[best]),
     )
+
+
+def compare_descriptor_batch(
+        first: bytes, seconds: Iterable[bytes], rings: int = 12,
+        sectors: int = 24, minimum_known_fraction: float = 0.12
+        ) -> tuple[DescriptorMatch, ...]:
+    """Compare one descriptor against a bounded batch without pair loops.
+
+    This is algebraically the same objective as ``compare_descriptors``.  The
+    batch dimension only removes repeated NumPy setup for the common anchor;
+    each returned item is still evaluated by the unchanged descriptor,
+    temporal, geometric, and consensus gates.
+    """
+    values = tuple(seconds)
+    return compare_descriptor_pairs(
+        (first,) * len(values), values, rings, sectors,
+        minimum_known_fraction)
+
+
+def compare_descriptor_pairs(
+        firsts: Iterable[bytes], seconds: Iterable[bytes], rings: int = 12,
+        sectors: int = 24, minimum_known_fraction: float = 0.12
+        ) -> tuple[DescriptorMatch, ...]:
+    """Compare a bounded set of independent descriptor pairs in one batch."""
+    first_values = tuple(firsts)
+    values = tuple(seconds)
+    if len(first_values) != len(values):
+        raise ValueError('descriptor batch lengths differ')
+    expected = rings * sectors * 2
+    if any(len(value) != expected for value in first_values + values):
+        raise ValueError('descriptor size/version mismatch')
+    if not values:
+        return ()
+    first_arrays = np.stack([
+        np.frombuffer(value, dtype=np.uint8).reshape(rings, sectors, 2)
+        for value in first_values
+    ], axis=0)
+    arrays = np.stack([
+        np.frombuffer(value, dtype=np.uint8).reshape(rings, sectors, 2)
+        for value in values
+    ], axis=0)
+    shifted = np.stack(
+        [np.roll(arrays, shift, axis=2) for shift in range(sectors)], axis=1)
+    known = (first_arrays[:, None, :, :, 1].astype(np.float32) +
+             shifted[:, :, :, :, 1].astype(np.float32)) / 510.0
+    weight = np.where(known >= minimum_known_fraction, known, 0.0)
+    denominator = weight.sum(axis=(2, 3))
+    diff = np.abs(first_arrays[:, None, :, :, :].astype(np.float32) -
+                  shifted.astype(np.float32)) / 255.0
+    weighted_error = (diff * weight[:, :, :, :, None]).sum(axis=(2, 3, 4))
+    errors = np.divide(
+        weighted_error, denominator * 2.0,
+        out=np.ones_like(denominator), where=denominator > 1e-6)
+    score_table = np.clip(1.0 - errors, 0.0, 1.0)
+    known_table = weight.mean(axis=(2, 3))
+    result = []
+    for index in range(len(values)):
+        order = np.argsort(score_table[index])[::-1]
+        best = int(order[0])
+        second = float(score_table[index, order[1]]) if sectors > 1 else 0.0
+        result.append(DescriptorMatch(
+            similarity=float(score_table[index, best]),
+            margin=float(score_table[index, best] - second),
+            sector_shift=best,
+            known_fraction=float(known_table[index, best]),
+        ))
+    return tuple(result)
 
 
 def rigidify_affine(matrix: np.ndarray, scale_tolerance: float = 0.05,
@@ -631,9 +720,11 @@ def _apply(points: np.ndarray, transform: tuple[float, float, float]) -> np.ndar
     return points @ rotation.T + np.array([tx, ty])
 
 
-def _nearest(points: np.ndarray, target: np.ndarray):
+def _nearest(points: np.ndarray, target: np.ndarray, tree=None):
     if cKDTree is not None:
-        return cKDTree(target).query(points, k=1)
+        if tree is None:
+            tree = cKDTree(target)
+        return tree.query(points, k=1)
     distances = np.linalg.norm(points[:, None, :] - target[None, :, :], axis=2)
     indices = distances.argmin(axis=1)
     return distances[np.arange(len(points)), indices], indices
@@ -691,6 +782,42 @@ def _field_distances(points: np.ndarray, crop: GridCrop, field) -> np.ndarray:
     return distances
 
 
+def _translation_grid_field_distances(
+        rotated_points: np.ndarray, base: np.ndarray, crop: GridCrop,
+        field, translation_offsets: np.ndarray) -> np.ndarray:
+    """Sample one yaw's translation grid without rebuilding world points.
+
+    This is algebraically the same transform used by ``_field_distances``:
+    the target-origin rotation is distributed over the rotated source points
+    and the translation offsets before cell rounding.  Keeping the grid
+    dimension explicit avoids a large flattened world-coordinate temporary
+    for every yaw seed.
+    """
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    delta = rotated_points + base[None, :] - np.asarray(
+        [crop.origin_x, crop.origin_y], dtype=np.float64)
+    local_base_x = cosine * delta[:, 0] + sine * delta[:, 1]
+    local_base_y = -sine * delta[:, 0] + cosine * delta[:, 1]
+    offset_x = (cosine * translation_offsets[:, 0] +
+                sine * translation_offsets[:, 1])[:, None]
+    offset_y = (-sine * translation_offsets[:, 0] +
+                cosine * translation_offsets[:, 1])[:, None]
+    columns = np.rint(
+        (local_base_x[None, :] + offset_x) / crop.resolution - 0.5,
+    ).astype(np.int64)
+    rows = np.rint(
+        (local_base_y[None, :] + offset_y) / crop.resolution - 0.5,
+    ).astype(np.int64)
+    valid = (
+        (columns >= 0) & (columns < crop.values.shape[1]) &
+        (rows >= 0) & (rows < crop.values.shape[0]))
+    distances = np.full(
+        columns.shape, max(crop.values.shape) * crop.resolution,
+        dtype=np.float64)
+    distances[valid] = field[rows[valid], columns[valid]]
+    return distances
+
+
 def _world_extent(crop: GridCrop):
     cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
     corners = np.asarray([
@@ -729,21 +856,30 @@ def _coarse_registration_seeds(
     offsets = np.arange(
         -translation_radius_m, translation_radius_m + 0.5 * translation_step_m,
         translation_step_m)
+    # Keep the original deterministic dx-major/dy-minor ordering, but score
+    # every translation offset for one yaw in one NumPy operation.  The old
+    # nested Python loop called _field_distances and np.median once per offset
+    # (up to 20,808 calls per registration); batching removes only that
+    # interpreter/temporary-array overhead and preserves the exact objective.
+    translation_offsets = np.stack(
+        np.meshgrid(offsets, offsets, indexing='ij'), axis=-1).reshape(-1, 2)
     for yaw in np.linspace(-math.pi, math.pi, max_yaw_steps, endpoint=False):
         cosine, sine = math.cos(float(yaw)), math.sin(float(yaw))
         rotation = np.array([[cosine, -sine], [sine, cosine]])
         base = target_center - rotation @ source_center
         rotated = source @ rotation.T
-        for dx in offsets:
-            for dy in offsets:
-                transform = (float(base[0] + dx), float(base[1] + dy),
-                             float(yaw))
-                distances = _field_distances(
-                    rotated + np.array([transform[0], transform[1]]),
-                    target, field)
-                clipped = np.minimum(distances, 0.50)
-                score = float(np.median(clipped) + 0.25 * np.mean(clipped))
-                candidates.append((score, transform))
+        distances = _translation_grid_field_distances(
+            rotated, base, target, field, translation_offsets)
+        clipped = np.minimum(distances, 0.50)
+        scores = np.median(clipped, axis=1) + 0.25 * np.mean(clipped, axis=1)
+        transforms = np.column_stack((
+            base[0] + translation_offsets[:, 0],
+            base[1] + translation_offsets[:, 1],
+            np.full(len(translation_offsets), float(yaw))))
+        candidates.extend(
+            (float(score), (float(transform[0]), float(transform[1]),
+                            float(transform[2])))
+            for score, transform in zip(scores, transforms))
     candidates.sort(key=lambda value: (value[0], value[1]))
     distinct = []
     for score, transform in candidates:
@@ -811,12 +947,13 @@ def _ecc_registration_seed(source: GridCrop, target: GridCrop):
 
 
 def _refine_registration(source_points, target_points, target, seed,
-                         max_iterations=35, max_correspondence_m=0.30):
+                         max_iterations=35, max_correspondence_m=0.30,
+                         target_tree=None):
     """Robust trimmed point-to-point refinement from one global seed."""
     transform = seed
     for _ in range(max_iterations):
         transformed = _apply(source_points, transform)
-        distances, indices = _nearest(transformed, target_points)
+        distances, indices = _nearest(transformed, target_points, target_tree)
         threshold = min(
             max_correspondence_m,
             max(3.0 * source_points.dtype.type(target.resolution),
@@ -842,9 +979,10 @@ def _refine_registration(source_points, target_points, target, seed,
 def _registration_quality(source: GridCrop, target: GridCrop,
                           source_points: np.ndarray,
                           target_points: np.ndarray, transform,
-                          max_correspondence_m=0.30) -> RegistrationResult:
+                          max_correspondence_m=0.30,
+                          source_tree=None, target_tree=None) -> RegistrationResult:
     transformed = _apply(source_points, transform)
-    distances, indices = _nearest(transformed, target_points)
+    distances, indices = _nearest(transformed, target_points, target_tree)
     threshold = min(
         max_correspondence_m,
         max(3.0 * source.resolution, float(np.percentile(distances, 60)) * 2.5))
@@ -861,7 +999,7 @@ def _registration_quality(source: GridCrop, target: GridCrop,
     # small repeated fragment in a large unrelated crop.
     inverse = invert_se2(transform)
     reverse = _apply(target_points, inverse)
-    reverse_distances, _ = _nearest(reverse, source_points)
+    reverse_distances, _ = _nearest(reverse, source_points, source_tree)
     reverse_threshold = max(3.0 * target.resolution, threshold)
     reverse_ratio = float(np.count_nonzero(reverse_distances <= reverse_threshold)) / \
         float(max(1, len(target_points)))
@@ -949,17 +1087,20 @@ def register_crops(
         return _empty_registration('NO_COARSE_ALIGNMENT')
     results = []
     target_field = _distance_field(target)
+    source_tree = cKDTree(source_points) if cKDTree is not None else None
+    target_tree = cKDTree(target_points) if cKDTree is not None else None
     for seed in seeds:
         seed_result = _registration_quality(
             source, target, source_points, target_points, seed,
-            max_correspondence_m)
+            max_correspondence_m, source_tree, target_tree)
         transform = _refine_registration(
             source_points, target_points, target, seed,
             max_iterations=max_iterations,
-            max_correspondence_m=max_correspondence_m)
+            max_correspondence_m=max_correspondence_m,
+            target_tree=target_tree)
         refined_result = _registration_quality(
             source, target, source_points, target_points, transform,
-            max_correspondence_m)
+            max_correspondence_m, source_tree, target_tree)
         results.extend((seed_result, refined_result))
     def ranking(result):
         if target_field is None:

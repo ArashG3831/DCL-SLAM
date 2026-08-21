@@ -343,15 +343,14 @@ class LocalNav2:
             '/tmp/my_epuck_%s_compute_path.lock' % namespace,
         ).value)
         self._path_query_lock_file = None
-        self._compute_client = ActionClient(
-            node, ComputePathToPose, 'compute_path_to_pose',
-        )
-        self._navigate_client = ActionClient(node, NavigateToPose, 'navigate_to_pose')
-        self._lifecycle_clients = {
-            name: node.create_client(
-                GetState, f'{self._nav2_node_prefix}{name}/get_state')
-            for name in ('planner_server', 'controller_server', 'bt_navigator')
-        }
+        # These waitables are created on first real local work.  Constructing
+        # them at process startup makes every idle assignment peer poll two
+        # action clients and three lifecycle services even before a frontier
+        # exists; lazy creation preserves the exact interfaces and checks
+        # once a candidate is available.
+        self._compute_client = None
+        self._navigate_client = None
+        self._lifecycle_clients = {}
         transient_qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -405,12 +404,32 @@ class LocalNav2:
         self._last_odom_angular_z = 0.0
         self._last_scan_stamp_ns = 0
         self._last_scan_min_range: Optional[float] = None
+        self._last_scan_summary_steady_s = 0.0
         self._recent_odom_samples = deque(maxlen=32)
         self._last_lifecycle_active: Optional[bool] = None
         self._lifecycle_health_pending = False
         self._timer = None
         if self._phase_inputs_active:
             self._activate_phase_inputs(transient_qos)
+
+    def _ensure_compute_client(self) -> None:
+        if self._compute_client is None:
+            self._compute_client = ActionClient(
+                self._node, ComputePathToPose, 'compute_path_to_pose')
+
+    def _ensure_navigate_client(self) -> None:
+        if self._navigate_client is None:
+            self._navigate_client = ActionClient(
+                self._node, NavigateToPose, 'navigate_to_pose')
+
+    def _ensure_lifecycle_clients(self) -> None:
+        if self._lifecycle_clients:
+            return
+        self._lifecycle_clients = {
+            name: self._node.create_client(
+                GetState, f'{self._nav2_node_prefix}{name}/get_state')
+            for name in ('planner_server', 'controller_server', 'bt_navigator')
+        }
 
     def _activate_phase_inputs(self, transient_qos=None) -> None:
         """Start map/health callbacks for a post-handoff shared phase."""
@@ -469,6 +488,9 @@ class LocalNav2:
 
     def refresh_health(self) -> None:
         """Refresh managed-node state without blocking the coordinator timer."""
+        if not self._lifecycle_clients:
+            self._last_lifecycle_active = False
+            return
         if self._lifecycle_health_pending:
             return
         if any(not client.service_is_ready() for client in self._lifecycle_clients.values()):
@@ -495,6 +517,8 @@ class LocalNav2:
     def health_flags(self) -> tuple[bool, bool]:
         """Return conservative current Nav2 and required-transform health flags."""
         nav2_healthy = (
+            self._compute_client is not None and
+            self._navigate_client is not None and
             self._compute_client.server_is_ready() and
             self._navigate_client.server_is_ready() and
             self._last_lifecycle_active is True and
@@ -570,8 +594,16 @@ class LocalNav2:
 
     def _on_scan(self, message: LaserScan) -> None:
         self._last_scan_stamp_ns = self._stamp_ns(message.header.stamp)
-        finite = [float(value) for value in message.ranges if math.isfinite(value)]
-        self._last_scan_min_range = min(finite) if finite else None
+        # The assignment boundary only retains scan freshness and a value for
+        # bounded failure diagnostics; Nav2/Collision Monitor own scan-driven
+        # safety.  Avoid rebuilding a 720-element Python list for every scan
+        # in every assignment process.
+        now = time.monotonic()
+        if now - self._last_scan_summary_steady_s >= 0.5:
+            finite = (float(value) for value in message.ranges
+                      if math.isfinite(value))
+            self._last_scan_min_range = min(finite, default=None)
+            self._last_scan_summary_steady_s = now
 
     def _age_s(self, stamp_ns: int, now_ns: int) -> Optional[float]:
         """Return a non-negative source age, or None for missing time."""
@@ -818,6 +850,7 @@ class LocalNav2:
             callback: Callable[[PathEvaluation], None],
             caller: str = 'ALLOCATOR_BID') -> bool:
         """Start one bounded local path request; return false if busy/unavailable."""
+        self._ensure_compute_client()
         if (self._path_callback is not None or
                 not self._compute_client.server_is_ready() or
                 not self._acquire_path_query_lock()):
@@ -957,6 +990,8 @@ class LocalNav2:
             self, task: PhysicalTask, final_path_valid: bool,
             callback: Callable[[DispatchPreconditions], None]) -> None:
         """Asynchronously confirm local lifecycle plus map, costmap, and TF context."""
+        self._ensure_navigate_client()
+        self._ensure_lifecycle_clients()
         base = self._basic_preconditions(task, final_path_valid)
         if base.reason:
             callback(base)
@@ -1049,6 +1084,7 @@ class LocalNav2:
             callback: Callable[[NavigationOutcome], None],
             diagnostic_path: tuple[tuple[float, float], ...] = ()) -> bool:
         """Send one already validated goal to this namespace's navigator only."""
+        self._ensure_navigate_client()
         if self.local_goal_active or not self._navigate_client.server_is_ready():
             return False
         goal = NavigateToPose.Goal()

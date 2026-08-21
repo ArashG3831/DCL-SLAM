@@ -30,6 +30,7 @@ from .unknown_pose_frontend_core import (
     BoundedVerificationBatchController,
     GridCrop,
     compare_descriptors,
+    compare_descriptor_pairs,
     confirmation_window_for_cadence,
     crop_grid,
     crop_batch_is_ready,
@@ -650,6 +651,7 @@ class UnknownPoseFrontend(Node):
         self.keyframes[keyframe_id] = (message, crop)
         while len(self.keyframes) > self.max_keyframes:
             self.keyframes.popitem(last=False)
+        self._prune_expired_descriptor_state()
         self.last_descriptor_wall = time.monotonic()
         self.pending_own_descriptor_keys.append(keyframe_id)
 
@@ -687,6 +689,7 @@ class UnknownPoseFrontend(Node):
         self.peer_descriptors[key] = message
         while len(self.peer_descriptors) > self.max_keyframes:
             self.peer_descriptors.popitem(last=False)
+        self._prune_expired_descriptor_state()
         self.pending_peer_descriptor_keys.append(key)
 
     @staticmethod
@@ -694,7 +697,54 @@ class UnknownPoseFrontend(Node):
         return (int(message.header.stamp.sec) * 1_000_000_000 +
                 int(message.header.stamp.nanosec))
 
-    def _temporal_support(self, peer_key, own_key, match):
+    def _prune_expired_descriptor_state(self):
+        """Discard pair caches whose bounded descriptor history expired.
+
+        Descriptor matching and temporal confirmation only use currently
+        retained own/peer keyframes.  Keeping match/cache entries for every
+        historical Cartesian pair made each later descriptor callback scan an
+        ever-growing set, even though the configured history is bounded.
+        Physical verification/rejection history is intentionally not touched:
+        it is the separate safety record that prevents retrying an old pair.
+        """
+        live_own = set(self.keyframes)
+        live_peer = set(self.peer_descriptors)
+        live_pairs = {
+            (peer_key, own_key)
+            for peer_key in live_peer
+            for own_key in live_own
+        }
+        for name in (
+                'matches', 'compared_pairs', 'descriptor_gate_status',
+                'temporal_support_cache', 'temporal_gate_rejected_pairs',
+                'confirmations'):
+            values = getattr(self, name)
+            if isinstance(values, dict):
+                for pair in tuple(values):
+                    if pair not in live_pairs:
+                        values.pop(pair, None)
+            else:
+                values.intersection_update(live_pairs)
+        for name in ('descriptor_gate_survivors', 'temporal_gate_survivors'):
+            getattr(self, name).intersection_update(live_pairs)
+
+    def _temporal_observations(self):
+        """Snapshot valid cached matches once for one descriptor callback."""
+        observations = []
+        for (other_peer_key, other_own_key), other_match in self.matches.items():
+            other_own_entry = self.keyframes.get(other_own_key)
+            other_peer_message = self.peer_descriptors.get(other_peer_key)
+            if other_own_entry is None or other_peer_message is None:
+                continue
+            observations.append((
+                (other_peer_key, other_own_key),
+                self._stamp_ns(other_own_entry[0]),
+                self._stamp_ns(other_peer_message),
+                other_match.similarity, other_match.margin,
+                other_match.known_fraction, other_match.sector_shift))
+        return observations
+
+    def _temporal_support(self, peer_key, own_key, match, observations=None):
         """Count distinct nearby cheap matches for this candidate.
 
         A descriptor/keyframe pair is advertised once, so counting repeated
@@ -708,18 +758,8 @@ class UnknownPoseFrontend(Node):
             return 0
         own_stamp = self._stamp_ns(own_entry[0])
         peer_stamp = self._stamp_ns(peer_message)
-        observations = []
-        for (other_peer_key, other_own_key), other_match in self.matches.items():
-            other_own_entry = self.keyframes.get(other_own_key)
-            other_peer_message = self.peer_descriptors.get(other_peer_key)
-            if other_own_entry is None or other_peer_message is None:
-                continue
-            observations.append((
-                (other_peer_key, other_own_key),
-                self._stamp_ns(other_own_entry[0]),
-                self._stamp_ns(other_peer_message),
-                other_match.similarity, other_match.margin,
-                other_match.known_fraction, other_match.sector_shift))
+        if observations is None:
+            observations = self._temporal_observations()
         return temporal_support_count(
             (peer_key, own_key), own_stamp, peer_stamp,
             match.sector_shift, observations, self.similarity_gate,
@@ -748,6 +788,81 @@ class UnknownPoseFrontend(Node):
                 return True
         return False
 
+    def _update_temporal_support_cache(self, changed_pair_keys):
+        """Update temporal support incrementally for newly computed pairs.
+
+        A new descriptor can add evidence to existing anchors, but it cannot
+        change the relationship between two already cached pairs.  The old
+        implementation re-ran every affected anchor against the complete
+        Cartesian observation list, which became quadratic as descriptor
+        history accumulated.  Compute the new anchors exactly once, then add
+        only the newly arrived valid observations to existing cached counts.
+        This preserves the same timestamp, quality, and circular-sector gates.
+        """
+        changed = []
+        changed_keys = set(changed_pair_keys)
+        for pair_key in changed_keys:
+            match = self.matches.get(pair_key)
+            if match is None or self.descriptor_gate_status.get(pair_key) is not None:
+                continue
+            peer_key, own_key = pair_key
+            own_entry = self.keyframes.get(own_key)
+            peer = self.peer_descriptors.get(peer_key)
+            if own_entry is None or peer is None:
+                continue
+            changed.append((
+                pair_key,
+                self._stamp_ns(own_entry[0]),
+                self._stamp_ns(peer),
+                int(match.sector_shift),
+            ))
+        if not changed:
+            return
+
+        observations = self._temporal_observations()
+        for pair_key, own_stamp, peer_stamp, sector_shift in changed:
+            match = self.matches[pair_key]
+            self.temporal_support_cache[pair_key] = temporal_support_count(
+                pair_key, own_stamp, peer_stamp, sector_shift, observations,
+                self.similarity_gate, self.margin_gate, 0.12,
+                self.effective_confirmation_window_ns)
+
+        existing = []
+        for pair_key in self.temporal_support_cache:
+            if pair_key in changed_keys or pair_key not in self.matches:
+                continue
+            if self.descriptor_gate_status.get(pair_key) is not None:
+                continue
+            peer_key, own_key = pair_key
+            own_entry = self.keyframes.get(own_key)
+            peer = self.peer_descriptors.get(peer_key)
+            if own_entry is None or peer is None:
+                continue
+            existing.append((
+                pair_key,
+                self._stamp_ns(own_entry[0]),
+                self._stamp_ns(peer),
+                int(self.matches[pair_key].sector_shift),
+            ))
+        if not existing:
+            return
+        anchor_own = np.asarray([item[1] for item in existing], dtype=np.int64)
+        anchor_peer = np.asarray([item[2] for item in existing], dtype=np.int64)
+        anchor_shift = np.asarray([item[3] for item in existing], dtype=np.int16)
+        new_own = np.asarray([item[1] for item in changed], dtype=np.int64)
+        new_peer = np.asarray([item[2] for item in changed], dtype=np.int64)
+        new_shift = np.asarray([item[3] for item in changed], dtype=np.int16)
+        within_time = (
+            (np.abs(anchor_own[:, None] - new_own[None, :]) <=
+             self.effective_confirmation_window_ns) &
+            (np.abs(anchor_peer[:, None] - new_peer[None, :]) <=
+             self.effective_confirmation_window_ns))
+        shift_delta = np.abs(anchor_shift[:, None] - new_shift[None, :])
+        shift_delta = np.minimum(shift_delta, 24 - shift_delta)
+        additions = np.sum(within_time & (shift_delta <= 2), axis=1)
+        for item, addition in zip(existing, additions):
+            self.temporal_support_cache[item[0]] += int(addition)
+
     def _compare_peer_descriptors(self, new_peer_key=None, new_own_key=None):
         if not self.keyframes or not self.peer_descriptors:
             return
@@ -768,47 +883,74 @@ class UnknownPoseFrontend(Node):
                 (peer_key, own_key, peer, own)
                 for peer_key, peer in peer_items
                 for own_key, own in own_items]
+        uncomputed_pairs = [
+            pair for pair in new_pairs
+            if (pair[0], pair[1]) not in self.compared_pairs]
         changed_pair_keys = {
             (peer_key, own_key)
-            for peer_key, own_key, _, _ in new_pairs}
-        for peer_key, own_key, peer, own_entry in new_pairs:
-            own = own_entry[0]
-            if (peer_key, own_key) in self.compared_pairs:
-                continue
+            for peer_key, own_key, _, _ in uncomputed_pairs}
+        for peer_key, own_key, _, _ in uncomputed_pairs:
             self.compared_pairs.add((peer_key, own_key))
+        if uncomputed_pairs:
+            first_descriptors = [
+                bytes(own_entry[0].descriptor_bytes)
+                for _, _, _, own_entry in uncomputed_pairs]
+            second_descriptors = [
+                bytes(peer.descriptor_bytes)
+                for _, _, peer, _ in uncomputed_pairs]
             try:
-                match = compare_descriptors(
-                    bytes(own.descriptor_bytes), bytes(peer.descriptor_bytes),
-                    int(own.ring_count), int(own.sector_count))
+                matches = compare_descriptor_pairs(
+                    first_descriptors, second_descriptors,
+                    int(uncomputed_pairs[0][3][0].ring_count),
+                    int(uncomputed_pairs[0][3][0].sector_count))
             except ValueError:
-                continue
-            self.counters['candidate_comparisons'] += 1
-            self.matches[(peer_key, own_key)] = match
-            self.best_similarity = max(self.best_similarity, match.similarity)
-            self.best_margin = max(self.best_margin, match.margin)
-            self.best_known_fraction = max(
-                self.best_known_fraction, match.known_fraction)
-            rejection_reason = None
-            if match.similarity < self.similarity_gate:
-                rejection_reason = 'SIMILARITY_BELOW_GATE'
-            elif match.margin < self.margin_gate:
-                rejection_reason = 'MARGIN_BELOW_GATE'
-            elif match.known_fraction < 0.12:
-                rejection_reason = 'KNOWN_FRACTION_BELOW_GATE'
-            self.descriptor_gate_status[(peer_key, own_key)] = rejection_reason
-            if rejection_reason is not None:
-                self.counters['cheap_rejections'] += 1
-                self.gate_rejection_counts[rejection_reason] += 1
-                continue
-            self.counters['cheap_candidates'] += 1
-            self.descriptor_gate_survivors.add((peer_key, own_key))
-            self._record_diagnostic_event(
-                'DESCRIPTOR_GATE_SURVIVED', peer_key=peer_key,
-                own_key=own_key, similarity=float(match.similarity),
-                margin=float(match.margin),
-                known_fraction=float(match.known_fraction))
+                # Preserve the historical per-pair rejection behavior for a
+                # malformed descriptor without affecting valid pairs in the
+                # same bounded callback batch.
+                matches = []
+                for _, _, peer, own_entry in uncomputed_pairs:
+                    own = own_entry[0]
+                    try:
+                        matches.append(compare_descriptors(
+                            bytes(own.descriptor_bytes),
+                            bytes(peer.descriptor_bytes),
+                            int(own.ring_count), int(own.sector_count)))
+                    except ValueError:
+                        matches.append(None)
+            for (peer_key, own_key, peer, own_entry), match in zip(
+                    uncomputed_pairs, matches):
+                if match is None:
+                    continue
+                self.counters['candidate_comparisons'] += 1
+                self.matches[(peer_key, own_key)] = match
+                self.best_similarity = max(
+                    self.best_similarity, match.similarity)
+                self.best_margin = max(self.best_margin, match.margin)
+                self.best_known_fraction = max(
+                    self.best_known_fraction, match.known_fraction)
+                rejection_reason = None
+                if match.similarity < self.similarity_gate:
+                    rejection_reason = 'SIMILARITY_BELOW_GATE'
+                elif match.margin < self.margin_gate:
+                    rejection_reason = 'MARGIN_BELOW_GATE'
+                elif match.known_fraction < 0.12:
+                    rejection_reason = 'KNOWN_FRACTION_BELOW_GATE'
+                self.descriptor_gate_status[
+                    (peer_key, own_key)] = rejection_reason
+                if rejection_reason is not None:
+                    self.counters['cheap_rejections'] += 1
+                    self.gate_rejection_counts[rejection_reason] += 1
+                    continue
+                self.counters['cheap_candidates'] += 1
+                self.descriptor_gate_survivors.add((peer_key, own_key))
+                self._record_diagnostic_event(
+                    'DESCRIPTOR_GATE_SURVIVED', peer_key=peer_key,
+                    own_key=own_key, similarity=float(match.similarity),
+                    margin=float(match.margin),
+                    known_fraction=float(match.known_fraction))
 
         eligible = []
+        self._update_temporal_support_cache(changed_pair_keys)
         for (peer_key, own_key), match in list(self.matches.items()):
             rejection_reason = self.descriptor_gate_status.get(
                 (peer_key, own_key))
@@ -820,20 +962,13 @@ class UnknownPoseFrontend(Node):
                 continue
             own = own_entry[0]
             pair_key = (peer_key, own_key)
-            affected = self._temporal_candidate_affected(
-                pair_key, changed_pair_keys)
-            if pair_key not in changed_pair_keys and not affected:
-                support_count = self.temporal_support_cache.get(pair_key)
-                if support_count is None:
-                    continue
-            else:
-                support_count = self._temporal_support(
-                    peer_key, own_key, match)
-                self.temporal_support_cache[pair_key] = support_count
+            support_count = self.temporal_support_cache.get(pair_key)
+            if support_count is None:
+                continue
             confirmations = self.confirmations.setdefault(
                 pair_key, set())
             confirmations.add((own_key, peer_key))
-            if affected:
+            if pair_key in changed_pair_keys:
                 self.counters['temporal_support_evaluations'] += 1
             self.counters['temporal_support_max'] = max(
                 self.counters['temporal_support_max'], support_count)

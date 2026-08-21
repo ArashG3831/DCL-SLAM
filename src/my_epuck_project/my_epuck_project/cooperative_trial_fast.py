@@ -268,10 +268,16 @@ def launch_command(
         command.extend([
             f'output_root:={output_root}',
             f'run_id:={run_id}',
-            # The full unknown-pose launch consumes this supported parameter
-            # directly. Keep frontend diagnostics beside this run's artifacts.
-            f'unknown_pose_diagnostic_output:={output_root / run_id / "frontend"}',
         ])
+        # Frontend diagnostics are an explicit observer/forensic workload.
+        # Do not accidentally enable the 1,000,000-record evidence stream in
+        # a headless performance run whose observer is disabled; preserve it
+        # whenever evidence capture or diagnostic mode was requested.
+        if (args.enable_observer or args.enable_forensic_capture or
+                args.diagnostic_mode):
+            command.append(
+                f'unknown_pose_diagnostic_output:='
+                f'{output_root / run_id / "frontend"}')
     optional_launch_arguments = (
         ('slam_tf_publish_probe_library', args.slam_tf_publish_probe_library),
         ('slam_tf_publish_probe_log', args.slam_tf_publish_probe_log),

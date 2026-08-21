@@ -1044,6 +1044,27 @@ class UnknownPoseFrontend(Node):
         selected = []
         own_centres = []
         peer_centres = []
+        # Requests are serialized at publication time but their responses can
+        # be delayed.  Treat already-in-flight physical views as part of the
+        # current acquisition set so a newly observed candidate cannot be
+        # selected next to a view whose registration is still pending.
+        inflight_own_centres = []
+        inflight_peer_centres = []
+        for inflight in self.request_candidate_by_request_key.values():
+            inflight_peer_key, inflight_own_key, inflight_peer, _ = (
+                self._candidate_fields(inflight))
+            inflight_entry = self.keyframes.get(inflight_own_key)
+            if inflight_entry is None:
+                continue
+            inflight_crop = inflight_entry[1]
+            inflight_own_centres.append(np.array([
+                inflight_crop.origin_x +
+                inflight_crop.values.shape[1] * inflight_crop.resolution / 2.0,
+                inflight_crop.origin_y +
+                inflight_crop.values.shape[0] * inflight_crop.resolution / 2.0]))
+            inflight_peer_centres.append(np.array([
+                float(inflight_peer.crop_origin_x),
+                float(inflight_peer.crop_origin_y)]))
         for _, peer_key, own_key, peer, own in pending_candidates:
             if any(item[1] == peer_key or item[2] == own_key
                    for item in selected):
@@ -1054,8 +1075,10 @@ class UnknownPoseFrontend(Node):
                 own_crop.origin_y + own_crop.values.shape[0] * own_crop.resolution / 2.0])
             peer_centre = np.array([float(peer.crop_origin_x),
                                     float(peer.crop_origin_y)])
-            if (selected and not candidate_views_are_spatially_separated(
-                    own_centre, peer_centre, own_centres, peer_centres)):
+            if not candidate_views_are_spatially_separated(
+                    own_centre, peer_centre,
+                    own_centres + inflight_own_centres,
+                    peer_centres + inflight_peer_centres):
                 continue
             selected.append((peer_key, own_key, peer, own))
             own_centres.append(own_centre)

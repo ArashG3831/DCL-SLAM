@@ -389,7 +389,11 @@ def launch_setup(context):
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='local_', global_frame=f'{robot}/map',
-                map_topic=f'/{robot}/map', autostart=True))
+                map_topic=f'/{robot}/map',
+                # The bounded runner explicitly disables automatic lifecycle
+                # startup so its readiness gate can start local Nav2 only
+                # after both wheel controllers have produced odom/TF.
+                autostart=LaunchConfiguration('nav2_autostart')))
         if unknown_initial_pose and launch_shared_stack:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,

@@ -173,7 +173,8 @@ def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
     assert 'shared_map' not in source
     method_source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
     assert 'LOCAL_NAV2_NODES' in method_source
-    assert 'lifecycle_manager_navigation/manage_nodes' not in method_source
+    assert 'lifecycle_manager_navigation/manage_nodes' in method_source
+    assert 'ManageLifecycleNodes.Request.STARTUP' in method_source
 
 
 def test_campaign_driver_filter_is_namespaced_and_not_broad_kill():

@@ -26,6 +26,7 @@ from ament_index_python.packages import get_package_share_directory
 from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import OccupancyGrid, Odometry
+from nav2_msgs.srv import ManageLifecycleNodes
 import rclpy
 import psutil
 from rclpy.duration import Duration
@@ -400,15 +401,33 @@ class ReadyProbe(Node):
         # bounded deadline because the second namespaced manager may still be
         # bringing up its nodes when the first state query completes.
         clients = {}
+        manager_clients = {}
         for robot in ('robot1', 'robot2'):
+            manager_clients[robot] = self.create_client(
+                ManageLifecycleNodes,
+                f'/{robot}/local_lifecycle_manager_navigation/manage_nodes')
             for node_name in LOCAL_NAV2_NODES:
                 service_name = f'/{robot}/{node_name}/get_state'
                 clients[(robot, node_name)] = self.create_client(
                     GetState, service_name)
+        startup_sent = set()
+        startup_results = {}
         while time.monotonic() < deadline:
             all_active = True
             details = {}
             for robot in ('robot1', 'robot2'):
+                manager = manager_clients[robot]
+                if robot not in startup_sent:
+                    if not manager.service_is_ready():
+                        manager.wait_for_service(timeout_sec=0.0)
+                    if manager.service_is_ready():
+                        request = ManageLifecycleNodes.Request()
+                        request.command = ManageLifecycleNodes.Request.STARTUP
+                        future = manager.call_async(request)
+                        response = self._wait_future(future, deadline)
+                        startup_results[robot] = bool(
+                            response is not None and response.success)
+                        startup_sent.add(robot)
                 active = {}
                 for node_name in LOCAL_NAV2_NODES:
                     client = clients[(robot, node_name)]
@@ -424,7 +443,8 @@ class ReadyProbe(Node):
                     active[node_name] = state_id == State.PRIMARY_STATE_ACTIVE
                     all_active = all_active and active[node_name]
                 details[robot] = active
-            if all_active:
+            if all_active and len(startup_results) == 2 and all(
+                    startup_results.values()):
                 return details
             self.spin_once(0.1)
         raise FastTrialError(

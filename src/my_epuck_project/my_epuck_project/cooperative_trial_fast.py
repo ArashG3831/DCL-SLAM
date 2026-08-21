@@ -293,6 +293,11 @@ def launch_command(
     return command
 
 
+def lifecycle_startup_succeeded(response) -> bool:
+    """Return whether a lifecycle STARTUP request was accepted."""
+    return response is not None and bool(response.success)
+
+
 class ReadyProbe(Node):
     """Small ROS graph probe used only by the fast runner."""
 
@@ -412,12 +417,14 @@ class ReadyProbe(Node):
                     GetState, service_name)
         startup_sent = set()
         startup_results = {}
+        next_startup_attempt = {robot: 0.0 for robot in ('robot1', 'robot2')}
         while time.monotonic() < deadline:
             all_active = True
             details = {}
             for robot in ('robot1', 'robot2'):
                 manager = manager_clients[robot]
-                if robot not in startup_sent:
+                if (robot not in startup_sent and
+                        time.monotonic() >= next_startup_attempt[robot]):
                     if not manager.service_is_ready():
                         manager.wait_for_service(timeout_sec=0.0)
                     if manager.service_is_ready():
@@ -425,9 +432,18 @@ class ReadyProbe(Node):
                         request.command = ManageLifecycleNodes.Request.STARTUP
                         future = manager.call_async(request)
                         response = self._wait_future(future, deadline)
-                        startup_results[robot] = bool(
-                            response is not None and response.success)
-                        startup_sent.add(robot)
+                        startup_results[robot] = lifecycle_startup_succeeded(
+                            response)
+                        if startup_results[robot]:
+                            startup_sent.add(robot)
+                        else:
+                            # A lifecycle manager can receive STARTUP while
+                            # one late Nav2 node is still creating its
+                            # change_state service.  Keep the bounded gate
+                            # alive and retry that manager; marking a failed
+                            # request as sent permanently strands the robot.
+                            next_startup_attempt[robot] = (
+                                time.monotonic() + 1.0)
                 active = {}
                 for node_name in LOCAL_NAV2_NODES:
                     client = clients[(robot, node_name)]

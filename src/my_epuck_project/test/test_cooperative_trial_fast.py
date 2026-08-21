@@ -177,6 +177,13 @@ def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
     assert 'ManageLifecycleNodes.Request.STARTUP' in method_source
 
 
+def test_nav2_readiness_retries_a_failed_lifecycle_startup():
+    source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
+    assert 'next_startup_attempt' in source
+    assert 'if startup_results[robot]:' in source
+    assert 'next_startup_attempt[robot]' in source
+
+
 def test_campaign_driver_filter_is_namespaced_and_not_broad_kill():
     valid = [
         '/home/arash/webots_ws/install/webots_ros2_driver/lib/webots_ros2_driver/driver',

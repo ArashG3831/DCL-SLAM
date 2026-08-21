@@ -1327,7 +1327,9 @@ def register_crop_set(
         max_projected_registration_error_m: float = 0.20,
         min_inlier_ratio: float = 0.55,
         max_robust_residual_m: float = 0.08,
-        min_candidate_margin: float = 0.02) -> RegistrationResult:
+        min_candidate_margin: float = 0.02,
+        individual_results: Iterable[RegistrationResult] | None = None
+        ) -> RegistrationResult:
     """Estimate one transform from an independently verified crop set.
 
     Each pair is registered independently, then transforms are clustered in
@@ -1338,7 +1340,22 @@ def register_crop_set(
     pair_list = list(pairs)
     if not pair_list:
         return _empty_registration('NO_CONSTRAINTS')
-    results = [register_crops(source, target) for source, target in pair_list]
+    if individual_results is None:
+        results = [register_crops(source, target)
+                   for source, target in pair_list]
+    else:
+        cached = list(individual_results)
+        if len(cached) != len(pair_list):
+            raise ValueError(
+                'individual_results must align one-for-one with pairs')
+        # Candidate verification has already run the exact same bounded
+        # single-crop registration for each accepted pair.  Reuse those
+        # immutable results during incremental consensus; this removes only
+        # duplicate work and leaves all clustering, spatial-diversity,
+        # consistency, uncertainty, and projected-error gates unchanged.
+        results = [
+            result if result is not None else register_crops(source, target)
+            for (source, target), result in zip(pair_list, cached)]
     forensic = consensus_subset_diagnostics(
         pair_list, results,
         target_map_radius_m=target_map_radius_m,

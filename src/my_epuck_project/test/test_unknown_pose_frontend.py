@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from my_epuck_project import unknown_pose_frontend_core as frontend_core
 from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
 from my_epuck_project.unknown_pose_frontend_core import (
     BoundedVerificationBatchController,
@@ -25,6 +26,7 @@ from my_epuck_project.unknown_pose_frontend_core import (
     polar_descriptor,
     physical_candidate_geometry_identity,
     register_crops,
+    register_crop_set,
     rigidify_affine,
     should_accept_hypothesis,
     confirmation_window_for_cadence,
@@ -361,6 +363,26 @@ def test_partial_overlap_is_verified_by_rigid_registration():
     assert result.inlier_ratio > 0.35
     assert math.isfinite(result.residual_m)
     assert result.transform[2] == result.transform[2]
+
+
+def test_incremental_consensus_reuses_completed_individual_registrations(
+        monkeypatch):
+    first = GridCrop(scene(), 0.05, 0.0, 0.0)
+    second = GridCrop(transform_grid(scene(), 0.10, 5, 3), 0.05, 0.0, 0.0)
+    cached = frontend_core.register_crops(first, second)
+
+    def unexpected_registration(*args, **kwargs):
+        raise AssertionError('incremental consensus recomputed a crop')
+
+    monkeypatch.setattr(frontend_core, 'register_crops',
+                        unexpected_registration)
+    result = register_crop_set(
+        [(first, second), (first, second), (first, second)],
+        min_consistent_constraints=3,
+        min_spatial_baseline_m=0.0,
+        individual_results=[cached, cached, cached])
+    assert result.constraint_count == 3
+    assert result.consistent_constraint_count == 3
 
 
 def test_rejected_affine_scale_or_shear_never_becomes_an_se2_hypothesis():

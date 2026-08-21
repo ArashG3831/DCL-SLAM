@@ -1873,9 +1873,14 @@ class UnknownPoseFrontend(Node):
         self._record_diagnostic_event(
             'EVIDENCE_SET_FORMED',
             constraints_accumulated=len(self.evidence_physical_keys))
-        pairs = list(self.evidence_pairs.values())
+        evidence_items = list(self.evidence_pairs.items())
+        pairs = [evidence for _, evidence in evidence_items]
+        cached_results = [
+            self.candidate_verification_results.get(pair_key)
+            for pair_key, _ in evidence_items]
         consensus = self._run_registration(
-            pairs, 'incremental_consensus', peer_key)
+            pairs, 'incremental_consensus', peer_key,
+            individual_results=cached_results)
         if consensus.accepted:
             self.evidence_acquisition_started = False
             self.evidence_acquisition_deadline_wall = None
@@ -1890,7 +1895,8 @@ class UnknownPoseFrontend(Node):
         # physically distinct candidate until the bounded budget/window ends.
         self._request_next_candidate_verification()
 
-    def _run_registration(self, evidence_pairs, source, keyframe_id=''):
+    def _run_registration(self, evidence_pairs, source, keyframe_id='',
+                          individual_results=None):
         self.counters['registrations'] += 1
         self.counters['registration_callback_entries'] += 1
         self.registration_callback_depth += 1
@@ -1903,7 +1909,8 @@ class UnknownPoseFrontend(Node):
                 target_map_radius_m=self.target_map_radius_m,
                 min_consistent_constraints=self.min_consistent_constraints,
                 max_projected_registration_error_m=(
-                    self.max_projected_registration_error_m))
+                    self.max_projected_registration_error_m),
+                individual_results=individual_results)
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1

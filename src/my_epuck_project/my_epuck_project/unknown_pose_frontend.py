@@ -2179,38 +2179,92 @@ class UnknownPoseFrontend(Node):
         return message
 
     def hypothesis_callback(self, message):
+        self._record_diagnostic_event(
+            'HYPOTHESIS_RECEIVED',
+            source_robot_id=str(message.source_robot_id),
+            target_robot_id=str(message.target_robot_id),
+            source_keyframe_id=str(message.source_keyframe_id),
+            target_keyframe_id=str(message.target_keyframe_id),
+            status=str(message.status),
+            accepted=bool(message.accepted),
+            final_confidence=float(message.final_confidence),
+            pending_target_proposal=bool(self.pending_target_proposal),
+            already_accepted=bool(self.accepted is not None))
         if {message.source_robot_id, message.target_robot_id} != {
                 self.robot_id, self.peer_robot_id}:
+            self._record_diagnostic_event(
+                'HYPOTHESIS_IGNORED_SCOPE',
+                source_robot_id=str(message.source_robot_id),
+                target_robot_id=str(message.target_robot_id))
             return
         if self.accepted is not None:
+            self._record_diagnostic_event(
+                'HYPOTHESIS_IGNORED_ALREADY_ACCEPTED',
+                status=str(message.status))
             return
         if message.status == 'PROPOSED' and self.robot_id == message.target_robot_id:
             if self.pending_target_proposal:
+                self._record_diagnostic_event(
+                    'HYPOTHESIS_IGNORED_PENDING_TARGET',
+                    source_keyframe_id=str(message.source_keyframe_id),
+                    target_keyframe_id=str(message.target_keyframe_id))
                 return
             self.pending_target_proposal = True
             self.peer_proposals[message.source_keyframe_id] = message
+            self._record_diagnostic_event(
+                'HYPOTHESIS_PROPOSAL_ACCEPTED_FOR_CONFIRMATION',
+                source_keyframe_id=str(message.source_keyframe_id),
+                target_keyframe_id=str(message.target_keyframe_id),
+                evidence_source_keyframe_ids=[
+                    str(value) for value in
+                    getattr(message, 'evidence_source_keyframe_ids', [])],
+                evidence_target_keyframe_ids=[
+                    str(value) for value in
+                    getattr(message, 'evidence_target_keyframe_ids', [])])
             self._request_source_for_confirmation(message)
             return
         if message.status == 'REJECTED':
             if self.robot_id == message.source_robot_id:
                 self.negotiation_started = False
+            self._record_diagnostic_event(
+                'HYPOTHESIS_REJECTED',
+                source_robot_id=str(message.source_robot_id),
+                target_robot_id=str(message.target_robot_id),
+                rejection_reason=str(message.rejection_reason))
             return
         if not should_accept_hypothesis(
                 self.accepted, message.status, message.accepted,
                 message.final_confidence):
+            self._record_diagnostic_event(
+                'HYPOTHESIS_IGNORED_ACCEPTANCE_GATE',
+                status=str(message.status), accepted=bool(message.accepted),
+                final_confidence=float(message.final_confidence))
             return
         if self.robot_id != message.source_robot_id:
             self.accepted = message
             self.accepted_wall = time.monotonic()
+            self._record_diagnostic_event(
+                'HYPOTHESIS_TARGET_ACCEPTED',
+                source_keyframe_id=str(message.source_keyframe_id),
+                target_keyframe_id=str(message.target_keyframe_id))
             self.publish_local_map()
             return
         proposal = self.pending_proposals.get(
             (message.source_keyframe_id, message.target_keyframe_id))
         if proposal is None or not proposal.accepted:
+            self._record_diagnostic_event(
+                'HYPOTHESIS_ACK_IGNORED_NO_PENDING_PROPOSAL',
+                source_keyframe_id=str(message.source_keyframe_id),
+                target_keyframe_id=str(message.target_keyframe_id),
+                pending_proposal_count=len(self.pending_proposals))
             return
         own = self.keyframes.get(message.source_keyframe_id)
         peer = self.peer_descriptors.get(message.target_keyframe_id)
         if own is None or peer is None:
+            self._record_diagnostic_event(
+                'HYPOTHESIS_ACK_IGNORED_MISSING_KEYFRAME',
+                source_keyframe_id=str(message.source_keyframe_id),
+                target_keyframe_id=str(message.target_keyframe_id))
             return
         final = self._hypothesis_message(
             own[0], peer, proposal, status='ACCEPTED', accepted=True,
@@ -2220,6 +2274,11 @@ class UnknownPoseFrontend(Node):
             evidence_target_keyframe_ids=list(getattr(
                 message, 'evidence_target_keyframe_ids', [])))
         self.hypothesis_pub.publish(final)
+        self._record_diagnostic_event(
+            'HYPOTHESIS_CANONICAL_ACCEPTED',
+            source_keyframe_id=str(message.source_keyframe_id),
+            target_keyframe_id=str(message.target_keyframe_id),
+            evidence_set_hash=str(message.evidence_set_hash))
         self.counters['accepted_hypotheses'] += 1
         self.accepted = final
         self.accepted_wall = time.monotonic()

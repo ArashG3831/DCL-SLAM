@@ -136,6 +136,17 @@ def test_batch_diagnostics_contract_keeps_attempt_and_correlation_identity():
     assert 'STALE_VERIFICATION_BATCH' in source
 
 
+def test_hypothesis_callback_persists_directional_protocol_diagnostics():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert "'HYPOTHESIS_RECEIVED'" in source
+    assert "'HYPOTHESIS_IGNORED_SCOPE'" in source
+    assert "'HYPOTHESIS_IGNORED_PENDING_TARGET'" in source
+    assert "'HYPOTHESIS_PROPOSAL_ACCEPTED_FOR_CONFIRMATION'" in source
+    assert "'HYPOTHESIS_ACK_IGNORED_NO_PENDING_PROPOSAL'" in source
+
+
 def test_batch_reentry_never_changes_three_constraint_consensus_gate():
     assert not crop_batch_is_ready(2, 3)
     assert crop_batch_is_ready(3, 3)

@@ -331,6 +331,24 @@ def candidate_reuses_accepted_physical_view(
         for accepted in accepted_geometry_keys)
 
 
+def candidate_views_are_spatially_separated(
+        own_center, peer_center, prior_own_centers, prior_peer_centers,
+        minimum_spacing_m: float = 0.40) -> bool:
+    """Require both sides of a pending pair to add a displaced view.
+
+    This is an acquisition-order rule for the bounded request batch.  It does
+    not alter the production spatial-baseline or consensus thresholds.
+    """
+    spacing = float(minimum_spacing_m)
+    if any(float(np.linalg.norm(np.asarray(own_center) - prior)) < spacing
+           for prior in prior_own_centers):
+        return False
+    if any(float(np.linalg.norm(np.asarray(peer_center) - prior)) < spacing
+           for prior in prior_peer_centers):
+        return False
+    return True
+
+
 def physical_descriptor_identity(descriptor) -> tuple:
     """Return the corresponding physical identity for a descriptor message."""
     resolution = float(getattr(descriptor, 'resolution', 0.0))

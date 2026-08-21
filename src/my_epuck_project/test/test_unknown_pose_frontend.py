@@ -11,6 +11,7 @@ from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
 from my_epuck_project.unknown_pose_frontend_core import (
     BoundedVerificationBatchController,
     candidate_reuses_accepted_physical_view,
+    candidate_views_are_spatially_separated,
     DedicatedDiagnosticJsonl,
     GridCrop,
     accumulate_physical_candidates,
@@ -537,6 +538,17 @@ def test_accepted_evidence_cannot_reuse_one_physical_view():
         same_own, accepted, own_crops)
     assert not candidate_reuses_accepted_physical_view(
         new_view, accepted, own_crops)
+
+
+def test_pending_selection_requires_displacement_on_both_sides():
+    own_prior = [np.asarray([0.0, 0.0])]
+    peer_prior = [np.asarray([3.0, 0.0])]
+    assert not candidate_views_are_spatially_separated(
+        [1.0, 0.0], [3.1, 0.0], own_prior, peer_prior)
+    assert not candidate_views_are_spatially_separated(
+        [0.1, 0.0], [4.0, 0.0], own_prior, peer_prior)
+    assert candidate_views_are_spatially_separated(
+        [1.0, 0.0], [4.0, 0.0], own_prior, peer_prior)
 
 
 def test_next_verification_rejects_local_view_near_any_accepted_source():

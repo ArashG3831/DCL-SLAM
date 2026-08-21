@@ -29,6 +29,7 @@ from .unknown_pose_frontend_core import (
     DedicatedDiagnosticJsonl,
     BoundedVerificationBatchController,
     candidate_reuses_accepted_physical_view,
+    candidate_views_are_spatially_separated,
     GridCrop,
     compare_descriptors,
     compare_descriptor_pairs,
@@ -1053,10 +1054,8 @@ class UnknownPoseFrontend(Node):
                 own_crop.origin_y + own_crop.values.shape[0] * own_crop.resolution / 2.0])
             peer_centre = np.array([float(peer.crop_origin_x),
                                     float(peer.crop_origin_y)])
-            if (selected and all(np.linalg.norm(own_centre - prior) < 0.40
-                                 for prior in own_centres) and
-                    all(np.linalg.norm(peer_centre - prior) < 0.40
-                        for prior in peer_centres)):
+            if (selected and not candidate_views_are_spatially_separated(
+                    own_centre, peer_centre, own_centres, peer_centres)):
                 continue
             selected.append((peer_key, own_key, peer, own))
             own_centres.append(own_centre)

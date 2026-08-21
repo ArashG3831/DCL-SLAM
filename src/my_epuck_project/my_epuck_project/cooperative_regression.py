@@ -1439,6 +1439,7 @@ def internal_trial(args):
             'use_sim_time': args.time_mode == 'sim',
             'use_scan_matching': args.use_scan_matching,
             'do_loop_closing': args.do_loop_closing,
+            'unknown_initial_pose': args.unknown_initial_pose,
         'ideal_encoder_sensing': args.ideal_encoder_sensing,
         'encoder_profile': args.profile_metadata['encoder_profile'],
             'logger_console_status': False,
@@ -1495,6 +1496,7 @@ def internal_trial(args):
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         f'use_scan_matching:={str(args.use_scan_matching).lower()}',
         f'do_loop_closing:={str(args.do_loop_closing).lower()}',
+        f'unknown_initial_pose:={str(args.unknown_initial_pose).lower()}',
         f'ideal_encoder_sensing:={str(args.ideal_encoder_sensing).lower()}',
         'logger_console_status:=false',
         f'enable_rosout_collection:={str(args.enable_rosout_collection).lower()}',
@@ -2072,6 +2074,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
              'throughput' else 'full')),
         use_scan_matching=getattr(args, 'use_scan_matching', False),
         do_loop_closing=getattr(args, 'do_loop_closing', False),
+        unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
         ideal_encoder_sensing=getattr(args, 'ideal_encoder_sensing', True),
         diagnostic_mode=getattr(args, 'diagnostic_mode', False),
         enable_rosout_collection=getattr(args, 'enable_rosout_collection', True),
@@ -2537,6 +2540,7 @@ def create_manifest(args, campaign, workspace):
             'use_sim_time': args.time_mode == 'sim',
             'use_scan_matching': args.use_scan_matching,
             'do_loop_closing': args.do_loop_closing,
+            'unknown_initial_pose': args.unknown_initial_pose,
             'ideal_encoder_sensing': args.ideal_encoder_sensing,
             'assignment_mode': 'replicated_two_robot_pair',
             'dispatch_enabled': True,
@@ -2838,6 +2842,11 @@ def apply_profile_defaults(args, profile_name=None):
         args.mission_timeout = settings['mission_timeout']
     if args.shift_window is None:
         args.shift_window = settings['map_comparison_shift_window']
+    if settings.get('slam_runtime_parameters', {}).get('use_scan_matching'):
+        args.use_scan_matching = True
+        args.do_loop_closing = False
+    if settings.get('unknown_initial_pose'):
+        args.unknown_initial_pose = True
     return args
 
 
@@ -2892,7 +2901,9 @@ def parser():
     result.add_argument(
         '--world-profile',
         choices=['large', 'small', 'large_unknown_pose',
-                 'large_unknown_pose_16m'],
+                 'large_unknown_pose_16m', 'large_unknown_pose_close_start',
+                 'large_unknown_pose_close_start_20ms',
+                 'large_unknown_pose_close_start_20ms_scan_matching'],
         default=None,
         help=(
             'World/configuration profile; defaults to large for new runs and '
@@ -2915,6 +2926,9 @@ def parser():
         '--do-loop-closing', type=boolean, default=False, metavar='BOOL',
         help=('Diagnostic Slam Toolbox override. Production YAML default is '
               'false; this does not alter the YAML.'))
+    result.add_argument(
+        '--unknown-initial-pose', type=boolean, default=False, metavar='BOOL',
+        help='Run the decentralized unknown-relative-pose phase contract.')
     result.add_argument(
         '--ideal-encoder-sensing', type=boolean, default=True, metavar='BOOL',
         help=('Use the thesis simulation assumption of zero explicitly '

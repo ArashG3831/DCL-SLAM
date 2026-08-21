@@ -59,6 +59,14 @@ def launch_setup(context):
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()
         == 'true')
+    profile_scan_parameters = dict(
+        selected.get('slam_runtime_parameters', {}))
+    effective_scan_matching = (
+        'true' if profile_scan_parameters.get('use_scan_matching') is True
+        else LaunchConfiguration('use_scan_matching'))
+    effective_loop_closing = (
+        'false' if 'do_loop_closing' in profile_scan_parameters
+        else LaunchConfiguration('do_loop_closing'))
     launch_world_path = world_path or selected['world_path']
     if forensic_enabled or contact_enabled:
         # Keep the source/production world untouched.  Webots requires every
@@ -114,8 +122,8 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
-            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'use_scan_matching': effective_scan_matching,
+            'do_loop_closing': effective_loop_closing,
             'slam_tf_publish_probe_library': LaunchConfiguration(
                 'slam_tf_publish_probe_library'),
             'slam_tf_publish_probe_log': LaunchConfiguration(
@@ -156,8 +164,8 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
-            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+            'use_scan_matching': effective_scan_matching,
+            'do_loop_closing': effective_loop_closing,
             'slam_tf_publish_probe_library': LaunchConfiguration(
                 'slam_tf_publish_probe_library'),
             'slam_tf_publish_probe_log': LaunchConfiguration(
@@ -335,8 +343,8 @@ def launch_setup(context):
                 'webots_mode': LaunchConfiguration('webots_mode'),
                 'webots_gui': LaunchConfiguration('webots_gui'),
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'use_scan_matching': LaunchConfiguration('use_scan_matching'),
-                'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+                'use_scan_matching': effective_scan_matching,
+                'do_loop_closing': effective_loop_closing,
                 'sensor_profile': LaunchConfiguration('sensor_profile'),
                 'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
                 'diagnostic_frontier_capture': LaunchConfiguration(
@@ -408,10 +416,14 @@ def launch_setup(context):
                     'assignment_strategy').perform(context),
                 'burgard_beta': float(LaunchConfiguration(
                     'burgard_beta').perform(context)),
-                'use_scan_matching': LaunchConfiguration(
-                    'use_scan_matching').perform(context).lower() == 'true',
-            'do_loop_closing': LaunchConfiguration(
-                'do_loop_closing').perform(context).lower() == 'true',
+                'use_scan_matching': profile_scan_parameters.get(
+                    'use_scan_matching',
+                    LaunchConfiguration('use_scan_matching').perform(
+                        context).lower() == 'true'),
+                'do_loop_closing': profile_scan_parameters.get(
+                    'do_loop_closing',
+                    LaunchConfiguration('do_loop_closing').perform(
+                        context).lower() == 'true'),
                 'ideal_encoder_sensing': LaunchConfiguration(
                     'ideal_encoder_sensing').perform(context).lower() == 'true',
                 'encoder_profile': selected['encoder_profile'],
@@ -466,7 +478,8 @@ def generate_launch_description():
             choices=['large', 'small', 'large_unknown_pose',
                      'large_unknown_pose_16m',
                      'large_unknown_pose_close_start',
-                     'large_unknown_pose_close_start_20ms']),
+                     'large_unknown_pose_close_start_20ms',
+                     'large_unknown_pose_close_start_20ms_scan_matching']),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument('world_path', default_value=''),
         DeclareLaunchArgument('webots_mode', default_value='realtime'),

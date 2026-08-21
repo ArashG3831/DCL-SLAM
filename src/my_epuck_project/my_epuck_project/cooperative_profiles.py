@@ -8,6 +8,24 @@ import re
 import tempfile
 
 
+CONSERVATIVE_SCAN_MATCHING_PARAMETERS = {
+    'use_scan_matching': True,
+    'do_loop_closing': False,
+    'correlation_search_space_dimension': 0.12,
+    'correlation_search_space_resolution': 0.01,
+    'correlation_search_space_smear_deviation': 0.015,
+    'distance_variance_penalty': 0.05,
+    'angle_variance_penalty': 0.05235987755982989,
+    'minimum_distance_penalty': 0.15,
+    'minimum_angle_penalty': 0.70,
+    'coarse_search_angle_offset': 0.0523596583,
+    'coarse_angle_resolution': 0.0174532925,
+    'fine_search_angle_offset': 0.0034906585,
+    'use_response_expansion': False,
+    'map_update_interval': 1.0,
+}
+
+
 PROFILE_SETTINGS = {
     'small': {
         'world': 'epuck_d500_two_world_teammate_visible.wbt',
@@ -134,6 +152,31 @@ PROFILE_SETTINGS = {
         },
         'startup_timeout': 300.0,
         'mission_timeout': 1800.0,
+    },
+    'large_unknown_pose_close_start_20ms_scan_matching': {
+        'world': 'epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt',
+        'baseline_world': 'epuck_d500_two_world_large.wbt',
+        'physics_profile': 'dynamic_low_slip_20ms_finite',
+        'slam_resolution': 0.03,
+        'fusion_resolution': 0.03,
+        'global_costmap_resolution': 0.03,
+        'local_costmap_resolution': 0.02,
+        'minimum_frontier_cells': 2,
+        'minimum_known_cell_gain_for_activity': 1,
+        'coverage_attribution_resolution': 0.03,
+        'map_comparison_shift_window': 1,
+        'rviz': 'cooperative_manual_exploration.rviz',
+        'rviz_view': {
+            'distance': 45,
+            'focal_x': 17.4,
+            'focal_y': 0,
+            'focal_z': 0,
+        },
+        'startup_timeout': 300.0,
+        'mission_timeout': 300.0,
+        'unknown_initial_pose': True,
+        'slam_runtime_parameters': dict(
+            CONSERVATIVE_SCAN_MATCHING_PARAMETERS),
     },
 }
 
@@ -385,6 +428,8 @@ def profile(name, worlds_directory, ideal_encoder_sensing=True):
     result['encoder_profile'] = (
         'webots_ideal_wheel_encoders'
         if ideal_encoder_sensing else 'webots_upstream_quantized_wheel_encoders')
+    result.setdefault('slam_runtime_parameters', {})
+    result.setdefault('unknown_initial_pose', False)
     result['name'] = name
     result['world_path'] = str(
         Path(worlds_directory).resolve() / result['world'])
@@ -456,6 +501,9 @@ def profile_summary(value):
             value['coverage_attribution_resolution'],
         'map_comparison_shift_window':
             value['map_comparison_shift_window'],
+        'unknown_initial_pose': value.get('unknown_initial_pose', False),
+        'slam_runtime_parameters': dict(
+            value.get('slam_runtime_parameters', {})),
     }
 
 

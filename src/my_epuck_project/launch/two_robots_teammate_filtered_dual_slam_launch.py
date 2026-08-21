@@ -24,7 +24,8 @@ from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
 
 
 def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
-                 tf_probe_log, tf_publication_mode, unknown_initial_pose):
+                 tf_probe_log, tf_publication_mode, unknown_initial_pose,
+                 slam_runtime_parameters):
     probe_env = {}
     if tf_probe_library:
         probe_env = {
@@ -34,6 +35,23 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
         }
         if tf_publication_mode:
             probe_env['RMW_FASTRTPS_PUBLICATION_MODE'] = tf_publication_mode
+    runtime_parameters = {
+        'use_lifecycle_manager': False,
+        'use_sim_time': LaunchConfiguration('use_sim_time'),
+        'resolution': slam_resolution,
+        'scan_topic': (
+            f'/{robot}/scan_d500_fixed'
+            if unknown_initial_pose else
+            f'/{robot}/scan_d500_slam'),
+    }
+    if slam_runtime_parameters:
+        runtime_parameters.update(slam_runtime_parameters)
+    else:
+        # Existing profiles retain their launch-argument override path.
+        runtime_parameters.update({
+            'use_scan_matching': LaunchConfiguration('use_scan_matching'),
+            'do_loop_closing': LaunchConfiguration('do_loop_closing'),
+        })
     slam = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
@@ -52,19 +70,7 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
                 package_dir, 'resource',
                 f'slam_toolbox_{robot}_teammate_filtered.yaml',
             ),
-            {
-                'use_lifecycle_manager': False,
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'resolution': slam_resolution,
-                'scan_topic': (
-                    f'/{robot}/scan_d500_fixed'
-                    if unknown_initial_pose else
-                    f'/{robot}/scan_d500_slam'),
-                # Runtime-only diagnostic overrides.  The checked-in YAML
-                # remains the production source of truth (false/false).
-                'use_scan_matching': LaunchConfiguration('use_scan_matching'),
-                'do_loop_closing': LaunchConfiguration('do_loop_closing'),
-            },
+            runtime_parameters,
         ],
     )
     configure = EmitEvent(event=ChangeState(
@@ -109,6 +115,8 @@ def launch_setup(context):
     phase_already_aligned = (
         LaunchConfiguration('phase_already_aligned').perform(context).lower()
         == 'true')
+    slam_runtime_parameters = dict(
+        selected.get('slam_runtime_parameters', {}))
     base = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_dir, 'launch', 'two_robots_namespaced_launch.py'
@@ -184,10 +192,10 @@ def launch_setup(context):
             *local_frame_anchors,
             *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
                           tf_probe_library, tf_probe_log, tf_publication_mode,
-                          unknown_initial_pose),
+                          unknown_initial_pose, slam_runtime_parameters),
             *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
                           tf_probe_library, tf_probe_log, tf_publication_mode,
-                          unknown_initial_pose),
+                          unknown_initial_pose, slam_runtime_parameters),
         ]
     return mapping_actions
 
@@ -200,7 +208,8 @@ def generate_launch_description():
             choices=['large', 'small', 'large_unknown_pose',
                      'large_unknown_pose_16m',
                      'large_unknown_pose_close_start',
-                     'large_unknown_pose_close_start_20ms'],
+                     'large_unknown_pose_close_start_20ms',
+                     'large_unknown_pose_close_start_20ms_scan_matching'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(

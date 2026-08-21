@@ -96,6 +96,8 @@ def test_shared_activation_declares_boolean_launch_parameters_with_boolean_types
     assert "('use_sim_time', True)" in activation
     assert "('use_scan_matching', False)" in activation
     assert "('do_loop_closing', False)" in activation
+    assert "('nav2_autostart', False)" in activation
+    assert "'nav2_autostart'" in activation
     assert "('fusion_process_nice', 0)" in activation
     assert "('fusion_cpu_quota_percent', 30)" in activation
     assert "('fusion_rebuild_period_s', 1.0)" in activation

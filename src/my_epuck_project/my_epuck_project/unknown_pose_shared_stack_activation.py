@@ -34,6 +34,7 @@ class UnknownPoseSharedStackActivation(Node):
             'use_sim_time',
             'use_scan_matching',
             'do_loop_closing',
+            'nav2_autostart',
             'diagnostic_mode',
             'diagnostic_frontier_capture',
             'traffic_scheduler_enabled',
@@ -47,6 +48,11 @@ class UnknownPoseSharedStackActivation(Node):
                 ('use_sim_time', True),
                 ('use_scan_matching', False),
                 ('do_loop_closing', False),
+                # The phase manager owns the one explicit shared Nav2 STARTUP
+                # transition after local Nav2 has shut down.  Autostarting
+                # here races that transition and makes a correct STARTUP
+                # request fail because the nodes are already active.
+                ('nav2_autostart', False),
                 ('sensor_profile', 'full'),
                 ('diagnostic_mode', False),
                 ('diagnostic_frontier_capture', False),

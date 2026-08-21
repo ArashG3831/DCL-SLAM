@@ -551,6 +551,47 @@ def test_pending_selection_requires_displacement_on_both_sides():
         [1.0, 0.0], [4.0, 0.0], own_prior, peer_prior)
 
 
+def test_candidate_order_prefers_unattempted_physical_views_over_reused_family():
+    """Rejected pair variants must not starve a genuinely new view."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {}
+    frontend.keyframes = {
+        'own-reused': (descriptor('own-reused', 0.0, 0.0),
+                       GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                                0.0, 0.0)),
+        'own-new': (descriptor('own-new', 2.0, 0.0, epoch=8, checksum=8),
+                    GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             2.0, 0.0)),
+    }
+    frontend.peer_descriptors = {
+        'peer-reused': descriptor('peer-reused', 3.0, 0.0),
+        'peer-new': descriptor('peer-new', 5.0, 0.0, epoch=8, checksum=8),
+    }
+    frontend._crop_geometry = lambda crop, *_args: {
+        'center': [crop.origin_x + 0.5 * crop.values.shape[1] * crop.resolution,
+                   crop.origin_y + 0.5 * crop.values.shape[0] * crop.resolution]}
+    frontend._descriptor_geometry = lambda value: {
+        'center': [float(value.crop_origin_x +
+                         0.5 * value.crop_width * value.resolution),
+                   float(value.crop_origin_y +
+                         0.5 * value.crop_height * value.resolution)]}
+    frontend.attempted_physical_view_reuse_counts = {}
+    reused = candidate(
+        'peer-reused', 'own-reused', frontend.peer_descriptors['peer-reused'],
+        frontend.keyframes['own-reused'][0])
+    fresh = candidate(
+        'peer-new', 'own-new', frontend.peer_descriptors['peer-new'],
+        frontend.keyframes['own-new'][0])
+    reused_geometry = frontend._candidate_physical_geometry_key(reused)
+    frontend.attempted_physical_view_reuse_counts[reused_geometry[0]] = 2
+    frontend.attempted_physical_view_reuse_counts[reused_geometry[1]] = 2
+
+    assert frontend._candidate_spatial_novelty_key(fresh)[0] == 0
+    assert frontend._candidate_spatial_novelty_key(reused)[0] == 4
+    assert frontend._candidate_spatial_novelty_key(fresh) < \
+        frontend._candidate_spatial_novelty_key(reused)
+
+
 def test_next_verification_rejects_local_view_near_any_accepted_source():
     """A peer-keyframe change cannot increase the source spatial baseline."""
     frontend = object.__new__(UnknownPoseFrontend)

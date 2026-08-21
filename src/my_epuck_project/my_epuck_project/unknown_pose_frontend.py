@@ -242,6 +242,11 @@ class UnknownPoseFrontend(Node):
         self.evidence_physical_geometry_keys = set()
         self.candidate_verification_attempted = set()
         self.candidate_verification_results = {}
+        # Acquisition-only history used to keep one repeatedly rejected
+        # physical view from monopolising later verification batches.  Exact
+        # pair rejection and accepted-evidence deduplication remain separate
+        # and authoritative; this counter changes ordering only.
+        self.attempted_physical_view_reuse_counts = {}
         self.request_candidate_by_request_key = {}
         self.request_metadata_by_request_key = {}
         self.completed_request_keys = set()
@@ -1348,7 +1353,19 @@ class UnknownPoseFrontend(Node):
         # only and leaves every geometric/consensus gate unchanged.
         balanced_distance = min(own_distance, peer_distance)
         total_distance = max(own_distance, peer_distance)
-        return (-balanced_distance, -total_distance, similarity,
+        geometry_key = self._candidate_physical_geometry_key(candidate)
+        reuse_count = 0
+        if geometry_key is not None:
+            reuse_count = sum(
+                int(self.attempted_physical_view_reuse_counts.get(view, 0))
+                for view in geometry_key)
+        # If a high-scoring descriptor repeatedly leads to geometric
+        # rejection, ranking another pair with the same local or peer crop
+        # first can starve genuinely new views.  Prefer never-attempted
+        # physical views, then retain the existing balanced spatial novelty
+        # ordering.  This is scheduling only: all registration and consensus
+        # gates and all exact duplicate/rejection sets are unchanged.
+        return (reuse_count, -balanced_distance, -total_distance, similarity,
                 str(peer_key), str(own_key))
 
     def _rank_next_verification_candidate(self):
@@ -1443,6 +1460,12 @@ class UnknownPoseFrontend(Node):
             return False
         peer_key, own_key, peer, own = self._candidate_fields(candidate)
         pair_key = (own_key, peer_key)
+        geometry_key = self._candidate_physical_geometry_key(candidate)
+        if geometry_key is not None:
+            for view in geometry_key:
+                self.attempted_physical_view_reuse_counts[view] = (
+                    int(self.attempted_physical_view_reuse_counts.get(view, 0))
+                    + 1)
         self.candidate_verification_attempted.add(pair_key)
         self.candidate_verification_attempts += 1
         self.candidate_verification_batch_attempts += 1

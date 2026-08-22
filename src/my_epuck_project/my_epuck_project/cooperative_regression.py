@@ -5,6 +5,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import csv
 from datetime import datetime, timezone
 import hashlib
+import multiprocessing
 import json
 import os
 from pathlib import Path
@@ -707,6 +708,52 @@ def tf_readiness(
             os.environ.pop('ROS_DOMAIN_ID', None)
         else:
             os.environ['ROS_DOMAIN_ID'] = previous_domain
+
+
+def _readiness_worker(kind, domain, unknown_initial_pose, result_queue):
+    """Run a DDS readiness probe in a killable child process."""
+    try:
+        if kind == 'clock':
+            result = clock_readiness(domain, timeout_s=4.0)
+        else:
+            result = tf_readiness(
+                domain, timeout_s=TF_READINESS_TIMEOUT_S,
+                unknown_initial_pose=unknown_initial_pose)
+        result_queue.put(result)
+    except Exception as error:
+        result_queue.put((False, {
+            'reason': f'{kind.upper()}_PROBE_CHILD_ERROR',
+            'error': f'{type(error).__name__}: {error}',
+        }))
+
+
+def bounded_readiness_probe(kind, domain, unknown_initial_pose=False,
+                            timeout_s=15.0):
+    """Bound DDS waits without allowing a probe to freeze the runner."""
+    context = multiprocessing.get_context('fork')
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_readiness_worker,
+        args=(kind, int(domain), bool(unknown_initial_pose), result_queue),
+        daemon=True)
+    process.start()
+    process.join(max(0.1, float(timeout_s)))
+    if process.is_alive():
+        process.terminate()
+        process.join(2.0)
+        return False, {
+            'reason': f'{kind.upper()}_PROBE_TIMEOUT',
+            'timeout_s': float(timeout_s),
+            'probe_pid': process.pid,
+        }
+    try:
+        return result_queue.get_nowait()
+    except Exception:
+        return False, {
+            'reason': f'{kind.upper()}_PROBE_NO_RESULT',
+            'probe_pid': process.pid,
+            'returncode': process.exitcode,
+        }
 
 
 def lifecycle_startup_action(manager_active, prior_state):
@@ -1775,8 +1822,8 @@ def internal_trial(args):
                         clock_details = collector_clock_details
                         clock_details['source'] = 'collector_status.json'
                 else:
-                    clock_ok, clock_details = clock_readiness(
-                        args.ros_domain_id)
+                    clock_ok, clock_details = bounded_readiness_probe(
+                        'clock', args.ros_domain_id, timeout_s=8.0)
                 if 'first_clock_probe' not in startup_timeline:
                     mark_startup_stage('first_clock_probe')
                 if clock_details.get('sample_wall_times'):
@@ -1796,9 +1843,10 @@ def internal_trial(args):
                     if mission_sim_start is None:
                         mission_sim_start = status.get('elapsed_s', 0.0)
                         metadata['clock_sim_start'] = mission_sim_start
-                    tf_ok, tf_details = tf_readiness(
-                        args.ros_domain_id,
-                        unknown_initial_pose=args.unknown_initial_pose)
+                    tf_ok, tf_details = bounded_readiness_probe(
+                        'tf', args.ros_domain_id,
+                        unknown_initial_pose=args.unknown_initial_pose,
+                        timeout_s=15.0)
                     metadata['tf_readiness'] = tf_details
                     if tf_ok and not nav2_started:
                         startup_budget = max(

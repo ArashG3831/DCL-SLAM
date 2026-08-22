@@ -121,7 +121,10 @@ def test_sim_clock_readiness_uses_collector_before_secondary_dds_probe():
               'cooperative_regression.py').read_text(encoding='utf-8')
     assert "if args.time_mode == 'sim':" in runner
     assert "source': 'collector_status.json'" in runner
-    assert "else:\n                    clock_ok, clock_details = clock_readiness" in runner
+    assert "else:\n                    clock_ok, clock_details = bounded_readiness_probe" in runner
+    assert 'bounded_readiness_probe' in runner
+    assert "kind, domain, unknown_initial_pose, result_queue" in runner
+    assert 'process.terminate()' in runner
 
 
 def test_shared_activation_receives_native_boolean_scan_matching_parameters():

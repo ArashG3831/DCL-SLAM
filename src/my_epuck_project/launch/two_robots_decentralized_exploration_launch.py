@@ -61,6 +61,14 @@ def launch_setup(context):
         == 'true')
     profile_scan_parameters = dict(
         selected.get('slam_runtime_parameters', {}))
+    # IncludeLaunchDescription arguments are textual launch substitutions, but
+    # the activation controller is an rclpy node whose declared parameters
+    # must retain their native types.  Keep these paths separate so a profile
+    # bool is not serialized as the string ``"true"`` for that node.
+    activation_scan_matching = profile_scan_parameters.get(
+        'use_scan_matching', False)
+    activation_loop_closing = profile_scan_parameters.get(
+        'do_loop_closing', False)
     effective_scan_matching = (
         'true' if profile_scan_parameters.get('use_scan_matching') is True
         else LaunchConfiguration('use_scan_matching'))
@@ -343,8 +351,8 @@ def launch_setup(context):
                 'webots_mode': LaunchConfiguration('webots_mode'),
                 'webots_gui': LaunchConfiguration('webots_gui'),
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'use_scan_matching': effective_scan_matching,
-                'do_loop_closing': effective_loop_closing,
+                'use_scan_matching': activation_scan_matching,
+                'do_loop_closing': activation_loop_closing,
                 'sensor_profile': LaunchConfiguration('sensor_profile'),
                 'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
                 'diagnostic_frontier_capture': LaunchConfiguration(

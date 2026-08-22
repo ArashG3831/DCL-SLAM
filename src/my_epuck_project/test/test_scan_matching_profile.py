@@ -88,6 +88,14 @@ def test_scan_matching_campaign_uses_unknown_pose_and_sim_watchdog():
     assert 'large_unknown_pose_close_start_20ms_scan_matching' in runner
 
 
+def test_shared_activation_receives_native_boolean_scan_matching_parameters():
+    launch = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
+        encoding='utf-8')
+    assert "activation_scan_matching = profile_scan_parameters.get(" in launch
+    assert "'use_scan_matching': activation_scan_matching" in launch
+    assert "'do_loop_closing': activation_loop_closing" in launch
+
+
 def test_scan_matching_profile_preserves_sensor_and_physics_contract():
     value = selected('large_unknown_pose_close_start_20ms_scan_matching')
     content = Path(value['world_path']).read_text(encoding='utf-8')

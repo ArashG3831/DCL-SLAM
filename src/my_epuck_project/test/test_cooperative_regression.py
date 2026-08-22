@@ -15,6 +15,7 @@ from my_epuck_project.cooperative_regression import (
     hold_open_artifacts_valid,
     internal_command,
     manual_rviz_command,
+    manual_rviz_commands,
     mission_timeout_expired,
     parse_log_errors,
     parser,
@@ -267,6 +268,18 @@ def test_manual_rviz_uses_installed_cooperative_config():
     assert command[-2:] == ['-p', 'use_sim_time:=false']
     assert manual_rviz_command('large', use_sim_time=True)[-2:] == [
         '-p', 'use_sim_time:=true']
+
+
+def test_manual_rviz_opens_one_independent_view_per_robot():
+    """Pre-handoff local maps use separate RViz fixed frames."""
+    commands = manual_rviz_commands('large', use_sim_time=True)
+    assert len(commands) == 2
+    assert commands[0][0:2] == ['rviz2', '-d']
+    assert commands[1][0:2] == ['rviz2', '-d']
+    assert 'robot1' in commands[0][2]
+    assert 'robot2' in commands[1][2]
+    assert commands[0][-2:] == ['-p', 'use_sim_time:=true']
+    assert commands[1][-2:] == ['-p', 'use_sim_time:=true']
 
 
 def test_rviz_gui_environment_selects_wslg_xcb_without_software_gl():

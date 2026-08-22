@@ -116,6 +116,14 @@ def test_cleanup_is_exact_campaign_path_owned():
     assert 'campaign_text in command' in runner
 
 
+def test_sim_clock_readiness_uses_collector_before_secondary_dds_probe():
+    runner = (PACKAGE / 'my_epuck_project' /
+              'cooperative_regression.py').read_text(encoding='utf-8')
+    assert "if args.time_mode == 'sim':" in runner
+    assert "source': 'collector_status.json'" in runner
+    assert "else:\n                    clock_ok, clock_details = clock_readiness" in runner
+
+
 def test_shared_activation_receives_native_boolean_scan_matching_parameters():
     launch = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
         encoding='utf-8')

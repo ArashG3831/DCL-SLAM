@@ -1754,18 +1754,29 @@ def internal_trial(args):
                     collector_clock_samples = collector_clock_samples[-8:]
             if readiness_probe_due(
                     args.time_mode, ready, now, last_clock_probe):
-                clock_ok, clock_details = clock_readiness(args.ros_domain_id)
-                if not clock_ok and args.time_mode == 'sim':
+                # The collector is already a participant on the campaign's
+                # exact domain and persists the actual /clock samples.  Use
+                # that bounded source first for simulated runs; a second DDS
+                # participant can block inside Fast DDS discovery even when
+                # the collector is receiving advancing time.
+                if args.time_mode == 'sim':
                     collector_clock_ok, collector_clock_details = (
                         collector_clock_readiness(collector_clock_samples))
                     if collector_clock_ok:
                         clock_ok = True
                         clock_details = {
-                            **clock_details,
+                            'topic': '/clock',
+                            'source': 'collector_status.json',
                             'fallback': collector_clock_details,
                             'reason': 'READY',
-                            'source': 'collector_status.json',
                         }
+                    else:
+                        clock_ok = False
+                        clock_details = collector_clock_details
+                        clock_details['source'] = 'collector_status.json'
+                else:
+                    clock_ok, clock_details = clock_readiness(
+                        args.ros_domain_id)
                 if 'first_clock_probe' not in startup_timeline:
                     mark_startup_stage('first_clock_probe')
                 if clock_details.get('sample_wall_times'):

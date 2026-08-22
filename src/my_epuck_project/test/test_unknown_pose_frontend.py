@@ -194,6 +194,22 @@ def test_descriptor_comparisons_are_queued_and_bounded_per_timer_tick():
     assert "if self.pending_descriptor_pair_keys:" in source
 
 
+def test_keyframe_identity_and_timestamp_are_not_map_revision_identity():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.robot_id = 'robot1'
+    frontend.keyframe_sequence = 0
+    first = frontend._allocate_keyframe_id()
+    second = frontend._allocate_keyframe_id()
+    assert first == 'robot1-00000001'
+    assert second == 'robot1-00000002'
+    assert first != second
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'message.header.stamp = self.get_clock().now().to_msg()' in source
+    assert 'message.map_epoch = self.map_revision' in source
+
+
 def test_rejected_proposal_releases_target_confirmation_latch():
     frontend = object.__new__(UnknownPoseFrontend)
     frontend.robot_id = 'robot2'

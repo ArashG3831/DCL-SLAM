@@ -327,6 +327,7 @@ class UnknownPoseFrontend(Node):
         self.tf_broadcaster = StaticTransformBroadcaster(self)
         self.latest_map = None
         self.map_revision = 0
+        self.keyframe_sequence = 0
         self.last_descriptor_wall = 0.0
         self.keyframes = OrderedDict()
         self.peer_descriptors = OrderedDict()
@@ -637,16 +638,30 @@ class UnknownPoseFrontend(Node):
             center_x=center_x, center_y=center_y,
             size_m=self.crop_size_m, origin_yaw=origin_yaw)
 
+    def _allocate_keyframe_id(self):
+        """Allocate an identity for each materially sampled descriptor.
+
+        ``map_revision`` remains the map epoch, but it is not a keyframe
+        identity: with a slower SLAM publication interval the robot can move
+        and produce new spatial views between two map revisions.
+        """
+        self.keyframe_sequence += 1
+        return f'{self.robot_id}-{self.keyframe_sequence:08d}'
+
     def publish_descriptor(self):
         crop = self._map_crop()
         if crop is None:
             return
         descriptor = polar_descriptor(crop)
         self.descriptor_bytes = len(descriptor)
-        keyframe_id = f'{self.robot_id}-{self.map_revision:08d}'
+        keyframe_id = self._allocate_keyframe_id()
         checksum = descriptor_checksum(descriptor)
         message = LocalMapDescriptor()
-        message.header = self.latest_map.header
+        message.header.frame_id = self.latest_map.header.frame_id
+        # The map epoch identifies the source map revision.  The descriptor
+        # timestamp identifies when this crop/keyframe was actually sampled,
+        # which remains meaningful when SLAM publishes maps less frequently.
+        message.header.stamp = self.get_clock().now().to_msg()
         message.source_robot_id = self.robot_id
         message.keyframe_id = keyframe_id
         message.map_epoch = self.map_revision

@@ -34,7 +34,7 @@ def test_default_layout_orbit_camera_and_tools_are_retained():
     assert panels == [
         'Displays', 'Selection', 'Tool Properties', 'Views', 'Time']
     assert manager['Global Options']['Fixed Frame'] == 'robot1/map'
-    assert manager['Global Options']['Frame Rate'] == 10
+    assert manager['Global Options']['Frame Rate'] == 3
     view = manager['Views']['Current']
     assert view['Class'] == 'rviz_default_plugins/Orbit'
     assert view['Target Frame'] == 'robot1/map'

@@ -479,7 +479,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: robot1/map
-    Frame Rate: 10
+    Frame Rate: 3
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

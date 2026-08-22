@@ -60,6 +60,7 @@ setup(
             'my_epuck_project.cooperative_regression:main',
             'run_cooperative_trial_fast = '
             'my_epuck_project.cooperative_trial_fast:main',
+            'rviz_map_overlay = my_epuck_project.rviz_map_overlay:main',
             'run_cooperative_campaign = '
             'my_epuck_project.cooperative_campaign_wrapper:main',
             'nav2_frontier_diagnostic = '

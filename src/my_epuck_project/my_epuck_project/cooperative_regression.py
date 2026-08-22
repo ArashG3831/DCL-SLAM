@@ -219,27 +219,11 @@ def manual_rviz_command(world_profile='small', use_sim_time=False):
     """Return the installed passive RViz command with explicit ROS time."""
     package = Path(get_package_share_directory('my_epuck_project'))
     selected = profile(world_profile, package / 'worlds')
-    config = manual_rviz_path(
-        selected, package / 'resource', robot='robot1')
+    config = manual_rviz_path(selected, package / 'resource')
     return [
         'rviz2', '-d', str(config), '--ros-args',
         '-p', f'use_sim_time:={str(bool(use_sim_time)).lower()}',
     ]
-
-
-def manual_rviz_commands(world_profile='small', use_sim_time=False):
-    """Return independent pre-handoff RViz views for both robot map frames."""
-    package = Path(get_package_share_directory('my_epuck_project'))
-    selected = profile(world_profile, package / 'worlds')
-    commands = []
-    for robot in ('robot1', 'robot2'):
-        config = manual_rviz_path(
-            selected, package / 'resource', robot=robot)
-        commands.append([
-            'rviz2', '-d', str(config), '--ros-args',
-            '-p', f'use_sim_time:={str(bool(use_sim_time)).lower()}',
-        ])
-    return commands
 
 
 def rviz_gui_environment(environment):
@@ -1626,6 +1610,7 @@ def internal_trial(args):
             'sensor_profile': args.sensor_profile,
             'diagnostic_mode': args.diagnostic_mode,
             'launch_rviz': 'false',
+            'launch_visualization_overlay': args.launch_rviz,
             # The runner owns the mission budget.  The launch file's
             # TimerAction starts at launch time, before controller and
             # odometry readiness, so enabling it here can shut down a slow
@@ -1688,6 +1673,7 @@ def internal_trial(args):
         f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
         'nav2_autostart:=false',
         'launch_rviz:=false',
+        f'launch_visualization_overlay:={str(args.launch_rviz).lower()}',
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         f'use_scan_matching:={str(args.use_scan_matching).lower()}',
@@ -1742,9 +1728,7 @@ def internal_trial(args):
         'collector_command': collector_command,
     })
     rviz = None
-    rviz_secondary = None
     rviz_log = None
-    rviz_secondary_log = None
     rviz_attempted = False
 
     def start_high_rate_diagnostics():
@@ -1781,62 +1765,41 @@ def internal_trial(args):
         atomic_json(attempt / 'runner_metadata.json', metadata)
 
     def start_rviz():
-        nonlocal rviz, rviz_secondary, rviz_log, rviz_secondary_log
-        nonlocal rviz_attempted
+        nonlocal rviz, rviz_log, rviz_attempted
         if not args.launch_rviz or rviz is not None or rviz_attempted:
             return
         rviz_attempted = True
-        rviz_commands = manual_rviz_commands(
+        rviz_command = manual_rviz_command(
             args.world_profile, use_sim_time=args.time_mode == 'sim')
         rviz_environment = rviz_gui_environment(environment)
-        rviz_logs = [
-            (attempt / 'rviz_robot1.log').open('w', encoding='utf-8'),
-            (attempt / 'rviz_robot2.log').open('w', encoding='utf-8'),
-        ]
-        rviz_log, rviz_secondary_log = rviz_logs
+        rviz_log = (attempt / 'rviz.log').open('w', encoding='utf-8')
         metadata['rviz_start_attempted_utc'] = utc_now()
-        metadata['rviz_commands'] = rviz_commands
-        started = []
+        metadata['rviz_command'] = rviz_command
         try:
-            for index, (rviz_command, log) in enumerate(
-                    zip(rviz_commands, rviz_logs)):
-                process = subprocess.Popen(
-                    rviz_command,
-                    env=rviz_environment,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    preexec_fn=lambda: os.setpgid(0, launch.pid),
-                )
-                if index == 0:
-                    rviz = process
-                else:
-                    rviz_secondary = process
-                started.append(process)
-                processes.append(process)
-                rviz_process = psutil.Process(process.pid)
-                rviz_process.cpu_percent(None)
-                ps_processes.append(rviz_process)
-                threading.Thread(
-                    target=activate_rviz_window,
-                    name=f'rviz-window-activation-{index + 1}',
-                    args=(process.pid,), daemon=True).start()
+            rviz = subprocess.Popen(
+                rviz_command,
+                env=rviz_environment,
+                stdout=rviz_log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                preexec_fn=lambda: os.setpgid(0, launch.pid),
+            )
         except OSError as error:
             metadata['rviz_start_error'] = (
                 f'{type(error).__name__}: {error}')
-            for process in started:
-                signal_process(process, signal.SIGTERM)
-            rviz = None
-            rviz_secondary = None
-            for log in rviz_logs:
-                log.close()
+            rviz_log.close()
             rviz_log = None
-            rviz_secondary_log = None
             atomic_json(attempt / 'runner_metadata.json', metadata)
             return
+        processes.append(rviz)
+        rviz_process = psutil.Process(rviz.pid)
+        rviz_process.cpu_percent(None)
+        ps_processes.append(rviz_process)
+        threading.Thread(
+            target=activate_rviz_window, name='rviz-window-activation',
+            args=(rviz.pid,), daemon=True).start()
         metadata.update({
             'rviz_pid': rviz.pid,
-            'rviz_pids': [process.pid for process in started],
             'rviz_started_utc': utc_now(),
             'rviz_start_reason': 'clock_and_stack_readiness',
         })
@@ -2117,13 +2080,10 @@ def internal_trial(args):
                 shutdown_events, 'mission_result_persisted',
                 committed=committed,
                 phase='before_launch_teardown')
-        for name, process in (
-                ('rviz_robot1', rviz), ('rviz_robot2', rviz_secondary)):
-            if process is not None:
-                append_shutdown_event(
-                    shutdown_events, 'signal_sent', process=name,
-                    signal='SIGINT')
-                signal_process(process, signal.SIGINT)
+        if rviz is not None:
+            append_shutdown_event(
+                shutdown_events, 'signal_sent', process='rviz', signal='SIGINT')
+            signal_process(rviz, signal.SIGINT)
         for process in diagnostic_processes:
             append_shutdown_event(
                 shutdown_events, 'signal_sent', process=f'diagnostic_{process.pid}',
@@ -2150,8 +2110,7 @@ def internal_trial(args):
             terminate_succeeded=cleanup['terminate_succeeded'],
             kill_required=cleanup['kill_required'])
         for name, process in (
-                ('collector', collector), ('launch', launch),
-                ('rviz_robot1', rviz), ('rviz_robot2', rviz_secondary)):
+                ('collector', collector), ('launch', launch), ('rviz', rviz)):
             if process is not None:
                 append_shutdown_event(
                     shutdown_events, 'process_exit', process=name,
@@ -2164,8 +2123,6 @@ def internal_trial(args):
         collector_log.close()
         if rviz_log is not None:
             rviz_log.close()
-        if rviz_secondary_log is not None:
-            rviz_secondary_log.close()
         for log in diagnostic_logs:
             log.close()
     orphan_cleanup = terminate_campaign_owned_processes(

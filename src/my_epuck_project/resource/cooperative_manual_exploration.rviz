@@ -51,7 +51,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: true
-      Enabled: true
+      Enabled: false
       Name: Robot1 Shared Map
       Topic:
         Depth: 1
@@ -72,39 +72,39 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: true
       Enabled: true
-      Name: Robot1 Local Map
+      Name: Robot1 Overlay Map
       Topic:
         Depth: 1
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot1/map
+        Value: /viz/robot1_map
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot1/map_updates
+        Value: /viz/robot1_map_updates
       Use Timestamp: false
       Value: true
     - Alpha: 0.85
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: false
-      Name: Robot2 Local Map
+      Enabled: true
+      Name: Robot2 Overlay Map
       Topic:
         Depth: 1
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot2/map
+        Value: /viz/robot2_map
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot2/map_updates
+        Value: /viz/robot2_map_updates
       Use Timestamp: false
       Value: true
     - Alpha: 0.5
@@ -142,14 +142,14 @@ Visualization Manager:
       Update Interval: 0
       Value: false
     - Class: rviz_default_plugins/Axes
-      Enabled: true
+      Enabled: false
       Length: 0.14
       Name: Robot1 Pose Axes
       Radius: 0.01
       Reference Frame: robot1/base_link
       Value: true
     - Class: rviz_default_plugins/Axes
-      Enabled: true
+      Enabled: false
       Length: 0.14
       Name: Robot2 Pose Axes
       Radius: 0.01
@@ -478,8 +478,8 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: robot1/map
-    Frame Rate: 1
+    Fixed Frame: viz/world
+    Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact
@@ -510,7 +510,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.01
       Pitch: 0.65
-      Target Frame: robot1/map
+      Target Frame: viz/world
       Value: Orbit (rviz)
       Yaw: 0.65
     Saved: ~

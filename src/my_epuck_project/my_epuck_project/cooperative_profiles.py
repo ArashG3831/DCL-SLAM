@@ -507,15 +507,12 @@ def profile_summary(value):
     }
 
 
-def manual_rviz_path(value, resource_directory, robot='robot1'):
-    """Return an RViz preset scoped to one robot's independent map frame."""
+def manual_rviz_path(value, resource_directory):
+    """Return the installed passive RViz preset for the selected profile."""
     source = Path(resource_directory) / value['rviz']
-    if value['name'] == 'small' and robot == 'robot1':
+    if value['name'] == 'small':
         return str(source)
-    view = value.get('rviz_view', {
-        'distance': 3, 'focal_x': -0.15,
-        'focal_y': 0, 'focal_z': 0,
-    })
+    view = value['rviz_view']
     content = source.read_text(encoding='utf-8')
     replacements = {
         '      Distance: 3\n': (
@@ -531,36 +528,8 @@ def manual_rviz_path(value, resource_directory, robot='robot1'):
         if old not in content:
             raise ValueError(f'RViz Orbit template is missing {old.strip()!r}')
         content = content.replace(old, new, 1)
-    frame = f'{robot}/map'
-    content = re.sub(
-        r'    Fixed Frame: [^\n]+\n',
-        f'    Fixed Frame: {frame}\n', content, count=1)
-    content = re.sub(
-        r'      Target Frame: [^\n]+\n',
-        f'      Target Frame: {frame}\n', content, count=1)
-
-    def set_display_enabled(name, enabled):
-        nonlocal content
-        lines = content.splitlines(keepends=True)
-        for index, line in enumerate(lines):
-            if line != f'      Name: {name}\n':
-                continue
-            start = index
-            while start > 0 and not lines[start].startswith('    - '):
-                start -= 1
-            for cursor in range(start, index):
-                if lines[cursor].startswith('      Enabled: '):
-                    lines[cursor] = (
-                        f'      Enabled: {str(enabled).lower()}\n')
-                    content = ''.join(lines)
-                    return
-            raise ValueError(f'RViz display {name!r} has no Enabled field')
-        raise ValueError(f'RViz display {name!r} is missing')
-
-    set_display_enabled('Robot1 Local Map', robot == 'robot1')
-    set_display_enabled('Robot2 Local Map', robot == 'robot2')
     destination = (
         Path(tempfile.gettempdir())
-        / f'my_epuck_cooperative_manual_exploration_{robot}_large.rviz')
+        / 'my_epuck_cooperative_manual_exploration_large.rviz')
     destination.write_text(content, encoding='utf-8')
     return str(destination)

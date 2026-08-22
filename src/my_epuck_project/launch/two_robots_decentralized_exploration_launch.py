@@ -59,6 +59,41 @@ def launch_setup(context):
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()
         == 'true')
+    visualization_overlay_nodes = []
+    if (LaunchConfiguration('launch_visualization_overlay').perform(context)
+            .lower() == 'true'):
+        visualization_overlay_nodes.append(Node(
+            package='my_epuck_project',
+            executable='rviz_map_overlay',
+            name='rviz_map_overlay',
+            output='screen',
+            parameters=[{
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'viz_world_frame': 'viz/world',
+                'robot1_map_topic': '/robot1/map',
+                'robot2_map_topic': '/robot2/map',
+                'robot1_output_topic': '/viz/robot1_map',
+                'robot2_output_topic': '/viz/robot2_map',
+                'robot1_alias_frame': 'viz/robot1_map',
+                'robot2_alias_frame': 'viz/robot2_map',
+                'robot1_offset_x_m': LaunchConfiguration(
+                    'visualization_robot1_offset_x_m'),
+                'robot1_offset_y_m': LaunchConfiguration(
+                    'visualization_robot1_offset_y_m'),
+                'robot1_offset_z_m': LaunchConfiguration(
+                    'visualization_robot1_offset_z_m'),
+                'robot1_offset_yaw_rad': LaunchConfiguration(
+                    'visualization_robot1_offset_yaw_rad'),
+                'robot2_offset_x_m': LaunchConfiguration(
+                    'visualization_robot2_offset_x_m'),
+                'robot2_offset_y_m': LaunchConfiguration(
+                    'visualization_robot2_offset_y_m'),
+                'robot2_offset_z_m': LaunchConfiguration(
+                    'visualization_robot2_offset_z_m'),
+                'robot2_offset_yaw_rad': LaunchConfiguration(
+                    'visualization_robot2_offset_yaw_rad'),
+            }],
+        ))
     profile_scan_parameters = dict(
         selected.get('slam_runtime_parameters', {}))
     # IncludeLaunchDescription arguments are textual launch substitutions, but
@@ -474,9 +509,10 @@ def launch_setup(context):
         f'staged_sha256={staged_world_sha256}'))
     if unknown_initial_pose:
         return [profile_log, unknown_local_mapping, *unknown_pose_frontends,
-                *local_phase_nodes, shared_activation, *frontend_watchdogs,
+                *local_phase_nodes, *visualization_overlay_nodes,
+                shared_activation, *frontend_watchdogs,
                 observer]
-    return [profile_log, assignment, observer]
+    return [profile_log, assignment, *visualization_overlay_nodes, observer]
 
 
 def generate_launch_description():
@@ -544,6 +580,25 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('launch_rviz', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('launch_visualization_overlay',
+                              default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('visualization_robot1_offset_x_m',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot1_offset_y_m',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot1_offset_z_m',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot1_offset_yaw_rad',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot2_offset_x_m',
+                              default_value='25.0'),
+        DeclareLaunchArgument('visualization_robot2_offset_y_m',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot2_offset_z_m',
+                              default_value='0.0'),
+        DeclareLaunchArgument('visualization_robot2_offset_yaw_rad',
+                              default_value='0.0'),
         DeclareLaunchArgument('logger_console_status', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('enable_rosout_collection', default_value='true',

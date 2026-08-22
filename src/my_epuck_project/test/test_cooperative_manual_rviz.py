@@ -33,11 +33,11 @@ def test_default_layout_orbit_camera_and_tools_are_retained():
     panels = [panel['Name'] for panel in config['Panels']]
     assert panels == [
         'Displays', 'Selection', 'Tool Properties', 'Views', 'Time']
-    assert manager['Global Options']['Fixed Frame'] == 'robot1/map'
-    assert manager['Global Options']['Frame Rate'] == 1
+    assert manager['Global Options']['Fixed Frame'] == 'viz/world'
+    assert manager['Global Options']['Frame Rate'] == 10
     view = manager['Views']['Current']
     assert view['Class'] == 'rviz_default_plugins/Orbit'
-    assert view['Target Frame'] == 'robot1/map'
+    assert view['Target Frame'] == 'viz/world'
     assert 2.5 <= view['Distance'] <= 3.5
     assert 'TopDownOrtho' not in CONFIG.read_text(encoding='utf-8')
     tools = {tool['Class'] for tool in manager['Tools']}
@@ -62,15 +62,14 @@ def test_clean_robot_pose_axes_replace_initial_full_tf_tree():
     enabled = {
         display['Name'] for display in displays if display['Enabled']}
     assert enabled == {
-        'Robot1 Shared Map', 'Robot1 Local Map',
-        'Robot1 Pose Axes', 'Robot2 Pose Axes',
+        'Robot1 Overlay Map', 'Robot2 Overlay Map',
     }
     assert by_name['Grid']['Enabled'] is False
     assert by_name['Grid']['Value'] is False
-    assert by_name['Robot1 Local Map']['Topic']['Value'] == '/robot1/map'
-    assert by_name['Robot1 Local Map']['Enabled'] is True
-    assert by_name['Robot2 Local Map']['Topic']['Value'] == '/robot2/map'
-    assert by_name['Robot2 Local Map']['Enabled'] is False
+    assert by_name['Robot1 Overlay Map']['Topic']['Value'] == '/viz/robot1_map'
+    assert by_name['Robot1 Overlay Map']['Enabled'] is True
+    assert by_name['Robot2 Overlay Map']['Topic']['Value'] == '/viz/robot2_map'
+    assert by_name['Robot2 Overlay Map']['Enabled'] is True
     transform = by_name['TF']
     assert transform['Class'] == 'rviz_default_plugins/TF'
     assert transform['Enabled'] is False
@@ -84,12 +83,26 @@ def test_clean_robot_pose_axes_replace_initial_full_tf_tree():
     for name, frame in expected_frames.items():
         axes = by_name[name]
         assert axes['Class'] == 'rviz_default_plugins/Axes'
-        assert axes['Enabled'] is True
+        assert axes['Enabled'] is False
         assert axes['Reference Frame'] == frame
         assert 0.12 <= axes['Length'] <= 0.15
         assert 0.008 <= axes['Radius'] <= 0.012
     assert by_name['Robot1 Model']['Enabled'] is False
     assert by_name['Robot2 Model']['Enabled'] is False
+
+
+def test_single_rviz_preset_has_two_visualization_map_displays():
+    """One RViz process can render both aliased local maps."""
+    manager = configuration()['Visualization Manager']
+    enabled_maps = [
+        display for display in manager['Displays']
+        if display['Class'] == 'rviz_default_plugins/Map'
+        and display['Enabled']
+    ]
+    assert len(enabled_maps) == 2
+    assert {display['Topic']['Value'] for display in enabled_maps} == {
+        '/viz/robot1_map', '/viz/robot2_map'}
+    assert manager['Global Options']['Fixed Frame'] == 'viz/world'
 
 
 def test_namespaced_optional_display_topics_are_exact():
@@ -104,8 +117,8 @@ def test_namespaced_optional_display_topics_are_exact():
     assert topics == {
         'Robot1 Shared Map': '/robot1/shared_map_visualization',
         'Robot2 Shared Map': '/robot2/shared_map_visualization',
-        'Robot1 Local Map': '/robot1/map',
-        'Robot2 Local Map': '/robot2/map',
+        'Robot1 Overlay Map': '/viz/robot1_map',
+        'Robot2 Overlay Map': '/viz/robot2_map',
         'Robot1 LaserScan': '/robot1/scan_d500_fixed',
         'Robot2 LaserScan': '/robot2/scan_d500_fixed',
         'Robot1 Global Costmap': '/robot1/global_costmap/costmap',
@@ -127,7 +140,7 @@ def test_namespaced_optional_display_topics_are_exact():
         display for display in displays
         if display['Name'] not in {
             'Grid', 'Robot1 Shared Map', 'Robot2 Shared Map',
-            'Robot1 Local Map', 'Robot2 Local Map',
+            'Robot1 Overlay Map', 'Robot2 Overlay Map',
             'Robot1 Pose Axes', 'Robot2 Pose Axes',
         }]
     assert all(display['Enabled'] is False for display in optional)

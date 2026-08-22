@@ -1,7 +1,10 @@
 """Deterministic tests for the Webots controller startup contract."""
 
+import subprocess
+
 from my_epuck_project.controller_readiness_gate import active_required
 from my_epuck_project.controller_startup_guard import (
+    ControllerStartupGuard,
     controller_action,
     manager_state_available,
     spawner_ros_home,
@@ -37,3 +40,29 @@ def test_controller_spawners_use_independent_campaign_owned_ros_homes():
 def test_startup_waits_for_manager_services_before_spawning():
     assert not manager_state_available(None)
     assert manager_state_available({})
+
+
+def test_standard_spawner_timeout_returns_to_bounded_retry(monkeypatch):
+    """A wedged child spawner must not deadlock the startup guard."""
+    guard = object.__new__(ControllerStartupGuard)
+    guard.controller_name = 'diffdrive_controller'
+    guard.manager = '/robot1/controller_manager'
+    guard.param_file = ''
+    guard.controller_ros_args = ''
+    guard.service_timeout_s = 0.2
+
+    class Logger:
+        def info(self, message):
+            del message
+
+        def warning(self, message):
+            del message
+
+    guard.get_logger = lambda: Logger()
+
+    def blocked(*args, **kwargs):
+        del args, kwargs
+        raise subprocess.TimeoutExpired('spawner', 0.2)
+
+    monkeypatch.setattr(subprocess, 'run', blocked)
+    assert guard.invoke_standard_spawner() is False

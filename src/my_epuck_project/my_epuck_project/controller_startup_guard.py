@@ -117,7 +117,19 @@ class ControllerStartupGuard(Node):
             f'(attempted standard spawner): {self.manager}')
         child_env = os.environ.copy()
         child_env['ROS_HOME'] = spawner_ros_home(self.manager)
-        completed = subprocess.run(command, check=False, env=child_env)
+        # A spawner can otherwise wait forever for a partially-started
+        # controller manager, preventing the guard from retrying and blocking
+        # the campaign readiness gate.  Bound this child by the same service
+        # budget used for manager calls; no controller state is synthesized.
+        try:
+            completed = subprocess.run(
+                command, check=False, env=child_env,
+                timeout=self.service_timeout_s + 1.0)
+        except subprocess.TimeoutExpired:
+            self.get_logger().warning(
+                f'Standard spawner timed out for {self.manager}; '
+                'returning control to the bounded retry loop')
+            return False
         return completed.returncode == 0
 
     def configure(self):

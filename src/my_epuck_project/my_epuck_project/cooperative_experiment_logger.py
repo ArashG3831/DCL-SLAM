@@ -876,6 +876,14 @@ class CooperativeExperimentLogger(Node):
         direct = self.directory / 'frontend'
         candidates = [direct]
         parent = self.directory.parent
+        # The launch runner deliberately creates the frontend directory before
+        # the logger allocates its collision-safe run directory.  In that
+        # normal case the files live directly under the observer root (for
+        # example ``observer/frontend``), while ``self.directory`` is
+        # ``observer/<run-id>``.  Include that root-level location explicitly;
+        # treating only run-directory siblings as candidates makes a valid
+        # frontend artifact set look missing at shutdown.
+        candidates.append(parent / 'frontend')
         try:
             siblings = sorted(parent.iterdir(), key=lambda path: path.name)
         except OSError:

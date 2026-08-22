@@ -280,6 +280,25 @@ def test_unknown_pose_artifacts_resolve_unsuffixed_frontend_run(observer):
     assert status['frontend_directory'] == f'{base_run_id}/frontend'
 
 
+def test_unknown_pose_artifacts_resolve_frontend_created_at_observer_root(observer):
+    """The runner may create observer/frontend before logger run allocation."""
+    observer.p['initial_configuration_json'] = json.dumps({
+        'unknown_initial_pose': True,
+    })
+    frontend = observer.directory.parent / 'frontend'
+    frontend.mkdir(parents=True)
+    for robot in ('robot1', 'robot2'):
+        for suffix in (
+                'unknown_pose_frontend.json',
+                'consensus_diagnostics.jsonl',
+                'physical_evidence_diagnostics.jsonl'):
+            (frontend / f'{robot}_{suffix}').write_text('{}\n')
+    status = observer.required_artifact_status(False)
+    assert status['complete'] is True
+    assert status['missing'] == []
+    assert status['frontend_directory'] == 'frontend'
+
+
 def test_no_handoff_does_not_require_shared_map_exports(observer):
     """Shared exports are required only after a shared-map topic is seen."""
     class PassiveForensic:

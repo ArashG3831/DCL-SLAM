@@ -565,18 +565,24 @@ def clock_readiness(domain, timeout_s=4.0):
             os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
-def tf_readiness_requirements():
-    """Return the namespaced TF edges required before Nav2 startup."""
+def tf_readiness_requirements(unknown_initial_pose=False):
+    """Return the TF edges required before Nav2 startup.
+
+    Unknown-pose runs intentionally have no shared frame before the canonical
+    handoff.  Requiring that post-handoff edge here makes readiness impossible.
+    """
     required = []
     for robot in ('robot1', 'robot2'):
-        required.extend([
-            (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'),
-            ('shared_map', f'{robot}/base_footprint', 'shared_to_base'),
-        ])
+        required.append(
+            (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'))
+        if not unknown_initial_pose:
+            required.append(
+                ('shared_map', f'{robot}/base_footprint', 'shared_to_base'))
     return required
 
 
-def tf_readiness(domain, timeout_s=TF_READINESS_TIMEOUT_S):
+def tf_readiness(
+        domain, timeout_s=TF_READINESS_TIMEOUT_S, unknown_initial_pose=False):
     """Verify odometry and the global transforms required by costmaps."""
     started = time.monotonic()
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
@@ -610,7 +616,7 @@ def tf_readiness(domain, timeout_s=TF_READINESS_TIMEOUT_S):
             durability=DurabilityPolicy.VOLATILE)
         for robot in ('robot1', 'robot2'):
             odom_received[robot] = False
-        required = tf_readiness_requirements()
+        required = tf_readiness_requirements(unknown_initial_pose)
         details['requested_transforms'] = [
             {'target': target, 'source': source, 'role': role}
             for target, source, role in required]
@@ -1697,7 +1703,9 @@ def internal_trial(args):
                     if mission_sim_start is None:
                         mission_sim_start = status.get('elapsed_s', 0.0)
                         metadata['clock_sim_start'] = mission_sim_start
-                    tf_ok, tf_details = tf_readiness(args.ros_domain_id)
+                    tf_ok, tf_details = tf_readiness(
+                        args.ros_domain_id,
+                        unknown_initial_pose=args.unknown_initial_pose)
                     metadata['tf_readiness'] = tf_details
                     if tf_ok and not nav2_started:
                         startup_budget = max(

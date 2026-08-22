@@ -1,6 +1,7 @@
 from my_epuck_project.cooperative_regression import (
     lifecycle_startup_action,
     mission_infrastructure_ready,
+    tf_readiness_requirements,
 )
 
 
@@ -32,6 +33,15 @@ def test_unknown_pose_readiness_does_not_require_prehandoff_fusion():
     ]
     assert mission_infrastructure_ready(True, True, True, nodes, True)
     assert not mission_infrastructure_ready(True, True, True, NODES, True)
+
+
+def test_unknown_pose_tf_readiness_requires_only_local_odom_chain():
+    requirements = tf_readiness_requirements(unknown_initial_pose=True)
+    assert requirements == [
+        ('robot1/base_footprint', 'robot1/odom', 'odom_to_base'),
+        ('robot2/base_footprint', 'robot2/odom', 'odom_to_base'),
+    ]
+    assert len(tf_readiness_requirements()) == 4
 
 
 def test_active_manager_is_observed_without_reissuing_startup():

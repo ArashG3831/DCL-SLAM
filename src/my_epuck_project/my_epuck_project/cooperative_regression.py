@@ -1225,7 +1225,7 @@ def required_observer_artifacts(directory):
     }
 
 
-def persisted_local_tf_readiness(attempt, run_id):
+def persisted_local_tf_readiness(attempt, run_id, unknown_initial_pose=False):
     """Use the campaign logger's TF samples when a probe participant misses DDS.
 
     The logger is already on the campaign graph and records the exact local
@@ -1236,7 +1236,8 @@ def persisted_local_tf_readiness(attempt, run_id):
     """
     path = (observer_directory(attempt, run_id) / 'forensic' /
             'transforms.csv')
-    available = set()
+    available_odom = set()
+    available_local_map = set()
     try:
         with path.open(newline='', encoding='utf-8') as stream:
             for row in csv.DictReader(stream):
@@ -1247,14 +1248,21 @@ def persisted_local_tf_readiness(attempt, run_id):
                 for robot in ('robot1', 'robot2'):
                     if (target == f'{robot}/odom'
                             and source == f'{robot}/base_footprint'):
-                        available.add(robot)
+                        available_odom.add(robot)
+                    if (unknown_initial_pose
+                            and target == f'{robot}/map'
+                            and source == f'{robot}/base_footprint'):
+                        available_local_map.add(robot)
     except (OSError, csv.Error):
         pass
-    ready = available == {'robot1', 'robot2'}
+    ready = available_odom == {'robot1', 'robot2'}
+    if unknown_initial_pose:
+        ready = ready and available_local_map == {'robot1', 'robot2'}
     return ready, {
         'source': 'campaign_logger_transforms.csv',
         'path': str(path),
-        'available_local_odom_chains': sorted(available),
+        'available_local_odom_chains': sorted(available_odom),
+        'available_local_map_chains': sorted(available_local_map),
         'reason': 'READY' if ready else 'LOCAL_TF_SAMPLES_INCOMPLETE',
     }
 
@@ -2027,7 +2035,8 @@ def internal_trial(args):
                     if not tf_ok:
                         persisted_ok, persisted_details = (
                             persisted_local_tf_readiness(
-                                attempt, args.run_id))
+                                attempt, args.run_id,
+                                unknown_initial_pose=args.unknown_initial_pose))
                         if persisted_ok:
                             tf_ok = True
                             tf_details = {

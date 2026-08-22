@@ -102,6 +102,13 @@ def test_full_exploration_logger_has_bounded_lossless_shutdown_window():
     assert "sigkill_timeout='30.0'" in source
 
 
+def test_logger_waits_for_frontend_files_before_freezing_artifact_contract():
+    source = (LAUNCH.parent / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert 'def wait_for_frontend_diagnostics' in source
+    assert 'self.wait_for_frontend_diagnostics()' in source
+
+
 def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
     source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
     text = source.read_text(encoding='utf-8')

@@ -933,6 +933,34 @@ class CooperativeExperimentLogger(Node):
                 sum((path / name).is_file() for name in required_names),
                 int(path == direct)),
         )
+
+    def wait_for_frontend_diagnostics(self, timeout_s=30.0):
+        """Allow frontend SIGINT handlers to finish before final validation."""
+        try:
+            unknown_pose = bool(json.loads(
+                self.p['initial_configuration_json']).get(
+                    'unknown_initial_pose', False))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown_pose = False
+        if not unknown_pose:
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        names = [
+            f'{robot}_{suffix}'
+            for robot in self.robots
+            for suffix in (
+                'unknown_pose_frontend.json',
+                'consensus_diagnostics.jsonl',
+                'physical_evidence_diagnostics.jsonl')]
+        while time.monotonic() < deadline:
+            directory = self.frontend_diagnostic_directory()
+            if all((directory / name).is_file() for name in names):
+                return True
+            time.sleep(0.25)
+        return all(
+            (self.frontend_diagnostic_directory() / name).is_file()
+            for name in names)
+
     @staticmethod
     def runtime_worktree():
         """Find the checkout that supplied this running package."""
@@ -1115,6 +1143,11 @@ class CooperativeExperimentLogger(Node):
         self.flush()
         successful=False
         try:
+            # ROS launch signals all children concurrently.  Frontend
+            # finalizers therefore need a bounded opportunity to close their
+            # JSON/JSONL streams before this observer freezes the artifact
+            # contract; otherwise a valid late file is recorded as missing.
+            self.wait_for_frontend_diagnostics()
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]

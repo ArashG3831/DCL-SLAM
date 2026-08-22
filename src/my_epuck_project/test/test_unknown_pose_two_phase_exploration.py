@@ -120,7 +120,9 @@ def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
 def test_unknown_mode_does_not_include_shared_assignment_before_handoff():
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
     assert "return [profile_log, unknown_local_mapping" in full
-    assert "return [profile_log, assignment, observer]" in full
+    assert "return [profile_log, assignment," in full
+    assert "*visualization_overlay_nodes" in full
+    assert "observer]" in full
     assert "'launch_shared_stack': 'false'" in full
 
 

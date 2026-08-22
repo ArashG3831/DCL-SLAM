@@ -730,7 +730,12 @@ def _readiness_worker(kind, domain, unknown_initial_pose, result_queue):
 def bounded_readiness_probe(kind, domain, unknown_initial_pose=False,
                             timeout_s=15.0):
     """Bound DDS waits without allowing a probe to freeze the runner."""
-    context = multiprocessing.get_context('fork')
+    # Do not fork after rclpy/DDS has initialized in the runner.  A forked
+    # child can inherit DDS threads and deadlock while constructing its TF2
+    # listener, producing a false readiness timeout even when the campaign is
+    # publishing valid odom->base transforms.  A fresh interpreter keeps the
+    # probe isolated without inheriting ROS middleware state.
+    context = multiprocessing.get_context('spawn')
     result_queue = context.Queue(maxsize=1)
     process = context.Process(
         target=_readiness_worker,
@@ -841,6 +846,34 @@ def get_nav2_lifecycle_states(
     return True, states
 
 
+def lifecycle_nodes_are_active(
+        node, executor, robot, timeout_s, unknown_initial_pose=False):
+    """Detect an already-autostarted local Nav2 stack before STARTUP.
+
+    Unknown-pose manual launches keep local Nav2 autostart enabled so local
+    exploration can begin before handoff.  In that mode, sending a second
+    lifecycle-manager STARTUP request is rejected even though the stack is
+    healthy.  Read the managed node states first and distinguish that benign
+    race from a genuinely inactive stack.
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    states = {}
+    for node_name in nav2_node_names(unknown_initial_pose):
+        client = node.create_client(
+            GetState, f'/{robot}/{node_name}/get_state')
+        remaining = max(0.0, deadline - time.monotonic())
+        if not client.wait_for_service(timeout_sec=remaining):
+            return False
+        future = client.call_async(GetState.Request())
+        while not future.done() and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.05)
+        if not future.done():
+            return False
+        response = future.result()
+        states[node_name] = str(response.current_state.label)
+    return bool(states) and all(label == 'active' for label in states.values())
+
+
 def activate_nav2(
         domain, timeout_s=10.0, startup_state=None,
         unknown_initial_pose=False):
@@ -878,6 +911,12 @@ def activate_nav2(
                     details['services'][robot] = 'ALREADY_ACTIVE'
                     continue
                 robot_started = time.monotonic()
+                if lifecycle_nodes_are_active(
+                        node, executor, robot,
+                        min(5.0, timeout_s), unknown_initial_pose=True):
+                    startup_state[robot] = 'ACTIVE'
+                    details['services'][robot] = 'ALREADY_ACTIVE'
+                    continue
                 manager_prefix = (
                     f'/{robot}/{nav2_manager_name(unknown_initial_pose)}')
                 service = f'{manager_prefix}/manage_nodes'
@@ -1179,6 +1218,37 @@ def required_observer_artifacts(directory):
     }
 
 
+def handoff_observed(attempt, run_id):
+    """Return whether runtime evidence requires shared-map artifacts.
+
+    Local-only unknown-pose runs intentionally have no shared-map exports.  A
+    frontend handoff counter or an observer peer-map receipt is the durable
+    boundary that turns those exports into a required post-handoff contract.
+    """
+    if any((attempt / f'{robot}_final_shared_map.npz').is_file()
+           for robot in ('robot1', 'robot2')):
+        return True
+    observer = observer_directory(attempt, run_id)
+    frontend = observer.parent / 'frontend'
+    for path in sorted(frontend.glob('*_unknown_pose_frontend.json')):
+        try:
+            counters = json.loads(path.read_text(encoding='utf-8')).get(
+                'counters', {})
+        except (OSError, ValueError, TypeError):
+            continue
+        if any(int(counters.get(name, 0) or 0) > 0 for name in (
+                'tf_handoffs', 'merge_handoff_started',
+                'accepted_hypotheses')):
+            return True
+    try:
+        manifest = json.loads(
+            (observer / 'forensic' / 'manifest.json').read_text(
+                encoding='utf-8'))
+        return int(manifest.get('accepted_peer_map_count', 0) or 0) > 0
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def post_completion_evidence(
         attempt, final_state, settled_observed, cleanup, process_exit_codes):
     """Return evidence that completion preceded an artifact-only shutdown issue.
@@ -1311,6 +1381,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
             (observer / 'summary.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         pass
+    shared_maps_required = handoff_observed(attempt, run_id)
     log_review = parse_log_errors(attempt / 'launch.log')
     completion_fallback = post_completion_evidence(
         attempt, final_state, settled_observed, cleanup, process_exit_codes)
@@ -1334,7 +1405,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         # A bounded diagnostic deliberately ends the attempt after a healthy
         # simulated interval; it is not a runtime failure.
         classification = 'BOUNDED_DIAGNOSTIC'
-    elif final_state is None or not maps_valid or not all(
+    elif final_state is None or (shared_maps_required and not maps_valid) or not all(
             observer_files.values()):
         classification = (
             'MISSION_COMPLETE' if completion_fallback
@@ -1397,6 +1468,7 @@ def classify_attempt(attempt, run_id, ready, timed_out, unexpected_exit,
         'unexpected_exit': unexpected_exit,
         'settled_observed': settled_observed,
         'map_validation_errors': map_errors,
+        'shared_maps_required': shared_maps_required,
         'observer_artifacts': observer_files,
         'observer_summary_path': str(
             Path('observer') / observer.name / 'summary.json'),
@@ -2199,8 +2271,9 @@ def validate_existing_attempt(path):
         if metadata.get('classification') == 'INFRASTRUCTURE_FAILURE':
             return False
         json.loads((path / 'final_state.json').read_text(encoding='utf-8'))
-        load_map(path / 'robot1_final_shared_map.npz')
-        load_map(path / 'robot2_final_shared_map.npz')
+        if handoff_observed(path, metadata.get('run_id', path.name)):
+            load_map(path / 'robot1_final_shared_map.npz')
+            load_map(path / 'robot2_final_shared_map.npz')
     except (OSError, ValueError, KeyError):
         return False
     return True

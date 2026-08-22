@@ -13,6 +13,7 @@ from my_epuck_project.cooperative_regression import (
     detect_slam_filter_output_stall,
     execute_attempt,
     hold_open_artifacts_valid,
+    handoff_observed,
     internal_command,
     manual_rviz_command,
     mission_timeout_expired,
@@ -692,6 +693,32 @@ def test_campaign_report_does_not_require_shared_maps_without_handoff(tmp_path):
     assert result['failure_count'] == 0
     assert (tmp_path / 'campaign_report.md').is_file()
     assert not (attempt / 'robot1_final_shared_map.npz').exists()
+
+
+def test_runner_does_not_require_shared_maps_without_handoff(tmp_path):
+    """Runner validation accepts a complete local-only diagnostic attempt."""
+    trial, attempt = create_attempt(
+        tmp_path, 1, classification='BOUNDED_DIAGNOSTIC')
+    (attempt / 'robot1_final_shared_map.npz').unlink()
+    (attempt / 'robot2_final_shared_map.npz').unlink()
+    metadata = json.loads(
+        (attempt / 'runner_metadata.json').read_text(encoding='utf-8'))
+    assert handoff_observed(attempt, metadata['run_id']) is False
+    assert validate_existing_attempt(attempt)
+
+
+def test_runner_requires_shared_maps_after_handoff(tmp_path):
+    """A recorded handoff retains the shared-map artifact contract."""
+    trial, attempt = create_attempt(
+        tmp_path, 1, classification='BOUNDED_DIAGNOSTIC')
+    (attempt / 'robot1_final_shared_map.npz').unlink()
+    (attempt / 'robot2_final_shared_map.npz').unlink()
+    frontend = attempt / 'observer' / 'frontend'
+    frontend.mkdir(parents=True, exist_ok=True)
+    (frontend / 'robot1_unknown_pose_frontend.json').write_text(
+        json.dumps({'counters': {'tf_handoffs': 1}}), encoding='utf-8')
+    assert handoff_observed(attempt, attempt.name) is True
+    assert not validate_existing_attempt(attempt)
 
 
 def test_campaign_exit_requires_mission_completion_not_only_clean_cleanup():

@@ -46,6 +46,7 @@ from .distributed_assignment.models import (
     CoordinatorState,
     FailureClass,
     PairDecision,
+    PhysicalTask,
     TaskSnapshot,
 )
 from .distributed_assignment.protocol import (
@@ -143,6 +144,27 @@ FAILURE_TO_MESSAGE = {
     FailureClass.EXPLICIT_CANCELLATION: ExplorationFailure.EXPLICIT_CANCELLATION,
     FailureClass.UNKNOWN: ExplorationFailure.UNKNOWN,
 }
+
+
+def eligible_solo_tasks(
+        tasks: tuple[PhysicalTask, ...],
+        hard_failure_signatures: set[str],
+        completed_signatures: set[str],
+        minimum_visible_gain_m: float,
+        minimum_ordering_score: float,
+        maximum_path_m: float) -> tuple[PhysicalTask, ...]:
+    """Return locally dispatchable tasks after bounded physical suppression."""
+    return tuple(
+        task for task in tasks
+        if task.physical_signature not in hard_failure_signatures
+        and task.physical_signature not in completed_signatures
+        and task.visible_reveal_gain >= minimum_visible_gain_m
+        and task.local_ordering_score >= minimum_ordering_score
+        and (
+            task.local_path_length_m <= 0.0 or
+            task.local_path_length_m <= maximum_path_m
+        )
+    )
 
 
 class DistributedFrontierAssignment(Node):
@@ -301,6 +323,11 @@ class DistributedFrontierAssignment(Node):
         # same physical signature.  The duration escalates for repeated hard
         # evidence, while transient classes never enter this table.
         self._hard_failure_counts: dict[str, int] = {}
+        # A successfully completed local-only frontier remains suppressed
+        # while the generator continues to publish the same physical region.
+        # Without this bounded set, resetting the semantic snapshot key after
+        # every success can immediately redispatch a tiny residual frontier.
+        self._completed_solo_physical_signatures: set[str] = set()
         # Diagnostics-only counters.  These do not alter eligibility or
         # suppression; they separate structural controller failures from
         # transient TF/infrastructure failures for forensic replay.
@@ -1341,15 +1368,20 @@ class DistributedFrontierAssignment(Node):
         )
         if self._last_solo_snapshot_key == key:
             return
-        candidates = tuple(
-            task for task in snapshot.tasks
-            if task.physical_signature not in self._hard_failure_signatures
-            and task.visible_reveal_gain >= self._minimum_solo_visible_gain_m
-            and task.local_ordering_score >= self._minimum_solo_ordering_score
-            and (
-                task.local_path_length_m <= 0.0 or
-                task.local_path_length_m <= self._maximum_solo_path_m
-            )
+        live_signatures = {
+            item.physical_signature for item in snapshot.tasks
+            if item.physical_signature
+        }
+        self._completed_solo_physical_signatures.intersection_update(
+            live_signatures
+        )
+        candidates = eligible_solo_tasks(
+            snapshot.tasks,
+            self._hard_failure_signatures,
+            self._completed_solo_physical_signatures,
+            self._minimum_solo_visible_gain_m,
+            self._minimum_solo_ordering_score,
+            self._maximum_solo_path_m,
         )
         self._last_solo_snapshot_key = key
         if not candidates:
@@ -1832,6 +1864,15 @@ class DistributedFrontierAssignment(Node):
                 nav2_error_code=outcome.error_code,
                 nav2_error_message=outcome.error_message,
                 nav2_error_name=outcome.nav2_error_name,
+            )
+        elif self._active_task is not None:
+            # Suppress only the exact physical region that just succeeded.
+            # A later disappearance from the snapshot permits it to be
+            # reconsidered; unchanged residual fragments cannot churn goals.
+            self._completed_solo_physical_signatures.update(
+                member.physical_signature
+                for member in self._active_task.members
+                if member.physical_signature
             )
         self._active_task = None
         self._active_round_id = ''

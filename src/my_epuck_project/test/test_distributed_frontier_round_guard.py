@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from my_epuck_project.distributed_assignment.models import Bounds, PhysicalTask
+from my_epuck_project.distributed_frontier_assignment import eligible_solo_tasks
 
 SOURCE = Path(__file__).parents[1] / 'my_epuck_project' / (
     'distributed_frontier_assignment.py'
@@ -15,3 +17,23 @@ def test_tick_owns_a_local_round_and_abandons_replaced_rounds():
     assert 'if round_work is None:' in text
     assert 'self._round_is_current(round_work, generation)' in text
     assert 'self._round_lifecycle.generation' in text
+
+
+def test_successful_physical_frontier_is_not_redispatched_while_present():
+    """A tiny successful residual must not cause same-task goal churn."""
+    completed = PhysicalTask(
+        'robot1', 'session', 1, 7, 'completed-region', 1,
+        (1.0, 1.0), Bounds((0.9, 0.9), (1.1, 1.1)), (1.0, 1.0),
+        visible_reveal_gain=1.0, local_ordering_score=1.0,
+        local_path_valid=True, local_path_length_m=0.06,
+    )
+    alternate = PhysicalTask(
+        'robot1', 'session', 1, 7, 'new-region', 2,
+        (2.0, 2.0), Bounds((1.9, 1.9), (2.1, 2.1)), (2.0, 2.0),
+        visible_reveal_gain=1.0, local_ordering_score=1.0,
+        local_path_valid=True, local_path_length_m=1.0,
+    )
+    selected = eligible_solo_tasks(
+        (completed, alternate), set(), {'completed-region'}, 0.05, 0.0, 18.0,
+    )
+    assert [task.physical_signature for task in selected] == ['new-region']

@@ -1671,7 +1671,13 @@ def internal_trial(args):
         f'sensor_profile:={args.sensor_profile}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
-        'nav2_autostart:=false',
+        # The authoritative launch defaults to local Nav2 autostart.  Passing
+        # false here leaves both lifecycle managers waiting for services while
+        # the regression readiness gate waits for active Nav2, so the robots
+        # can publish maps/descriptors but never receive local frontier goals.
+        # Keep local Nav2 startup enabled; shared cooperative components remain
+        # phase-gated by the unknown-pose launch.
+        'nav2_autostart:=true',
         'launch_rviz:=false',
         f'launch_visualization_overlay:={str(args.launch_rviz).lower()}',
         'enable_mission_timeout:=false',

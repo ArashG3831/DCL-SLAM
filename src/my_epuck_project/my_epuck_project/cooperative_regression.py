@@ -3185,7 +3185,8 @@ def parser():
         choices=['large', 'small', 'large_unknown_pose',
                  'large_unknown_pose_16m', 'large_unknown_pose_close_start',
                  'large_unknown_pose_close_start_20ms',
-                 'large_unknown_pose_close_start_20ms_scan_matching'],
+                 'large_unknown_pose_close_start_20ms_scan_matching',
+                 'large_unknown_pose_far_start_20ms_scan_matching'],
         default=None,
         help=(
             'World/configuration profile; defaults to large for new runs and '

@@ -45,6 +45,28 @@ def test_large_unknown_pose_16m_is_the_canonical_far_start_profile():
     assert value['physics_profile'] == 'dynamic_low_slip_4ms_finite'
 
 
+def test_far_start_20ms_scan_matching_profile_is_explicit_and_17m():
+    value = selected('large_unknown_pose_far_start_20ms_scan_matching')
+    metadata = value['world_metadata']
+    assert value['world'] == (
+        'epuck_d500_two_world_unknown_pose_far_start_dynamic_low_slip_20ms_finite.wbt')
+    assert value['physics_profile'] == 'dynamic_low_slip_20ms_finite'
+    assert value['unknown_initial_pose'] is True
+    assert metadata['robots']['robot1'].translation[:2] == (16.0, 0.0)
+    assert metadata['robots']['robot2'].translation[:2] == (-1.0, 0.0)
+    assert math.isclose(metadata['initial_separation_m'], 17.0, abs_tol=1e-6)
+    assert metadata['robots']['robot1'].planar_yaw == (
+        metadata['robots']['robot2'].planar_yaw)
+    content = Path(value['world_path']).read_text(encoding='utf-8')
+    assert 'basicTimeStep 20' in content
+    assert 'basicTimeStep 4' not in content
+    assert content.count('noise 0') >= 2
+    assert content.count('resolution -1') >= 2
+    assert value['slam_runtime_parameters']['use_scan_matching'] is True
+    assert value['slam_runtime_parameters']['do_loop_closing'] is False
+    assert value['slam_runtime_parameters']['use_response_expansion'] is False
+
+
 def test_close_start_profile_matches_manual_saved_world_poses():
     value = selected('large_unknown_pose_close_start')
     metadata = value['world_metadata']

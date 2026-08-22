@@ -209,7 +209,8 @@ def generate_launch_description():
                      'large_unknown_pose_16m',
                      'large_unknown_pose_close_start',
                      'large_unknown_pose_close_start_20ms',
-                     'large_unknown_pose_close_start_20ms_scan_matching'],
+                     'large_unknown_pose_close_start_20ms_scan_matching',
+                     'large_unknown_pose_far_start_20ms_scan_matching'],
         ),
         DeclareLaunchArgument('webots_port', default_value='23000'),
         DeclareLaunchArgument(

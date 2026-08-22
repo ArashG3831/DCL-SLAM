@@ -99,7 +99,8 @@ def parser() -> argparse.ArgumentParser:
         'small', 'large', 'large_unknown_pose', 'large_unknown_pose_16m',
         'large_unknown_pose_close_start',
         'large_unknown_pose_close_start_20ms',
-        'large_unknown_pose_close_start_20ms_scan_matching'),
+        'large_unknown_pose_close_start_20ms_scan_matching',
+        'large_unknown_pose_far_start_20ms_scan_matching'),
                         default='large')
     result.add_argument('--world-path', default='')
     result.add_argument('--sensor-profile', choices=('full', 'throughput'),

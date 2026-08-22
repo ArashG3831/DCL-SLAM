@@ -28,7 +28,11 @@ class D500ScanFix(Node):
             LaserScan,
             input_topic,
             self.callback,
-            qos_profile_sensor_data,
+            # The Webots ROS driver advertises the raw D500 stream with the
+            # project's default reliable profile.  Keep this subscription
+            # reliable; using sensor-data best-effort here silently leaves
+            # the bridge without samples under CycloneDDS.
+            10,
         )
 
         self.pub = self.create_publisher(

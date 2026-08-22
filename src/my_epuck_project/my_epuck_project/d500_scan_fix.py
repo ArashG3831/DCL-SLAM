@@ -4,6 +4,7 @@ import signal
 import rclpy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
@@ -22,13 +23,13 @@ class D500ScanFix(Node):
             LaserScan,
             input_topic,
             self.callback,
-            10
+            qos_profile_sensor_data,
         )
 
         self.pub = self.create_publisher(
             LaserScan,
             output_topic,
-            10
+            qos_profile_sensor_data,
         )
 
         self.get_logger().info(

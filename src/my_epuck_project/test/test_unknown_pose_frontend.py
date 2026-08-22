@@ -904,6 +904,31 @@ def test_pooled_evidence_reconsiders_prior_pairs_without_descriptor_keys():
                 ('source-3', 'target-3')]
 
 
+def test_completed_consensus_rebuilds_proposal_pool_from_evidence_pairs():
+    """Verified pairs remain publishable after leaving the pending pool."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {
+        ('own-1', 'peer-1'): ('own-crop-1', 'peer-crop-1'),
+        ('own-2', 'peer-2'): ('own-crop-2', 'peer-crop-2'),
+        ('own-3', 'peer-3'): ('own-crop-3', 'peer-crop-3'),
+    }
+    frontend.pending_candidate_pairs = {}
+    frontend.active_candidate_pairs = []
+    frontend.keyframes = {
+        f'own-{i}': (SimpleNamespace(), f'own-crop-{i}')
+        for i in (1, 2, 3)}
+    frontend.peer_descriptors = {
+        f'peer-{i}': SimpleNamespace()
+        for i in (1, 2, 3)}
+
+    pool = frontend._proposal_candidate_pool(
+        SimpleNamespace(accepted=True))
+
+    assert [(item[1], item[0]) for item in pool] == [
+        ('own-1', 'peer-1'), ('own-2', 'peer-2'), ('own-3', 'peer-3')]
+    assert not frontend.pending_candidate_pairs
+
+
 def test_consensus_diagnostic_stream_survives_unrelated_protocol_traffic(tmp_path):
     path = tmp_path / 'robot1_consensus_diagnostics.jsonl'
     stream = DedicatedDiagnosticJsonl(path, max_records=8)

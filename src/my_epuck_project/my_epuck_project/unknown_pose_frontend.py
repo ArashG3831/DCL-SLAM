@@ -2080,6 +2080,30 @@ class UnknownPoseFrontend(Node):
             self.consensus_gate_rejection_counts[str(result.reason)] += 1
         return result
 
+    def _proposal_candidate_pool(self, result=None):
+        """Return the candidate view of the evidence used for a proposal.
+
+        When an incremental consensus result is supplied, its evidence has
+        already been removed from ``pending_candidate_pairs`` by the crop
+        verification path.  Reconstruct that bounded pool from the canonical
+        hashable evidence-pair identities instead of silently losing the
+        just-accepted constraints at proposal publication time.
+        """
+        if result is not None:
+            pool = []
+            for own_key, peer_key in self.evidence_pairs:
+                own_entry = self.keyframes.get(own_key)
+                peer_descriptor = self.peer_descriptors.get(peer_key)
+                if own_entry is None or peer_descriptor is None:
+                    continue
+                pool.append((
+                    peer_key, own_key, peer_descriptor, own_entry[0]))
+            return pool
+        candidate_pool = list(self.pending_candidate_pairs.values())
+        if not candidate_pool:
+            candidate_pool = list(self.active_candidate_pairs)
+        return candidate_pool
+
     def _publish_multi_constraint_proposal(self, result=None):
         if self.batch_proposal_published or self.robot_id > self.peer_robot_id:
             return
@@ -2090,11 +2114,10 @@ class UnknownPoseFrontend(Node):
         physical_keys = set()
         # Evidence can arrive over several selection callbacks.  The active
         # selection is only the latest snapshot; use the bounded pending pool
-        # so accepted earlier pairs are reconsidered together.  This changes
-        # no registration or consensus gate—only the accumulation lookup.
-        candidate_pool = list(self.pending_candidate_pairs.values())
-        if not candidate_pool:
-            candidate_pool = list(self.active_candidate_pairs)
+        # so accepted earlier pairs are reconsidered together.  A completed
+        # incremental consensus must instead use the evidence pairs that were
+        # just verified, because those candidates have already left pending.
+        candidate_pool = self._proposal_candidate_pool(result)
         for candidate in evidence_candidates_for_pool(
                 candidate_pool, self.evidence_pairs):
             pair_key = (candidate[1], candidate[0])

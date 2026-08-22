@@ -1445,6 +1445,8 @@ def internal_trial(args):
     attempt = Path(args.attempt_dir).resolve()
     attempt.mkdir(parents=True, exist_ok=False)
     (attempt / 'observer').mkdir()
+    frontend_diagnostic_output = (attempt / 'observer' / 'frontend').resolve()
+    frontend_diagnostic_output.mkdir(parents=True, exist_ok=False)
     (attempt / 'ros_logs').mkdir()
     (attempt / 'tmp').mkdir()
     shutdown_events = attempt / 'shutdown_events.jsonl'
@@ -1489,6 +1491,7 @@ def internal_trial(args):
             'source_world_path': args.source_world_path,
             'run_id': args.run_id,
             'output_root': str(attempt / 'observer'),
+            'unknown_pose_diagnostic_output': str(frontend_diagnostic_output),
             'mission_timeout_s': (
                 args.mission_timeout + args.settling_period + 30.0
                 if args.mission_timeout is not None else 600.0),
@@ -1549,6 +1552,7 @@ def internal_trial(args):
         f'world_path:={args.source_world_path}',
         f'run_id:={args.run_id}',
         f'output_root:={attempt / "observer"}',
+        f'unknown_pose_diagnostic_output:={frontend_diagnostic_output}',
         f'mission_timeout_s:='
         f'{args.mission_timeout + args.settling_period + 30.0 if args.mission_timeout is not None else 600.0}',
         f'webots_port:={args.webots_port}',
@@ -1575,6 +1579,10 @@ def internal_trial(args):
         f'contact_sampling_period_ms:={args.contact_sampling_period_ms}',
         f'controller_variant:={args.controller_variant}',
     ]
+    if not str(frontend_diagnostic_output).startswith(str(attempt.resolve()) + os.sep):
+        raise RuntimeError('frontend diagnostic output escaped campaign directory')
+    if not frontend_diagnostic_output.is_absolute():
+        raise RuntimeError('frontend diagnostic output must be absolute')
     collector_command = [
         'ros2', 'run', 'my_epuck_project', 'cooperative_trial_collector',
         '--ros-args',
@@ -1997,6 +2005,11 @@ def internal_trial(args):
             rviz_log.close()
         for log in diagnostic_logs:
             log.close()
+    orphan_cleanup = terminate_campaign_owned_processes(
+        attempt, args.graceful_shutdown_timeout, args.hard_shutdown_timeout)
+    cleanup['orphan_process_cleanup'] = orphan_cleanup
+    append_shutdown_event(
+        shutdown_events, 'orphan_process_cleanup', **orphan_cleanup)
     port_clean = False
     for _ in range(30):
         if (not linux_port_used(args.webots_port)
@@ -2558,6 +2571,58 @@ def final_cleanup_audit(campaign, manifest):
     }
     atomic_json(campaign / 'final_cleanup_audit.json', result)
     return result
+
+
+def campaign_owned_processes(campaign):
+    """Return live processes whose command line contains this campaign path.
+
+    Process groups do not reliably retain grandchildren after Webots/ROS
+    launch teardown.  This exact-path audit is intentionally narrower than a
+    name-based kill and cannot match the original dirty workspace.
+    """
+    campaign_text = str(Path(campaign).resolve())
+    result = []
+    for process in psutil.process_iter(['pid', 'cmdline', 'ppid']):
+        if process.pid == os.getpid():
+            continue
+        try:
+            command = ' '.join(process.info.get('cmdline') or [])
+            if campaign_text in command:
+                result.append({
+                    'pid': process.pid, 'ppid': process.info.get('ppid'),
+                    'command': command,
+                })
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    return result
+
+
+def terminate_campaign_owned_processes(campaign, graceful_timeout=5.0,
+                                       hard_timeout=3.0):
+    """Terminate only exact campaign-command descendants after normal exit."""
+    before = campaign_owned_processes(campaign)
+    for item in before:
+        try:
+            os.kill(item['pid'], signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    deadline = time.monotonic() + graceful_timeout
+    while time.monotonic() < deadline and campaign_owned_processes(campaign):
+        time.sleep(0.1)
+    remaining = campaign_owned_processes(campaign)
+    for item in remaining:
+        try:
+            os.kill(item['pid'], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    deadline = time.monotonic() + hard_timeout
+    while time.monotonic() < deadline and campaign_owned_processes(campaign):
+        time.sleep(0.1)
+    return {
+        'before': before,
+        'after': campaign_owned_processes(campaign),
+        'clean': not campaign_owned_processes(campaign),
+    }
 
 
 def create_manifest(args, campaign, workspace):

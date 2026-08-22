@@ -108,8 +108,20 @@ class CooperativeExperimentLogger(Node):
         if isinstance(contact_enabled, str):
             contact_enabled = contact_enabled.lower() == 'true'
         self.contact_capture = bool(contact_enabled)
+        try:
+            initial_configuration = json.loads(
+                self.p['initial_configuration_json'])
+            scan_matching_enabled = bool(
+                initial_configuration.get('use_scan_matching', False) or
+                initial_configuration.get(
+                    'slam_runtime_parameters', {}).get(
+                        'use_scan_matching', False))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            scan_matching_enabled = False
+        self.scan_matching_enabled = scan_matching_enabled
         self.forensic = (ForensicEvidenceWriter(
-            self.directory, self.robots, self.p['forensic_snapshot_interval_s'])
+            self.directory, self.robots, self.p['forensic_snapshot_interval_s'],
+            scan_matching_enabled=scan_matching_enabled)
             if forensic_enabled else None)
         self.ground_truth_process = None
         self.ground_truth_log = None
@@ -291,6 +303,19 @@ class CooperativeExperimentLogger(Node):
                 except TransformException as exc:
                     self.forensic.record_transform(
                         now_ros, now_wall, target, source, error=str(exc))
+            if self.scan_matching_enabled:
+                try:
+                    correction = self.tf_buffer.lookup_transform(
+                        f'{robot}/map', f'{robot}/odom', Time(),
+                        timeout=Duration(seconds=0.03))
+                    self.forensic.record_scan_correction(
+                        robot, now_ros, now_wall,
+                        self.latest[robot].get('odom'),
+                        map_to_odom=correction)
+                except TransformException as exc:
+                    self.forensic.record_scan_correction(
+                        robot, now_ros, now_wall,
+                        self.latest[robot].get('odom'), error=str(exc))
         self.forensic.flush()
     def subscribe(self):
         for r in self.robots:
@@ -827,6 +852,16 @@ class CooperativeExperimentLogger(Node):
                     frontend_directory.relative_to(self.directory.parent))
             except ValueError:
                 result['frontend_directory'] = str(frontend_directory)
+        if self.scan_matching_enabled and self.forensic is not None:
+            required.extend([
+                self.directory / 'forensic' / 'scan_matching' /
+                f'{robot}_corrections.jsonl' for robot in self.robots])
+            missing = [logical_name(path) for path in required
+                       if not path.is_file()]
+            result['required'] = [logical_name(path) for path in required]
+            result['missing'] = missing
+            result['complete'] = not missing
+            result['status'] = 'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS'
         return result
 
     def frontend_diagnostic_directory(self):

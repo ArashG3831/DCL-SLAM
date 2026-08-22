@@ -88,6 +88,34 @@ def test_scan_matching_campaign_uses_unknown_pose_and_sim_watchdog():
     assert 'large_unknown_pose_close_start_20ms_scan_matching' in runner
 
 
+def test_campaign_forwards_distinct_campaign_owned_frontend_diagnostics():
+    runner = (PACKAGE / 'my_epuck_project' /
+              'cooperative_regression.py').read_text(encoding='utf-8')
+    assert 'frontend_diagnostic_output = ' in runner
+    assert 'unknown_pose_diagnostic_output:=' in runner
+    assert 'must be absolute' in runner
+    assert 'escaped campaign directory' in runner
+
+
+def test_scan_correction_stream_is_passive_and_required_when_enabled():
+    evidence = (PACKAGE / 'my_epuck_project' /
+                'forensic_evidence.py').read_text(encoding='utf-8')
+    logger = (PACKAGE / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert 'corrections.jsonl' in evidence
+    assert 'local_map_to_odom_tf' in evidence
+    assert 'T_map_base = T_map_odom * T_odom_base' in evidence
+    assert 'scan_matching_enabled' in logger
+    assert "'scan_matching'" in logger
+
+
+def test_cleanup_is_exact_campaign_path_owned():
+    runner = (PACKAGE / 'my_epuck_project' /
+              'cooperative_regression.py').read_text(encoding='utf-8')
+    assert 'terminate_campaign_owned_processes' in runner
+    assert 'campaign_text in command' in runner
+
+
 def test_shared_activation_receives_native_boolean_scan_matching_parameters():
     launch = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
         encoding='utf-8')

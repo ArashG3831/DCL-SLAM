@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -84,7 +85,8 @@ class ForensicEvidenceWriter:
 
     MAP_KEYS = ("map", "shared_map")
 
-    def __init__(self, directory, robots, interval_s=15.0):
+    def __init__(self, directory, robots, interval_s=15.0,
+                 scan_matching_enabled=False):
         self.root = Path(directory) / "forensic"
         self.maps_dir = self.root / "maps"
         self.peer_dir = self.root / "peer_maps"
@@ -132,6 +134,28 @@ class ForensicEvidenceWriter:
             "rotation_x", "rotation_y", "rotation_z", "rotation_w", "error",
         ])
         self.tf_writer.writeheader()
+        self.scan_matching_enabled = bool(scan_matching_enabled)
+        self._scan_files = {}
+        self._scan_writers = {}
+        if self.scan_matching_enabled:
+            self.scan_dir = self.root / "scan_matching"
+            self.scan_dir.mkdir(parents=True, exist_ok=True)
+            scan_fields = [
+                "robot_id", "query_ros_time_s", "query_wall_elapsed_s",
+                "odom_header_stamp", "map_to_odom_stamp", "source",
+                "available", "accepted", "rejected", "rejection_reason",
+                "response_expansion", "odom_predicted_x", "odom_predicted_y",
+                "odom_predicted_yaw", "accepted_slam_x", "accepted_slam_y",
+                "accepted_slam_yaw", "map_to_odom_x", "map_to_odom_y",
+                "map_to_odom_yaw", "translation_correction_m",
+                "yaw_correction_rad", "translation_bound_m",
+                "yaw_bound_rad", "bound_violation", "error",
+            ]
+            for robot in self.robots:
+                stream = (self.scan_dir / f"{robot}_corrections.jsonl").open(
+                    "w", encoding="utf-8", buffering=1)
+                self._scan_files[robot] = stream
+                self._scan_writers[robot] = scan_fields
         self._flush_counter = 0
 
     @staticmethod
@@ -283,10 +307,80 @@ class ForensicEvidenceWriter:
                         "rotation_y": q.y, "rotation_z": q.z, "rotation_w": q.w})
         self.tf_writer.writerow(row)
 
+    @staticmethod
+    def _yaw(quaternion):
+        return math.atan2(
+            2.0 * (quaternion.w * quaternion.z +
+                   quaternion.x * quaternion.y),
+            1.0 - 2.0 * (quaternion.y * quaternion.y +
+                         quaternion.z * quaternion.z))
+
+    def record_scan_correction(self, robot, query_ros, query_wall,
+                               odom_message, map_to_odom=None, error="",
+                               translation_bound_m=0.06,
+                               yaw_bound_rad=0.0558503168):
+        """Persist a passive local-SLAM correction observation.
+
+        Slam Toolbox does not expose a correction callback in this deployment.
+        Therefore the local ``map -> odom`` TF is used as the accepted SLAM
+        correction.  The accepted pose is composed as
+        ``T_map_base = T_map_odom * T_odom_base``; Supervisor data is not
+        involved.  A missing TF is recorded as unavailable, never as a zero
+        correction or a rejection.
+        """
+        if not self.scan_matching_enabled or self._closed:
+            return
+        pose = odom_message.pose.pose if odom_message is not None else None
+        odom_yaw = self._yaw(pose.orientation) if pose is not None else None
+        row = {
+            "robot_id": robot, "query_ros_time_s": query_ros,
+            "query_wall_elapsed_s": query_wall, "odom_header_stamp": "",
+            "map_to_odom_stamp": "", "source": "local_map_to_odom_tf",
+            "available": map_to_odom is not None,
+            "accepted": map_to_odom is not None,
+            "rejected": False,
+            "rejection_reason": "",
+            "response_expansion": False,
+            "odom_predicted_x": pose.position.x if pose else None,
+            "odom_predicted_y": pose.position.y if pose else None,
+            "odom_predicted_yaw": odom_yaw,
+            "accepted_slam_x": None, "accepted_slam_y": None,
+            "accepted_slam_yaw": None, "map_to_odom_x": None,
+            "map_to_odom_y": None, "map_to_odom_yaw": None,
+            "translation_correction_m": None, "yaw_correction_rad": None,
+            "translation_bound_m": translation_bound_m,
+            "yaw_bound_rad": yaw_bound_rad, "bound_violation": False,
+            "error": error,
+        }
+        if odom_message is not None:
+            row["odom_header_stamp"] = _stamp_text(odom_message.header.stamp)
+        if map_to_odom is not None and pose is not None:
+            stamp = map_to_odom.header.stamp
+            transform = map_to_odom.transform
+            tx, ty = transform.translation.x, transform.translation.y
+            map_yaw = self._yaw(transform.rotation)
+            c, s = math.cos(map_yaw), math.sin(map_yaw)
+            row.update({
+                "map_to_odom_stamp": _stamp_text(stamp),
+                "accepted_slam_x": tx + c * pose.position.x - s * pose.position.y,
+                "accepted_slam_y": ty + s * pose.position.x + c * pose.position.y,
+                "accepted_slam_yaw": map_yaw + odom_yaw,
+                "map_to_odom_x": tx, "map_to_odom_y": ty,
+                "map_to_odom_yaw": map_yaw,
+                "translation_correction_m": math.hypot(tx, ty),
+                "yaw_correction_rad": map_yaw,
+                "bound_violation": (
+                    math.hypot(tx, ty) > translation_bound_m or
+                    abs(map_yaw) > yaw_bound_rad),
+            })
+        self._scan_files[robot].write(
+            json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+
     def flush(self):
         if self._closed:
             return
-        streams = [*self._odom_files.values(), self.peer_file, self.tf_file]
+        streams = [*self._odom_files.values(), self.peer_file, self.tf_file,
+                   *self._scan_files.values()]
         for stream in streams:
             stream.flush()
         self._flush_counter += 1
@@ -295,7 +389,8 @@ class ForensicEvidenceWriter:
         if self._closed:
             return
         self.flush()
-        for stream in [*self._odom_files.values(), self.peer_file, self.tf_file]:
+        for stream in [*self._odom_files.values(), self.peer_file, self.tf_file,
+                       *self._scan_files.values()]:
             stream.close()
         self._closed = True
 
@@ -306,6 +401,7 @@ class ForensicEvidenceWriter:
             "map_snapshot_interval_s": self.interval_s,
             "map_snapshot_count": self.map_snapshot_count,
             "accepted_peer_map_count": self.peer_record_count,
+            "scan_matching_enabled": self.scan_matching_enabled,
             "files": sorted(str(path.relative_to(self.root))
                              for path in self.root.rglob("*") if path.is_file()),
         }

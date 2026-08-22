@@ -31,7 +31,6 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
         probe_env = {
             'LD_PRELOAD': tf_probe_library,
             'SLAM_TF_PUBLISH_PROBE_LOG': tf_probe_log,
-            'RMW_IMPLEMENTATION': 'rmw_fastrtps_cpp',
         }
         if tf_publication_mode:
             probe_env['RMW_FASTRTPS_PUBLICATION_MODE'] = tf_publication_mode

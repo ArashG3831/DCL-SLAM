@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WSL simulation profile: keep DDS traffic on the WSL loopback. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo"/>
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>200</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

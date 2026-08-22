@@ -608,7 +608,14 @@ def tf_readiness_requirements(unknown_initial_pose=False):
     for robot in ('robot1', 'robot2'):
         required.append(
             (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'))
-        if not unknown_initial_pose:
+        if unknown_initial_pose:
+            # Local Nav2 must not start until local SLAM has produced a
+            # usable map->odom edge as well as odom->base.  Starting the
+            # local costmaps on odom alone races their first activation and
+            # leaves both managers retrying forever before handoff.
+            required.append(
+                (f'{robot}/map', f'{robot}/base_footprint', 'local_map_to_base'))
+        else:
             required.append(
                 ('shared_map', f'{robot}/base_footprint', 'shared_to_base'))
     return required
@@ -1777,13 +1784,10 @@ def internal_trial(args):
         f'sensor_profile:={args.sensor_profile}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
-        # The authoritative launch defaults to local Nav2 autostart.  Passing
-        # false here leaves both lifecycle managers waiting for services while
-        # the regression readiness gate waits for active Nav2, so the robots
-        # can publish maps/descriptors but never receive local frontier goals.
-        # Keep local Nav2 startup enabled; shared cooperative components remain
-        # phase-gated by the unknown-pose launch.
-        'nav2_autostart:=true',
+        # Local Nav2 is started by the readiness gate only after controllers,
+        # odom, local maps, and local TF are available.  Shared Nav2 remains
+        # phase-gated by the unknown-pose handoff.
+        'nav2_autostart:=false',
         'launch_rviz:=false',
         f'launch_visualization_overlay:={str(args.launch_rviz).lower()}',
         'enable_mission_timeout:=false',

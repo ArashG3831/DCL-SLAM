@@ -370,14 +370,13 @@ def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(
     assert "'enable_mission_timeout:=false'" in source
 
 
-def test_campaign_launch_autostarts_local_nav2_for_readiness():
-    """Campaign readiness must not deadlock local Nav2 lifecycle managers."""
+def test_campaign_launch_defers_local_nav2_until_readiness():
+    """The gate starts local Nav2 after controller/TF readiness."""
     source = (
         Path(__file__).resolve().parents[1]
         / 'my_epuck_project' / 'cooperative_regression.py'
     ).read_text(encoding='utf-8')
-    assert "'nav2_autostart:=true'" in source
-    assert "'nav2_autostart:=false'" not in source
+    assert "'nav2_autostart:=false'" in source
 
 
 @pytest.mark.parametrize('trials,concurrency', [(2, 1), (1, 2)])

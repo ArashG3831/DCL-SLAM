@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Real-robot profile: use the Wi-Fi interface, not WSL loopback. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="wlan0"/>
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>200</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

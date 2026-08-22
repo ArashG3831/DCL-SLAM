@@ -71,6 +71,12 @@ EXPECTED_NODE_SUFFIXES = (
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
+UNKNOWN_POSE_EXPECTED_NODE_SUFFIXES = (
+    '/robot1/local_distributed_frontier_assignment',
+    '/robot2/local_distributed_frontier_assignment',
+    '/robot1/unknown_pose_frontend',
+    '/robot2/unknown_pose_frontend',
+)
 NAV2_NODES = (
     'controller_server', 'smoother_server', 'planner_server',
     'route_server', 'behavior_server', 'velocity_smoother',
@@ -1244,7 +1250,7 @@ def readiness_probe_due(time_mode, ready, now, last_probe, interval=5.0):
             and now - last_probe >= interval)
 
 
-def required_graph_ready(nodes):
+def required_graph_ready(nodes, unknown_initial_pose=False):
     """Return whether the launch graph has reached infrastructure readiness.
 
     Frontier claims are mission-state messages, not startup infrastructure.
@@ -1252,16 +1258,19 @@ def required_graph_ready(nodes):
     coordinator, which is intentionally not part of this gate: a coordinator
     may be healthy while it is still proposing or has no eligible claim.
     """
+    expected = (UNKNOWN_POSE_EXPECTED_NODE_SUFFIXES
+                if unknown_initial_pose else EXPECTED_NODE_SUFFIXES)
     return all(
         any(node.endswith(suffix) for node in nodes)
-        for suffix in EXPECTED_NODE_SUFFIXES
+        for suffix in expected
     )
 
 
-def mission_infrastructure_ready(clock_ok, tf_ok, nav2_started, nodes):
+def mission_infrastructure_ready(
+        clock_ok, tf_ok, nav2_started, nodes, unknown_initial_pose=False):
     """Require both Nav2 lifecycle managers before starting mission time."""
     return (clock_ok and tf_ok and nav2_started and
-            required_graph_ready(nodes))
+            required_graph_ready(nodes, unknown_initial_pose))
 
 
 LIVE_PARAMETER_NODES = (
@@ -1685,6 +1694,9 @@ def internal_trial(args):
                     None if clock_ok else clock_details.get(
                         'reason', 'CLOCK_PROBE_INTERNAL_ERROR'))
                 if clock_ok:
+                    if mission_sim_start is None:
+                        mission_sim_start = status.get('elapsed_s', 0.0)
+                        metadata['clock_sim_start'] = mission_sim_start
                     tf_ok, tf_details = tf_readiness(args.ros_domain_id)
                     metadata['tf_readiness'] = tf_details
                     if tf_ok and not nav2_started:
@@ -1711,7 +1723,8 @@ def internal_trial(args):
             if clock_ok and tf_ok and not ready:
                 nodes = status.get('nodes', [])
                 ready = mission_infrastructure_ready(
-                    clock_ok, tf_ok, nav2_started, nodes)
+                    clock_ok, tf_ok, nav2_started, nodes,
+                    args.unknown_initial_pose)
                 if ready:
                     start_high_rate_diagnostics()
                     metadata['infrastructure_ready'] = True
@@ -1723,7 +1736,8 @@ def internal_trial(args):
                                         if args.time_mode == 'wall'
                                         and args.mission_timeout is not None
                                         else None)
-                    mission_sim_start = status.get('elapsed_s')
+                    if mission_sim_start is None:
+                        mission_sim_start = status.get('elapsed_s', 0.0)
                     metadata['readiness_elapsed_s'] = now - start
                     metadata['readiness_graph_nodes'] = nodes
                     mark_startup_stage(

@@ -23,6 +23,17 @@ def test_mission_readiness_keeps_existing_clock_tf_and_graph_gates():
     assert not mission_infrastructure_ready(True, True, True, NODES[:-1])
 
 
+def test_unknown_pose_readiness_does_not_require_prehandoff_fusion():
+    nodes = [
+        '/robot1/local_distributed_frontier_assignment',
+        '/robot2/local_distributed_frontier_assignment',
+        '/robot1/unknown_pose_frontend',
+        '/robot2/unknown_pose_frontend',
+    ]
+    assert mission_infrastructure_ready(True, True, True, nodes, True)
+    assert not mission_infrastructure_ready(True, True, True, NODES, True)
+
+
 def test_active_manager_is_observed_without_reissuing_startup():
     assert lifecycle_startup_action(True, None) == 'ALREADY_ACTIVE'
 

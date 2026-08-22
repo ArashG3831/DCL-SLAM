@@ -310,6 +310,17 @@ def test_graph_readiness_does_not_require_frontier_claims():
     assert not required_graph_ready(nodes[:-1])
 
 
+def test_unknown_pose_graph_readiness_uses_local_prehandoff_nodes():
+    nodes = [
+        '/robot1/local_distributed_frontier_assignment',
+        '/robot2/local_distributed_frontier_assignment',
+        '/robot1/unknown_pose_frontend',
+        '/robot2/unknown_pose_frontend',
+    ]
+    assert required_graph_ready(nodes, unknown_initial_pose=True)
+    assert not required_graph_ready(nodes[:-1], unknown_initial_pose=True)
+
+
 def test_runner_profile_defaults_and_rviz_selection():
     """New runs default large while explicit small retains proven timeouts."""
     large = apply_profile_defaults(parser().parse_args([]))

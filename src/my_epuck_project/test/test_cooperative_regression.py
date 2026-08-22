@@ -14,6 +14,7 @@ from my_epuck_project.cooperative_regression import (
     execute_attempt,
     hold_open_artifacts_valid,
     handoff_observed,
+    persisted_local_tf_readiness,
     internal_command,
     manual_rviz_command,
     mission_timeout_expired,
@@ -719,6 +720,24 @@ def test_runner_requires_shared_maps_after_handoff(tmp_path):
         json.dumps({'counters': {'tf_handoffs': 1}}), encoding='utf-8')
     assert handoff_observed(attempt, attempt.name) is True
     assert not validate_existing_attempt(attempt)
+
+
+def test_persisted_tf_readiness_requires_both_local_odom_chains(tmp_path):
+    """Logger TF fallback is valid only after both local chains are present."""
+    attempt = tmp_path / 'attempt'
+    path = attempt / 'observer' / 'run' / 'forensic'
+    path.mkdir(parents=True)
+    (path / 'transforms.csv').write_text(
+        'target_frame,source_frame,available\n'
+        'robot1/odom,robot1/base_footprint,True\n', encoding='utf-8')
+    ready, details = persisted_local_tf_readiness(attempt, 'run')
+    assert not ready
+    assert details['available_local_odom_chains'] == ['robot1']
+    with (path / 'transforms.csv').open('a', encoding='utf-8') as stream:
+        stream.write('robot2/odom,robot2/base_footprint,True\n')
+    ready, details = persisted_local_tf_readiness(attempt, 'run')
+    assert ready
+    assert details['reason'] == 'READY'
 
 
 def test_campaign_exit_requires_mission_completion_not_only_clean_cleanup():

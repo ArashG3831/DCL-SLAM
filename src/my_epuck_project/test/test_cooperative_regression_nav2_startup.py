@@ -1,6 +1,8 @@
 from my_epuck_project.cooperative_regression import (
     lifecycle_startup_action,
     mission_infrastructure_ready,
+    nav2_manager_name,
+    nav2_node_names,
     tf_readiness_requirements,
 )
 
@@ -55,3 +57,14 @@ def test_pending_startup_is_not_reentered_after_partial_pair_start():
 
 def test_unattempted_manager_receives_the_only_startup_request():
     assert lifecycle_startup_action(False, None) == 'SEND_STARTUP'
+
+
+def test_unknown_pose_nav2_readiness_uses_local_phase_names():
+    assert nav2_node_names(True)[0] == 'local_controller_server'
+    assert nav2_node_names(True)[-1] == 'local_waypoint_follower'
+    assert nav2_manager_name(True) == 'local_lifecycle_manager_navigation'
+
+
+def test_known_pose_nav2_readiness_keeps_existing_names():
+    assert nav2_node_names(False)[0] == 'controller_server'
+    assert nav2_manager_name(False) == 'lifecycle_manager_navigation'

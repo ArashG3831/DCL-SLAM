@@ -692,12 +692,27 @@ def lifecycle_startup_action(manager_active, prior_state):
     return 'SEND_STARTUP'
 
 
-def wait_for_nav2_lifecycle_services(node, timeout_s):
+def nav2_node_names(unknown_initial_pose=False):
+    """Return the lifecycle node names used by the selected launch phase."""
+    if unknown_initial_pose:
+        return tuple(f'local_{name}' for name in NAV2_NODES)
+    return NAV2_NODES
+
+
+def nav2_manager_name(unknown_initial_pose=False):
+    """Return the lifecycle manager name used by the selected launch phase."""
+    return ('local_lifecycle_manager_navigation'
+            if unknown_initial_pose else 'lifecycle_manager_navigation')
+
+
+def wait_for_nav2_lifecycle_services(
+        node, timeout_s, unknown_initial_pose=False):
     """Wait until every namespaced Nav2 lifecycle node exposes get_state."""
     missing = []
     deadline = time.monotonic() + timeout_s
+    node_names = nav2_node_names(unknown_initial_pose)
     for robot in ('robot1', 'robot2'):
-        for node_name in NAV2_NODES:
+        for node_name in node_names:
             service_name = f'/{robot}/{node_name}/get_state'
             client = node.create_client(GetState, service_name)
             remaining = max(0.0, deadline - time.monotonic())
@@ -707,13 +722,15 @@ def wait_for_nav2_lifecycle_services(node, timeout_s):
     return True, missing
 
 
-def get_nav2_lifecycle_states(node, executor, timeout_s):
+def get_nav2_lifecycle_states(
+        node, executor, timeout_s, unknown_initial_pose=False):
     """Read every managed lifecycle node without issuing a transition."""
     states = {}
     deadline = time.monotonic() + timeout_s
+    node_names = nav2_node_names(unknown_initial_pose)
     for robot in ('robot1', 'robot2'):
         states[robot] = {}
-        for node_name in NAV2_NODES:
+        for node_name in node_names:
             client = node.create_client(
                 GetState, f'/{robot}/{node_name}/get_state')
             remaining = max(0.0, deadline - time.monotonic())
@@ -732,7 +749,9 @@ def get_nav2_lifecycle_states(node, executor, timeout_s):
     return True, states
 
 
-def activate_nav2(domain, timeout_s=10.0, startup_state=None):
+def activate_nav2(
+        domain, timeout_s=10.0, startup_state=None,
+        unknown_initial_pose=False):
     """Start both Nav2 managers after the required transforms are available.
 
     ``timeout_s`` is deliberately a *per-manager* budget.  Starting robot1
@@ -754,13 +773,13 @@ def activate_nav2(domain, timeout_s=10.0, startup_state=None):
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         services_ready, missing = wait_for_nav2_lifecycle_services(
-            node, timeout_s)
+            node, timeout_s, unknown_initial_pose)
         if not services_ready:
             details['status'] = 'LIFECYCLE_SERVICES_NOT_READY'
             details['missing_services'] = missing
             return False, details
         state_services_ready, lifecycle_states = get_nav2_lifecycle_states(
-            node, executor, timeout_s)
+            node, executor, timeout_s, unknown_initial_pose)
         if not state_services_ready:
             details['status'] = 'LIFECYCLE_STATE_QUERY_TIMEOUT'
             details['lifecycle_states'] = lifecycle_states
@@ -768,7 +787,8 @@ def activate_nav2(domain, timeout_s=10.0, startup_state=None):
         details['lifecycle_states'] = lifecycle_states
         for robot in ('robot1', 'robot2'):
             robot_started = time.monotonic()
-            manager_prefix = f'/{robot}/lifecycle_manager_navigation'
+            manager_prefix = (
+                f'/{robot}/{nav2_manager_name(unknown_initial_pose)}')
             robot_states = lifecycle_states[robot]
             active = all(
                 state['label'] == 'active'
@@ -1712,7 +1732,8 @@ def internal_trial(args):
                             0.0, readiness_deadline - time.monotonic())
                         nav2_started, nav2_details = activate_nav2(
                             args.ros_domain_id, timeout_s=startup_budget,
-                            startup_state=nav2_startup_state)
+                            startup_state=nav2_startup_state,
+                            unknown_initial_pose=args.unknown_initial_pose)
                         metadata['nav2_activation'] = nav2_details
                 atomic_json(attempt / 'runner_metadata.json', metadata)
                 # The probe uses a bounded wall-time wait and may finish

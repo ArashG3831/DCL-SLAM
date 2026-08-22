@@ -434,6 +434,7 @@ def test_next_verification_candidate_prefers_spatially_displaced_view():
     frontend.evidence_pairs = {('own-0', 'peer-0'): (None, None)}
     frontend.keyframes = {}
     frontend.peer_descriptors = {}
+    frontend.attempted_physical_view_reuse_counts = {}
 
     def crop(center):
         return GridCrop(np.zeros((2, 2), dtype=np.int16), 1.0,
@@ -473,6 +474,7 @@ def test_next_verification_candidate_balances_both_crop_displacements():
     frontend.evidence_pairs = {('own-0', 'peer-0'): (None, None)}
     frontend.keyframes = {}
     frontend.peer_descriptors = {}
+    frontend.attempted_physical_view_reuse_counts = {}
 
     def crop(center):
         return GridCrop(np.zeros((2, 2), dtype=np.int16), 1.0,

@@ -5,6 +5,7 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from my_epuck_project import unknown_pose_frontend_core as frontend_core
 from my_epuck_project.unknown_pose_frontend import UnknownPoseFrontend
@@ -157,7 +158,7 @@ def test_accepted_alignment_is_published_as_persistent_static_tf():
     frontend.accepted = SimpleNamespace(
         source_to_target=SimpleNamespace(
             translation=SimpleNamespace(x=1.25, y=-0.5),
-            rotation=SimpleNamespace(z=0.0, w=1.0),
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
         )
     )
     frontend.robot_id = 'robot1'
@@ -176,6 +177,13 @@ def test_accepted_alignment_is_published_as_persistent_static_tf():
     assert frontend.tf_broadcaster.sent[0].header.frame_id == 'shared_map'
     assert frontend.tf_broadcaster.sent[0].child_frame_id == 'robot1/local_world'
     assert frontend.tf_broadcaster.sent[1].child_frame_id == 'robot2/local_world'
+    # Registration's source_to_target message maps source points into the
+    # target frame.  The persistent shared_map -> target/local_world TF is the
+    # target pose in the source frame, so its translation is the inverse.
+    assert frontend.tf_broadcaster.sent[1].transform.translation.x == pytest.approx(-1.25)
+    assert frontend.tf_broadcaster.sent[1].transform.translation.y == pytest.approx(0.5)
+    assert frontend.tf_broadcaster.sent[1].transform.rotation.z == pytest.approx(0.0)
+    assert frontend.tf_broadcaster.sent[1].transform.rotation.w == pytest.approx(1.0)
     assert frontend.counters['tf_handoffs'] == 1
     source = (
         __import__('pathlib').Path(__file__).parents[1] /

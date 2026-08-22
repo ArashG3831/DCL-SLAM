@@ -48,6 +48,7 @@ from .unknown_pose_frontend_core import (
     evidence_batch_is_spatially_diverse,
     evidence_candidates_for_pool,
     evidence_pairs_for_selection,
+    invert_se2,
     polar_descriptor,
     physical_crop_identity,
     physical_candidate_geometry_identity,
@@ -2508,7 +2509,27 @@ class UnknownPoseFrontend(Node):
         transform.header.stamp = now
         transform.header.frame_id = self.shared_frame
         transform.child_frame_id = f'{self.peer_robot_id}/local_world'
-        transform.transform = self.accepted.source_to_target
+        # ``register_crops(source, target)`` returns the point transform that
+        # maps source-crop coordinates into target-crop coordinates.  A ROS TF
+        # with parent ``shared_map`` (the source/local frame) and child
+        # ``peer_robot/local_world`` needs the inverse: the child pose
+        # expressed in the parent frame.  Keep the protocol hypothesis in its
+        # source->target convention and invert only at this TF boundary.
+        registration = self.accepted.source_to_target
+        yaw = math.atan2(
+            2.0 * (registration.rotation.w * registration.rotation.z +
+                   registration.rotation.x * registration.rotation.y),
+            1.0 - 2.0 * (registration.rotation.y ** 2 +
+                         registration.rotation.z ** 2))
+        inverse_x, inverse_y, inverse_yaw = invert_se2(
+            (registration.translation.x, registration.translation.y, yaw))
+        transform.transform.translation.x = inverse_x
+        transform.transform.translation.y = inverse_y
+        transform.transform.translation.z = 0.0
+        transform.transform.rotation.x = 0.0
+        transform.transform.rotation.y = 0.0
+        transform.transform.rotation.z = math.sin(inverse_yaw / 2.0)
+        transform.transform.rotation.w = math.cos(inverse_yaw / 2.0)
         self.tf_broadcaster.sendTransform(transform)
         self.counters['tf_handoffs'] += 1
 

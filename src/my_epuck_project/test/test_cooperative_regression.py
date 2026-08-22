@@ -664,6 +664,26 @@ def test_campaign_report_does_not_count_bounded_diagnostic_as_failure(tmp_path):
     assert result['diagnostic_count'] == 1
 
 
+def test_campaign_report_does_not_require_shared_maps_without_handoff(tmp_path):
+    """A bounded no-handoff run reports missing shared maps as not applicable."""
+    trial, attempt = create_attempt(
+        tmp_path, 1, classification='BOUNDED_DIAGNOSTIC')
+    (attempt / 'robot1_final_shared_map.npz').unlink()
+    (attempt / 'robot2_final_shared_map.npz').unlink()
+    (tmp_path / 'campaign_progress.json').write_text(json.dumps({
+        'valid_trials': {trial: str(attempt.relative_to(tmp_path))},
+    }))
+    (tmp_path / 'campaign_manifest.json').write_text(json.dumps({
+        'campaign_id': 'no_handoff', 'git_commit': 'abc',
+        'trial_count_requested': 1,
+    }))
+    result = analyze_campaign(tmp_path)
+    assert result['shared_map_analysis'] == 'NOT_APPLICABLE_NO_HANDOFF'
+    assert result['failure_count'] == 0
+    assert (tmp_path / 'campaign_report.md').is_file()
+    assert not (attempt / 'robot1_final_shared_map.npz').exists()
+
+
 def test_campaign_exit_requires_mission_completion_not_only_clean_cleanup():
     """A clean bounded diagnostic must not have success exit semantics."""
     source = (Path(__file__).parents[1] / 'my_epuck_project' /

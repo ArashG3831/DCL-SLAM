@@ -119,6 +119,85 @@ def _attempts(campaign):
     return result
 
 
+def _analyze_without_shared_maps(campaign, manifest, attempts):
+    """Write a bounded report when no handoff legitimately produced maps.
+
+    Shared-map exports are a post-handoff contract.  A no-handoff diagnostic
+    must remain reportable without manufacturing shared maps or converting the
+    physical/evidence result into an infrastructure error.
+    """
+    rows = []
+    missing_by_trial = {}
+    for trial_id, attempt, metadata in attempts:
+        missing = [
+            str(attempt / f'{robot}_final_shared_map.npz')
+            for robot in ('robot1', 'robot2')
+            if not (attempt / f'{robot}_final_shared_map.npz').is_file()
+        ]
+        missing_by_trial[trial_id] = missing
+        rows.append({
+            'trial_id': trial_id,
+            'classification': metadata.get('classification', 'UNKNOWN'),
+            'ready': metadata.get('infrastructure_ready',
+                                  metadata.get('ready', False)),
+            'timed_out': metadata.get('shutdown_reason') ==
+            'simulated_mission_timeout',
+            'wall_time_s': metadata.get('wall_time_s'),
+            'artifact_path': str(attempt),
+            'shared_map_exports': False,
+            'missing_shared_map_artifacts': missing,
+            'cleanup_complete': metadata.get('cleanup_complete', False),
+        })
+    write_csv(campaign / 'trials.csv', rows)
+    write_csv(
+        campaign / 'pairwise_map_metrics.csv', [],
+        fieldnames=['trial_a', 'trial_b', 'comparison_validity', 'reason'])
+    (campaign / 'campaign_report.md').write_text(
+        '# Cooperative exploration regression campaign\n\n'
+        '## Verdict\n\n'
+        'No canonical handoff was observed; shared-map exports are therefore '
+        'not applicable and were not synthesized.\n\n'
+        '```json\n' + json.dumps({
+            'campaign_id': manifest.get('campaign_id', campaign.name),
+            'code_commit': manifest.get('git_commit'),
+            'selected_trials': [row['trial_id'] for row in rows],
+            'missing_shared_map_artifacts': missing_by_trial,
+            'status': 'NO_HANDOFF_SHARED_MAPS_NOT_APPLICABLE',
+        }, indent=2, sort_keys=True) + '\n```\n',
+        encoding='utf-8')
+    non_failure = {'BOUNDED_DIAGNOSTIC', 'CLEAN_SHUTDOWN', 'PASS',
+                   'MISSION_COMPLETE'}
+    summary = {
+        'schema_version': '1.0.0',
+        'campaign_id': manifest.get('campaign_id', campaign.name),
+        'code_commit': manifest.get('git_commit'),
+        'trial_count_requested': manifest.get(
+            'trial_count_requested', len(rows)),
+        'valid_trial_count': len(rows),
+        'pass_count': 0,
+        'failure_count': sum(
+            row['classification'] not in non_failure for row in rows),
+        'diagnostic_count': sum(
+            row['classification'] == 'BOUNDED_DIAGNOSTIC' for row in rows),
+        'mission_completion_rate': 0.0,
+        'all_processes_clean_boolean': all(
+            row['cleanup_complete'] for row in rows),
+        'shared_map_analysis': 'NOT_APPLICABLE_NO_HANDOFF',
+        'missing_shared_map_artifacts': missing_by_trial,
+        'artifact_paths': {
+            'report': str(campaign / 'campaign_report.md'),
+            'trials_csv': str(campaign / 'trials.csv'),
+            'pairwise_csv': str(campaign / 'pairwise_map_metrics.csv'),
+        },
+        'limitations': list(manifest.get('limitations', [])) + [
+            'No accepted unknown-pose handoff; shared-map exports are not '
+            'required and were intentionally not synthesized.',
+        ],
+    }
+    atomic_json(campaign / 'campaign_summary.json', finite(summary))
+    return finite(summary)
+
+
 def _status_value(final_state, robot, field, default=None):
     robot_state = (final_state.get('robots', {}).get(robot, {}) or {})
     status = robot_state.get('status') or {}
@@ -356,6 +435,11 @@ def analyze_campaign(campaign_dir, free_threshold=25,
     attempts = _attempts(campaign)
     if not attempts:
         raise ValueError('campaign has no selected valid trials')
+    if any(not all(
+            (attempt / f'{robot}_final_shared_map.npz').is_file()
+            for robot in ('robot1', 'robot2'))
+            for _, attempt, _ in attempts):
+        return _analyze_without_shared_maps(campaign, manifest, attempts)
     thresholds = {
         'free_max': free_threshold, 'occupied_min': occupied_threshold,
     }

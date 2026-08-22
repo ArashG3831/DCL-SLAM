@@ -107,6 +107,9 @@ def test_scan_correction_stream_is_passive_and_required_when_enabled():
     assert 'T_map_base = T_map_odom * T_odom_base' in evidence
     assert 'scan_matching_enabled' in logger
     assert "'scan_matching'" in logger
+    assert 'record_scan_correction_at_map_update' in logger
+    assert 'delta_map_to_odom_between_local_map_updates' in evidence
+    assert 'NO_PREVIOUS_MAP_TO_ODOM_BASELINE' in evidence
 
 
 def test_cleanup_is_exact_campaign_path_owned():

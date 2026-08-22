@@ -303,19 +303,6 @@ class CooperativeExperimentLogger(Node):
                 except TransformException as exc:
                     self.forensic.record_transform(
                         now_ros, now_wall, target, source, error=str(exc))
-            if self.scan_matching_enabled:
-                try:
-                    correction = self.tf_buffer.lookup_transform(
-                        f'{robot}/map', f'{robot}/odom', Time(),
-                        timeout=Duration(seconds=0.03))
-                    self.forensic.record_scan_correction(
-                        robot, now_ros, now_wall,
-                        self.latest[robot].get('odom'),
-                        map_to_odom=correction)
-                except TransformException as exc:
-                    self.forensic.record_scan_correction(
-                        robot, now_ros, now_wall,
-                        self.latest[robot].get('odom'), error=str(exc))
         self.forensic.flush()
     def subscribe(self):
         for r in self.robots:
@@ -395,6 +382,23 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None and key == 'peer_map':
             self.forensic.record_peer_map(
                 r, msg, now, time.monotonic() - self.start)
+        if self.forensic is not None and self.scan_matching_enabled and key == 'map':
+            self.record_scan_correction_at_map_update(r, now)
+
+    def record_scan_correction_at_map_update(self, robot, now_ros):
+        """Record passive scan-match correction evidence at each local map update."""
+        now_wall = time.monotonic() - self.start
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                f'{robot}/map', f'{robot}/odom', Time(),
+                timeout=Duration(seconds=0.03))
+            self.forensic.record_scan_correction(
+                robot, now_ros, now_wall, self.latest[robot].get('odom'),
+                map_to_odom=transform)
+        except TransformException as exc:
+            self.forensic.record_scan_correction(
+                robot, now_ros, now_wall, self.latest[robot].get('odom'),
+                error=str(exc))
     def age(self,r,key):
         value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):

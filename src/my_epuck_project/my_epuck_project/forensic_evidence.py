@@ -137,6 +137,7 @@ class ForensicEvidenceWriter:
         self.scan_matching_enabled = bool(scan_matching_enabled)
         self._scan_files = {}
         self._scan_writers = {}
+        self._previous_map_to_odom = {}
         if self.scan_matching_enabled:
             self.scan_dir = self.root / "scan_matching"
             self.scan_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +150,9 @@ class ForensicEvidenceWriter:
                 "accepted_slam_yaw", "map_to_odom_x", "map_to_odom_y",
                 "map_to_odom_yaw", "translation_correction_m",
                 "yaw_correction_rad", "translation_bound_m",
-                "yaw_bound_rad", "bound_violation", "error",
+                "yaw_bound_rad", "bound_violation", "correction_basis",
+                "sample_kind", "map_to_odom_delta_x",
+                "map_to_odom_delta_y", "map_to_odom_delta_yaw", "error",
             ]
             for robot in self.robots:
                 stream = (self.scan_dir / f"{robot}_corrections.jsonl").open(
@@ -322,11 +325,14 @@ class ForensicEvidenceWriter:
         """Persist a passive local-SLAM correction observation.
 
         Slam Toolbox does not expose a correction callback in this deployment.
-        Therefore the local ``map -> odom`` TF is used as the accepted SLAM
-        correction.  The accepted pose is composed as
+        Therefore successive local ``map -> odom`` TF samples at local-map
+        update callbacks are used as a bounded correction observation.  The
+        correction is the delta between consecutive map-frame estimates, not
+        the absolute accumulated map-to-odom offset.  The accepted pose is composed as
         ``T_map_base = T_map_odom * T_odom_base``; Supervisor data is not
-        involved.  A missing TF is recorded as unavailable, never as a zero
-        correction or a rejection.
+        involved.  The first available sample establishes a baseline and is
+        not assigned a correction magnitude.  A missing TF is recorded as
+        unavailable, never as a zero correction or a rejection.
         """
         if not self.scan_matching_enabled or self._closed:
             return
@@ -337,7 +343,7 @@ class ForensicEvidenceWriter:
             "query_wall_elapsed_s": query_wall, "odom_header_stamp": "",
             "map_to_odom_stamp": "", "source": "local_map_to_odom_tf",
             "available": map_to_odom is not None,
-            "accepted": map_to_odom is not None,
+            "accepted": False,
             "rejected": False,
             "rejection_reason": "",
             "response_expansion": False,
@@ -350,6 +356,10 @@ class ForensicEvidenceWriter:
             "translation_correction_m": None, "yaw_correction_rad": None,
             "translation_bound_m": translation_bound_m,
             "yaw_bound_rad": yaw_bound_rad, "bound_violation": False,
+            "correction_basis": "delta_map_to_odom_between_local_map_updates",
+            "sample_kind": "local_map_update",
+            "map_to_odom_delta_x": None, "map_to_odom_delta_y": None,
+            "map_to_odom_delta_yaw": None,
             "error": error,
         }
         if odom_message is not None:
@@ -367,12 +377,26 @@ class ForensicEvidenceWriter:
                 "accepted_slam_yaw": map_yaw + odom_yaw,
                 "map_to_odom_x": tx, "map_to_odom_y": ty,
                 "map_to_odom_yaw": map_yaw,
-                "translation_correction_m": math.hypot(tx, ty),
-                "yaw_correction_rad": map_yaw,
-                "bound_violation": (
-                    math.hypot(tx, ty) > translation_bound_m or
-                    abs(map_yaw) > yaw_bound_rad),
             })
+            previous = self._previous_map_to_odom.get(robot)
+            self._previous_map_to_odom[robot] = (tx, ty, map_yaw)
+            if previous is not None:
+                delta_x, delta_y = tx - previous[0], ty - previous[1]
+                delta_yaw = (map_yaw - previous[2] + math.pi) % (2.0 * math.pi) - math.pi
+                translation = math.hypot(delta_x, delta_y)
+                row.update({
+                    "accepted": True,
+                    "translation_correction_m": translation,
+                    "yaw_correction_rad": delta_yaw,
+                    "map_to_odom_delta_x": delta_x,
+                    "map_to_odom_delta_y": delta_y,
+                    "map_to_odom_delta_yaw": delta_yaw,
+                    "bound_violation": (
+                        translation > translation_bound_m or
+                        abs(delta_yaw) > yaw_bound_rad),
+                })
+            else:
+                row["rejection_reason"] = "NO_PREVIOUS_MAP_TO_ODOM_BASELINE"
         self._scan_files[robot].write(
             json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
 

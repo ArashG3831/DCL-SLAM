@@ -254,12 +254,22 @@ def launch_setup(context):
     requested_shared_stack = (
         LaunchConfiguration('launch_shared_stack').perform(context).lower()
         == 'true')
+    requested_shared_fusion = (
+        LaunchConfiguration('launch_shared_fusion').perform(context).lower()
+        == 'true')
     # Unknown-pose pre-handoff is structurally local-only.  The explicit
     # phase marker is required in addition to the request flag so a nested
     # launch default or scope collision cannot instantiate shared Nav2/fusion
     # before the canonical handoff.
     launch_shared_stack = requested_shared_stack and (
         not unknown_initial_pose or phase_already_aligned)
+    # Keep only the fusion processes resident before handoff.  They are
+    # explicitly handoff-gated and therefore have no map subscriptions,
+    # timer, or TF listener until an accepted hypothesis arrives.  This
+    # avoids delaying fusion behind the large post-handoff Nav2 launch.
+    launch_shared_fusion = requested_shared_fusion and (
+        not unknown_initial_pose or phase_already_aligned or
+        not launch_shared_stack)
     handoff_gated = unknown_initial_pose and not phase_already_aligned
     try:
         quota_enabled = float(fusion_quota) > 0.0
@@ -335,7 +345,7 @@ def launch_setup(context):
                     'export_rate_hz': 1.0,
                 }],
             ))
-        if launch_shared_stack:
+        if launch_shared_fusion:
             exchange.append(Node(
                 package='my_epuck_project',
                 executable='source_aware_map_fusion',
@@ -449,6 +459,8 @@ def generate_launch_description():
         DeclareLaunchArgument('launch_mapping', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('launch_shared_stack', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_shared_fusion', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_already_aligned', default_value='false',
                               choices=['true', 'false']),

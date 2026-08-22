@@ -125,6 +125,9 @@ class UnknownPoseSharedStackActivation(Node):
             'phase_already_aligned': 'true',
             'launch_mapping': 'false',
             'launch_shared_stack': 'true',
+            # The fusion pair is already resident in an inert, handoff-gated
+            # state from the initial launch.  Do not start duplicate nodes.
+            'launch_shared_fusion': 'false',
             'handoff_transform_x': f'{x:.12g}',
             'handoff_transform_y': f'{y:.12g}',
             'handoff_transform_yaw': f'{yaw:.12g}',

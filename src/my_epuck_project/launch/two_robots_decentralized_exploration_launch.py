@@ -192,6 +192,7 @@ def launch_setup(context):
             'unknown_initial_pose': 'true',
             'launch_mapping': 'true',
             'launch_shared_stack': 'false',
+            'launch_shared_fusion': 'true',
             'phase_already_aligned': 'false',
         }.items(),
     )

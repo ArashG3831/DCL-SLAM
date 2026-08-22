@@ -178,6 +178,20 @@ def test_unknown_pose_frontend_handoff_is_the_only_peer_map_enablement():
             encoding='utf-8')
 
 
+def test_unknown_pose_prelaunches_inert_fusion_and_avoids_duplicate_activation():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
+        encoding='utf-8')
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text(
+        encoding='utf-8')
+    activation = (LAUNCH.parent / 'my_epuck_project' /
+                  'unknown_pose_shared_stack_activation.py').read_text(
+                      encoding='utf-8')
+    assert "'launch_shared_fusion': 'true'" in full
+    assert "LaunchConfiguration('launch_shared_fusion')" in stack
+    assert 'handoff_gated = unknown_initial_pose and not phase_already_aligned' in stack
+    assert "'launch_shared_fusion': 'false'" in activation
+
+
 def test_full_unknown_pose_launch_keeps_observer_artifact_finalization():
     source = (LAUNCH / 'two_robots_decentralized_exploration_launch.py')
     text = source.read_text(encoding='utf-8')

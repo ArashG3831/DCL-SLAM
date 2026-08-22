@@ -91,6 +91,8 @@ def launch_setup(context):
                 'unknown_initial_pose'),
             'launch_mapping': LaunchConfiguration('launch_mapping'),
             'launch_shared_stack': LaunchConfiguration('launch_shared_stack'),
+            'launch_shared_fusion': LaunchConfiguration(
+                'launch_shared_fusion'),
             'phase_already_aligned': LaunchConfiguration(
                 'phase_already_aligned'),
             'handoff_gated': LaunchConfiguration('handoff_gated'),
@@ -155,6 +157,8 @@ def generate_launch_description():
         DeclareLaunchArgument('launch_mapping', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('launch_shared_stack', default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_shared_fusion', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_already_aligned', default_value='false',
                               choices=['true', 'false']),

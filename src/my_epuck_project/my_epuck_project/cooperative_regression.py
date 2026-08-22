@@ -565,6 +565,38 @@ def clock_readiness(domain, timeout_s=4.0):
             os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
+def collector_clock_readiness(samples):
+    """Validate advancing ROS time recorded by the campaign collector.
+
+    The collector subscribes to the same ``/clock`` topic as the runner but
+    writes its ROS-time samples through a wall-timed health timer.  This is a
+    narrow fallback for hosts where a fresh second DDS participant can
+    discover the clock publisher but cannot receive its samples.  It never
+    fabricates time: two strictly increasing collector observations are
+    required.
+    """
+    details = {
+        'source': 'collector_status.json',
+        'topic': '/clock',
+        'samples': [item['sim_time_seconds'] for item in samples],
+        'sample_wall_times': [item['wall_elapsed_s'] for item in samples],
+        'sample_count': len(samples),
+        'publisher_count': None,
+    }
+    if len(samples) < 2:
+        details['reason'] = 'COLLECTOR_CLOCK_NOT_ADVANCING'
+        return False, details
+    increasing = all(
+        current['sim_time_seconds'] > previous['sim_time_seconds']
+        and current['wall_elapsed_s'] > previous['wall_elapsed_s']
+        for previous, current in zip(samples, samples[1:]))
+    if not increasing:
+        details['reason'] = 'COLLECTOR_CLOCK_NOT_ADVANCING'
+        return False, details
+    details['reason'] = 'READY'
+    return True, details
+
+
 def tf_readiness_requirements(unknown_initial_pose=False):
     """Return the TF edges required before Nav2 startup.
 
@@ -1687,6 +1719,7 @@ def internal_trial(args):
     readiness_deadline = start + args.startup_timeout
     mission_deadline = None
     mission_sim_start = None
+    collector_clock_samples = []
     clock_ok = args.time_mode == 'wall'
     tf_ok = args.time_mode == 'wall'
     nav2_started = args.time_mode == 'wall'
@@ -1701,9 +1734,30 @@ def internal_trial(args):
                 status = json.loads(status_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 pass
+            collector_sim_time = status.get('sim_time_seconds')
+            if isinstance(collector_sim_time, (int, float)):
+                if (not collector_clock_samples
+                        or collector_sim_time != collector_clock_samples[-1][
+                            'sim_time_seconds']):
+                    collector_clock_samples.append({
+                        'sim_time_seconds': float(collector_sim_time),
+                        'wall_elapsed_s': now - start,
+                    })
+                    collector_clock_samples = collector_clock_samples[-8:]
             if readiness_probe_due(
                     args.time_mode, ready, now, last_clock_probe):
                 clock_ok, clock_details = clock_readiness(args.ros_domain_id)
+                if not clock_ok and args.time_mode == 'sim':
+                    collector_clock_ok, collector_clock_details = (
+                        collector_clock_readiness(collector_clock_samples))
+                    if collector_clock_ok:
+                        clock_ok = True
+                        clock_details = {
+                            **clock_details,
+                            'fallback': collector_clock_details,
+                            'reason': 'READY',
+                            'source': 'collector_status.json',
+                        }
                 if 'first_clock_probe' not in startup_timeline:
                     mark_startup_stage('first_clock_probe')
                 if clock_details.get('sample_wall_times'):

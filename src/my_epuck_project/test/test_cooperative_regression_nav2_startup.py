@@ -1,4 +1,5 @@
 from my_epuck_project.cooperative_regression import (
+    collector_clock_readiness,
     lifecycle_startup_action,
     mission_infrastructure_ready,
     nav2_manager_name,
@@ -68,3 +69,19 @@ def test_unknown_pose_nav2_readiness_uses_local_phase_names():
 def test_known_pose_nav2_readiness_keeps_existing_names():
     assert nav2_node_names(False)[0] == 'controller_server'
     assert nav2_manager_name(False) == 'lifecycle_manager_navigation'
+
+
+def test_collector_clock_fallback_requires_two_increasing_observations():
+    assert not collector_clock_readiness([{
+        'sim_time_seconds': 1.0, 'wall_elapsed_s': 2.0,
+    }])[0]
+    ready, details = collector_clock_readiness([
+        {'sim_time_seconds': 1.0, 'wall_elapsed_s': 2.0},
+        {'sim_time_seconds': 1.5, 'wall_elapsed_s': 2.5},
+    ])
+    assert ready
+    assert details['source'] == 'collector_status.json'
+    assert collector_clock_readiness([
+        {'sim_time_seconds': 1.5, 'wall_elapsed_s': 2.0},
+        {'sim_time_seconds': 1.5, 'wall_elapsed_s': 2.5},
+    ])[0] is False

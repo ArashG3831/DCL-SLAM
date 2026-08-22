@@ -45,6 +45,26 @@ def read_events(observer):
     ]
 
 
+def test_goal_decision_ledger_mirrors_navigation_decision_events(observer):
+    observer.event(
+        'NAV_GOAL_SENT', 'local goal dispatched', 'robot1',
+        canonical_task_id='task-1', physical_task_signature='physical-1',
+        path_length_m=2.5, map_revision=7,
+    )
+    observer.goal_decisions.flush()
+    rows = [
+        json.loads(line)
+        for line in (observer.directory / 'goal_decision_ledger.jsonl').read_text(
+            encoding='utf-8').splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]['decision_stage'] == 'NAV_GOAL_SENT'
+    assert rows[0]['robot_id'] == 'robot1'
+    assert rows[0]['canonical_task_id'] == 'task-1'
+    assert rows[0]['physical_task_signature'] == 'physical-1'
+    assert rows[0]['path_length_m'] == 2.5
+
+
 def test_logger_uses_stable_executor_for_shutdown_pybind_regression():
     """The experimental EventsExecutor conversion crash is not used."""
     from rclpy.executors import SingleThreadedExecutor

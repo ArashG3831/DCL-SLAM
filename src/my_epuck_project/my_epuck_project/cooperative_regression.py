@@ -3269,7 +3269,10 @@ def parser():
     result.add_argument('--free-threshold', type=int, default=25)
     result.add_argument('--occupied-threshold', type=int, default=65)
     result.add_argument('--shift-window', type=int)
-    result.add_argument('--graceful-shutdown-timeout', type=float, default=20.0)
+    # Lossless forensic streams can be hundreds of MB at a bounded timeout.
+    # Allow the launch child logger to receive SIGINT and finish its final
+    # manifest/JSONL commit before the runner escalates the process group.
+    result.add_argument('--graceful-shutdown-timeout', type=float, default=150.0)
     result.add_argument('--hard-shutdown-timeout', type=float, default=10.0)
     # Private per-attempt interface used only by campaign supervisors.
     result.add_argument('--internal-trial', action='store_true',

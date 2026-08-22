@@ -421,6 +421,11 @@ def launch_setup(context):
     observer = Node(
         package='my_epuck_project', executable='cooperative_experiment_logger',
         name='cooperative_experiment_logger', output='screen',
+        # The observer closes lossless forensic JSONL streams before the
+        # launch process exits.  The default launch child timeout is too short
+        # for a bounded campaign's final evidence flush.
+        sigterm_timeout='120.0',
+        sigkill_timeout='30.0',
         condition=IfCondition(LaunchConfiguration('enable_observer')),
         parameters=[{
             'run_id': LaunchConfiguration('run_id'),

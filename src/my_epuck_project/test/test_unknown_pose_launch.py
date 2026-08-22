@@ -95,6 +95,13 @@ def test_full_exploration_launch_starts_both_unknown_pose_frontends():
     assert "'peer_robot_id': peer" in text
 
 
+def test_full_exploration_logger_has_bounded_lossless_shutdown_window():
+    source = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
+        encoding='utf-8')
+    assert "sigterm_timeout='120.0'" in source
+    assert "sigkill_timeout='30.0'" in source
+
+
 def test_explicit_unknown_pose_exploration_entrypoint_selects_full_stack():
     source = (LAUNCH / 'two_robots_unknown_pose_exploration_launch.py')
     text = source.read_text(encoding='utf-8')

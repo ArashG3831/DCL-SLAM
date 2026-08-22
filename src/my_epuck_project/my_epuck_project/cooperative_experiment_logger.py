@@ -41,6 +41,16 @@ TIME_FIELDS=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed
 TELEMETRY=TIME_FIELDS+['robot_id','pose_x','pose_y','pose_yaw','linear_speed_mps','angular_speed_radps','commanded_linear_mps','commanded_angular_radps','cmd_vel_received','cmd_vel_age_s','cmd_vel_source','distance_travelled_m','claim_state','claim_id','frontier_id','goal_x','goal_y','goal_yaw','navigation_active','distance_remaining_m','recoveries','candidate_count','local_known_cells','shared_known_cells','local_costmap_obstacles','global_costmap_known','global_costmap_obstacles','odom_age_s','scan_age_s','map_age_s','shared_map_age_s','claim_age_s','feedback_age_s']
 COVERAGE=TIME_FIELDS+['robot1_local_known','robot2_local_known','robot1_shared_known','robot2_shared_known','shared_free_cells','shared_occupied_cells','shared_unknown_cells','known_area_m2','coverage_gain_cells','coverage_gain_since_start_cells','unique_first_seen_robot1_cells','unique_first_seen_robot2_cells','later_duplicated_by_robot1_cells','later_duplicated_by_robot2_cells','simultaneously_observed_cells','total_known_union_cells','duplicated_known_fraction','shared_maps_equivalent']
 HEALTH=TIME_FIELDS+['robot_id','topic_name','topic_rate_hz','topic_age_s','expected_min_rate_hz','stale']
+GOAL_LEDGER_EVENTS={
+    'CLAIM_PROPOSED', 'CLAIM_CONFLICT_DETECTED', 'EQUIVALENT_FRONTIER_DUPLICATE',
+    'ARBITRATION_WON', 'ARBITRATION_LOST', 'NAV_GOAL_SENT',
+    'NAV_GOAL_ACCEPTED', 'NAV_GOAL_REJECTED', 'NAVIGATION_SUCCEEDED',
+    'NAVIGATION_FAILED', 'NAVIGATION_CANCELED', 'NAVIGATION_CANCELLED',
+    'NAVIGATION_TIMEOUT', 'ROUND_INVALIDATED', 'DISTRIBUTED_TASK_FAILURE',
+    'DISTRIBUTED_PAIR_DECISION', 'DISTRIBUTED_STATUS',
+    'TRAFFIC_WAITING', 'TRAFFIC_RELEASED_FRESH_REALLOCATION',
+    'MISSION_COMPLETE', 'MISSION_ABORTED',
+}
 
 
 def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
@@ -92,7 +102,7 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
         # Protocol counters deliberately separate replicated publications from
         # unique decisions and local navigation outcomes.
         self.unique_agreed_rounds=set(); self.unique_agreed_decisions=set()
@@ -346,6 +356,16 @@ class CooperativeExperimentLogger(Node):
             with self._io_lock:
                 if self._closed:return None
                 self.events.write(encoded)
+                if event_type in GOAL_LEDGER_EVENTS:
+                    ledger = dict(row)
+                    ledger['decision_stage'] = event_type
+                    ledger['observed_navigation_active'] = bool(
+                        robot is not None and
+                        self.latest.get(robot, {}).get(
+                            'navigation_active', False))
+                    self.goal_decisions.write(
+                        json.dumps(finite(ledger), separators=(',', ':'),
+                                   allow_nan=False) + '\n')
         except (OSError,TypeError,ValueError) as exc:
             self.write_failures+=1; self.get_logger().error(f'event write failed: {exc}',throttle_duration_sec=10.)
         if console or severity=='ERROR' or event_type.endswith(('_STARTED','_CLEARED')):

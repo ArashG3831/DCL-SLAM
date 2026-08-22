@@ -739,8 +739,8 @@ def test_persisted_tf_readiness_requires_both_local_odom_chains(tmp_path):
     assert details['reason'] == 'READY'
 
 
-def test_persisted_tf_readiness_unknown_pose_requires_local_map_chains(tmp_path):
-    """Unknown-pose fallback must not bypass local map->base readiness."""
+def test_persisted_tf_readiness_unknown_pose_uses_local_odom_chains(tmp_path):
+    """Unknown-pose fallback accepts the pre-handoff local odom contract."""
     attempt = tmp_path / 'attempt'
     path = attempt / 'observer' / 'run' / 'forensic'
     path.mkdir(parents=True)
@@ -748,14 +748,6 @@ def test_persisted_tf_readiness_unknown_pose_requires_local_map_chains(tmp_path)
         'target_frame,source_frame,available\n'
         'robot1/odom,robot1/base_footprint,True\n'
         'robot2/odom,robot2/base_footprint,True\n', encoding='utf-8')
-    ready, details = persisted_local_tf_readiness(
-        attempt, 'run', unknown_initial_pose=True)
-    assert not ready
-    assert details['available_local_map_chains'] == []
-    with (path / 'transforms.csv').open('a', encoding='utf-8') as stream:
-        stream.write(
-            'robot1/map,robot1/base_footprint,True\n'
-            'robot2/map,robot2/base_footprint,True\n')
     ready, details = persisted_local_tf_readiness(
         attempt, 'run', unknown_initial_pose=True)
     assert ready

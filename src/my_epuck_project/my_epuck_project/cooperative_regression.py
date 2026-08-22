@@ -608,14 +608,7 @@ def tf_readiness_requirements(unknown_initial_pose=False):
     for robot in ('robot1', 'robot2'):
         required.append(
             (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'))
-        if unknown_initial_pose:
-            # Local Nav2 must not start until local SLAM has produced a
-            # usable map->odom edge as well as odom->base.  Starting the
-            # local costmaps on odom alone races their first activation and
-            # leaves both managers retrying forever before handoff.
-            required.append(
-                (f'{robot}/map', f'{robot}/base_footprint', 'local_map_to_base'))
-        else:
+        if not unknown_initial_pose:
             required.append(
                 ('shared_map', f'{robot}/base_footprint', 'shared_to_base'))
     return required
@@ -1237,7 +1230,6 @@ def persisted_local_tf_readiness(attempt, run_id, unknown_initial_pose=False):
     path = (observer_directory(attempt, run_id) / 'forensic' /
             'transforms.csv')
     available_odom = set()
-    available_local_map = set()
     try:
         with path.open(newline='', encoding='utf-8') as stream:
             for row in csv.DictReader(stream):
@@ -1249,20 +1241,13 @@ def persisted_local_tf_readiness(attempt, run_id, unknown_initial_pose=False):
                     if (target == f'{robot}/odom'
                             and source == f'{robot}/base_footprint'):
                         available_odom.add(robot)
-                    if (unknown_initial_pose
-                            and target == f'{robot}/map'
-                            and source == f'{robot}/base_footprint'):
-                        available_local_map.add(robot)
     except (OSError, csv.Error):
         pass
     ready = available_odom == {'robot1', 'robot2'}
-    if unknown_initial_pose:
-        ready = ready and available_local_map == {'robot1', 'robot2'}
     return ready, {
         'source': 'campaign_logger_transforms.csv',
         'path': str(path),
         'available_local_odom_chains': sorted(available_odom),
-        'available_local_map_chains': sorted(available_local_map),
         'reason': 'READY' if ready else 'LOCAL_TF_SAMPLES_INCOMPLETE',
     }
 

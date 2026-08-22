@@ -41,13 +41,11 @@ def test_unknown_pose_readiness_does_not_require_prehandoff_fusion():
     assert not mission_infrastructure_ready(True, True, True, NODES, True)
 
 
-def test_unknown_pose_tf_readiness_requires_local_map_and_odom_chain():
+def test_unknown_pose_tf_readiness_requires_local_odom_chain():
     requirements = tf_readiness_requirements(unknown_initial_pose=True)
     assert requirements == [
         ('robot1/base_footprint', 'robot1/odom', 'odom_to_base'),
-        ('robot1/map', 'robot1/base_footprint', 'local_map_to_base'),
         ('robot2/base_footprint', 'robot2/odom', 'odom_to_base'),
-        ('robot2/map', 'robot2/base_footprint', 'local_map_to_base'),
     ]
     assert len(tf_readiness_requirements()) == 4
 

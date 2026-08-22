@@ -784,6 +784,11 @@ def nav2_manager_name(unknown_initial_pose=False):
             if unknown_initial_pose else 'lifecycle_manager_navigation')
 
 
+def nav2_startup_preflight_mode(unknown_initial_pose=False):
+    """Describe the safe lifecycle-start ordering for the selected phase."""
+    return 'manager_ack' if unknown_initial_pose else 'state_then_manager'
+
+
 def wait_for_nav2_lifecycle_services(
         node, timeout_s, unknown_initial_pose=False):
     """Wait until every namespaced Nav2 lifecycle node exposes get_state."""
@@ -851,6 +856,52 @@ def activate_nav2(
             'regression_nav2_startup_gate', context=context)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
+        # In unknown-pose mode the local lifecycle manager is deliberately
+        # held inactive until this gate.  Do not require a sequential
+        # get_state response from every Nav2 plugin before sending STARTUP:
+        # a late route-server service can block that diagnostic query even
+        # though the lifecycle manager is ready to perform its ordered
+        # transition.  The manager's successful STARTUP response is the
+        # authoritative activation acknowledgement.  Keep the historical
+        # state-before-startup probe unchanged for known-pose launches.
+        if nav2_startup_preflight_mode(unknown_initial_pose) == 'manager_ack':
+            for robot in ('robot1', 'robot2'):
+                robot_started = time.monotonic()
+                manager_prefix = (
+                    f'/{robot}/{nav2_manager_name(unknown_initial_pose)}')
+                service = f'{manager_prefix}/manage_nodes'
+                client = node.create_client(
+                    ManageLifecycleNodes, service)
+                remaining = max(
+                    0.0, timeout_s - (time.monotonic() - robot_started))
+                if not client.wait_for_service(timeout_sec=remaining):
+                    details['services'][robot] = 'MANAGE_SERVICE_TIMEOUT'
+                    details['status'] = 'MANAGE_SERVICE_TIMEOUT'
+                    return False, details
+                request = ManageLifecycleNodes.Request()
+                request.command = ManageLifecycleNodes.Request.STARTUP
+                startup_state[robot] = 'STARTING'
+                future = client.call_async(request)
+                deadline = time.monotonic() + max(
+                    0.0, timeout_s - (time.monotonic() - robot_started))
+                while not future.done() and time.monotonic() < deadline:
+                    executor.spin_once(timeout_sec=0.1)
+                if not future.done():
+                    details['services'][robot] = 'STARTUP_RESPONSE_TIMEOUT'
+                    details['status'] = 'STARTUP_RESPONSE_TIMEOUT'
+                    return False, details
+                response = future.result()
+                details['services'][robot] = (
+                    'STARTED' if response.success else 'REJECTED')
+                if not response.success:
+                    startup_state[robot] = 'FAILED'
+                    details['status'] = 'REJECTED'
+                    return False, details
+                startup_state[robot] = 'ACTIVE'
+            details['status'] = 'READY'
+            details['readiness_evidence'] = (
+                'both local lifecycle managers acknowledged STARTUP')
+            return True, details
         services_ready, missing = wait_for_nav2_lifecycle_services(
             node, timeout_s, unknown_initial_pose)
         if not services_ready:

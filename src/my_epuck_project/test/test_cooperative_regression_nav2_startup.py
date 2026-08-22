@@ -1,6 +1,7 @@
 from my_epuck_project.cooperative_regression import (
     collector_clock_readiness,
     lifecycle_startup_action,
+    nav2_startup_preflight_mode,
     mission_infrastructure_ready,
     nav2_manager_name,
     nav2_node_names,
@@ -69,6 +70,11 @@ def test_unknown_pose_nav2_readiness_uses_local_phase_names():
 def test_known_pose_nav2_readiness_keeps_existing_names():
     assert nav2_node_names(False)[0] == 'controller_server'
     assert nav2_manager_name(False) == 'lifecycle_manager_navigation'
+
+
+def test_unknown_pose_nav2_uses_manager_ack_before_plugin_state_queries():
+    assert nav2_startup_preflight_mode(True) == 'manager_ack'
+    assert nav2_startup_preflight_mode(False) == 'state_then_manager'
 
 
 def test_collector_clock_fallback_requires_two_increasing_observations():

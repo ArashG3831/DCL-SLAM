@@ -789,6 +789,14 @@ def nav2_startup_preflight_mode(unknown_initial_pose=False):
     return 'manager_ack' if unknown_initial_pose else 'state_then_manager'
 
 
+NAV2_MANAGER_STARTUP_CALL_SLICE_S = 30.0
+
+
+def nav2_manager_startup_call_timeout(timeout_s):
+    """Bound one manager call so the outer readiness loop can retry."""
+    return min(max(0.0, float(timeout_s)), NAV2_MANAGER_STARTUP_CALL_SLICE_S)
+
+
 def wait_for_nav2_lifecycle_services(
         node, timeout_s, unknown_initial_pose=False):
     """Wait until every namespaced Nav2 lifecycle node exposes get_state."""
@@ -866,14 +874,17 @@ def activate_nav2(
         # state-before-startup probe unchanged for known-pose launches.
         if nav2_startup_preflight_mode(unknown_initial_pose) == 'manager_ack':
             for robot in ('robot1', 'robot2'):
+                if startup_state.get(robot) == 'ACTIVE':
+                    details['services'][robot] = 'ALREADY_ACTIVE'
+                    continue
                 robot_started = time.monotonic()
                 manager_prefix = (
                     f'/{robot}/{nav2_manager_name(unknown_initial_pose)}')
                 service = f'{manager_prefix}/manage_nodes'
                 client = node.create_client(
                     ManageLifecycleNodes, service)
-                remaining = max(
-                    0.0, timeout_s - (time.monotonic() - robot_started))
+                remaining = nav2_manager_startup_call_timeout(
+                    timeout_s - (time.monotonic() - robot_started))
                 if not client.wait_for_service(timeout_sec=remaining):
                     details['services'][robot] = 'MANAGE_SERVICE_TIMEOUT'
                     details['status'] = 'MANAGE_SERVICE_TIMEOUT'
@@ -882,8 +893,8 @@ def activate_nav2(
                 request.command = ManageLifecycleNodes.Request.STARTUP
                 startup_state[robot] = 'STARTING'
                 future = client.call_async(request)
-                deadline = time.monotonic() + max(
-                    0.0, timeout_s - (time.monotonic() - robot_started))
+                deadline = time.monotonic() + nav2_manager_startup_call_timeout(
+                    timeout_s - (time.monotonic() - robot_started))
                 while not future.done() and time.monotonic() < deadline:
                     executor.spin_once(timeout_sec=0.1)
                 if not future.done():

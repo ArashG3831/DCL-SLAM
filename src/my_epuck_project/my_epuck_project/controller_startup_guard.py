@@ -70,7 +70,7 @@ class ControllerStartupGuard(Node):
         self.declare_parameter('controller_ros_args', '')
         self.declare_parameter('max_attempts', 6)
         self.declare_parameter('retry_delay_s', 1.0)
-        self.declare_parameter('service_timeout_s', 3.0)
+        self.declare_parameter('service_timeout_s', 15.0)
         self.controller_name = str(self.get_parameter('controller_name').value)
         self.manager = str(self.get_parameter('controller_manager').value)
         self.param_file = str(self.get_parameter('controller_param_file').value)

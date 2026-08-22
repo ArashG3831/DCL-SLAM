@@ -11,6 +11,17 @@ from my_epuck_project.controller_startup_guard import (
 )
 
 
+def test_startup_guard_uses_bounded_but_startup_tolerant_service_budget():
+    """The guard allows slow Webots manager discovery without hanging."""
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[1]
+        / 'my_epuck_project' / 'controller_startup_guard.py'
+    ).read_text(encoding='utf-8')
+    assert "declare_parameter('service_timeout_s', 15.0)" in source
+    assert 'timeout=self.service_timeout_s + 1.0' in source
+
+
 def test_each_robot_requires_both_named_controllers_active():
     ready = {
         'diffdrive_controller': 'active',

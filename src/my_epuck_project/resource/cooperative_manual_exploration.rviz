@@ -67,6 +67,46 @@ Visualization Manager:
         Value: /robot1/shared_map_visualization_updates
       Use Timestamp: false
       Value: true
+    - Alpha: 0.85
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: true
+      Enabled: true
+      Name: Robot1 Local Map
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot1/map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot1/map_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.85
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: false
+      Name: Robot2 Local Map
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot2/map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot2/map_updates
+      Use Timestamp: false
+      Value: true
     - Alpha: 0.5
       Class: rviz_default_plugins/Map
       Color Scheme: map
@@ -438,7 +478,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: shared_map
+    Fixed Frame: robot1/map
     Frame Rate: 10
   Name: root
   Tools:
@@ -470,7 +510,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.01
       Pitch: 0.65
-      Target Frame: shared_map
+      Target Frame: robot1/map
       Value: Orbit (rviz)
       Yaw: 0.65
     Saved: ~

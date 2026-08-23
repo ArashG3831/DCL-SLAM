@@ -149,6 +149,22 @@ class BoundedVerificationBatchController:
         self.waiting_for_novelty = False
         self.completed = True
 
+    def reopen_after_rejected_proposal(self):
+        """Allow novel evidence after a peer rejects a proposal.
+
+        A locally acceptable evidence batch is marked complete while the
+        responder verifies it.  If that remote verification rejects the
+        proposal, the batch was not a handoff and the initiator must be able
+        to acquire a later, physically novel batch.  Reopening here does not
+        retry old pairs: the frontend's attempted/rejected physical evidence
+        sets still provide that safety boundary.
+        """
+        if self.lifetime_expired:
+            return
+        self.active = False
+        self.completed = False
+        self.waiting_for_novelty = True
+
     def is_novel(self, own_key, peer_key, own_timestamp_ns, peer_timestamp_ns,
                  own_center, peer_center, attempted_pairs=(),
                  rejected_physical=False):

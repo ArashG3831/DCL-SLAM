@@ -2388,6 +2388,15 @@ class UnknownPoseFrontend(Node):
         if message.status == 'REJECTED':
             if self.robot_id == message.source_robot_id:
                 self.negotiation_started = False
+                # The local registration may have passed while the peer's
+                # independent confirmation failed.  This is not a completed
+                # handoff: release the source latch and reopen the bounded
+                # batch controller so only novel evidence can be tried next.
+                self.batch_proposal_published = False
+                self.pending_proposals.pop(
+                    (str(message.source_keyframe_id),
+                     str(message.target_keyframe_id)), None)
+                self.verification_batches.reopen_after_rejected_proposal()
             if self.robot_id == message.target_robot_id:
                 # A rejected proposal terminates the responder's pending
                 # confirmation too.  Without this reset, the responder

@@ -223,6 +223,7 @@ def test_rejected_proposal_releases_target_confirmation_latch():
     frontend.robot_id = 'robot2'
     frontend.peer_robot_id = 'robot1'
     frontend.accepted = None
+    frontend.pending_target_proposal = False
     frontend.pending_target_proposal = True
     frontend.negotiation_started = True
     frontend.peer_proposals = {'robot1-00000055': object()}
@@ -239,6 +240,36 @@ def test_rejected_proposal_releases_target_confirmation_latch():
     assert frontend.pending_target_proposal is False
     assert frontend.peer_proposals == {}
     assert frontend.negotiation_started is True
+
+
+def test_rejected_proposal_reopens_initiator_for_novel_evidence():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.robot_id = 'robot1'
+    frontend.peer_robot_id = 'robot2'
+    frontend.accepted = None
+    frontend.pending_target_proposal = False
+    frontend.batch_proposal_published = True
+    frontend.negotiation_started = True
+    frontend.pending_proposals = {('robot1-00000055', 'robot2-00000035'):
+                                  object()}
+    frontend.verification_batches = BoundedVerificationBatchController(
+        budget=2, max_batches=3, lifetime_s=100.0)
+    frontend.verification_batches.mark_completed()
+    frontend._record_diagnostic_event = lambda *args, **kwargs: None
+    message = SimpleNamespace(
+        source_robot_id='robot1', target_robot_id='robot2',
+        source_keyframe_id='robot1-00000055',
+        target_keyframe_id='robot2-00000035', status='REJECTED',
+        accepted=False, final_confidence=0.0,
+        rejection_reason='INSUFFICIENT_CONSISTENT_CONSTRAINTS')
+
+    frontend.hypothesis_callback(message)
+
+    assert frontend.batch_proposal_published is False
+    assert frontend.negotiation_started is False
+    assert frontend.pending_proposals == {}
+    assert frontend.verification_batches.completed is False
+    assert frontend.verification_batches.waiting_for_novelty is True
 
 
 def test_batch_reentry_never_changes_three_constraint_consensus_gate():

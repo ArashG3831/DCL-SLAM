@@ -29,3 +29,9 @@ float32 projected_error_m
 float32 translation_uncertainty_m
 float32 yaw_uncertainty_rad
 float32 condition_number
+string selector_status
+float64 selector_score
+float64 selector_null_score
+float64 selector_runner_up_score
+float64 selector_runner_up_margin
+float64[] selector_inlier_probabilities

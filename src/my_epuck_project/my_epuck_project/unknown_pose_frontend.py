@@ -1815,8 +1815,17 @@ class UnknownPoseFrontend(Node):
                     self._record_crop_rejection('INCOMPLETE_EVIDENCE_SET', message)
                     return
                 evidence_pairs.append((source_crop, target_entry[1]))
+            evidence_timestamps = []
+            for source_key, target_key in zip(evidence_sources, evidence_targets):
+                source_descriptor = self.peer_descriptors.get(source_key)
+                target_entry = self.keyframes.get(target_key)
+                evidence_timestamps.append((
+                    0 if source_descriptor is None else self._stamp_ns(source_descriptor),
+                    0 if target_entry is None else self._stamp_ns(target_entry[0]),
+                ))
             result = self._run_registration(
-                evidence_pairs, 'target_confirmation', message.keyframe_id)
+                evidence_pairs, 'target_confirmation', message.keyframe_id,
+                evidence_timestamps=evidence_timestamps)
             tx, ty, yaw = result.transform
             proposed_tx = proposal.source_to_target.translation.x
             proposed_ty = proposal.source_to_target.translation.y
@@ -1827,7 +1836,13 @@ class UnknownPoseFrontend(Node):
             translation_error = math.hypot(tx - proposed_tx, ty - proposed_ty)
             yaw_error = abs(math.atan2(
                 math.sin(yaw - proposed_yaw), math.cos(yaw - proposed_yaw)))
-            mutually_consistent = translation_error <= 0.12 and yaw_error <= 0.04
+            selector_agrees = (
+                str(getattr(proposal, 'selector_status', '')) in
+                ('', 'ACCEPTED_HYPOTHESIS'))
+            mutually_consistent = (
+                translation_error <= 0.12 and yaw_error <= 0.04 and
+                selector_agrees and
+                str(getattr(proposal, 'evidence_set_hash', '')) != '')
             accepted = result.accepted and mutually_consistent
             response = self._ack_message(
                 proposal, result, accepted,
@@ -2007,7 +2022,11 @@ class UnknownPoseFrontend(Node):
             for pair_key, _ in evidence_items]
         consensus = self._run_registration(
             pairs, 'incremental_consensus', peer_key,
-            individual_results=cached_results)
+            individual_results=cached_results,
+            evidence_timestamps=[
+                (self._stamp_ns(self.keyframes[own_key][0]),
+                 self._stamp_ns(self.peer_descriptors[peer_key]))
+                for (own_key, peer_key), _ in evidence_items])
         if consensus.accepted:
             self.evidence_acquisition_started = False
             self.evidence_acquisition_deadline_wall = None
@@ -2023,7 +2042,7 @@ class UnknownPoseFrontend(Node):
         self._request_next_candidate_verification()
 
     def _run_registration(self, evidence_pairs, source, keyframe_id='',
-                          individual_results=None):
+                          individual_results=None, evidence_timestamps=None):
         self.counters['registrations'] += 1
         self.counters['registration_callback_entries'] += 1
         self.registration_callback_depth += 1
@@ -2037,7 +2056,8 @@ class UnknownPoseFrontend(Node):
                 min_consistent_constraints=self.min_consistent_constraints,
                 max_projected_registration_error_m=(
                     self.max_projected_registration_error_m),
-                individual_results=individual_results)
+                individual_results=individual_results,
+                evidence_timestamps=evidence_timestamps)
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
@@ -2081,7 +2101,17 @@ class UnknownPoseFrontend(Node):
                 result.translation_uncertainty_m),
             yaw_uncertainty_rad=float(result.yaw_uncertainty_rad),
             condition_number=float(result.condition_number),
-            projected_error_m=float(result.projected_error_m))
+            projected_error_m=float(result.projected_error_m),
+            selector_status=str(getattr(result, 'selector_status', '')),
+            selector_score=float(getattr(result, 'selector_score', 0.0)),
+            selector_null_score=float(getattr(
+                result, 'selector_null_score', 0.0)),
+            selector_runner_up_score=float(getattr(
+                result, 'selector_runner_up_score', -math.inf)),
+            selector_runner_up_margin=float(getattr(
+                result, 'selector_runner_up_margin', 0.0)),
+            selector_inlier_probabilities=[float(value) for value in getattr(
+                result, 'selector_inlier_probabilities', ())])
         if not result.accepted:
             self.counters['multi_constraint_rejections'] += 1
             self.consensus_gate_rejection_counts[str(result.reason)] += 1
@@ -2207,7 +2237,11 @@ class UnknownPoseFrontend(Node):
         self.counters['multi_constraint_attempts'] += 1
         if result is None:
             result = self._run_registration(
-                pairs, 'initiator_batch', selected_pairs[0][0])
+                pairs, 'initiator_batch', selected_pairs[0][0],
+                evidence_timestamps=[
+                    (self._stamp_ns(candidate[3]),
+                     self._stamp_ns(candidate[2]))
+                    for candidate in selected_pairs])
         own_key = selected_pairs[0][1]
         peer_key = selected_pairs[0][0]
         own_descriptor = self.keyframes[own_key][0]
@@ -2363,6 +2397,20 @@ class UnknownPoseFrontend(Node):
             result.translation_uncertainty_m)
         message.yaw_uncertainty_rad = float(result.yaw_uncertainty_rad)
         message.condition_number = float(result.condition_number)
+        # Replicate the robust-selector model evidence.  The transport fields
+        # are diagnostic/protocol evidence only; the accepted flag remains
+        # gated by the existing two-sided handoff protocol.
+        message.selector_status = str(getattr(
+            result, 'selector_status', 'INSUFFICIENT_EVIDENCE'))
+        message.selector_score = float(getattr(result, 'selector_score', 0.0))
+        message.selector_null_score = float(getattr(
+            result, 'selector_null_score', 0.0))
+        message.selector_runner_up_score = float(getattr(
+            result, 'selector_runner_up_score', -math.inf))
+        message.selector_runner_up_margin = float(getattr(
+            result, 'selector_runner_up_margin', 0.0))
+        message.selector_inlier_probabilities = [float(value) for value in
+            getattr(result, 'selector_inlier_probabilities', ())]
         return message
 
     def hypothesis_callback(self, message):
@@ -2471,6 +2519,24 @@ class UnknownPoseFrontend(Node):
                 source_keyframe_id=str(message.source_keyframe_id),
                 target_keyframe_id=str(message.target_keyframe_id))
             return
+        peer_selector_status = str(getattr(message, 'selector_status', ''))
+        evidence_hash_matches = (
+            not getattr(message, 'evidence_set_hash', '') or
+            str(message.evidence_set_hash) == str(proposal.evidence_set_hash))
+        peer_selector_accepted = (
+            peer_selector_status in ('', 'ACCEPTED_HYPOTHESIS') and
+            int(getattr(message, 'consistent_constraint_count', 0)) >=
+            int(self.min_consistent_constraints))
+        if not evidence_hash_matches or not peer_selector_accepted:
+            self._record_diagnostic_event(
+                'HYPOTHESIS_ACK_IGNORED_ROBUST_SELECTOR_MISMATCH',
+                proposal_evidence_set_hash=str(proposal.evidence_set_hash),
+                peer_evidence_set_hash=str(getattr(
+                    message, 'evidence_set_hash', '')),
+                peer_selector_status=peer_selector_status,
+                peer_consistent_constraint_count=int(getattr(
+                    message, 'consistent_constraint_count', 0)))
+            return
         final = self._hypothesis_message(
             own[0], peer, proposal, status='ACCEPTED', accepted=True,
             rejection_reason='',
@@ -2529,6 +2595,16 @@ class UnknownPoseFrontend(Node):
         message.translation_uncertainty_m = proposal.translation_uncertainty_m
         message.yaw_uncertainty_rad = proposal.yaw_uncertainty_rad
         message.condition_number = proposal.condition_number
+        message.selector_status = getattr(
+            result, 'selector_status', 'INSUFFICIENT_EVIDENCE')
+        message.selector_score = getattr(result, 'selector_score', 0.0)
+        message.selector_null_score = getattr(result, 'selector_null_score', 0.0)
+        message.selector_runner_up_score = getattr(
+            result, 'selector_runner_up_score', -math.inf)
+        message.selector_runner_up_margin = getattr(
+            result, 'selector_runner_up_margin', 0.0)
+        message.selector_inlier_probabilities = list(getattr(
+            result, 'selector_inlier_probabilities', []))
         return message
 
     def _request_source_for_confirmation(self, proposal):

@@ -17,6 +17,12 @@ from typing import Iterable
 
 import numpy as np
 
+from .robust_relative_pose_selector import (
+    ACCEPTED_HYPOTHESIS,
+    PoseConstraint,
+    select_robust_hypothesis,
+)
+
 try:
     import cv2
 except ImportError:  # pragma: no cover - exercised only on minimal systems.
@@ -491,6 +497,15 @@ class RegistrationResult:
     # Bounded, JSON-friendly forensic data.  This is diagnostic only and does
     # not participate in registration or acceptance decisions.
     consensus_diagnostics: tuple = ()
+    # Robust multi-hypothesis selector evidence.  These values are carried in
+    # the replicated proposal/ack message so each peer can verify the same
+    # winner without a central estimator.
+    selector_status: str = 'INSUFFICIENT_EVIDENCE'
+    selector_score: float = 0.0
+    selector_null_score: float = 0.0
+    selector_runner_up_score: float = -math.inf
+    selector_runner_up_margin: float = 0.0
+    selector_inlier_probabilities: tuple = ()
 
 
 def hypothesis_is_acceptable(status: str, accepted: bool,
@@ -1362,7 +1377,8 @@ def register_crop_set(
         min_inlier_ratio: float = 0.55,
         max_robust_residual_m: float = 0.08,
         min_candidate_margin: float = 0.02,
-        individual_results: Iterable[RegistrationResult] | None = None
+        individual_results: Iterable[RegistrationResult] | None = None,
+        evidence_timestamps: Iterable[tuple[int, int]] | None = None
         ) -> RegistrationResult:
     """Estimate one transform from an independently verified crop set.
 
@@ -1403,37 +1419,61 @@ def register_crop_set(
     accepted = [result for result in results if result.accepted]
     if not accepted:
         return _empty_registration('NO_GEOMETRIC_CONSTRAINT')
-    clusters = []
-    for result in accepted:
-        best = None
-        for cluster in clusters:
-            distance, yaw_distance = _transform_distance(
-                result.transform, cluster['mean'])
-            if (distance <= max_translation_consistency_m and
-                    yaw_distance <= max_yaw_consistency_rad):
-                best = cluster
-                break
-        if best is None:
-            clusters.append({'mean': result.transform, 'items': [result]})
-        else:
-            best['items'].append(result)
-            items = best['items']
-            weights = np.asarray([
-                max(1e-3, item.inlier_ratio / max(item.residual_m, 1e-3))
-                for item in items])
-            translations = np.asarray([item.transform[:2] for item in items])
-            yaw_values = np.asarray([item.transform[2] for item in items])
-            best['mean'] = (
-                float(np.average(translations[:, 0], weights=weights)),
-                float(np.average(translations[:, 1], weights=weights)),
-                float(math.atan2(np.sum(weights * np.sin(yaw_values)),
-                                 np.sum(weights * np.cos(yaw_values)))))
-    cluster = max(clusters, key=lambda item: (
-        len(item['items']),
-        sum(value.inlier_ratio for value in item['items']),
-        -sum(value.residual_m for value in item['items'])))
-    items = cluster['items']
-    transform = cluster['mean']
+    # The old implementation grew one evolving mean in arrival order.  That
+    # could absorb a third constraint even when the final set contained a
+    # pairwise-inconsistent transform.  Use a bounded multi-hypothesis,
+    # covariance-weighted selector instead; the single-crop registration above
+    # remains unchanged and still supplies the observations.
+    accepted_indices = [index for index, result in enumerate(results)
+                        if result.accepted]
+    timestamp_list = list(evidence_timestamps or ())
+    robust_candidates = []
+    for index in accepted_indices:
+        pair = pair_list[index]
+        item = results[index]
+        timestamp_pair = (timestamp_list[index]
+                          if index < len(timestamp_list) else (0, 0))
+        robust_candidates.append(PoseConstraint(
+            transform=tuple(float(value) for value in item.transform),
+            covariance=tuple(float(value) for value in item.covariance),
+            quality=max(0.05, min(1.0, float(
+                0.45 * item.inlier_ratio +
+                0.30 * item.occupied_free_agreement +
+                0.25 * item.overlap_fraction))),
+            evidence_id=str(index),
+            source_center=_crop_center(pair[0]),
+            target_center=_crop_center(pair[1]),
+            source_timestamp_ns=int(timestamp_pair[0]),
+            target_timestamp_ns=int(timestamp_pair[1])))
+    robust = select_robust_hypothesis(
+        robust_candidates,
+        min_inliers=min_consistent_constraints,
+        min_spatial_baseline_m=min_spatial_baseline_m,
+        max_translation_disagreement_m=max_translation_consistency_m,
+        max_yaw_disagreement_rad=max_yaw_consistency_rad)
+    forensic = tuple(forensic) + tuple(robust.diagnostics)
+    if robust.status != ACCEPTED_HYPOTHESIS:
+        return RegistrationResult(
+            accepted=False, transform=robust.transform,
+            covariance=robust.covariance, inlier_ratio=0.0,
+            residual_m=math.inf, occupied_free_agreement=0.0,
+            overlap_fraction=0.0,
+            reason='INSUFFICIENT_CONSISTENT_CONSTRAINTS',
+            constraint_count=len(results),
+            consistent_constraint_count=len(robust.selected_indices),
+            projected_error_m=math.inf,
+            final_confidence=0.0,
+            consensus_diagnostics=forensic,
+            selector_status=robust.status,
+            selector_score=robust.score,
+            selector_null_score=robust.null_score,
+            selector_runner_up_score=robust.runner_up_score,
+            selector_runner_up_margin=robust.runner_up_margin,
+            selector_inlier_probabilities=robust.inlier_probabilities)
+    selected_result_indices = [accepted_indices[index]
+                               for index in robust.selected_indices]
+    items = [results[index] for index in selected_result_indices]
+    transform = robust.transform
     residuals = np.asarray([item.residual_m for item in items])
     inlier_ratio = float(np.average(
         [item.inlier_ratio for item in items],
@@ -1487,7 +1527,8 @@ def register_crop_set(
         inlier_ratio >= min_inlier_ratio and
         robust_residual <= max_robust_residual_m and
         projected <= max_projected_registration_error_m and
-        condition < 1e4 and confidence >= min_candidate_margin)
+        condition < 1e4 and confidence >= min_candidate_margin and
+        robust.status == ACCEPTED_HYPOTHESIS)
     reason = 'ACCEPTED_MULTI_CONSTRAINT' if accepted_final else (
         'INSUFFICIENT_CONSISTENT_CONSTRAINTS' if len(items) < min_consistent_constraints
         else 'PHYSICAL_ACCURACY_GATE_REJECTED')
@@ -1510,7 +1551,13 @@ def register_crop_set(
         translation_uncertainty_m=translation_uncertainty,
         yaw_uncertainty_rad=yaw_uncertainty, condition_number=condition,
         projected_error_m=projected, final_confidence=confidence,
-        consensus_diagnostics=forensic)
+        consensus_diagnostics=forensic,
+        selector_status=robust.status,
+        selector_score=robust.score,
+        selector_null_score=robust.null_score,
+        selector_runner_up_score=robust.runner_up_score,
+        selector_runner_up_margin=robust.runner_up_margin,
+        selector_inlier_probabilities=robust.inlier_probabilities)
 
 
 def descriptor_checksum(descriptor: bytes) -> int:

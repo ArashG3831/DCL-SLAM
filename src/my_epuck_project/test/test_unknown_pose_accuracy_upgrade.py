@@ -25,6 +25,13 @@ from my_epuck_project.unknown_pose_frontend_core import (
     _distance_field,
     wrap_angle,
 )
+from my_epuck_project.robust_relative_pose_selector import (
+    ACCEPTED_HYPOTHESIS,
+    AMBIGUOUS_HYPOTHESES,
+    INSUFFICIENT_EVIDENCE,
+    PoseConstraint,
+    select_robust_hypothesis,
+)
 
 
 def _scalar_polar_descriptor_reference(crop, rings=12, sectors=24):
@@ -182,6 +189,77 @@ def test_multi_keyframe_consensus_rejects_one_wrong_constraint():
     assert result.consistent_constraint_count >= 3
     assert np.linalg.norm(np.asarray(result.transform[:2]) - (0.7, -0.2)) < 0.10
     assert result.projected_error_m < 0.20
+
+
+def _selector_constraint(transform, index, quality=0.95, source_center=None):
+    return PoseConstraint(
+        transform=tuple(transform),
+        covariance=(0.03 ** 2, 0.0, 0.0, 0.0, 0.03 ** 2,
+                    0.0, 0.0, 0.0, math.radians(0.35) ** 2),
+        quality=quality,
+        evidence_id=f'evidence-{index}',
+        source_center=(float(index), 0.0) if source_center is None else source_center,
+        target_center=(float(index) + 0.7, -0.2),
+        source_timestamp_ns=index * 1_000_000_000,
+        target_timestamp_ns=(index + 1) * 1_000_000_000)
+
+
+def test_robust_selector_rejects_current_internally_inconsistent_three_set():
+    """The persisted 1.313-degree pair must not reach handoff."""
+    selection = select_robust_hypothesis([
+        _selector_constraint((-2.7218818, 0.0085150, -0.0130691), 0),
+        _selector_constraint((-2.6999520, 0.0129301, -0.0239829), 1),
+        _selector_constraint((-2.7715699, 0.0130774, -0.0010675), 2),
+    ], min_inliers=3)
+    assert selection.status != ACCEPTED_HYPOTHESIS
+    # The diagnostics may retain the high-probability set for forensic
+    # reporting even when the structural compatibility gate rejects it.
+    assert selection.runner_up_margin >= 0.0
+
+
+def test_robust_selector_accepts_clear_cluster_and_rejects_outlier():
+    selection = select_robust_hypothesis([
+        _selector_constraint((0.7, -0.2, 0.03), 0),
+        _selector_constraint((0.702, -0.198, 0.031), 1),
+        _selector_constraint((0.698, -0.201, 0.029), 2),
+        _selector_constraint((1.7, 1.0, 0.5), 3, quality=0.60),
+    ], min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
+    assert set(selection.selected_indices) == {0, 1, 2}
+
+
+def test_robust_selector_refuses_competing_hypotheses():
+    first = [
+        (1.0, 0.0, 0.02), (1.002, 0.001, 0.021),
+        (0.998, -0.001, 0.019),
+    ]
+    second = [
+        (3.0, 1.0, 0.40), (3.002, 1.001, 0.401),
+        (2.998, 0.999, 0.399),
+    ]
+    selection = select_robust_hypothesis([
+            _selector_constraint(value, index, source_center=(float(index), 0.0))
+        for index, value in enumerate(first + second)
+    ], min_inliers=3)
+    assert selection.status in (AMBIGUOUS_HYPOTHESES, INSUFFICIENT_EVIDENCE)
+
+
+def test_robust_selector_null_refuses_all_outliers():
+    selection = select_robust_hypothesis([
+        _selector_constraint((0.0, 0.0, 0.0), 0),
+        _selector_constraint((4.0, 2.0, 1.0), 1),
+        _selector_constraint((-4.0, -2.0, -1.0), 2),
+    ], min_inliers=3)
+    assert selection.status != ACCEPTED_HYPOTHESIS
+
+
+def test_robust_selector_handles_yaw_wraparound():
+    selection = select_robust_hypothesis([
+        _selector_constraint((1.0, 0.0, math.pi - 0.004), 0),
+        _selector_constraint((1.001, 0.001, -math.pi + 0.004), 1),
+        _selector_constraint((0.999, -0.001, math.pi - 0.002), 2),
+    ], min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
 
 
 def _synthetic_consensus_result(transform, accepted=True):

@@ -140,6 +140,17 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None or self.contact_capture:
             self.start_forensic_ground_truth()
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}; self.shared_map_seen=set()
+        # Bounded scan-pipeline evidence.  These samples are passive and are
+        # written once at shutdown so a campaign records what Slam Toolbox
+        # actually received rather than only the configured value.
+        self.scan_pipeline = {
+            r: {
+                'scan_d500_fixed_stamps': deque(maxlen=4096),
+                'map_stamps': deque(maxlen=4096),
+                'scan_correction_records': 0,
+            }
+            for r in self.robots}
+        self.scan_pipeline_warning_emitted = False
         self.tf_buffer=Buffer(); self.tf_listener=TransformListener(self.tf_buffer,self)
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
         self.coverage=self.csv_file('coverage.csv',COVERAGE); self.health=self.csv_file('topic_health.csv',HEALTH)
@@ -399,6 +410,12 @@ class CooperativeExperimentLogger(Node):
             self.last[(r,key)]=now; self.windows.setdefault((r,key),deque()).append(now); self.latest[r][key]=msg
             if key == 'shared_map':
                 self.shared_map_seen.add(r)
+            if key == 'scan_d500_fixed':
+                self.scan_pipeline[r]['scan_d500_fixed_stamps'].append(
+                    stamp(msg)[0] + stamp(msg)[1] * 1e-9)
+            elif key == 'map':
+                self.scan_pipeline[r]['map_stamps'].append(
+                    stamp(msg)[0] + stamp(msg)[1] * 1e-9)
         if self.forensic is not None and key == 'peer_map':
             self.forensic.record_peer_map(
                 r, msg, now, time.monotonic() - self.start)
@@ -408,6 +425,7 @@ class CooperativeExperimentLogger(Node):
     def record_scan_correction_at_map_update(self, robot, now_ros):
         """Record passive scan-match correction evidence at each local map update."""
         now_wall = time.monotonic() - self.start
+        self.scan_pipeline[robot]['scan_correction_records'] += 1
         try:
             transform = self.tf_buffer.lookup_transform(
                 f'{robot}/map', f'{robot}/odom', Time(),
@@ -786,6 +804,14 @@ class CooperativeExperimentLogger(Node):
     def sample_health(self):
         limits={'odom':self.p['odom_stale_s'],'joint_states':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
         now=time.monotonic()
+        try:
+            scan_parameters = json.loads(
+                self.p['initial_configuration_json']).get(
+                    'slam_runtime_parameters', {})
+            configured_throttle = float(scan_parameters.get(
+                'throttle_scans', 0))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            configured_throttle = 0.0
         for r in self.robots:
             available=self.tf_buffer.can_transform(self.p['global_frame'],f'{r}/base_footprint',Time(),timeout=Duration(seconds=0.0))
             old_tf=self.tf_state.get(r)
@@ -798,6 +824,16 @@ class CooperativeExperimentLogger(Node):
                 age=self.age(r,key); stale=age is None or age>limit; old=self.stale.get((r,key)); active=self.latest[r].get('navigation_active',False)
                 if old is not None and stale!=old and (key!='navigate_feedback' or active):self.event('TOPIC_STALE' if stale else 'TOPIC_RECOVERED',f'{key} age={age}',r,f'/{r}/{key}',severity='WARN' if stale else 'INFO',topic_name=f'/{r}/{key}',topic_age_s=age)
                 self.stale[(r,key)]=stale; row=self.row_time(); row.update(robot_id=r,topic_name=f'/{r}/{key}',topic_rate_hz=len(window)/10.,topic_age_s=age,expected_min_rate_hz=1/limit,stale=stale); self.csv_row(self.health,row)
+            if (self.scan_matching_enabled and configured_throttle > 1.0
+                    and not self.scan_pipeline_warning_emitted):
+                scan_window = self.windows.get((r, 'scan_d500_fixed'), ())
+                if len(scan_window) >= 2 and len(scan_window) / 10.0 <= 2.0:
+                    self.scan_pipeline_warning_emitted = True
+                    self.event(
+                        'SCAN_PIPELINE_THROTTLE_MISMATCH',
+                        'corrected scan rate is too low for configured SLAM throttle',
+                        r, severity='WARN', configured_throttle_scans=configured_throttle,
+                        observed_scan_rate_hz=len(scan_window) / 10.0)
     def sample_process_resources(self):
         now=time.monotonic(); fields=Path('/proc/self/stat').read_text().split(); ticks=int(fields[13])+int(fields[14]); rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
         previous=self._cpu_previous; self._cpu_previous=(now,ticks); self._rss_samples.append(rss)
@@ -819,11 +855,67 @@ class CooperativeExperimentLogger(Node):
             try:self.forensic.flush()
             except OSError as e:self.write_failures+=1; self.get_logger().error(f'forensic flush failed: {e}',throttle_duration_sec=10.)
 
+    @staticmethod
+    def _observed_rate(stamps):
+        values = [float(value) for value in stamps if math.isfinite(float(value))]
+        if len(values) < 2:
+            return 0.0
+        span = max(values) - min(values)
+        return (len(values) - 1) / span if span > 0.0 else 0.0
+
+    def write_scan_pipeline_diagnostic(self):
+        """Persist effective SLAM and measured scan/map cadence evidence."""
+        try:
+            configuration = json.loads(self.p['initial_configuration_json'])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            configuration = {}
+        parameters = configuration.get('slam_runtime_parameters', {})
+        throttle = parameters.get('throttle_scans')
+        robots = {}
+        mismatch = False
+        for robot in self.robots:
+            values = self.scan_pipeline[robot]
+            scan_rate = self._observed_rate(values['scan_d500_fixed_stamps'])
+            map_rate = self._observed_rate(values['map_stamps'])
+            robot_row = {
+                'corrected_scan_messages': len(values['scan_d500_fixed_stamps']),
+                'corrected_scan_rate_hz': scan_rate,
+                'map_messages': len(values['map_stamps']),
+                'map_update_rate_hz': map_rate,
+                'scan_correction_records': values['scan_correction_records'],
+            }
+            robots[robot] = robot_row
+            if (self.scan_matching_enabled and throttle is not None
+                    and float(throttle) > 1.0 and scan_rate <= 2.0):
+                mismatch = True
+        diagnostic = {
+            'schema_version': SCHEMA,
+            'scan_matching_enabled': self.scan_matching_enabled,
+            'effective_slam_runtime_parameters': parameters,
+            'configured_throttle_scans': throttle,
+            'robots': robots,
+            'preflight_status': 'FAIL_SCAN_THROTTLE_MISMATCH' if mismatch else 'PASS',
+            'rate_definition': 'header-stamp span; (N-1)/(last-first)',
+            'source_topics': {
+                robot: f'/{robot}/scan_d500_fixed' for robot in self.robots},
+            'map_topics': {
+                robot: f'/{robot}/map' for robot in self.robots},
+        }
+        atomic_json(self.directory / 'scan_pipeline_diagnostic.json', diagnostic)
+        if mismatch:
+            self.event(
+                'SCAN_PIPELINE_THROTTLE_MISMATCH',
+                'scan pipeline preflight failed at finalization',
+                severity='ERROR', configured_throttle_scans=throttle)
+        return diagnostic
+
     def required_artifact_status(self, include_campaign_files=True):
         """Return the fail-closed artifact contract for this validation."""
         required=[]
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
+        if self.scan_matching_enabled:
+            required.append(self.directory / 'scan_pipeline_diagnostic.json')
         if self.forensic is not None:
             required.extend([
                 self.directory/'forensic'/'transforms.csv',
@@ -1148,6 +1240,8 @@ class CooperativeExperimentLogger(Node):
             # JSON/JSONL streams before this observer freezes the artifact
             # contract; otherwise a valid late file is recorded as missing.
             self.wait_for_frontend_diagnostics()
+            if self.scan_matching_enabled:
+                self.write_scan_pipeline_diagnostic()
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]

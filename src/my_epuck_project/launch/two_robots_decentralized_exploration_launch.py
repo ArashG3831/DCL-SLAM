@@ -502,7 +502,12 @@ def launch_setup(context):
                 'do_loop_closing': profile_scan_parameters.get(
                     'do_loop_closing',
                     LaunchConfiguration('do_loop_closing').perform(
-                        context).lower() == 'true'),
+                    context).lower() == 'true'),
+                # Preserve the complete effective SLAM override in the
+                # passive manifest.  This is also the source of truth for the
+                # scan-pipeline diagnostic; both namespaced Slam Toolbox
+                # instances receive this same dictionary below.
+                'slam_runtime_parameters': profile_scan_parameters,
                 'ideal_encoder_sensing': LaunchConfiguration(
                     'ideal_encoder_sensing').perform(context).lower() == 'true',
                 'encoder_profile': selected['encoder_profile'],

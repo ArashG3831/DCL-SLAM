@@ -22,16 +22,14 @@ CONSERVATIVE_SCAN_MATCHING_PARAMETERS = {
     'coarse_angle_resolution': 0.0174532925,
     'fine_search_angle_offset': 0.0034906585,
     'use_response_expansion': False,
-    # The dynamic close-start fixture advances at a 20 ms physics step.  The
-    # conservative matcher is intentionally retained, but it cannot consume
-    # every 50 Hz 720-beam scan in Webots fast mode.  Throttling the input at
-    # the SLAM boundary prevents the reliable bridge queue from back-pressuring
-    # the simulator while leaving all scan-matching gates and penalties intact.
-    'throttle_scans': 10,
+    # The corrected D500 bridge publishes one scan per simulated second.  The
+    # SLAM throttle therefore remains one: a value of ten would silently
+    # discard nine out of every ten corrected scans and reduce scan matching
+    # to roughly 0.1 Hz.
+    'throttle_scans': 1,
     'minimum_time_interval': 1.0,
-    # Publish the full 720-beam scan at 1 Hz of simulation time.  This is the
-    # proven close-start throughput: higher simulated rates overrun the
-    # scan-matching callback budget before a local map->odom TF can settle.
+    # Publish the full 720-beam scan at 1 Hz of simulation time.  This keeps
+    # the source cadence and the SLAM input cadence aligned.
     # Resolution, range, and noise are unchanged.
     'lidar_update_rate': 1.0,
     # Full 720-beam samples are fragmented DDS payloads.  On the WSL

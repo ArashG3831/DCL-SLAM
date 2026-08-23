@@ -54,9 +54,9 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
         'coarse_angle_resolution': 0.0174532925,
         'fine_search_angle_offset': 0.0034906585,
         'use_response_expansion': False,
-        'throttle_scans': 10,
-        # The close-start scan-matching callback budget is validated at 1 Hz;
-        # faster reliable fragmented streams prevent local TF convergence.
+        'throttle_scans': 1,
+        # The corrected fixed-scan input is approximately 1 Hz, so every
+        # corrected scan must be available to Slam Toolbox.
         'minimum_time_interval': 1.0,
         'lidar_update_rate': 1.0,
         'scan_input_reliability': 'reliable',
@@ -68,6 +68,58 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
     assert 'slam_runtime_parameters' in slam
     assert slam.count('slam_runtime_parameters)') >= 2
     assert 'if slam_runtime_parameters:' in slam
+
+
+def test_scan_matching_overlays_are_identical_and_normal_profile_is_unchanged():
+    close = selected('large_unknown_pose_close_start_20ms_scan_matching')
+    far = selected('large_unknown_pose_far_start_20ms_scan_matching')
+    assert close['slam_runtime_parameters'] == far['slam_runtime_parameters']
+    assert close['slam_runtime_parameters']['throttle_scans'] == 1
+    normal = selected('large_unknown_pose_close_start_20ms')
+    assert normal['slam_runtime_parameters'] == {}
+    for robot in ('robot1', 'robot2'):
+        yaml = (RESOURCE / f'slam_toolbox_{robot}_teammate_filtered.yaml').read_text(
+            encoding='utf-8')
+        assert 'throttle_scans: 3' in yaml
+
+
+def test_generated_runtime_configuration_carries_throttle_to_both_robots():
+    launch = (LAUNCH / 'two_robots_teammate_filtered_dual_slam_launch.py').read_text(
+        encoding='utf-8')
+    # The launch creates one parameter override dictionary for each namespaced
+    # Slam Toolbox node.  Keep this assertion textual so it remains a fast,
+    # source-only regression check.
+    assert launch.count(
+        'unknown_initial_pose, slam_runtime_parameters)') >= 2
+    source = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(
+        encoding='utf-8')
+    assert "'slam_runtime_parameters': profile_scan_parameters" in source
+
+
+def test_installed_profile_matches_source_profile():
+    value = selected('large_unknown_pose_close_start_20ms_scan_matching')
+    assert value['slam_runtime_parameters']['throttle_scans'] == 1
+    # The installed launch is the generated artifact consumed by ros2 launch.
+    # It must retain the same runtime-override path as the source launch; the
+    # two profile worlds intentionally have different hashes (close vs far).
+    installed = PACKAGE.parent / 'install' / 'my_epuck_project' / 'share' / \
+        'my_epuck_project' / 'launch' / \
+        'two_robots_teammate_filtered_dual_slam_launch.py'
+    if installed.is_file():
+        text = installed.read_text(encoding='utf-8')
+        assert 'slam_runtime_parameters' in text
+        assert 'runtime_parameters.update(slam_runtime_parameters)' in text
+
+
+def test_scan_pipeline_diagnostic_records_effective_params_and_rates():
+    logger = (PACKAGE / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert 'scan_pipeline_diagnostic.json' in logger
+    assert 'corrected_scan_rate_hz' in logger
+    assert 'map_update_rate_hz' in logger
+    assert 'scan_correction_records' in logger
+    assert 'FAIL_SCAN_THROTTLE_MISMATCH' in logger
+    assert 'configured_throttle_scans' in logger
 
 
 def test_all_nested_launch_layers_accept_scan_matching_profile():

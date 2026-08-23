@@ -14,6 +14,8 @@ import os
 import time
 
 import rclpy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rosgraph_msgs.msg import Clock
 
 from webots_ros2_driver.ros2_supervisor import Ros2Supervisor
 
@@ -49,8 +51,23 @@ class PacedRos2Supervisor(Ros2Supervisor):
     def __init__(self):
         super().__init__()
         private_name = '_Ros2Supervisor__clock_publisher'
+        # The stock Ros2Supervisor creates ``clock`` with the default reliable
+        # QoS.  In Webots fast mode that writer can block the supervisor
+        # callback when the post-handoff ROS graph grows, preventing the next
+        # Webots physics step and freezing simulation time.  The clock is a
+        # disposable telemetry stream; best-effort depth one keeps the
+        # simulator stepping even when a subscriber is temporarily behind.
+        stock_publisher = getattr(self, private_name)
+        self.destroy_publisher(stock_publisher)
+        clock_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        clock_publisher = self.create_publisher(Clock, 'clock', clock_qos)
         setattr(self, private_name, _ClockPublisherProxy(
-            getattr(self, private_name),
+            clock_publisher,
             step_sleep_seconds=os.environ.get(
                 'MY_EPUCK_FAST_STEP_SLEEP_SECONDS', '0.001')))
 

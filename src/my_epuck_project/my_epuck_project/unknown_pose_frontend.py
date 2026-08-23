@@ -244,6 +244,12 @@ class UnknownPoseFrontend(Node):
         self.request_own_by_peer_key = {}
         self.request_own_by_request_key = {}
         self.evidence_pairs = {}
+        # Retain the descriptor metadata for accepted evidence even after the
+        # bounded live keyframe cache evicts its advertisement.  Consensus
+        # may complete on a later callback; proposal publication still needs
+        # the exact source/target IDs and descriptor provenance for that
+        # already-accepted crop pair.
+        self.evidence_candidates = {}
         self.evidence_physical_keys = {}
         self.evidence_physical_geometry_keys = set()
         self.candidate_verification_attempted = set()
@@ -1973,6 +1979,7 @@ class UnknownPoseFrontend(Node):
             return
         self.evidence_pairs[pair_key] = (
             self.keyframes[own_key][1], received_crop)
+        self.evidence_candidates[pair_key] = candidate
         self.evidence_physical_keys[pair_key] = physical_key
         self.evidence_physical_geometry_keys.add(candidate_geometry_key)
         self.counters['constraints_accumulated'] = len(
@@ -2092,6 +2099,11 @@ class UnknownPoseFrontend(Node):
         if result is not None:
             pool = []
             for own_key, peer_key in self.evidence_pairs:
+                retained = getattr(self, 'evidence_candidates', {}).get(
+                    (own_key, peer_key))
+                if retained is not None:
+                    pool.append(retained)
+                    continue
                 own_entry = self.keyframes.get(own_key)
                 peer_descriptor = self.peer_descriptors.get(peer_key)
                 if own_entry is None or peer_descriptor is None:
@@ -2203,7 +2215,8 @@ class UnknownPoseFrontend(Node):
         self.pending_proposals[(own_key, peer_key)] = result
         source_ids = [pair[1] for pair in selected_pairs]
         target_ids = [pair[0] for pair in selected_pairs]
-        self._publish_local_evidence_crops(source_ids)
+        self._publish_local_evidence_crops(
+            source_ids, evidence_candidates=selected_pairs)
         proposal = self._hypothesis_message(
             own_descriptor, peer_descriptor, result,
             status='PROPOSED' if result.accepted else 'REJECTED',
@@ -2226,13 +2239,25 @@ class UnknownPoseFrontend(Node):
                 reason='CONSENSUS_REJECTED',
                 state='WAITING_FOR_NOVEL_EVIDENCE')
 
-    def _publish_local_evidence_crops(self, keyframe_ids):
+    def _publish_local_evidence_crops(self, keyframe_ids,
+                                      evidence_candidates=None):
         """Make the initiator's bounded evidence available for peer verification."""
+        retained_by_own = {}
+        for candidate in evidence_candidates or ():
+            peer_key, own_key, _, _ = self._candidate_fields(candidate)
+            evidence = self.evidence_pairs.get((own_key, peer_key))
+            if evidence is not None:
+                retained_by_own.setdefault(own_key, (
+                    candidate[3], evidence[0]))
         for keyframe_id in keyframe_ids:
             stored = self.keyframes.get(keyframe_id)
             if stored is None:
-                continue
-            descriptor, crop = stored
+                retained = retained_by_own.get(keyframe_id)
+                if retained is None:
+                    continue
+                descriptor, crop = retained
+            else:
+                descriptor, crop = stored
             message = LocalMapCrop()
             message.header = descriptor.header
             message.source_robot_id = self.robot_id

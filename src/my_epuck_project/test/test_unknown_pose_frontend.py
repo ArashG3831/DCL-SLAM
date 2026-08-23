@@ -272,6 +272,22 @@ def test_rejected_proposal_reopens_initiator_for_novel_evidence():
     assert frontend.verification_batches.waiting_for_novelty is True
 
 
+def test_consensus_proposal_pool_retains_evicted_evidence_metadata():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {('own-1', 'peer-1'): ('own-crop', 'peer-crop')}
+    retained = (
+        'peer-1', 'own-1',
+        SimpleNamespace(map_epoch=4, checksum=11),
+        SimpleNamespace(map_epoch=7, checksum=22))
+    frontend.evidence_candidates = {('own-1', 'peer-1'): retained}
+    frontend.keyframes = {}
+    frontend.peer_descriptors = {}
+
+    pool = frontend._proposal_candidate_pool(result=object())
+
+    assert pool == [retained]
+
+
 def test_batch_reentry_never_changes_three_constraint_consensus_gate():
     assert not crop_batch_is_ready(2, 3)
     assert crop_batch_is_ready(3, 3)

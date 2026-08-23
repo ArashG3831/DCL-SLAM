@@ -181,6 +181,8 @@ class DistributedFrontierAssignment(Node):
         self._local_only = bool(self.declare_parameter('local_only', False).value)
         self._handoff_gated = bool(self.declare_parameter(
             'handoff_gated', False).value)
+        self._stop_after_handoff = bool(self.declare_parameter(
+            'stop_after_handoff', False).value)
         self._phase_gated = bool(self.declare_parameter(
             'phase_gated', False).value)
         self._handoff_complete = False
@@ -410,7 +412,7 @@ class DistributedFrontierAssignment(Node):
         }
         if not self._phase_gated:
             self._activate_protocol_inputs()
-        if self._handoff_gated:
+        if self._handoff_gated or self._stop_after_handoff:
             self.create_subscription(
                 RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
                 self._handoff_callback, hypothesis_qos,
@@ -522,9 +524,29 @@ class DistributedFrontierAssignment(Node):
         self._dispatch_enabled = False if self._local_only else True
         if self._local_only and self._nav2.local_goal_active:
             self._nav2.cancel_navigation()
+        if self._local_only and self._stop_after_handoff:
+            self._stop_local_phase()
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE robot=%s phase=POST_HANDOFF dispatch=%s' %
             (self._robot_id, self._dispatch_enabled))
+
+    def _stop_local_phase(self) -> None:
+        """Stop pre-handoff allocation work after canonical handoff."""
+        for subscription in self._phase_subscriptions:
+            self.destroy_subscription(subscription)
+        self._phase_subscriptions = []
+        if self._tick_timer is not None:
+            self._tick_timer.cancel()
+            self._tick_timer = None
+        if self._status_timer is not None:
+            self._status_timer.cancel()
+            self._status_timer = None
+        self._round = None
+        self._dispatch_in_progress = False
+        self._state = CoordinatorState.WAITING_FOR_INPUTS
+        self._state_reason = 'pre-handoff local phase stopped'
+        self.get_logger().info(
+            'FRONTIER_PHASE pre_handoff_stopped=true reason=ACCEPTED_HANDOFF')
 
     def _candidate_callback(self, message: FrontierCandidateArray) -> None:
         """Keep bounded generator evidence separate from reachable task bids."""

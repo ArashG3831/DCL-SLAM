@@ -9,6 +9,7 @@ from geometry_msgs.msg import Point
 from my_epuck_interfaces.msg import (
     FrontierCandidateArray,
     PhysicalTask,
+    RelativePoseHypothesis,
     TaskSnapshot,
 )
 
@@ -55,6 +56,10 @@ class FrontierProposalAdapter(Node):
             raise ValueError('robot_id must be robot1 or robot2')
         self._maximum_tasks = int(self.declare_parameter('maximum_tasks', 5).value)
         self._validity_s = float(self.declare_parameter('validity_s', 8.0).value)
+        self._stop_after_handoff = bool(self.declare_parameter(
+            'stop_after_handoff', False,
+        ).value)
+        self._stopped_after_handoff = False
         self._signature_quantum_m = float(
             self.declare_parameter('signature_quantization_m', 0.05).value,
         )
@@ -85,6 +90,13 @@ class FrontierProposalAdapter(Node):
         self._subscription = self.create_subscription(
             FrontierCandidateArray, input_topic, self._on_candidates, input_qos,
         )
+        if self._stop_after_handoff:
+            self._handoff_subscription = self.create_subscription(
+                RelativePoseHypothesis,
+                '/cslam/relative_pose/hypotheses',
+                self._on_handoff,
+                input_qos,
+            )
         self.get_logger().info(
             'proposal adapter robot=%s session=%s top_k=%d dispatch=false' % (
                 self._robot_id, self._session_text, self._maximum_tasks,
@@ -105,6 +117,8 @@ class FrontierProposalAdapter(Node):
 
     def _on_candidates(self, candidates: FrontierCandidateArray) -> None:
         """Publish one immutable bounded snapshot for a fresh candidate batch."""
+        if self._stopped_after_handoff:
+            return
         if candidates.source_robot_id != self._robot_id:
             self.get_logger().error('candidate source identity mismatch; batch rejected')
             return
@@ -152,6 +166,14 @@ class FrontierProposalAdapter(Node):
                 candidates.map_revision, len(message.tasks),
             )
         )
+
+    def _on_handoff(self, message: RelativePoseHypothesis) -> None:
+        """Stop the pre-handoff proposal stream at canonical handoff."""
+        if (self._stop_after_handoff and not self._stopped_after_handoff and
+                bool(message.accepted) and str(message.status) == 'ACCEPTED'):
+            self._stopped_after_handoff = True
+            self.get_logger().info(
+                'FRONTIER_PHASE pre_handoff_stopped=true reason=ACCEPTED_HANDOFF')
 
 
 def main(args=None):

@@ -45,6 +45,7 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     assert "'launch_shared_stack': 'false'" in full
     assert "'launch_mapping': 'true'" in full
     assert "'handoff_gated': handoff_gated" in stack
+    assert "'stop_after_handoff': True" in full
     assert "'phase_gated': LaunchConfiguration('phase_gated')" in assignment_launch
     assert "'handoff_gated': LaunchConfiguration('handoff_gated')" in frontier_launch
     assert "if not self._phase_gated:" in assignment
@@ -54,6 +55,8 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     assert "if not self.phase_active:" in fusion
     assert "handoff_gated_" in generator
     assert "if (handoff_gated_ && !processing_active_)" in generator
+    assert "stop_after_handoff_" in generator
+    assert "pre_handoff_stopped=true" in generator
     assert "FRONTIER_PHASE post_handoff=true processing_active=true" in generator
     assert "ManageLifecycleNodes.Request.STARTUP" in phase
     assert "ManageLifecycleNodes.Request.SHUTDOWN" in phase
@@ -69,7 +72,7 @@ def test_shared_inputs_are_created_once_after_handoff():
     assert assignment.count('self._activate_protocol_inputs()') == 2
     assert fusion.count('def _activate_fusion_phase') == 1
     assert fusion.count('self._activate_fusion_phase(') == 2
-    assert generator.count('processing_active_ = true;') == 2
+    assert generator.count('processing_active_ = true;') == 3
 
 
 def test_shared_stack_is_started_only_by_one_shot_handoff_activation():
@@ -186,6 +189,17 @@ def test_local_and_shared_goal_owners_are_phase_exclusive():
     assert "name='unknown_pose_phase_manager'" in full
     assert "self._dispatch_enabled = False if self._local_only else True" in assignment
     assert "self._nav2.cancel_navigation()" in assignment
+    assert "'stop_after_handoff': True" in full
+    assert "def _stop_local_phase" in assignment
+
+
+def test_pre_handoff_frontend_outputs_stop_at_canonical_handoff():
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    adapter = (PY / 'frontier_proposal_adapter.py').read_text()
+    assert full.count("'stop_after_handoff': True") >= 3
+    assert "RelativePoseHypothesis" in adapter
+    assert "_stopped_after_handoff" in adapter
+    assert "if self._stopped_after_handoff" in adapter
 
 
 def test_local_frontiers_and_adapter_are_not_peer_tasks():

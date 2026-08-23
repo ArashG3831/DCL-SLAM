@@ -300,6 +300,7 @@ def launch_setup(context):
                         'planner_id': 'GridBased',
                         'occupied_threshold': 50,
                         'visible_gain_range_m': 11.98,
+                        'stop_after_handoff': True,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                     }],
                 ),
@@ -315,6 +316,7 @@ def launch_setup(context):
                         'task_snapshot_topic': f'/{robot}/local_task_snapshot',
                         'maximum_tasks': 5,
                         'validity_s': 8.0,
+                        'stop_after_handoff': True,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                     }],
                 ),
@@ -338,6 +340,7 @@ def launch_setup(context):
                         'task_snapshot_topic': f'/{robot}/local_task_snapshot',
                         'local_only': True,
                         'handoff_gated': True,
+                        'stop_after_handoff': True,
                         # Local pre-handoff assignment is a single-owner
                         # action boundary; one executor avoids four-worker
                         # waitable/GIL contention without changing task logic.

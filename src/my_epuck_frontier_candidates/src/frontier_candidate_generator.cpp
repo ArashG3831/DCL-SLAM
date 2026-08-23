@@ -114,6 +114,7 @@ public:
     P(std::string, path_query_lock_path, "");
     P(double, processing_rate_hz, .5);
     P(bool, handoff_gated, false);
+    P(bool, stop_after_handoff, false);
     P(int, occupied_threshold, 50);
     P(int, costmap_blocked_threshold, 1);
     P(int, minimum_frontier_cells, 5);
@@ -162,21 +163,49 @@ public:
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       marker_topic_, rclcpp::QoS(1).reliable());
     planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
-    if (handoff_gated_) {
+    if (handoff_gated_ || stop_after_handoff_) {
       handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
         "/cslam/relative_pose/hypotheses", rclcpp::QoS(1).reliable(),
         [this](my_epuck_interfaces::msg::RelativePoseHypothesis::ConstSharedPtr message) {
-          if (!message->accepted || message->status != "ACCEPTED" || processing_active_) {
+          if (!message->accepted || message->status != "ACCEPTED") {
             return;
           }
-          processing_active_ = true;
-          timer_ = create_wall_timer(
-            std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
-            [this] {tick();});
-          receipt_summary_timer_ = create_wall_timer(
-            1s, [this] {emit_receipt_summary();});
-          RCLCPP_INFO(get_logger(), "FRONTIER_PHASE post_handoff=true processing_active=true");
+          if (handoff_gated_ && !processing_active_) {
+            processing_active_ = true;
+            timer_ = create_wall_timer(
+              std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
+              [this] {tick();});
+            receipt_summary_timer_ = create_wall_timer(
+              1s, [this] {emit_receipt_summary();});
+            RCLCPP_INFO(get_logger(), "FRONTIER_PHASE post_handoff=true processing_active=true");
+          } else if (stop_after_handoff_ && processing_active_) {
+            processing_active_ = false;
+            request_generation_++;
+            active_request_ = 0;
+            if (timer_) {timer_->cancel();}
+            if (timeout_timer_) {timeout_timer_->cancel();}
+            if (retry_timer_) {retry_timer_->cancel();}
+            if (active_) {
+              planner_->async_cancel_goal(active_);
+              active_.reset();
+            }
+            release_path_lock();
+            state_ = State::IDLE;
+            works_.clear();
+            reachable_.clear();
+            cycle_map_.reset();
+            cycle_cost_.reset();
+            RCLCPP_INFO(
+              get_logger(),
+              "FRONTIER_PHASE pre_handoff_stopped=true reason=ACCEPTED_HANDOFF");
+          }
         });
+      if (stop_after_handoff_ && !handoff_gated_) {
+        processing_active_ = true;
+        timer_ = create_wall_timer(
+          std::chrono::duration<double>(1.0 / std::max(.01, processing_rate_hz_)),
+          [this] {tick();});
+      }
     } else {
       processing_active_ = true;
       timer_ = create_wall_timer(
@@ -206,7 +235,7 @@ public:
 private:
   void map_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
   {
-    if (handoff_gated_ && !processing_active_) {return;}
+    if ((handoff_gated_ || stop_after_handoff_) && !processing_active_) {return;}
     const auto checksum = map_checksum(*message);
     const auto receipt = std::chrono::steady_clock::now().time_since_epoch();
     std::lock_guard<std::mutex> lock(mu_);
@@ -224,7 +253,7 @@ private:
 
   void cost_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
   {
-    if (handoff_gated_ && !processing_active_) {return;}
+    if ((handoff_gated_ || stop_after_handoff_) && !processing_active_) {return;}
     const auto checksum = map_checksum(*message);
     const auto receipt = std::chrono::steady_clock::now().time_since_epoch();
     std::lock_guard<std::mutex> lock(mu_);
@@ -1128,6 +1157,7 @@ private:
   std::string planner_id_;
   double processing_rate_hz_, minimum_frontier_length_m_, stable_id_quantization_m_;
   bool handoff_gated_{false};
+  bool stop_after_handoff_{false};
   bool processing_active_{false};
   double approach_clearance_m_, planner_tolerance_m_, minimum_robot_distance_m_;
   double path_query_timeout_s_, maximum_feasible_path_m_, gain_weight_, distance_weight_;

@@ -10,6 +10,7 @@ from my_epuck_project.distributed_assignment.local_nav2 import (
     classify_follow_path_controller_error,
     follow_path_controller_error_name,
     downsample_path,
+    local_path_clearance,
     local_path_clear,
     occupancy_value,
     upstream_point_validation,
@@ -93,6 +94,38 @@ def test_local_path_clear_ignores_samples_outside_rolling_window():
     assert local_path_clear(
         grid, ((0.5, 0.5), (10.0, 10.0)), lambda point: point,
     )
+
+
+def test_local_path_clear_stops_at_first_outside_sample():
+    """Distant/re-entered global points must not become local-gate failures."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 2
+    grid.info.height = 2
+    grid.data = [0] * 4
+    evidence = local_path_clearance(
+        grid,
+        ((0.5, 0.5), (10.0, 10.0), (1.5, 1.5)),
+        lambda point: point,
+    )
+    assert evidence.clear
+    assert evidence.reason == 'CLEAR'
+    assert evidence.inspected_points == 1
+    assert evidence.outside_points == 1
+
+
+def test_local_path_clear_reports_transform_failure_separately():
+    """Missing TF remains a safety rejection, not an out-of-window cell."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 2
+    grid.info.height = 2
+    grid.data = [0] * 4
+    evidence = local_path_clearance(
+        grid, ((0.5, 0.5),), lambda point: None,
+    )
+    assert not evidence.clear
+    assert evidence.reason == 'TRANSFORM_UNAVAILABLE'
 
 
 def test_path_length_and_samples_are_measured_and_bounded():

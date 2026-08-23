@@ -228,6 +228,24 @@ def classify_empty_frontiers(
     return None
 
 
+def all_physical_tasks_suppressed(
+        task_signatures: Iterable[Iterable[str]],
+        suppressed_signatures: set[str],
+) -> bool:
+    """Return true only when every current task has hard evidence.
+
+    A canonical task may contain equivalent source observations from both
+    robots.  Requiring every member signature to be suppressed prevents one
+    robot's failed local approach from incorrectly declaring a task globally
+    unreachable when the peer still has an executable view.
+    """
+    groups = [
+        frozenset(signature for signature in group if signature)
+        for group in task_signatures
+    ]
+    return bool(groups) and all(group and group <= suppressed_signatures for group in groups)
+
+
 def terminal_reason_is_success(reason: str) -> bool:
     """Return whether a reason represents successful map exhaustion."""
     return reason.startswith('MISSION_COMPLETE_')

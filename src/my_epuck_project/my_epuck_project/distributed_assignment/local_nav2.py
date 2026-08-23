@@ -123,6 +123,9 @@ class DispatchPreconditions:
     no_local_goal_active: bool
     final_path_valid: bool
     reason: str
+    local_path_reason: str = ''
+    local_path_inspected_points: int = 0
+    local_path_outside_points: int = 0
 
     @property
     def ready(self) -> bool:
@@ -333,32 +336,61 @@ def occupancy_value(grid: OccupancyGrid, point: Point) -> Optional[int]:
     return int(grid.data[index])
 
 
-def local_path_clear(
+@dataclass(frozen=True)
+class LocalPathClearance:
+    """Bounded evidence for the contiguous path prefix in the local grid."""
+
+    clear: bool
+    reason: str
+    inspected_points: int
+    outside_points: int
+
+
+def local_path_clearance(
         grid: Optional[OccupancyGrid], points: tuple[Point, ...],
         transform_point: Callable[[Point], Optional[Point]],
-        blocked_threshold: int = 80) -> bool:
+        blocked_threshold: int = 80) -> LocalPathClearance:
     """Check the portion of a global path visible in the rolling local grid.
 
     Global NavFn is intentionally allowed to traverse unknown space so it can
     reach a frontier.  That makes a valid global path insufficient at the
     dispatch boundary: its first metres can still enter an inflated obstacle
-    that the rolling local controller will stop for.  Samples outside the
-    rolling window are ignored; samples inside it must be known and below the
-    local inflation threshold.  The transform is injected so this geometry
-    rule remains deterministic and unit-testable without a ROS TF graph.
+    that the rolling local controller will stop for.  Only the contiguous
+    prefix that lies inside the rolling window is an execution-horizon gate.
+    Once the path leaves that window, the farther segment is covered by the
+    global path validation and is not re-entered if the path later loops back.
+    The transform is injected so this geometry rule remains deterministic and
+    unit-testable without a ROS TF graph.
     """
     if grid is None:
-        return False
+        return LocalPathClearance(False, 'NO_LOCAL_COSTMAP', 0, 0)
+    inspected = 0
+    outside = 0
     for point in points:
         local = transform_point(point)
         if local is None:
-            return False
+            return LocalPathClearance(
+                False, 'TRANSFORM_UNAVAILABLE', inspected, outside,
+            )
         value = occupancy_value(grid, local)
         if value is None:
-            continue
+            outside += 1
+            break
         if value < 0 or value >= blocked_threshold:
-            return False
-    return True
+            reason = 'UNKNOWN_LOCAL_CELL' if value < 0 else 'BLOCKED_LOCAL_CELL'
+            return LocalPathClearance(False, reason, inspected + 1, outside)
+        inspected += 1
+    return LocalPathClearance(True, 'CLEAR', inspected, outside)
+
+
+def local_path_clear(
+        grid: Optional[OccupancyGrid], points: tuple[Point, ...],
+        transform_point: Callable[[Point], Optional[Point]],
+        blocked_threshold: int = 80) -> bool:
+    """Boolean compatibility wrapper for the local path safety predicate."""
+    return local_path_clearance(
+        grid, points, transform_point, blocked_threshold,
+    ).clear
 
 
 class LocalNav2:
@@ -1119,7 +1151,7 @@ class LocalNav2:
             reason = reason or 'goal lies outside current global costmap'
         elif cost_value < 0 or cost_value >= self._costmap_lethal_threshold:
             reason = reason or 'goal costmap cell is unknown or lethal'
-        local_path_is_clear = local_path_clear(
+        local_path_evidence = local_path_clearance(
             self._local_costmap, path_samples,
             lambda point: (
                 None if self._local_costmap is None else
@@ -1129,8 +1161,9 @@ class LocalNav2:
             ),
             blocked_threshold=80,
         )
+        local_path_is_clear = local_path_evidence.clear
         if not local_path_is_clear:
-            reason = reason or 'final path enters unknown or inflated local costmap cell'
+            reason = reason or 'local path gate: ' + local_path_evidence.reason
         if self.local_goal_active:
             reason = reason or 'another local navigation goal is active'
         if not final_path_valid:
@@ -1150,6 +1183,9 @@ class LocalNav2:
             no_local_goal_active=not self.local_goal_active,
             final_path_valid=final_path_valid,
             reason=reason,
+            local_path_reason=local_path_evidence.reason,
+            local_path_inspected_points=local_path_evidence.inspected_points,
+            local_path_outside_points=local_path_evidence.outside_points,
         )
 
     def send_navigation(

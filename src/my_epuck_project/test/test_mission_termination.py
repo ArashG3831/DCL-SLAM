@@ -12,6 +12,7 @@ from my_epuck_project.mission_termination import (
     matching_terminal_reason,
     recommended_exit_code,
     summarize_frontier_regions,
+    all_physical_tasks_suppressed,
 )
 
 
@@ -217,3 +218,10 @@ def test_reachable_frontier_without_gain_evidence_still_blocks():
     assert evidence.actionable_reachable == 1
     assert evidence.below_minimum_gain == 0
     assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
+
+
+def test_all_current_task_members_must_have_hard_evidence_before_terminalizing():
+    suppressed = {'a', 'b'}
+    assert all_physical_tasks_suppressed((('a',), ('b',)), suppressed)
+    assert not all_physical_tasks_suppressed((('a', 'b'),), {'a'})
+    assert not all_physical_tasks_suppressed(((),), suppressed)

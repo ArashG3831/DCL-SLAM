@@ -82,6 +82,7 @@ from .mission_termination import (
     classify_empty_frontiers,
     summarize_frontier_regions,
     terminal_reason_is_success,
+    all_physical_tasks_suppressed,
 )
 
 
@@ -1261,6 +1262,35 @@ class DistributedFrontierAssignment(Node):
                 self._candidate_evidence['robot1'],
                 self._candidate_evidence['robot2'],
             )
+        first = self._fresh_snapshot('robot1', now)
+        second = self._fresh_snapshot('robot2', now)
+        if (
+                candidate_reason is None and first is not None and second is not None and
+                self._candidate_evidence_seen == {'robot1', 'robot2'} and
+                not any(
+                    item.planner_failures or item.unclassified or
+                    item.meaningful_detected_not_queried
+                    for item in self._candidate_evidence.values()
+                )
+        ):
+            # Candidate generators report global reachability.  A dispatch
+            # gate can still establish hard local execution evidence for every
+            # current physical task.  Once both source snapshots are fresh and
+            # every canonical task is fully suppressed, classify the union as
+            # having no executable frontiers instead of waiting forever for a
+            # semantic snapshot change that cannot arrive.
+            self._expire_failures(now)
+            suppressed = set(self._hard_failure_signatures)
+            union = build_canonical_union(
+                first.tasks, second.tasks, self._maximum_union_tasks,
+            )
+            if all_physical_tasks_suppressed(
+                    (
+                        (member.physical_signature for member in task.members)
+                        for task in union.tasks
+                    ), suppressed,
+            ):
+                candidate_reason = TerminalReason.NO_REACHABLE_FRONTIERS
         peer_reason = '' if not peer_fresh else str(peer.value.reason)
         if peer_reason.startswith('COMPLETION_CANDIDATE:'):
             peer_reason = peer_reason.split(':', 1)[1]
@@ -1770,13 +1800,17 @@ class DistributedFrontierAssignment(Node):
             'DISPATCH_PRECONDITIONS robot=%s round=%s task=%s ready=%s '
             'action=%s lifecycle=%s tf=%s tf_age=%s map_inside=%s map_value=%s '
             'costmap_inside=%s costmap_value=%s local_path_clear=%s '
-            'local_goal_clear=%s path=%s reason=%s' % (
+            'local_path_reason=%s local_path_inspected=%s '
+            'local_path_outside=%s local_goal_clear=%s path=%s reason=%s' % (
                 self._robot_id, self._active_round_id, task.canonical_id, checks.ready,
                 checks.action_server_ready, checks.lifecycle_active,
                 checks.transform_available, checks.transform_age_s,
                 checks.goal_inside_map, checks.goal_map_value,
                 checks.goal_inside_costmap, checks.goal_costmap_value,
-                checks.local_path_clear, checks.no_local_goal_active,
+                checks.local_path_clear, checks.local_path_reason,
+                checks.local_path_inspected_points,
+                checks.local_path_outside_points,
+                checks.no_local_goal_active,
                 checks.final_path_valid, checks.reason,
             )
         )

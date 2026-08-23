@@ -10,6 +10,7 @@ from my_epuck_project.distributed_assignment.local_nav2 import (
     classify_follow_path_controller_error,
     follow_path_controller_error_name,
     downsample_path,
+    local_path_clear,
     occupancy_value,
     upstream_point_validation,
     path_length,
@@ -63,6 +64,35 @@ def test_upstream_point_validation_preserves_threshold_and_unknown_semantics():
 def test_upstream_point_validation_missing_grid_is_not_blocked():
     """Absent dispatch-time evidence is explicit rather than a rejection."""
     assert upstream_point_validation(None, (0.0, 0.0))['status'] == 'NO_DATA'
+
+
+def test_local_path_clear_rejects_inflated_or_unknown_cells():
+    """A globally valid path must not enter the rolling obstacle corridor."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 3
+    grid.info.height = 3
+    grid.data = [0] * 9
+    grid.data[4] = 80
+    assert not local_path_clear(
+        grid, ((0.5, 0.5), (1.5, 1.5)), lambda point: point,
+    )
+    grid.data[4] = -1
+    assert not local_path_clear(
+        grid, ((0.5, 0.5), (1.5, 1.5)), lambda point: point,
+    )
+
+
+def test_local_path_clear_ignores_samples_outside_rolling_window():
+    """Only the locally observable path segment is a dispatch safety gate."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 2
+    grid.info.height = 2
+    grid.data = [0, 0, 0, 0]
+    assert local_path_clear(
+        grid, ((0.5, 0.5), (10.0, 10.0)), lambda point: point,
+    )
 
 
 def test_path_length_and_samples_are_measured_and_bounded():
@@ -126,6 +156,7 @@ def _dispatch_checks(**overrides):
         goal_inside_costmap=True,
         goal_map_value=0,
         goal_costmap_value=0,
+        local_path_clear=True,
         no_local_goal_active=True,
         final_path_valid=True,
         reason='',
@@ -140,6 +171,15 @@ def test_unknown_or_lethal_goal_is_hard_failure_even_before_lifecycle_query():
         goal_map_value=-1,
         goal_costmap_value=-1,
         reason='goal costmap cell is unknown or lethal',
+    )
+    assert classify_dispatch_precondition_failure(checks) == FailureClass.HARD_UNREACHABLE
+
+
+def test_local_path_obstacle_is_hard_failure_before_lifecycle_query():
+    """Do not dispatch a path whose local corridor is already blocked."""
+    checks = _dispatch_checks(
+        local_path_clear=False,
+        reason='final path enters unknown or inflated local costmap cell',
     )
     assert classify_dispatch_precondition_failure(checks) == FailureClass.HARD_UNREACHABLE
 

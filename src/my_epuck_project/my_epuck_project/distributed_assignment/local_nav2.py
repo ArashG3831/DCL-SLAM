@@ -77,7 +77,8 @@ def classify_dispatch_precondition_failure(
         checks.goal_costmap_value < 0 or
         checks.goal_costmap_value >= 253
     )
-    if map_geometry_bad or costmap_geometry_bad or not checks.final_path_valid:
+    if (map_geometry_bad or costmap_geometry_bad or
+            not checks.local_path_clear or not checks.final_path_valid):
         return FailureClass.HARD_UNREACHABLE
     if (not checks.action_server_ready or not checks.lifecycle_active or
             not checks.transform_available):
@@ -118,6 +119,7 @@ class DispatchPreconditions:
     goal_inside_costmap: bool
     goal_map_value: Optional[int]
     goal_costmap_value: Optional[int]
+    local_path_clear: bool
     no_local_goal_active: bool
     final_path_valid: bool
     reason: str
@@ -128,7 +130,8 @@ class DispatchPreconditions:
         return (
             self.action_server_ready and self.lifecycle_active and
             self.transform_available and self.goal_inside_map and
-            self.goal_inside_costmap and self.no_local_goal_active and
+            self.goal_inside_costmap and self.local_path_clear and
+            self.no_local_goal_active and
             self.final_path_valid and not self.reason
         )
 
@@ -328,6 +331,34 @@ def occupancy_value(grid: OccupancyGrid, point: Point) -> Optional[int]:
     if index >= len(grid.data):
         return None
     return int(grid.data[index])
+
+
+def local_path_clear(
+        grid: Optional[OccupancyGrid], points: tuple[Point, ...],
+        transform_point: Callable[[Point], Optional[Point]],
+        blocked_threshold: int = 80) -> bool:
+    """Check the portion of a global path visible in the rolling local grid.
+
+    Global NavFn is intentionally allowed to traverse unknown space so it can
+    reach a frontier.  That makes a valid global path insufficient at the
+    dispatch boundary: its first metres can still enter an inflated obstacle
+    that the rolling local controller will stop for.  Samples outside the
+    rolling window are ignored; samples inside it must be known and below the
+    local inflation threshold.  The transform is injected so this geometry
+    rule remains deterministic and unit-testable without a ROS TF graph.
+    """
+    if grid is None:
+        return False
+    for point in points:
+        local = transform_point(point)
+        if local is None:
+            return False
+        value = occupancy_value(grid, local)
+        if value is None:
+            continue
+        if value < 0 or value >= blocked_threshold:
+            return False
+    return True
 
 
 class LocalNav2:
@@ -1015,11 +1046,12 @@ class LocalNav2:
 
     def check_dispatch_preconditions(
             self, task: PhysicalTask, final_path_valid: bool,
-            callback: Callable[[DispatchPreconditions], None]) -> None:
+            callback: Callable[[DispatchPreconditions], None],
+            path_samples: tuple[Point, ...] = ()) -> None:
         """Asynchronously confirm local lifecycle plus map, costmap, and TF context."""
         self._ensure_navigate_client()
         self._ensure_lifecycle_clients()
-        base = self._basic_preconditions(task, final_path_valid)
+        base = self._basic_preconditions(task, final_path_valid, path_samples)
         if base.reason:
             callback(base)
             return
@@ -1052,7 +1084,8 @@ class LocalNav2:
             future.add_done_callback(lambda result, key=name: completed(key, result))
 
     def _basic_preconditions(
-            self, task: PhysicalTask, final_path_valid: bool) -> DispatchPreconditions:
+            self, task: PhysicalTask, final_path_valid: bool,
+            path_samples: tuple[Point, ...] = ()) -> DispatchPreconditions:
         map_value = None if self._map is None else occupancy_value(self._map, task.approach)
         cost_value = (
             None if self._costmap is None else occupancy_value(self._costmap, task.approach)
@@ -1086,6 +1119,18 @@ class LocalNav2:
             reason = reason or 'goal lies outside current global costmap'
         elif cost_value < 0 or cost_value >= self._costmap_lethal_threshold:
             reason = reason or 'goal costmap cell is unknown or lethal'
+        local_path_is_clear = local_path_clear(
+            self._local_costmap, path_samples,
+            lambda point: (
+                None if self._local_costmap is None else
+                (_transform_point(
+                    self._tf_buffer, self._local_costmap.header.frame_id,
+                    self._global_frame, point) or (None, 0))[0]
+            ),
+            blocked_threshold=80,
+        )
+        if not local_path_is_clear:
+            reason = reason or 'final path enters unknown or inflated local costmap cell'
         if self.local_goal_active:
             reason = reason or 'another local navigation goal is active'
         if not final_path_valid:
@@ -1101,6 +1146,7 @@ class LocalNav2:
             goal_inside_costmap=inside_costmap,
             goal_map_value=map_value,
             goal_costmap_value=cost_value,
+            local_path_clear=local_path_is_clear,
             no_local_goal_active=not self.local_goal_active,
             final_path_valid=final_path_valid,
             reason=reason,

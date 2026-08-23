@@ -1434,6 +1434,7 @@ class DistributedFrontierAssignment(Node):
             self._nav2.check_dispatch_preconditions(
                 task.members[0], True,
                 lambda checks: self._dispatch_after_checks(task, result, checks),
+                path_samples=result.samples,
             )
 
         if not self._nav2.evaluate_path(
@@ -1722,6 +1723,7 @@ class DistributedFrontierAssignment(Node):
                 lambda checks: self._dispatch_after_checks(
                     task, result, checks, round_work, generation,
                 ),
+                path_samples=result.samples,
             )
 
         local_evaluation = round_work.local_path_evaluations.get(task_id)
@@ -1767,13 +1769,15 @@ class DistributedFrontierAssignment(Node):
         self.get_logger().info(
             'DISPATCH_PRECONDITIONS robot=%s round=%s task=%s ready=%s '
             'action=%s lifecycle=%s tf=%s tf_age=%s map_inside=%s map_value=%s '
-            'costmap_inside=%s costmap_value=%s local_goal_clear=%s path=%s reason=%s' % (
+            'costmap_inside=%s costmap_value=%s local_path_clear=%s '
+            'local_goal_clear=%s path=%s reason=%s' % (
                 self._robot_id, self._active_round_id, task.canonical_id, checks.ready,
                 checks.action_server_ready, checks.lifecycle_active,
                 checks.transform_available, checks.transform_age_s,
                 checks.goal_inside_map, checks.goal_map_value,
                 checks.goal_inside_costmap, checks.goal_costmap_value,
-                checks.no_local_goal_active, checks.final_path_valid, checks.reason,
+                checks.local_path_clear, checks.no_local_goal_active,
+                checks.final_path_valid, checks.reason,
             )
         )
         if not checks.ready:

@@ -204,6 +204,8 @@ def launch_setup(context):
                     'motion_fixture_drive_duration_s'),
                 'linear_speed': LaunchConfiguration(
                     'motion_fixture_linear_speed'),
+                'robot2_linear_scale': LaunchConfiguration(
+                    'motion_fixture_robot2_linear_scale'),
                 'angular_speed': LaunchConfiguration(
                     'motion_fixture_angular_speed'),
             }]))
@@ -236,6 +238,8 @@ def generate_launch_description():
         DeclareLaunchArgument('motion_fixture_turn_duration_s', default_value='3.2'),
         DeclareLaunchArgument('motion_fixture_drive_duration_s', default_value='12.0'),
         DeclareLaunchArgument('motion_fixture_linear_speed', default_value='0.10'),
+        DeclareLaunchArgument('motion_fixture_robot2_linear_scale',
+                              default_value='1.0'),
         DeclareLaunchArgument('motion_fixture_angular_speed', default_value='0.45'),
         OpaqueFunction(function=launch_setup),
     ])

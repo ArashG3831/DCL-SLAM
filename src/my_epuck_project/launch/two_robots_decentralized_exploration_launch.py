@@ -233,6 +233,7 @@ def launch_setup(context):
     )
     unknown_pose_frontends = []
     local_phase_nodes = []
+    motion_fixture_nodes = []
     frontend_watchdogs = []
     shared_activation = None
     if unknown_initial_pose:
@@ -376,6 +377,35 @@ def launch_setup(context):
                     }],
                 ),
             ])
+        if (LaunchConfiguration('enable_motion_fixture').perform(context)
+                .lower() == 'true'):
+            motion_fixture_nodes.append(Node(
+                package='my_epuck_project',
+                executable='unknown_pose_motion_fixture',
+                name='unknown_pose_motion_fixture', output='screen',
+                parameters=[{
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    'start_delay_s': LaunchConfiguration(
+                        'motion_fixture_start_delay_s'),
+                    'turn_duration_s': LaunchConfiguration(
+                        'motion_fixture_turn_duration_s'),
+                    'drive_duration_s': LaunchConfiguration(
+                        'motion_fixture_drive_duration_s'),
+                    'cycles': LaunchConfiguration('motion_fixture_cycles'),
+                    'mirror_turns': LaunchConfiguration(
+                        'motion_fixture_mirror_turns'),
+                    'robot2_static': LaunchConfiguration(
+                        'motion_fixture_robot2_static'),
+                    'robot2_static_after_first_cycle': LaunchConfiguration(
+                        'motion_fixture_robot2_static_after_first_cycle'),
+                    'linear_speed': LaunchConfiguration(
+                        'motion_fixture_linear_speed'),
+                    'robot2_linear_scale': LaunchConfiguration(
+                        'motion_fixture_robot2_linear_scale'),
+                    'angular_speed': LaunchConfiguration(
+                        'motion_fixture_angular_speed'),
+                }],
+            ))
         shared_activation = Node(
             package='my_epuck_project',
             executable='unknown_pose_shared_stack_activation',
@@ -514,7 +544,8 @@ def launch_setup(context):
         f'staged_sha256={staged_world_sha256}'))
     if unknown_initial_pose:
         return [profile_log, unknown_local_mapping, *unknown_pose_frontends,
-                *local_phase_nodes, *visualization_overlay_nodes,
+                *local_phase_nodes, *motion_fixture_nodes,
+                *visualization_overlay_nodes,
                 shared_activation, *frontend_watchdogs,
                 observer]
     return [profile_log, assignment, *visualization_overlay_nodes, observer]
@@ -567,6 +598,32 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('unknown_pose_diagnostic_output',
                               default_value=''),
+        # Validation-only motion for unknown-pose evidence acquisition.  The
+        # default is disabled so production launches remain unchanged.
+        DeclareLaunchArgument('enable_motion_fixture', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('motion_fixture_start_delay_s',
+                              default_value='20.0'),
+        DeclareLaunchArgument('motion_fixture_turn_duration_s',
+                              default_value='3.2'),
+        DeclareLaunchArgument('motion_fixture_drive_duration_s',
+                              default_value='12.0'),
+        DeclareLaunchArgument('motion_fixture_cycles', default_value='1'),
+        DeclareLaunchArgument('motion_fixture_mirror_turns',
+                              default_value='true',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('motion_fixture_robot2_static',
+                              default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('motion_fixture_robot2_static_after_first_cycle',
+                              default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('motion_fixture_linear_speed',
+                              default_value='0.10'),
+        DeclareLaunchArgument('motion_fixture_robot2_linear_scale',
+                              default_value='1.0'),
+        DeclareLaunchArgument('motion_fixture_angular_speed',
+                              default_value='0.45'),
         DeclareLaunchArgument('max_verification_batches', default_value='64'),
         DeclareLaunchArgument('verification_lifetime_s',
                               default_value='1100.0'),

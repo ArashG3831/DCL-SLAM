@@ -130,6 +130,12 @@ def launch_setup(context):
                 'webots_controller_port'),
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
+            'scan_publish_period': str(
+                slam_runtime_parameters.get('minimum_time_interval', 0.0)),
+            'lidar_update_rate': str(
+                slam_runtime_parameters.get('lidar_update_rate', 0.0)),
+            'scan_input_reliability': str(
+                slam_runtime_parameters.get('scan_input_reliability', 'reliable')),
         }.items(),
     )
     filters = []

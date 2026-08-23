@@ -4,9 +4,16 @@
   <Domain id="any">
     <General>
       <Interfaces>
-        <NetworkInterface name="lo"/>
+        <NetworkInterface address="127.0.0.1" multicast="false"/>
       </Interfaces>
-      <AllowMulticast>spdp</AllowMulticast>
+      <AllowMulticast>false</AllowMulticast>
+      <EnableMulticastLoopback>true</EnableMulticastLoopback>
+      <!-- Keep each UDP payload below the WSL/Windows loopback MTU while
+           allowing 720-beam LaserScan samples to be retransmitted as DDS
+           fragments.  The Wi-Fi profile remains unchanged. -->
+      <FragmentSize>1025B</FragmentSize>
+      <MaxMessageSize>1472B</MaxMessageSize>
+      <MaxRexmitMessageSize>1456B</MaxRexmitMessageSize>
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>

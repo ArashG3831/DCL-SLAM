@@ -339,7 +339,7 @@ E-puck {
   ]
 }
 E-puck {
-  translation 18.77 -1.6718e-17 0.001
+  translation 16 2.77 0.001
   rotation 0 0 1 1.5707963267948966
   name "robot2"
   controller "<extern>"

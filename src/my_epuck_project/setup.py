@@ -89,6 +89,8 @@ setup(
             'my_epuck_project.terminal_finalization_runtime_fixture:main',
             'motion_scan_branch_relay = '
             'my_epuck_project.motion_scan_branch_relay:main',
+            'paced_ros2_supervisor = '
+            'my_epuck_project.paced_ros2_supervisor:main',
         ],
     },
 )

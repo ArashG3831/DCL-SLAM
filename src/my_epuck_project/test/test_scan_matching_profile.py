@@ -54,6 +54,12 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
         'coarse_angle_resolution': 0.0174532925,
         'fine_search_angle_offset': 0.0034906585,
         'use_response_expansion': False,
+        'throttle_scans': 10,
+        # The close-start scan-matching callback budget is validated at 1 Hz;
+        # faster reliable fragmented streams prevent local TF convergence.
+        'minimum_time_interval': 1.0,
+        'lidar_update_rate': 1.0,
+        'scan_input_reliability': 'reliable',
         'map_update_interval': 1.0,
     }
     assert parameters == expected

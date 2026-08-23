@@ -66,6 +66,13 @@ REQUIRED_OBSERVER_FILES = (
     'summary.json', 'events.jsonl', 'warnings.jsonl', 'topic_health.csv',
     'coverage.csv', 'robot1_timeseries.csv', 'robot2_timeseries.csv',
 )
+ABNORMAL_ROS_EXIT_PATTERNS = (
+    re.compile(r'ddsi_entity_index\.c:\d+.*Assertion'),
+    re.compile(r'process has died .*exit code -6'),
+    re.compile(r'potentially unexpected fatal signal 6'),
+    re.compile(r'process has died .*exit code -11'),
+    re.compile(r'potentially unexpected fatal signal 11'),
+)
 EXPECTED_NODE_SUFFIXES = (
     '/robot1/distributed_frontier_assignment',
     '/robot2/distributed_frontier_assignment',
@@ -88,6 +95,26 @@ ROS_DOMAIN_MAX = 232
 WEBOTS_PORT_MIN = 1024
 WEBOTS_PORT_MAX = 65535
 PROGRESS_LOCK = threading.RLock()
+
+
+def abnormal_ros_exit_evidence(path, offset=0):
+    """Read new launch-log bytes and return fatal ROS/DDS evidence.
+
+    A launch process can remain alive after a child aborts.  Treating a DDS
+    assertion or SIGABRT as an immediate attempt failure prevents the runner
+    from continuing readiness/retry churn until the host is exhausted.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as stream:
+            stream.seek(offset)
+            text = stream.read()
+            new_offset = stream.tell()
+    except OSError:
+        return offset, []
+    matches = [line.strip() for line in text.splitlines()
+               if any(pattern.search(line)
+                      for pattern in ABNORMAL_ROS_EXIT_PATTERNS)]
+    return new_offset, matches
 # A fresh TF buffer may initially contain Slam Toolbox map->odom samples that
 # are future-dated relative to the odom->base samples.  Keep this as a bounded
 # startup readiness budget; it does not alter any TF publisher or Nav2
@@ -601,14 +628,22 @@ def collector_clock_readiness(samples):
 def tf_readiness_requirements(unknown_initial_pose=False):
     """Return the TF edges required before Nav2 startup.
 
-    Unknown-pose runs intentionally have no shared frame before the canonical
-    handoff.  Requiring that post-handoff edge here makes readiness impossible.
+    Unknown-pose runs intentionally have no *shared* frame before the
+    canonical handoff.  They do, however, need each robot's own SLAM map
+    frame before local Nav2 can activate: the local global costmap is keyed to
+    ``robotN/map`` and cannot configure against odom alone.  Requiring that
+    local map chain is a pre-handoff sensor/SLAM readiness gate, not a request
+    for an inter-robot transform or an accepted handoff.
     """
     required = []
     for robot in ('robot1', 'robot2'):
         required.append(
             (f'{robot}/base_footprint', f'{robot}/odom', 'odom_to_base'))
-        if not unknown_initial_pose:
+        if unknown_initial_pose:
+            required.append(
+                (f'{robot}/map', f'{robot}/base_footprint',
+                 'local_map_to_base'))
+        else:
             required.append(
                 ('shared_map', f'{robot}/base_footprint', 'shared_to_base'))
     return required
@@ -794,7 +829,17 @@ def nav2_startup_preflight_mode(unknown_initial_pose=False):
     return 'manager_ack' if unknown_initial_pose else 'state_then_manager'
 
 
-NAV2_MANAGER_STARTUP_CALL_SLICE_S = 30.0
+# A local Nav2 manager configures costmaps and controller plugins serially.
+# Under WSL/Webots fast mode the second robot can legitimately need more than
+# 30 wall seconds while the first robot, SLAM, and the DDS bridge are already
+# active.  A short per-call cap turns that normal startup tail into a false
+# readiness failure and causes a second STARTUP request against a partially
+# configured manager.  Keep the retry bounded, but allow one complete bringup.
+NAV2_MANAGER_STARTUP_CALL_SLICE_S = 90.0
+# Keep teardown bounded even when a Webots driver escapes the launch process
+# group.  An essential-child abort must not leave the campaign waiting for a
+# user-sized graceful timeout while the host continues accumulating resources.
+MAX_CAMPAIGN_GRACEFUL_SHUTDOWN_S = 20.0
 
 
 def nav2_manager_startup_call_timeout(timeout_s):
@@ -1219,17 +1264,19 @@ def required_observer_artifacts(directory):
 
 
 def persisted_local_tf_readiness(attempt, run_id, unknown_initial_pose=False):
-    """Use the campaign logger's TF samples when a probe participant misses DDS.
+    """Use the campaign logger's exact required TF samples as a DDS fallback.
 
-    The logger is already on the campaign graph and records the exact local
-    odom chains used by Nav2.  Requiring one available sample for each robot
-    is a runtime TF check; it does not use Supervisor data or create a new
-    frame relationship.  This fallback covers hosts where a new DDS
-    participant cannot discover the high-rate TF stream during startup.
+    The logger is already on the campaign graph and records the transforms
+    used by Nav2.  A pre-handoff unknown-pose run still needs each private
+    ``robotN/map -> robotN/base_footprint`` chain; checking only odometry
+    allows Nav2 to start against two disconnected TF trees and produces the
+    global-costmap failure seen in the close-start smoke.  This fallback does
+    not create or infer transforms and never uses Supervisor data.
     """
     path = (observer_directory(attempt, run_id) / 'forensic' /
             'transforms.csv')
-    available_odom = set()
+    required = tf_readiness_requirements(unknown_initial_pose)
+    available = set()
     try:
         with path.open(newline='', encoding='utf-8') as stream:
             for row in csv.DictReader(stream):
@@ -1237,17 +1284,24 @@ def persisted_local_tf_readiness(attempt, run_id, unknown_initial_pose=False):
                     continue
                 target = row.get('target_frame')
                 source = row.get('source_frame')
-                for robot in ('robot1', 'robot2'):
-                    if (target == f'{robot}/odom'
-                            and source == f'{robot}/base_footprint'):
-                        available_odom.add(robot)
+                for required_target, required_source, role in required:
+                    if target == required_target and source == required_source:
+                        available.add((required_target, required_source, role))
     except (OSError, csv.Error):
         pass
-    ready = available_odom == {'robot1', 'robot2'}
+    ready = len(available) == len(required)
     return ready, {
         'source': 'campaign_logger_transforms.csv',
         'path': str(path),
-        'available_local_odom_chains': sorted(available_odom),
+        'required_transforms': [
+            {'target': target, 'source': source, 'role': role}
+            for target, source, role in required
+        ],
+        'available_transforms': [
+            {'target': target, 'source': source, 'role': role}
+            for target, source, role in required
+            if (target, source, role) in available
+        ],
         'reason': 'READY' if ready else 'LOCAL_TF_SAMPLES_INCOMPLETE',
     }
 
@@ -1726,6 +1780,19 @@ def internal_trial(args):
             'use_scan_matching': args.use_scan_matching,
             'do_loop_closing': args.do_loop_closing,
             'unknown_initial_pose': args.unknown_initial_pose,
+            'enable_motion_fixture': args.enable_motion_fixture,
+            'motion_fixture_cycles': args.motion_fixture_cycles,
+            'motion_fixture_mirror_turns': args.motion_fixture_mirror_turns,
+            'motion_fixture_robot2_static': args.motion_fixture_robot2_static,
+            'motion_fixture_robot2_static_after_first_cycle': (
+                args.motion_fixture_robot2_static_after_first_cycle),
+            'motion_fixture_start_delay_s': args.motion_fixture_start_delay_s,
+            'motion_fixture_turn_duration_s': args.motion_fixture_turn_duration_s,
+            'motion_fixture_drive_duration_s': args.motion_fixture_drive_duration_s,
+            'motion_fixture_linear_speed': args.motion_fixture_linear_speed,
+            'motion_fixture_robot2_linear_scale': (
+                args.motion_fixture_robot2_linear_scale),
+            'motion_fixture_angular_speed': args.motion_fixture_angular_speed,
         'ideal_encoder_sensing': args.ideal_encoder_sensing,
         'encoder_profile': args.profile_metadata['encoder_profile'],
             'logger_console_status': False,
@@ -1788,6 +1855,19 @@ def internal_trial(args):
         f'use_scan_matching:={str(args.use_scan_matching).lower()}',
         f'do_loop_closing:={str(args.do_loop_closing).lower()}',
         f'unknown_initial_pose:={str(args.unknown_initial_pose).lower()}',
+        f'enable_motion_fixture:={str(args.enable_motion_fixture).lower()}',
+        f'motion_fixture_cycles:={args.motion_fixture_cycles}',
+        f'motion_fixture_mirror_turns:={str(args.motion_fixture_mirror_turns).lower()}',
+        f'motion_fixture_robot2_static:={str(args.motion_fixture_robot2_static).lower()}',
+        'motion_fixture_robot2_static_after_first_cycle:='
+        f'{str(args.motion_fixture_robot2_static_after_first_cycle).lower()}',
+        f'motion_fixture_start_delay_s:={args.motion_fixture_start_delay_s}',
+        f'motion_fixture_turn_duration_s:={args.motion_fixture_turn_duration_s}',
+        f'motion_fixture_drive_duration_s:={args.motion_fixture_drive_duration_s}',
+        f'motion_fixture_linear_speed:={args.motion_fixture_linear_speed}',
+        'motion_fixture_robot2_linear_scale:='
+        f'{args.motion_fixture_robot2_linear_scale}',
+        f'motion_fixture_angular_speed:={args.motion_fixture_angular_speed}',
         f'ideal_encoder_sensing:={str(args.ideal_encoder_sensing).lower()}',
         'logger_console_status:=false',
         f'enable_rosout_collection:={str(args.enable_rosout_collection).lower()}',
@@ -1812,6 +1892,7 @@ def internal_trial(args):
         '-p', f'use_sim_time:={str(args.time_mode == "sim").lower()}',
     ]
     launch_log = (attempt / 'launch.log').open('w', encoding='utf-8')
+    launch_log_path = attempt / 'launch.log'
     collector_log = (attempt / 'collector.log').open('w', encoding='utf-8')
     launch = subprocess.Popen(
         launch_command, env=environment, stdout=launch_log,
@@ -1919,6 +2000,9 @@ def internal_trial(args):
 
     holding_open = False
     collector_finalized_for_hold = False
+    cleanup_graceful_timeout = min(
+        float(args.graceful_shutdown_timeout),
+        MAX_CAMPAIGN_GRACEFUL_SHUTDOWN_S)
 
     def stop(signum, frame):
         nonlocal interrupted
@@ -1933,6 +2017,7 @@ def internal_trial(args):
     peak_rss = 0
     peak_cpu = 0.0
     maximum_processes = 0
+    launch_probe_offset = 0
     metrics_file = (attempt / 'process_metrics.csv').open(
         'w', newline='', encoding='utf-8')
     writer = csv.DictWriter(metrics_file, fieldnames=(
@@ -1954,6 +2039,16 @@ def internal_trial(args):
     try:
         while not interrupted:
             now = time.monotonic()
+            launch_probe_offset, abnormal_evidence = abnormal_ros_exit_evidence(
+                launch_log_path, launch_probe_offset)
+            if abnormal_evidence:
+                unexpected_exit = True
+                shutdown_reason = 'abnormal_ros_process_exit'
+                metadata.setdefault('abnormal_process_evidence', []).extend(
+                    abnormal_evidence)
+                metadata['abnormal_process_evidence_utc'] = utc_now()
+                atomic_json(attempt / 'runner_metadata.json', metadata)
+                break
             status = {}
             try:
                 status = json.loads(status_path.read_text(encoding='utf-8'))
@@ -2010,9 +2105,6 @@ def internal_trial(args):
                     None if clock_ok else clock_details.get(
                         'reason', 'CLOCK_PROBE_INTERNAL_ERROR'))
                 if clock_ok:
-                    if mission_sim_start is None:
-                        mission_sim_start = status.get('elapsed_s', 0.0)
-                        metadata['clock_sim_start'] = mission_sim_start
                     tf_ok, tf_details = bounded_readiness_probe(
                         'tf', args.ros_domain_id,
                         unknown_initial_pose=args.unknown_initial_pose,
@@ -2100,7 +2192,7 @@ def internal_trial(args):
                     # before the GUI inspection period begins.
                     signal_process(collector, signal.SIGINT)
                     wait_processes(
-                        [collector], args.graceful_shutdown_timeout)
+                        [collector], cleanup_graceful_timeout)
                     collector_finalized_for_hold = (
                         collector.poll() is not None)
                     if (not collector_finalized_for_hold
@@ -2190,7 +2282,7 @@ def internal_trial(args):
                 signal='SIGINT')
             _send_scope([collector], signal.SIGINT,
                         process_group=collector.pid)
-            wait_processes([collector], args.graceful_shutdown_timeout,
+            wait_processes([collector], cleanup_graceful_timeout,
                             process_group=collector.pid)
             append_shutdown_event(
                 shutdown_events, 'final_snapshot_complete', process='collector',
@@ -2211,11 +2303,11 @@ def internal_trial(args):
                 signal='SIGINT')
             signal_process(process, signal.SIGINT)
         if diagnostic_processes:
-            wait_processes(diagnostic_processes, args.graceful_shutdown_timeout)
+            wait_processes(diagnostic_processes, cleanup_graceful_timeout)
             for process in diagnostic_processes:
                 if process.poll() is None:
                     scoped_shutdown(
-                        [process], args.graceful_shutdown_timeout,
+                        [process], cleanup_graceful_timeout,
                         args.hard_shutdown_timeout, process_group=process.pid,
                         send_initial_sigint=False)
         # Then let the launch's passive observer finalize its own outputs.
@@ -2223,7 +2315,7 @@ def internal_trial(args):
             shutdown_events, 'signal_sent', process='launch', signal='SIGINT')
         signal_process(launch, signal.SIGINT)
         cleanup = scoped_shutdown(
-            processes, args.graceful_shutdown_timeout,
+            processes, cleanup_graceful_timeout,
             args.hard_shutdown_timeout, process_group=launch.pid,
             send_initial_sigint=False)
         append_shutdown_event(
@@ -2247,7 +2339,7 @@ def internal_trial(args):
         for log in diagnostic_logs:
             log.close()
     orphan_cleanup = terminate_campaign_owned_processes(
-        attempt, args.graceful_shutdown_timeout, args.hard_shutdown_timeout)
+        attempt, cleanup_graceful_timeout, args.hard_shutdown_timeout)
     cleanup['orphan_process_cleanup'] = orphan_cleanup
     append_shutdown_event(
         shutdown_events, 'orphan_process_cleanup', **orphan_cleanup)
@@ -2427,6 +2519,26 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         use_scan_matching=getattr(args, 'use_scan_matching', False),
         do_loop_closing=getattr(args, 'do_loop_closing', False),
         unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
+        enable_motion_fixture=getattr(args, 'enable_motion_fixture', False),
+        motion_fixture_cycles=getattr(args, 'motion_fixture_cycles', 1),
+        motion_fixture_mirror_turns=getattr(
+            args, 'motion_fixture_mirror_turns', True),
+        motion_fixture_robot2_static=getattr(
+            args, 'motion_fixture_robot2_static', False),
+        motion_fixture_robot2_static_after_first_cycle=getattr(
+            args, 'motion_fixture_robot2_static_after_first_cycle', False),
+        motion_fixture_start_delay_s=getattr(
+            args, 'motion_fixture_start_delay_s', 20.0),
+        motion_fixture_turn_duration_s=getattr(
+            args, 'motion_fixture_turn_duration_s', 3.2),
+        motion_fixture_drive_duration_s=getattr(
+            args, 'motion_fixture_drive_duration_s', 12.0),
+        motion_fixture_linear_speed=getattr(
+            args, 'motion_fixture_linear_speed', 0.10),
+        motion_fixture_robot2_linear_scale=getattr(
+            args, 'motion_fixture_robot2_linear_scale', 1.0),
+        motion_fixture_angular_speed=getattr(
+            args, 'motion_fixture_angular_speed', 0.45),
         ideal_encoder_sensing=getattr(args, 'ideal_encoder_sensing', True),
         diagnostic_mode=getattr(args, 'diagnostic_mode', False),
         enable_rosout_collection=getattr(args, 'enable_rosout_collection', True),
@@ -3335,6 +3447,35 @@ def parser():
         '--unknown-initial-pose', type=boolean, default=False, metavar='BOOL',
         help='Run the decentralized unknown-relative-pose phase contract.')
     result.add_argument(
+        '--enable-motion-fixture', type=boolean, default=False, metavar='BOOL',
+        help=('Validation-only bounded motion fixture for unknown-pose '
+              'viewpoint acquisition; production default is disabled.'))
+    result.add_argument(
+        '--motion-fixture-cycles', type=int, default=1,
+        help='Number of bounded turn/drive viewpoint cycles for the fixture.')
+    result.add_argument(
+        '--motion-fixture-mirror-turns', type=boolean, default=True,
+        metavar='BOOL',
+        help=('Validation fixture: turn robots in opposite directions when '
+              'true; use synchronized turns for shared-view acquisition when '
+              'false.'))
+    result.add_argument(
+        '--motion-fixture-robot2-static', type=boolean, default=False,
+        metavar='BOOL',
+        help=('Validation fixture: hold Robot 2 stationary while Robot 1 '
+              'traverses the shared geometry.'))
+    result.add_argument(
+        '--motion-fixture-robot2-static-after-first-cycle', type=boolean,
+        default=False, metavar='BOOL',
+        help='Validation fixture: hold Robot 2 after the first paired cycle.')
+    result.add_argument('--motion-fixture-start-delay-s', type=float, default=20.0)
+    result.add_argument('--motion-fixture-turn-duration-s', type=float, default=3.2)
+    result.add_argument('--motion-fixture-drive-duration-s', type=float, default=12.0)
+    result.add_argument('--motion-fixture-linear-speed', type=float, default=0.10)
+    result.add_argument('--motion-fixture-robot2-linear-scale', type=float,
+                        default=1.0)
+    result.add_argument('--motion-fixture-angular-speed', type=float, default=0.45)
+    result.add_argument(
         '--ideal-encoder-sensing', type=boolean, default=True, metavar='BOOL',
         help=('Use the thesis simulation assumption of zero explicitly '
               'injected encoder/odometry noise. Webots wheel PositionSensor '
@@ -3444,6 +3585,8 @@ def validate_cli_options(args):
     """Validate campaign-level manual GUI constraints."""
     if args.trials < 1:
         raise SystemExit('--trials must be positive')
+    if args.motion_fixture_cycles < 1:
+        raise SystemExit('--motion-fixture-cycles must be positive')
     if not 1 <= args.maximum_concurrency <= 4:
         raise SystemExit('--maximum-concurrency must be between 1 and 4')
     if args.no_mission_timeout:

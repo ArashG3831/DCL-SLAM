@@ -171,6 +171,22 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
             'collision_monitor_state',
         'use_sim_time': LaunchConfiguration('use_sim_time'),
     }
+    # The Nav2 parameter files carry ``use_sim_time`` inside every node's
+    # ros__parameters block (and inside both costmaps).  Rewriting only the
+    # document-level key leaves the pre-handoff ``local_*`` stack on its
+    # default wall clock.  In simulation that makes stamped Webots scans look
+    # millions of seconds old to collision_monitor, which then emits a safety
+    # stop forever.  Rewrite each actual node parameter explicitly so local
+    # and shared stacks use the same clock selected by the launch.
+    for lifecycle_name in LIFECYCLE_NODES:
+        parameter_rewrites[
+            f'{parameter_node(lifecycle_name)}.ros__parameters.use_sim_time'
+        ] = LaunchConfiguration('use_sim_time')
+    for costmap_name in ('local_costmap.local_costmap',
+                         'global_costmap.global_costmap'):
+        parameter_rewrites[
+            f'{costmap_name}.ros__parameters.use_sim_time'
+        ] = LaunchConfiguration('use_sim_time')
     parameter_rewrites.update(diagnostic_rewrites)
     parameters = ParameterFile(
         RewrittenYaml(

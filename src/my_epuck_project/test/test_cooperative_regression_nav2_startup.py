@@ -1,6 +1,8 @@
 from my_epuck_project.cooperative_regression import (
+    abnormal_ros_exit_evidence,
     collector_clock_readiness,
     lifecycle_startup_action,
+    MAX_CAMPAIGN_GRACEFUL_SHUTDOWN_S,
     NAV2_MANAGER_STARTUP_CALL_SLICE_S,
     nav2_startup_preflight_mode,
     nav2_manager_startup_call_timeout,
@@ -9,6 +11,35 @@ from my_epuck_project.cooperative_regression import (
     nav2_node_names,
     tf_readiness_requirements,
 )
+
+
+def test_campaign_cleanup_grace_period_is_bounded():
+    assert MAX_CAMPAIGN_GRACEFUL_SHUTDOWN_S <= 20.0
+
+
+def test_abnormal_ros_exit_evidence_detects_dds_abort_without_false_positive(
+        tmp_path):
+    path = tmp_path / 'launch.log'
+    path.write_text('normal\n', encoding='utf-8')
+    offset, evidence = abnormal_ros_exit_evidence(path)
+    assert not evidence
+    path.write_text(
+        'normal\n'
+        'frontier: ddsi_entity_index.c:271: Assertion failed\n'
+        'process has died [pid 7, exit code -6]\n', encoding='utf-8')
+    offset, evidence = abnormal_ros_exit_evidence(path, offset)
+    assert len(evidence) == 2
+    assert any('ddsi_entity_index' in line for line in evidence)
+    assert any('exit code -6' in line for line in evidence)
+
+
+def test_abnormal_ros_exit_evidence_detects_dds_segfault(tmp_path):
+    path = tmp_path / 'launch.log'
+    path.write_text(
+        'process has died [pid 9, exit code -11]\n'
+        'potentially unexpected fatal signal 11\n', encoding='utf-8')
+    _, evidence = abnormal_ros_exit_evidence(path)
+    assert len(evidence) == 2
 
 
 NODES = [
@@ -41,11 +72,13 @@ def test_unknown_pose_readiness_does_not_require_prehandoff_fusion():
     assert not mission_infrastructure_ready(True, True, True, NODES, True)
 
 
-def test_unknown_pose_tf_readiness_requires_local_odom_chain():
+def test_unknown_pose_tf_readiness_requires_local_map_and_odom_chains():
     requirements = tf_readiness_requirements(unknown_initial_pose=True)
     assert requirements == [
         ('robot1/base_footprint', 'robot1/odom', 'odom_to_base'),
+        ('robot1/map', 'robot1/base_footprint', 'local_map_to_base'),
         ('robot2/base_footprint', 'robot2/odom', 'odom_to_base'),
+        ('robot2/map', 'robot2/base_footprint', 'local_map_to_base'),
     ]
     assert len(tf_readiness_requirements()) == 4
 

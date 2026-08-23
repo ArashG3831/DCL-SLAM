@@ -12,7 +12,9 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (
+    get_package_prefix, get_package_share_directory,
+)
 
 import webots_ros2_driver.webots_controller as webots_controller_module
 import webots_ros2_driver.webots_launcher as webots_launcher_module
@@ -40,6 +42,9 @@ def launch_setup(context):
         LaunchConfiguration('webots_gui').perform(context).lower() == 'true'
     )
     sensor_profile = LaunchConfiguration('sensor_profile').perform(context)
+    lidar_update_rate = LaunchConfiguration('lidar_update_rate').perform(context)
+    scan_input_reliability = LaunchConfiguration(
+        'scan_input_reliability').perform(context)
 
     base_urdf_path = os.path.join(package_dir, 'resource', 'epuck_d500_webots.urdf')
     base_control_path = os.path.join(package_dir, 'resource', 'ros2_control.yml')
@@ -74,18 +79,41 @@ def launch_setup(context):
     # requested listen port.  Under this WSL/Webots build the server may
     # redirect by two ports; replace only that client with the confirmed
     # actual port while preserving the official world augmentation.
-    webots._supervisor = Ros2SupervisorLauncher(port=controller_port)
+    if webots_mode == 'fast':
+        # The stock supervisor publishes /clock on every 20 ms physics step.
+        # In accelerated mode that becomes an unbounded reliable DDS stream
+        # which starves lidar and lifecycle callbacks.  The project wrapper
+        # keeps the same Supervisor step/services but coalesces /clock.
+        webots._supervisor = Node(
+            package='my_epuck_project',
+            executable='paced_ros2_supervisor',
+            namespace='Ros2Supervisor',
+            remappings=[('/Ros2Supervisor/clock', '/clock')],
+            output='screen',
+            additional_env={
+                'WEBOTS_CONTROLLER_URL': (
+                    f'tcp://127.0.0.1:{controller_port}/Ros2Supervisor'),
+                'WEBOTS_HOME': get_package_prefix('webots_ros2_driver'),
+            },
+            respawn=False,
+        )
+    else:
+        webots._supervisor = Ros2SupervisorLauncher(port=controller_port)
 
     controller_manager_timeout = ['--controller-manager-timeout', '50']
     controller_manager_prefix = 'python.exe' if os.name == 'nt' else ''
 
     robot_actions = []
     for robot_name in ('robot1', 'robot2'):
-        robot_urdf = base_urdf.replace(
-            '<topicName>/scan_d500</topicName>',
+        lidar_properties = (
             '<topicName>/scan_d500</topicName>\n'
-            f'                <frameName>{robot_name}/d500_lidar</frameName>',
+            f'                <frameName>{robot_name}/d500_lidar</frameName>'
         )
+        if float(lidar_update_rate) > 0.0:
+            lidar_properties += (
+                f'\n                <updateRate>{lidar_update_rate}</updateRate>')
+        robot_urdf = base_urdf.replace(
+            '<topicName>/scan_d500</topicName>', lidar_properties, 1)
         robot_urdf_path = os.path.join(
             tempfile.gettempdir(), f'my_epuck_project_{robot_name}.urdf')
         with open(robot_urdf_path, 'w') as f:
@@ -179,6 +207,8 @@ def launch_setup(context):
                     'robot_description': robot_urdf_path,
                     'use_sim_time': use_sim_time,
                     'set_robot_state_publisher': True,
+                    'qos_overrides./scan_d500.publisher.reliability':
+                        scan_input_reliability,
                 },
                 robot_control_path,
             ],
@@ -193,7 +223,12 @@ def launch_setup(context):
             executable='twist_stamper',
             namespace=robot_name,
             output='screen',
-            parameters=[{'use_sim_time': use_sim_time}],
+            # This bridge stamps the outgoing command from the incoming
+            # message and does not need a ROS-time clock subscription.  In
+            # Webots fast mode /clock can run at thousands of callbacks per
+            # wall second; opting this stateless bridge out prevents it from
+            # starving the sensor and command callbacks.
+            parameters=[{'use_sim_time': False}],
             remappings=[
                 ('/cmd_vel_unstamped', f'/{robot_name}/cmd_vel_unstamped'),
                 ('/cmd_vel', f'/{robot_name}/cmd_vel'),
@@ -207,9 +242,16 @@ def launch_setup(context):
             namespace=robot_name,
             output='screen',
             parameters=[{
-                'use_sim_time': use_sim_time,
+                # Scan headers already carry Webots simulation timestamps;
+                # the fixer has no timers.  Avoid subscribing it to the very
+                # high-rate /clock stream in fast mode so raw scans continue
+                # to reach the corrected output.
+                'use_sim_time': False,
                 'input_topic': 'scan_d500',
                 'output_topic': 'scan_d500_fixed',
+                'input_reliability': scan_input_reliability,
+                'minimum_time_interval': LaunchConfiguration(
+                    'scan_publish_period'),
             }],
         )
 
@@ -280,5 +322,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument(
+            'scan_publish_period', default_value='0.0',
+            description='Minimum simulation-time interval for corrected scans.'),
+        DeclareLaunchArgument(
+            'lidar_update_rate', default_value='0.0',
+            description='Optional Webots ROS lidar publication rate in Hz.'),
+        DeclareLaunchArgument(
+            'scan_input_reliability', default_value='reliable',
+            choices=['reliable', 'best_effort'],
+            description='Reliability for the raw Webots lidar stream.'),
         OpaqueFunction(function=launch_setup),
     ])

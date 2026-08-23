@@ -84,6 +84,41 @@ def test_local_path_clear_rejects_inflated_or_unknown_cells():
     )
 
 
+def test_local_path_clear_ignores_blocked_start_anchor_but_checks_corridor():
+    """The robot-pose anchor may be inflated; the next local segment may not."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 3
+    grid.info.height = 1
+    grid.data = [100, 0, 0]
+    evidence = local_path_clearance(
+        grid, ((0.5, 0.5), (1.5, 0.5)), lambda point: point,
+    )
+    assert evidence.clear
+    assert evidence.inspected_points == 1
+    grid.data[1] = 100
+    evidence = local_path_clearance(
+        grid, ((0.5, 0.5), (1.5, 0.5)), lambda point: point,
+    )
+    assert not evidence.clear
+    assert evidence.reason == 'BLOCKED_LOCAL_CELL'
+    assert evidence.inspected_points == 1
+
+
+def test_local_path_clear_keeps_unknown_start_anchor_rejected():
+    """An absent local observation at the robot pose remains unsafe."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 2
+    grid.info.height = 1
+    grid.data = [-1, 0]
+    evidence = local_path_clearance(
+        grid, ((0.5, 0.5), (1.5, 0.5)), lambda point: point,
+    )
+    assert not evidence.clear
+    assert evidence.reason == 'UNKNOWN_LOCAL_CELL'
+
+
 def test_local_path_clear_ignores_samples_outside_rolling_window():
     """Only the locally observable path segment is a dispatch safety gate."""
     grid = OccupancyGrid()

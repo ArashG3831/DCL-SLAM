@@ -366,7 +366,7 @@ def local_path_clearance(
         return LocalPathClearance(False, 'NO_LOCAL_COSTMAP', 0, 0)
     inspected = 0
     outside = 0
-    for point in points:
+    for point_index, point in enumerate(points):
         local = transform_point(point)
         if local is None:
             return LocalPathClearance(
@@ -376,6 +376,14 @@ def local_path_clearance(
         if value is None:
             outside += 1
             break
+        # Nav2's path normally starts at the robot pose.  The rolling local
+        # costmap can mark that exact footprint cell as inflated/lethal even
+        # while the immediately-following execution corridor is clear.  The
+        # start sample is a pose anchor, not a segment the controller must
+        # enter; keep unknown start cells conservative, but do not reject a
+        # valid path solely because the footprint anchor is occupied.
+        if point_index == 0 and value >= blocked_threshold:
+            continue
         if value < 0 or value >= blocked_threshold:
             reason = 'UNKNOWN_LOCAL_CELL' if value < 0 else 'BLOCKED_LOCAL_CELL'
             return LocalPathClearance(False, reason, inspected + 1, outside)

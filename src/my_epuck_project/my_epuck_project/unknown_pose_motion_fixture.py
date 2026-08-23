@@ -122,6 +122,17 @@ class UnknownPoseMotionFixture(Node):
         robot2_static = self.robot2_static or (
             self.robot2_static_after_first_cycle and cycle >= 1)
         turn_sign = -1.0 if cycle % 2 == 0 else 1.0
+        if phase == 'DONE':
+            # Release the final command input once the bounded acquisition
+            # course is complete.  Continuing to publish zeroes here races
+            # Nav2 on the same validation-only /cmd_vel input and makes every
+            # subsequent local navigation goal appear controller-stalled.
+            if not self.finished:
+                self.finished = True
+                self.get_logger().info(
+                    'Unknown-pose validation motion fixture complete cycles=%d' %
+                    self.cycles)
+            return
         if phase == 'TURN':
             self.publish('robot1', angular=turn_sign * self.angular_speed)
             self.publish('robot2', angular=(
@@ -136,11 +147,6 @@ class UnknownPoseMotionFixture(Node):
         else:
             self.publish('robot1')
             self.publish('robot2')
-        if phase == 'DONE' and not self.finished:
-            self.finished = True
-            self.get_logger().info(
-                'Unknown-pose validation motion fixture complete cycles=%d' %
-                self.cycles)
 
 
 def main(args=None):

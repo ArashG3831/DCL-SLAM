@@ -60,6 +60,33 @@ def follow_path_controller_error_name(error_code: int) -> str:
     return FOLLOW_PATH_CONTROLLER_ERROR_NAMES.get(int(error_code), '')
 
 
+def classify_dispatch_precondition_failure(
+        checks: 'DispatchPreconditions') -> FailureClass:
+    """Classify a final dispatch rejection by its first-order evidence.
+
+    Geometry can be rejected before lifecycle queries complete.  In that case
+    ``lifecycle_active`` is deliberately still false and must not turn a
+    stale/unknown goal into a TF/lifecycle failure.
+    """
+    map_geometry_bad = (
+        not checks.goal_inside_map or checks.goal_map_value is None or
+        checks.goal_map_value < 0 or checks.goal_map_value >= 50
+    )
+    costmap_geometry_bad = (
+        not checks.goal_inside_costmap or checks.goal_costmap_value is None or
+        checks.goal_costmap_value < 0 or
+        checks.goal_costmap_value >= 253
+    )
+    if map_geometry_bad or costmap_geometry_bad or not checks.final_path_valid:
+        return FailureClass.HARD_UNREACHABLE
+    if (not checks.action_server_ready or not checks.lifecycle_active or
+            not checks.transform_available):
+        return FailureClass.TF_OR_LIFECYCLE
+    if not checks.no_local_goal_active:
+        return FailureClass.ACTION_REJECTION
+    return FailureClass.UNKNOWN
+
+
 @dataclass(frozen=True)
 class PathEvaluation:
     """Observable result of one local ComputePathToPose request."""
@@ -1053,8 +1080,8 @@ class LocalNav2:
             reason = 'required transform unavailable: ' + str(error)
         if not inside_map:
             reason = reason or 'goal lies outside current shared map'
-        elif map_value >= 50:
-            reason = reason or 'goal occupancy-map cell is not free'
+        elif map_value < 0 or map_value >= 50:
+            reason = reason or 'goal occupancy-map cell is unknown or occupied'
         if not inside_costmap:
             reason = reason or 'goal lies outside current global costmap'
         elif cost_value < 0 or cost_value >= self._costmap_lethal_threshold:

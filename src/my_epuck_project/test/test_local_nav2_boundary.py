@@ -3,8 +3,10 @@
 import math
 
 from my_epuck_project.distributed_assignment.local_nav2 import (
+    DispatchPreconditions,
     LocalNav2,
     PathEvaluation,
+    classify_dispatch_precondition_failure,
     classify_follow_path_controller_error,
     follow_path_controller_error_name,
     downsample_path,
@@ -112,6 +114,52 @@ def test_propagated_follow_path_tf_abort_is_infrastructure_evidence():
     """Keep FollowPath TF_ERROR separate from structural task failure."""
     assert classify_follow_path_controller_error(102) == FailureClass.TF_OR_LIFECYCLE
     assert follow_path_controller_error_name(102) == 'TF_ERROR'
+
+
+def _dispatch_checks(**overrides):
+    values = dict(
+        action_server_ready=True,
+        lifecycle_active=False,
+        transform_available=True,
+        transform_age_s=0.1,
+        goal_inside_map=True,
+        goal_inside_costmap=True,
+        goal_map_value=0,
+        goal_costmap_value=0,
+        no_local_goal_active=True,
+        final_path_valid=True,
+        reason='',
+    )
+    values.update(overrides)
+    return DispatchPreconditions(**values)
+
+
+def test_unknown_or_lethal_goal_is_hard_failure_even_before_lifecycle_query():
+    """Geometry must not be misclassified by the default lifecycle flag."""
+    checks = _dispatch_checks(
+        goal_map_value=-1,
+        goal_costmap_value=-1,
+        reason='goal costmap cell is unknown or lethal',
+    )
+    assert classify_dispatch_precondition_failure(checks) == FailureClass.HARD_UNREACHABLE
+
+
+def test_lifecycle_or_action_unavailability_remains_infrastructure_failure():
+    """A geometrically valid task still reports infrastructure evidence."""
+    checks = _dispatch_checks(
+        reason='lifecycle services unavailable: local_controller_server',
+    )
+    assert classify_dispatch_precondition_failure(checks) == FailureClass.TF_OR_LIFECYCLE
+
+
+def test_active_goal_race_is_action_rejection_after_valid_geometry():
+    """Do not suppress a task merely because a local goal is still active."""
+    checks = _dispatch_checks(
+        lifecycle_active=True,
+        no_local_goal_active=False,
+        reason='another local navigation goal is active',
+    )
+    assert classify_dispatch_precondition_failure(checks) == FailureClass.ACTION_REJECTION
 
 
 def test_bounded_failure_crop_and_geometry_signature_are_deterministic():

@@ -33,6 +33,7 @@ from .distributed_assignment.failures import (
     HARD_FAILURES, bounded_suppression_duration,
 )
 from .distributed_assignment.local_nav2 import (
+    classify_dispatch_precondition_failure,
     DispatchPreconditions,
     LocalNav2,
     NavigationOutcome,
@@ -1754,11 +1755,7 @@ class DistributedFrontierAssignment(Node):
             )
         )
         if not checks.ready:
-            failure = (
-                FailureClass.TF_OR_LIFECYCLE if
-                (not checks.lifecycle_active or not checks.transform_available)
-                else FailureClass.HARD_UNREACHABLE
-            )
+            failure = classify_dispatch_precondition_failure(checks)
             self._invalidate_round(failure, checks.reason, final_path)
             return
         if not self._nav2.send_navigation(

@@ -43,6 +43,13 @@ class UnknownPosePhaseManager(Node):
         self._transition = 'WAITING_FOR_HANDOFF'
         self._request_in_flight = False
         self._transition_started = 0.0
+        # A rejected lifecycle request leaves Nav2 in a partially transitioning
+        # state for a short period.  Do not hammer the manager at 10 Hz: that
+        # creates entity/log churn and can starve the action servers needed by
+        # the next attempt.  A one-second bounded backoff preserves retry
+        # behavior while allowing lifecycle cleanup/advertisement to settle.
+        self._next_retry_at = 0.0
+        self._retry_interval_s = 1.0
         self._hypothesis_sub = self.create_subscription(
             RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
             self._hypothesis_callback, qos)
@@ -62,7 +69,9 @@ class UnknownPosePhaseManager(Node):
                 'transition=SHUTTING_DOWN_LOCAL' % self.robot_id)
 
     def _send(self, client, command, next_state: str) -> None:
-        if self._request_in_flight or not client.service_is_ready():
+        if (self._request_in_flight or
+                time.monotonic() < self._next_retry_at or
+                not client.service_is_ready()):
             return
         request = ManageLifecycleNodes.Request()
         request.command = command
@@ -75,11 +84,13 @@ class UnknownPosePhaseManager(Node):
             try:
                 response = result.result()
             except Exception as error:  # noqa: B902
+                self._next_retry_at = time.monotonic() + self._retry_interval_s
                 self.get_logger().error(
                     'UNKNOWN_POSE_PHASE robot=%s transition=%s exception=%s' %
                     (self.robot_id, self._transition, error))
                 return
             if not bool(response.success):
+                self._next_retry_at = time.monotonic() + self._retry_interval_s
                 self.get_logger().error(
                     'UNKNOWN_POSE_PHASE robot=%s transition=%s rejected' %
                     (self.robot_id, self._transition))

@@ -317,6 +317,23 @@ def test_prefixed_local_nav2_rewrites_local_map_frame_and_topic():
     assert "'global_costmap.global_costmap.ros__parameters.static_layer.map_topic'" in launch_text
 
 
+def test_shared_nav2_bt_waits_for_post_handoff_action_servers():
+    for robot in ('robot1', 'robot2'):
+        params = yaml.safe_load((ROOT / 'resource' /
+                                f'nav2_{robot}_shared_map.yaml').read_text())
+        bt = params['bt_navigator']['ros__parameters']
+        assert bt['wait_for_service_timeout'] == 5000
+        assert bt['default_server_timeout'] == 500
+
+
+def test_phase_manager_backoff_prevents_lifecycle_retry_spin():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert 'self._next_retry_at = 0.0' in phase
+    assert 'self._retry_interval_s = 1.0' in phase
+    assert 'time.monotonic() < self._next_retry_at' in phase
+    assert 'self._next_retry_at = time.monotonic() + self._retry_interval_s' in phase
+
+
 def test_fast_runner_uses_remaining_startup_deadline_for_nav2():
     runner = (PY / 'cooperative_trial_fast.py').read_text()
     assert 'nav2_deadline = readiness_deadline' in runner

@@ -250,6 +250,7 @@ behavior_server:
       plugin: "nav2_behaviors::Wait"
     assisted_teleop:
       plugin: "nav2_behaviors::AssistedTeleop"
+    local_frame: robot1/odom
     global_frame: robot1/odom
     robot_base_frame: robot1/base_footprint
     transform_tolerance: 0.1

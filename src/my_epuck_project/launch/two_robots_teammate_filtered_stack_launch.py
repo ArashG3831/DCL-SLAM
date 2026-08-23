@@ -27,6 +27,33 @@ LIFECYCLE_NODES = [
 ]
 
 
+def _is_large_world_profile(selected):
+    """Return whether a resolved profile uses the large-world geometry.
+
+    Unknown-pose and physics-timestep variants retain the ``large`` prefix;
+    comparing only against the literal base profile would select the small
+    world progress-checker contract for them.
+    """
+    return str(selected.get('name', '')).startswith('large')
+
+
+def _progress_movement_time_allowance(selected):
+    """Return the bounded progress allowance for the resolved world profile.
+
+    Unknown-pose large profiles use RPP's intentional rotate-to-heading phase.
+    The observed e-puck angular command (about 0.2--0.3 rad/s) can require
+    more than the ordinary large-world 18 s allowance for a 2--4 rad heading
+    change.  Keep the existing checker and raise only this bounded allowance
+    for those profiles; small and ordinary large-world behavior is unchanged.
+    """
+    name = str(selected.get('name', ''))
+    if name.startswith('large_unknown_pose'):
+        return '30.0'
+    if _is_large_world_profile(selected):
+        return '18.0'
+    return '10.0'
+
+
 # Historical diagnostic baseline.  Production YAML now contains RPP; keeping
 # this block here preserves explicit ``controller_variant:=dwb`` reproduction
 # without reintroducing DWB into the active production configuration.
@@ -164,9 +191,14 @@ def nav2_nodes(package_dir, robot, selected, controller_variant,
         'global_costmap.global_costmap.ros__parameters.static_layer.map_topic':
             map_topic or f'/{robot}/shared_map',
         f'{parameter_node("controller_server")}.ros__parameters.progress_checker.required_movement_radius':
-            '0.08' if selected['name'] == 'large' else '0.5',
+            # All large-world variants, including the close/far unknown-pose
+            # fixtures, need the large-world progress contract.  Comparing
+            # only against the literal ``large`` profile silently applied the
+            # small-world 0.5 m/10 s checker to those fixtures; RPP then
+            # failed while it was still rotating to a frontier heading.
+            '0.08' if _is_large_world_profile(selected) else '0.5',
         f'{parameter_node("controller_server")}.ros__parameters.progress_checker.movement_time_allowance':
-            '18.0' if selected['name'] == 'large' else '10.0',
+            _progress_movement_time_allowance(selected),
         f'{parameter_node("collision_monitor")}.ros__parameters.state_topic':
             'collision_monitor_state',
         'use_sim_time': LaunchConfiguration('use_sim_time'),

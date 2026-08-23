@@ -265,6 +265,26 @@ def test_prefixed_local_nav2_nodes_receive_frozen_rpp_parameters():
     assert 'controller_server' not in document
 
 
+def test_unknown_pose_large_profiles_use_large_progress_checker_contract():
+    module = _load_nav_launch()
+    assert module._is_large_world_profile({
+        'name': 'large_unknown_pose_close_start_20ms_scan_matching'})
+    assert module._is_large_world_profile({
+        'name': 'large_unknown_pose_far_start_20ms_scan_matching'})
+    assert not module._is_large_world_profile({'name': 'small'})
+    assert module._progress_movement_time_allowance({
+        'name': 'large_unknown_pose_close_start_20ms_scan_matching'}) == '30.0'
+    assert module._progress_movement_time_allowance({'name': 'large'}) == '18.0'
+    assert module._progress_movement_time_allowance({'name': 'small'}) == '10.0'
+
+
+def test_recovery_behaviors_use_namespaced_odom_frame():
+    for robot in ('robot1', 'robot2'):
+        params = (ROOT / 'resource' /
+                  f'nav2_{robot}_shared_map.yaml').read_text(encoding='utf-8')
+        assert f'local_frame: {robot}/odom' in params
+
+
 def test_prefixed_local_nav2_rewrites_local_map_frame_and_topic():
     module = _load_nav_launch()
     source = ROOT / 'resource' / 'nav2_robot1_shared_map.yaml'

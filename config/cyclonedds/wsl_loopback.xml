@@ -8,12 +8,14 @@
       </Interfaces>
       <AllowMulticast>false</AllowMulticast>
       <EnableMulticastLoopback>true</EnableMulticastLoopback>
-      <!-- Keep each UDP payload below the WSL/Windows loopback MTU while
-           allowing 720-beam LaserScan samples to be retransmitted as DDS
-           fragments.  The Wi-Fi profile remains unchanged. -->
-      <FragmentSize>1025B</FragmentSize>
-      <MaxMessageSize>1472B</MaxMessageSize>
-      <MaxRexmitMessageSize>1456B</MaxRexmitMessageSize>
+      <!-- The former 1025/1472-byte limits were intended as an MTU
+           workaround, but CycloneDDS 0.10.x can overrun its send iovec for
+           fragmented ROS samples at such low limits.  WSL simulation stays
+           on the loopback interface, so use the supported defaults/large
+           fragment bounds instead.  The Wi-Fi profile remains unchanged. -->
+      <FragmentSize>4000B</FragmentSize>
+      <MaxMessageSize>14720B</MaxMessageSize>
+      <MaxRexmitMessageSize>14720B</MaxRexmitMessageSize>
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>

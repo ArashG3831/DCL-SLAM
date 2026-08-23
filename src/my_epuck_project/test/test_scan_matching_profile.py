@@ -146,6 +146,21 @@ def test_scan_matching_campaign_uses_unknown_pose_and_sim_watchdog():
     assert 'large_unknown_pose_close_start_20ms_scan_matching' in runner
 
 
+def test_wsl_cyclonedds_profile_avoids_low_fragment_bounds_for_ros_samples():
+    """Keep the WSL loopback profile away from CycloneDDS low-limit overruns.
+
+    The simulation publishes fragmented FrontierCandidateArray samples.  The
+    old 1025/1472-byte limits reproduced an AddressSanitizer iovec over-read
+    in CycloneDDS 0.10.x; the Wi-Fi profile is intentionally not covered here.
+    """
+    xml = (PACKAGE.parent.parent / 'config' / 'cyclonedds' /
+           'wsl_loopback.xml').read_text(encoding='utf-8')
+    assert '<FragmentSize>4000B</FragmentSize>' in xml
+    assert '<MaxMessageSize>14720B</MaxMessageSize>' in xml
+    assert '<MaxRexmitMessageSize>14720B</MaxRexmitMessageSize>' in xml
+    assert '<FragmentSize>1025B</FragmentSize>' not in xml
+
+
 def test_campaign_forwards_distinct_campaign_owned_frontend_diagnostics():
     runner = (PACKAGE / 'my_epuck_project' /
               'cooperative_regression.py').read_text(encoding='utf-8')

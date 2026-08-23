@@ -114,6 +114,19 @@ def test_vectorized_fusion_matches_scalar_for_randomized_geometries():
         assert vector.tolist() == scalar.tolist()
 
 
+def test_vectorized_geometry_cache_is_bounded_across_map_revisions():
+    """Map growth must not retain coordinate arrays for every old geometry."""
+    cache = {}
+    for revision in range(12):
+        message = occupancy_grid(
+            20, 20, 0.03, -float(revision), 0.0, 0.0,
+            [0] * (20 * 20))
+        _vectorized_fused_data(
+            [message], [(0.0, 0.0, 0.0)], -2.0, -2.0, 200, 200,
+            0.03, cache)
+    assert len(cache) <= 4
+
+
 def test_identical_map_content_ignores_timestamp_changes():
     first = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
     second = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])

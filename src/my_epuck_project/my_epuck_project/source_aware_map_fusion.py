@@ -18,6 +18,14 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
+# SLAM map origins/dimensions change as exploration expands.  Retaining the
+# vectorized world-coordinate arrays for every historical geometry grows
+# without bound (each entry is two large float arrays).  A small bounded cache
+# still avoids duplicate work within the current pair of source maps without
+# retaining old map revisions.
+_MAX_GEOMETRY_CACHE_ENTRIES = 4
+
+
 def _quaternion_yaw(quaternion):
     return math.atan2(
         2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
@@ -138,6 +146,8 @@ def _vectorized_fused_data(messages, transforms, minimum_x, minimum_y, width,
                      + origin_sin * local_x + origin_cos * local_y)
             cached = (map_x, map_y)
             geometry_cache[geometry_key] = cached
+            while len(geometry_cache) > _MAX_GEOMETRY_CACHE_ENTRIES:
+                geometry_cache.pop(next(iter(geometry_cache)))
         map_x, map_y = cached
         values = _grid_array(message)
         known = values >= 0

@@ -51,3 +51,11 @@ def test_peer_navigation_reservation_remains_when_traffic_scheduler_enabled():
     """Explicit traffic scheduling retains its safety reservation."""
     assert peer_navigation_blocks_dispatch(True, True) is True
     assert peer_navigation_blocks_dispatch(True, False) is False
+
+
+def test_snapshot_wait_path_uses_the_same_scheduler_gate():
+    """Both peer-activity paths obey the explicit traffic setting."""
+    text = SOURCE.read_text(encoding='utf-8')
+    # One occurrence is the helper definition; the other two are the normal
+    # dispatch and missing-snapshot paths in _tick.
+    assert text.count('peer_navigation_blocks_dispatch(') >= 3

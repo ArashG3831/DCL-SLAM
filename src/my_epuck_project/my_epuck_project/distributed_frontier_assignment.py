@@ -971,7 +971,8 @@ class DistributedFrontierAssignment(Node):
                  (peer_status.value.state == DistributedExplorationStatus.NAVIGATING and
                   bool(peer_status.value.active_canonical_task_id)))
             )
-            if peer_navigating:
+            if peer_navigation_blocks_dispatch(
+                    self._traffic_scheduler_enabled, peer_navigating):
                 self._transition(
                     CoordinatorState.WAITING_FOR_INPUTS,
                     'peer active assignment heartbeat; awaiting fresh proposal',

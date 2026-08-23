@@ -8,6 +8,18 @@ from rcl_interfaces.srv import ListParameters
 
 from my_epuck_project.navigation_live_parameters import (
     collect_snapshots, native_parameter_values, snapshot_node)
+from my_epuck_project.cooperative_regression import (
+    LIVE_PARAMETER_NODES, LOCAL_LIVE_PARAMETER_NODES)
+
+
+def test_unknown_pose_live_parameter_nodes_use_local_nav2_names():
+    """Unknown-pose pre-handoff snapshots target the active local stack."""
+    assert LOCAL_LIVE_PARAMETER_NODES == (
+        'local_controller_server', 'local_velocity_smoother',
+        'local_costmap/local_costmap', 'global_costmap/global_costmap',
+        'local_planner_server')
+    assert LIVE_PARAMETER_NODES[0] == 'controller_server'
+    assert LIVE_PARAMETER_NODES[-1] == 'planner_server'
 
 
 def test_native_parameter_values_preserve_ros_scalar_and_array_types():

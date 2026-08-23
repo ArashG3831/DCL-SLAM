@@ -1605,6 +1605,11 @@ LIVE_PARAMETER_NODES = (
     'local_costmap/local_costmap', 'global_costmap/global_costmap',
     'planner_server',
 )
+LOCAL_LIVE_PARAMETER_NODES = (
+    'local_controller_server', 'local_velocity_smoother',
+    'local_costmap/local_costmap', 'global_costmap/global_costmap',
+    'local_planner_server',
+)
 LIVE_PARAMETER_FEATURE_VERSION = '2.0.0'
 
 
@@ -1662,7 +1667,8 @@ def navigation_preflight(workspace):
     }
 
 
-def capture_live_parameter_snapshots(attempt, environment, allocated_domain):
+def capture_live_parameter_snapshots(
+        attempt, environment, allocated_domain, unknown_initial_pose=False):
     """Capture bounded live Nav2 parameter dumps and normalized parity."""
     del environment
     from .navigation_live_parameters import (
@@ -1671,8 +1677,10 @@ def capture_live_parameter_snapshots(attempt, environment, allocated_domain):
 
     root = Path(attempt) / 'observer' / 'live_parameters'
     root.mkdir(parents=True, exist_ok=True)
+    parameter_nodes = (LOCAL_LIVE_PARAMETER_NODES
+                       if unknown_initial_pose else LIVE_PARAMETER_NODES)
     nodes = [f'/{robot}/{suffix}' for robot in ('robot1', 'robot2')
-             for suffix in LIVE_PARAMETER_NODES]
+             for suffix in parameter_nodes]
     snapshots = collect_snapshots(nodes, allocated_domain)
     trees = {'robot1': {}, 'robot2': {}}
     statuses = []
@@ -1701,7 +1709,7 @@ def capture_live_parameter_snapshots(attempt, environment, allocated_domain):
     report = live_snapshot_report(trees['robot1'], trees['robot2'], statuses)
     report.update({'schema_version': SNAPSHOT_SCHEMA,
                    'feature_version': LIVE_PARAMETER_FEATURE_VERSION,
-                   'nodes': list(LIVE_PARAMETER_NODES),
+                   'nodes': list(parameter_nodes),
                    'snapshots': statuses,
                    'bounded': True})
     (root / 'parity_report.json').write_text(
@@ -2173,7 +2181,8 @@ def internal_trial(args):
                     atomic_json(attempt / 'runner_metadata.json', metadata)
                     try:
                         live_report = capture_live_parameter_snapshots(
-                            attempt, environment, args.ros_domain_id)
+                            attempt, environment, args.ros_domain_id,
+                            unknown_initial_pose=args.unknown_initial_pose)
                     except (OSError, subprocess.TimeoutExpired, ValueError) as error:
                         live_report = {
                             'schema_version': '1.0.0',

@@ -3,7 +3,10 @@
 from pathlib import Path
 
 from my_epuck_project.distributed_assignment.models import Bounds, PhysicalTask
-from my_epuck_project.distributed_frontier_assignment import eligible_solo_tasks
+from my_epuck_project.distributed_frontier_assignment import (
+    eligible_solo_tasks,
+    peer_navigation_blocks_dispatch,
+)
 
 SOURCE = Path(__file__).parents[1] / 'my_epuck_project' / (
     'distributed_frontier_assignment.py'
@@ -37,3 +40,14 @@ def test_successful_physical_frontier_is_not_redispatched_while_present():
         (completed, alternate), set(), {'completed-region'}, 0.05, 0.0, 18.0,
     )
     assert [task.physical_signature for task in selected] == ['new-region']
+
+
+def test_peer_navigation_does_not_serialize_when_traffic_scheduler_disabled():
+    """The normal profile permits independent goals on both robots."""
+    assert peer_navigation_blocks_dispatch(False, True) is False
+
+
+def test_peer_navigation_reservation_remains_when_traffic_scheduler_enabled():
+    """Explicit traffic scheduling retains its safety reservation."""
+    assert peer_navigation_blocks_dispatch(True, True) is True
+    assert peer_navigation_blocks_dispatch(True, False) is False

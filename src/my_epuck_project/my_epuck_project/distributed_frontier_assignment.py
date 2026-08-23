@@ -135,6 +135,17 @@ STATE_TO_MESSAGE = {
 }
 
 
+def peer_navigation_blocks_dispatch(
+        traffic_scheduler_enabled: bool, peer_active: bool) -> bool:
+    """Return whether a peer's active goal must reserve this dispatcher.
+
+    The reservation is meaningful only when the explicit traffic scheduler is
+    enabled.  The production exploration profile disables that scheduler, in
+    which case independent agreed tasks may be dispatched concurrently.
+    """
+    return bool(traffic_scheduler_enabled and peer_active)
+
+
 FAILURE_TO_MESSAGE = {
     FailureClass.HARD_UNREACHABLE: ExplorationFailure.HARD_UNREACHABLE,
     FailureClass.PLANNER_FAILURE: ExplorationFailure.PLANNER_FAILURE,
@@ -928,15 +939,20 @@ class DistributedFrontierAssignment(Node):
             return
         if self._nav2.local_goal_active or self._dispatch_in_progress:
             return
-        # A healthy peer goal is an already-issued local Nav2 commitment, not
-        # a new candidate to be re-arbitrated.  Conservatively wait for its
-        # terminal result and fresh proposals instead of issuing a conflicting
-        # new goal or cancelling the peer's local action.  This is the active
-        # robot priority rule; both replicas observe the same peer status.
+        # When traffic scheduling is enabled, a healthy peer goal is an
+        # already-issued local Nav2 commitment, so defer a new dispatch until
+        # its terminal result.  With traffic scheduling disabled (the normal
+        # cooperative-exploration profile), this guard must not serialize the
+        # team: an idle robot is allowed to dispatch an independently agreed
+        # task while its peer is navigating.
         peer_status = self._peer_status
-        if (peer_status is not None and peer_status.fresh(now) and
-                (peer_status.value.local_nav_goal_active or
-                 peer_status.value.state == DistributedExplorationStatus.NAVIGATING)):
+        peer_active = bool(
+            peer_status is not None and peer_status.fresh(now) and
+            (peer_status.value.local_nav_goal_active or
+             peer_status.value.state == DistributedExplorationStatus.NAVIGATING)
+        )
+        if peer_navigation_blocks_dispatch(
+                self._traffic_scheduler_enabled, peer_active):
             self._transition(
                 CoordinatorState.WAITING_FOR_INPUTS,
                 'peer active local NavigateToPose retains traffic priority',

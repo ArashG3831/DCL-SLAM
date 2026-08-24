@@ -405,6 +405,13 @@ class UnknownPoseFrontend(Node):
         self.confirmations = {}
         self.pending_requests = set()
         self.pending_proposals = {}
+        # Retain the canonical proposal envelope until the peer ACK arrives.
+        # The bounded keyframe cache may evict the source/target descriptors
+        # while confirmation is in flight; finalizing an ACK must not depend
+        # on re-looking up those descriptors.  This is deliberately bounded
+        # by the same proposal lifecycle (publish -> ACK/REJECT), not an
+        # unbounded evidence stream.
+        self.pending_proposal_messages = {}
         # Keep the exact evidence-set fingerprint alongside the local
         # RegistrationResult.  RegistrationResult intentionally contains
         # geometry/quality only; the fingerprint belongs to the replicated
@@ -2749,6 +2756,7 @@ class UnknownPoseFrontend(Node):
         key = (str(proposal.source_keyframe_id),
                str(proposal.target_keyframe_id))
         self.pending_proposals[key] = result
+        self.pending_proposal_messages[key] = copy.deepcopy(proposal)
         self.pending_proposal_evidence_hashes[key] = str(
             proposal.evidence_set_hash)
         self.hypothesis_pub.publish(proposal)
@@ -3137,6 +3145,9 @@ class UnknownPoseFrontend(Node):
                 self.pending_proposals.pop(
                     (str(message.source_keyframe_id),
                      str(message.target_keyframe_id)), None)
+                getattr(self, 'pending_proposal_messages', {}).pop(
+                    (str(message.source_keyframe_id),
+                     str(message.target_keyframe_id)), None)
                 getattr(self, 'pending_proposal_evidence_hashes', {}).pop(
                     (str(message.source_keyframe_id),
                      str(message.target_keyframe_id)), None)
@@ -3182,17 +3193,11 @@ class UnknownPoseFrontend(Node):
                 target_keyframe_id=str(message.target_keyframe_id),
                 pending_proposal_count=len(self.pending_proposals))
             return
-        own = self.keyframes.get(message.source_keyframe_id)
-        peer = self.peer_descriptors.get(message.target_keyframe_id)
-        if own is None or peer is None:
-            self._record_diagnostic_event(
-                'HYPOTHESIS_ACK_IGNORED_MISSING_KEYFRAME',
-                source_keyframe_id=str(message.source_keyframe_id),
-                target_keyframe_id=str(message.target_keyframe_id))
-            return
         peer_selector_status = str(getattr(message, 'selector_status', ''))
         proposal_key = (str(message.source_keyframe_id),
                         str(message.target_keyframe_id))
+        proposal_message = getattr(
+            self, 'pending_proposal_messages', {}).get(proposal_key)
         proposal_evidence_set_hash = getattr(
             self, 'pending_proposal_evidence_hashes', {}).get(proposal_key, '')
         peer_evidence_set_hash = str(getattr(message, 'evidence_set_hash', ''))
@@ -3213,13 +3218,54 @@ class UnknownPoseFrontend(Node):
                 peer_consistent_constraint_count=int(getattr(
                     message, 'consistent_constraint_count', 0)))
             return
-        final = self._hypothesis_message(
-            own[0], peer, proposal, status='ACCEPTED', accepted=True,
-            rejection_reason='',
-            evidence_source_keyframe_ids=list(getattr(
-                message, 'evidence_source_keyframe_ids', [])),
-            evidence_target_keyframe_ids=list(getattr(
-                message, 'evidence_target_keyframe_ids', [])))
+        if proposal_message is not None:
+            # The proposal already contains the source-to-target transform
+            # computed by the canonical source and independently verified by
+            # the target.  Reuse that immutable envelope rather than
+            # recomputing it from descriptors that may have been evicted.
+            final = copy.deepcopy(proposal_message)
+            final.status = 'ACCEPTED'
+            final.accepted = True
+            final.rejection_reason = ''
+            final.evidence_set_hash = str(
+                message.evidence_set_hash or
+                proposal_message.evidence_set_hash)
+            if getattr(message, 'evidence_source_keyframe_ids', []):
+                final.evidence_source_keyframe_ids = list(
+                    message.evidence_source_keyframe_ids)
+            if getattr(message, 'evidence_target_keyframe_ids', []):
+                final.evidence_target_keyframe_ids = list(
+                    message.evidence_target_keyframe_ids)
+            self._record_diagnostic_event(
+                'HYPOTHESIS_ACK_FINALIZED_FROM_RETAINED_PROPOSAL',
+                source_keyframe_id=str(message.source_keyframe_id),
+                target_keyframe_id=str(message.target_keyframe_id),
+                keyframe_evicted=bool(
+                    message.source_keyframe_id not in self.keyframes or
+                    message.target_keyframe_id not in self.peer_descriptors))
+        else:
+            # Defensive compatibility path for proposals created before the
+            # retained-envelope field existed.  Keep the old safety check;
+            # never synthesize a final message without both descriptors.
+            own = self.keyframes.get(message.source_keyframe_id)
+            peer = self.peer_descriptors.get(message.target_keyframe_id)
+            if own is None or peer is None:
+                self._record_diagnostic_event(
+                    'HYPOTHESIS_ACK_IGNORED_MISSING_KEYFRAME',
+                    source_keyframe_id=str(message.source_keyframe_id),
+                    target_keyframe_id=str(message.target_keyframe_id))
+                return
+            final = self._hypothesis_message(
+                own[0], peer, proposal, status='ACCEPTED', accepted=True,
+                rejection_reason='',
+                evidence_source_keyframe_ids=list(getattr(
+                    message, 'evidence_source_keyframe_ids', [])),
+                evidence_target_keyframe_ids=list(getattr(
+                    message, 'evidence_target_keyframe_ids', [])))
+        self.pending_proposals.pop(proposal_key, None)
+        getattr(self, 'pending_proposal_messages', {}).pop(proposal_key, None)
+        getattr(self, 'pending_proposal_evidence_hashes', {}).pop(
+            proposal_key, None)
         self.hypothesis_pub.publish(final)
         self._record_diagnostic_event(
             'HYPOTHESIS_CANONICAL_ACCEPTED',

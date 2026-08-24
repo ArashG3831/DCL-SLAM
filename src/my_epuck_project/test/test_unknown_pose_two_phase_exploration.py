@@ -205,6 +205,22 @@ def test_expected_handoff_teardown_is_marked_before_local_children_stop():
     assert 'os.replace(temporary, self._handoff_marker_path)' in phase
 
 
+def test_source_ack_can_finalize_after_proposal_keyframes_are_evicted():
+    """An in-flight canonical proposal owns its immutable protocol envelope."""
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert 'self.pending_proposal_messages = {}' in frontend
+    assert 'self.pending_proposal_messages[key] = copy.deepcopy(proposal)' in frontend
+    assert "HYPOTHESIS_ACK_FINALIZED_FROM_RETAINED_PROPOSAL" in frontend
+    assert 'proposal_message is not None' in frontend
+    # The missing-keyframe path remains only as a defensive fallback for
+    # legacy proposals, rather than rejecting every delayed ACK.
+    ack_start = frontend.index('        proposal = self.pending_proposals.get(')
+    ack_end = frontend.index('    def _ack_message(', ack_start)
+    ack = frontend[ack_start:ack_end]
+    assert ack.count('HYPOTHESIS_ACK_IGNORED_MISSING_KEYFRAME') == 1
+    assert 'pending_proposal_messages' in ack
+
+
 def test_peer_summary_verifies_when_crops_arrived_before_summary():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     assert 'source_id in self.received_peer_crops' in frontend

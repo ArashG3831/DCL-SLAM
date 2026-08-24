@@ -182,6 +182,15 @@ def main(args=None):
     node = FrontierProposalAdapter()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    except Exception:
+        # Launch may invalidate the context before delivering the process
+        # signal.  Preserve fail-fast behavior for application errors while
+        # making shutdown idempotent.
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

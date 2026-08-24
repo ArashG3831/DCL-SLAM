@@ -121,13 +121,30 @@ class UnknownPosePhaseManager(Node):
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+        def live(pid):
+            """Return whether a PID still owns a running process.
+
+            A launch child can remain as a zombie until its launch parent
+            reaps it.  Treating the mere presence of ``/proc/<pid>`` as live
+            made the phase switch escalate an already-terminated child to
+            SIGKILL, which launch correctly reported as an unexpected
+            frontend exit.  This is teardown bookkeeping only; it does not
+            broaden which processes are selected.
+            """
+            try:
+                fields = open('/proc/%s/stat' % pid, encoding='utf-8').read().split()
+                return len(fields) < 3 or fields[2] not in ('Z', 'X')
+            except (FileNotFoundError, PermissionError, OSError):
+                return False
+
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
-            remaining = [pid for pid in pids if os.path.exists('/proc/%s' % pid)]
+            remaining = [pid for pid in pids if live(pid)]
             if not remaining:
                 break
             time.sleep(0.05)
-        remaining = [pid for pid in pids if os.path.exists('/proc/%s' % pid)]
+        remaining = [pid for pid in pids if live(pid)]
         for pid in remaining:
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -202,6 +219,12 @@ def main(args=None):
     node = UnknownPosePhaseManager()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

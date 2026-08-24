@@ -63,6 +63,24 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     assert "message.accepted" in phase
 
 
+def test_handoff_teardown_does_not_escalate_zombie_children():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert "fields = open('/proc/%s/stat' % pid" in phase
+    assert "fields[2] not in ('Z', 'X')" in phase
+    assert "remaining = [pid for pid in pids if live(pid)]" in phase
+
+
+def test_handoff_node_shutdown_paths_are_idempotent():
+    for name in (
+            'unknown_pose_frontend.py', 'frontier_proposal_adapter.py',
+            'distributed_frontier_assignment.py',
+            'unknown_pose_phase_manager.py',
+            'unknown_pose_shared_stack_activation.py'):
+        source = (PY / name).read_text()
+        assert 'ExternalShutdownException' in source
+        assert 'if rclpy.ok()' in source
+
+
 def test_shared_inputs_are_created_once_after_handoff():
     assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     fusion = (PY / 'source_aware_map_fusion.py').read_text()

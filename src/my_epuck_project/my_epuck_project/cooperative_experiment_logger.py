@@ -146,6 +146,8 @@ class CooperativeExperimentLogger(Node):
         self.scan_pipeline = {
             r: {
                 'scan_d500_fixed_stamps': deque(maxlen=4096),
+                'scan_d500_nav_stamps': deque(maxlen=4096),
+                'scan_d500_nav_ages_s': deque(maxlen=4096),
                 'map_stamps': deque(maxlen=4096),
                 'scan_correction_records': 0,
             }
@@ -331,7 +333,7 @@ class CooperativeExperimentLogger(Node):
             # Passive controller-health evidence; it never gates or commands
             # the running stack.
             self.observe(JointState,f'/{r}/joint_states',lambda m,x=r:self.mark(x,'joint_states',m),qos_profile_sensor_data,f'{r}.joint_states')
-            for s in ('scan_d500_fixed','scan_d500_slam'): self.observe(LaserScan,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),qos_profile_sensor_data,f'{r}.{s}')
+            for s in ('scan_d500_fixed','scan_d500_slam','scan_d500_nav'): self.observe(LaserScan,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),qos_profile_sensor_data,f'{r}.{s}')
             for s in ('map','shared_map','local_costmap/costmap','global_costmap/costmap'): self.observe(OccupancyGrid,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),self.qos(True,True,1),f'{r}.{s}')
             self.observe(PeerMap,f'/cslam/{r}/local_map',lambda m,x=r:self.mark(x,'peer_map',m),self.qos(True,True,1),f'{r}.peer_map')
             self.observe(FrontierCandidateArray,f'/{r}/frontier_candidates',lambda m,x=r:self.candidates(x,m),self.qos(True,False,1),f'{r}.candidates')
@@ -413,6 +415,12 @@ class CooperativeExperimentLogger(Node):
             if key == 'scan_d500_fixed':
                 self.scan_pipeline[r]['scan_d500_fixed_stamps'].append(
                     stamp(msg)[0] + stamp(msg)[1] * 1e-9)
+            elif key == 'scan_d500_nav':
+                source_stamp = stamp(msg)[0] + stamp(msg)[1] * 1e-9
+                self.scan_pipeline[r]['scan_d500_nav_stamps'].append(
+                    source_stamp)
+                self.scan_pipeline[r]['scan_d500_nav_ages_s'].append(
+                    max(0.0, now - source_stamp))
             elif key == 'map':
                 self.scan_pipeline[r]['map_stamps'].append(
                     stamp(msg)[0] + stamp(msg)[1] * 1e-9)
@@ -802,7 +810,7 @@ class CooperativeExperimentLogger(Node):
                     self.attribution.observe(r,transformed[1],time.monotonic()-self.start); self._last_attributed[r]=snapshot[0]
         a=self.attribution.summary(); row=self.row_time(); row.update(robot1_local_known=self.map_counts('robot1','map')[0],robot2_local_known=self.map_counts('robot2','map')[0],robot1_shared_known=known[0],robot2_shared_known=known[1],shared_free_cells=counts[0][0],shared_occupied_cells=counts[0][1],shared_unknown_cells=counts[0][2],known_area_m2=known[0]*maps[0].info.resolution**2,coverage_gain_cells=gain,coverage_gain_since_start_cells=current-self.initial_known,unique_first_seen_robot1_cells=a['unique_first_seen_cells'].get('robot1',0),unique_first_seen_robot2_cells=a['unique_first_seen_cells'].get('robot2',0),later_duplicated_by_robot1_cells=a['later_duplicated_cells'].get('robot1',0),later_duplicated_by_robot2_cells=a['later_duplicated_cells'].get('robot2',0),simultaneously_observed_cells=a['simultaneously_observed_cells'],total_known_union_cells=a['total_known_union_cells'],duplicated_known_fraction=a['duplicated_known_fraction'],shared_maps_equivalent=equivalent); self.csv_row(self.coverage,row)
     def sample_health(self):
-        limits={'odom':self.p['odom_stale_s'],'joint_states':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
+        limits={'odom':self.p['odom_stale_s'],'joint_states':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'scan_d500_nav':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
         now=time.monotonic()
         try:
             scan_parameters = json.loads(
@@ -876,10 +884,36 @@ class CooperativeExperimentLogger(Node):
         for robot in self.robots:
             values = self.scan_pipeline[robot]
             scan_rate = self._observed_rate(values['scan_d500_fixed_stamps'])
+            nav_stamps = list(values['scan_d500_nav_stamps'])
+            nav_ages = sorted(float(value) for value in
+                              values['scan_d500_nav_ages_s'])
+            nav_gaps = [right - left for left, right in zip(
+                nav_stamps, nav_stamps[1:]) if right >= left]
+            def nav_percentile(fraction):
+                if not nav_ages:
+                    return None
+                index = min(len(nav_ages) - 1, max(
+                    0, math.ceil(len(nav_ages) * fraction) - 1))
+                return nav_ages[index]
             map_rate = self._observed_rate(values['map_stamps'])
             robot_row = {
                 'corrected_scan_messages': len(values['scan_d500_fixed_stamps']),
                 'corrected_scan_rate_hz': scan_rate,
+                # This is the scan stream consumed by collision_monitor and
+                # Nav2 obstacle layers.  Ages are computed against the ROS
+                # simulation clock at receipt time; no timestamp rewriting or
+                # runtime gating is performed by the observer.
+                'nav_scan_messages': len(nav_stamps),
+                'nav_scan_rate_hz': self._observed_rate(nav_stamps),
+                'nav_scan_max_source_gap_s': max(nav_gaps, default=None),
+                'nav_scan_source_age_s': {
+                    'samples': len(nav_ages),
+                    'min': min(nav_ages, default=None),
+                    'median': (statistics.median(nav_ages)
+                               if nav_ages else None),
+                    'p95': nav_percentile(0.95),
+                    'max': max(nav_ages, default=None),
+                },
                 'map_messages': len(values['map_stamps']),
                 'map_update_rate_hz': map_rate,
                 'scan_correction_records': values['scan_correction_records'],

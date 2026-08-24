@@ -162,6 +162,22 @@ def test_csv_timing_schema_accepts_wall_and_sim_elapsed_fields(observer):
         assert "wall_elapsed_s" in header
 
 
+def test_scan_pipeline_records_nav_source_age_and_gap(observer):
+    observer.p['initial_configuration_json'] = json.dumps({
+        'slam_runtime_parameters': {'throttle_scans': 1},
+    })
+    values = observer.scan_pipeline['robot1']
+    values['scan_d500_fixed_stamps'].extend([1.0, 2.0, 3.0])
+    values['scan_d500_nav_stamps'].extend([1.0, 2.0, 4.0])
+    values['scan_d500_nav_ages_s'].extend([0.2, 0.4, 2.1])
+    observer.write_scan_pipeline_diagnostic()
+    diagnostic = read_json(observer.directory / 'scan_pipeline_diagnostic.json')
+    nav = diagnostic['robots']['robot1']
+    assert nav['nav_scan_messages'] == 3
+    assert nav['nav_scan_max_source_gap_s'] == 2.0
+    assert nav['nav_scan_source_age_s']['p95'] == 2.1
+
+
 def test_nonfatal_subsystem_error_is_counted_and_logging_continues(observer):
     def malformed():
         raise ValueError("malformed diagnostic")

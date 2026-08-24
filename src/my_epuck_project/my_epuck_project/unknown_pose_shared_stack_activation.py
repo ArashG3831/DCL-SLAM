@@ -186,7 +186,13 @@ def main(args=None):
     node = UnknownPoseSharedStackActivation()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
         node.shutdown_child()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -1814,18 +1814,8 @@ def internal_trial(args):
         'startup_timeline': startup_timeline,
     }
     mark_startup_stage('runtime_parameters_generated')
-    preflight = navigation_preflight(args.workspace)
-    atomic_json(attempt / 'runner_metadata.json', metadata)
-    metadata['preflight'] = preflight
-    atomic_json(attempt / 'runner_metadata.json', metadata)
-    if not preflight['passed']:
-        print('PREFLIGHT_FAILED ' + json.dumps(preflight, sort_keys=True),
-              flush=True)
-        return 1
     environment = os.environ.copy()
-    # Fast DDS shared-memory port locks can collide between the many ROS 2
-    # controller/spawner processes in an isolated WSL trial. Disable that
-    # transport by default; an explicit user setting is preserved.
+    # Prepare the exact campaign environment before preflight.
     environment.update({
         'ROS_DOMAIN_ID': str(args.ros_domain_id),
         'RMW_IMPLEMENTATION': rmw_implementation,
@@ -1836,6 +1826,15 @@ def internal_trial(args):
         'TMP': str(attempt / 'tmp'),
         'PYTHONUNBUFFERED': '1',
     })
+    atomic_json(attempt / 'runner_metadata.json', metadata)
+    preflight = navigation_preflight(args.workspace)
+    atomic_json(attempt / 'runner_metadata.json', metadata)
+    metadata['preflight'] = preflight
+    atomic_json(attempt / 'runner_metadata.json', metadata)
+    if not preflight['passed']:
+        print('PREFLIGHT_FAILED ' + json.dumps(preflight, sort_keys=True),
+              flush=True)
+        return 1
     launch_command = [
         'ros2', 'launch', 'my_epuck_project',
         'two_robots_decentralized_exploration_launch.py',
@@ -2332,7 +2331,8 @@ def internal_trial(args):
             terminate_succeeded=cleanup['terminate_succeeded'],
             kill_required=cleanup['kill_required'])
         for name, process in (
-                ('collector', collector), ('launch', launch), ('rviz', rviz)):
+                ('collector', collector), ('launch', launch),
+                ('rviz', rviz)):
             if process is not None:
                 append_shutdown_event(
                     shutdown_events, 'process_exit', process=name,

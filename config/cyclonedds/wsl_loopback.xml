@@ -4,20 +4,27 @@
   <Domain id="any">
     <General>
       <Interfaces>
-        <NetworkInterface address="127.0.0.1" multicast="false"/>
+        <!-- Keep discovery and user traffic on WSL's loopback interface. -->
+        <NetworkInterface name="lo"/>
       </Interfaces>
+      <!-- WSL's loopback interface is not multicast-capable.  Use explicit
+           localhost peer discovery instead of relying on SPDP multicast;
+           this keeps every participant on the simulation host and avoids a
+           graph that can pass a tiny talker test while dropping larger
+           service/scan participants. -->
       <AllowMulticast>false</AllowMulticast>
-      <EnableMulticastLoopback>true</EnableMulticastLoopback>
-      <!-- The former 1025/1472-byte limits were intended as an MTU
+      <!-- The former explicit 1025/1472-byte limits were intended as an MTU
            workaround, but CycloneDDS 0.10.x can overrun its send iovec for
-           fragmented ROS samples at such low limits.  WSL simulation stays
-           on the loopback interface, so use the supported defaults/large
-           fragment bounds instead.  The Wi-Fi profile remains unchanged. -->
-      <FragmentSize>4000B</FragmentSize>
+           fragmented ROS samples at such low limits.  Keep the transport
+           fragment size at its installed default so transient-local URDF
+           samples remain compatible, while allowing the supported 14720-byte
+           maximum sample size.  The Wi-Fi profile remains unchanged. -->
       <MaxMessageSize>14720B</MaxMessageSize>
-      <MaxRexmitMessageSize>14720B</MaxRexmitMessageSize>
     </General>
     <Discovery>
+      <Peers>
+        <Peer Address="127.0.0.1"/>
+      </Peers>
       <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>200</MaxAutoParticipantIndex>
     </Discovery>

@@ -52,8 +52,11 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
             'do_loop_closing': LaunchConfiguration('do_loop_closing'),
         })
     slam = LifecycleNode(
-        package='slam_toolbox',
-        executable='async_slam_toolbox_node',
+        # The validation wrapper preserves upstream Slam Toolbox behavior but
+        # replaces only its hard-coded sensor-data QoS with reliable QoS for
+        # the full 720-reading corrected scan on WSL loopback.
+        package='reliable_slam_toolbox_wrapper',
+        executable='reliable_async_slam_toolbox_node',
         name='slam_toolbox',
         namespace=robot,
         output='screen',

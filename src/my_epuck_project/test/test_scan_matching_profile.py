@@ -68,6 +68,8 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
     assert 'slam_runtime_parameters' in slam
     assert slam.count('slam_runtime_parameters)') >= 2
     assert 'if slam_runtime_parameters:' in slam
+    assert 'scan_output_reliability' not in slam
+    assert 'scan_output_sample_count' not in slam
 
 
 def test_scan_matching_overlays_are_identical_and_normal_profile_is_unchanged():
@@ -155,10 +157,21 @@ def test_wsl_cyclonedds_profile_avoids_low_fragment_bounds_for_ros_samples():
     """
     xml = (PACKAGE.parent.parent / 'config' / 'cyclonedds' /
            'wsl_loopback.xml').read_text(encoding='utf-8')
-    assert '<FragmentSize>4000B</FragmentSize>' in xml
+    # Keep CycloneDDS' transport fragment size at its supported default.  A
+    # forced 4000-byte fragment size breaks transient-local robot descriptions
+    # on the installed WSL loopback transport even when small samples work.
+    assert '<FragmentSize>' not in xml
     assert '<MaxMessageSize>14720B</MaxMessageSize>' in xml
-    assert '<MaxRexmitMessageSize>14720B</MaxRexmitMessageSize>' in xml
+    # Leave MaxRexmitMessageSize at CycloneDDS' transport default.  Explicitly
+    # setting it to 14720B suppresses loopback discovery with the installed
+    # Jazzy CycloneDDS build even though ordinary data samples still publish.
+    assert '<MaxRexmitMessageSize>' not in xml
     assert '<FragmentSize>1025B</FragmentSize>' not in xml
+    assert '<NetworkInterface name="lo"/>' in xml
+    assert '<AllowMulticast>false</AllowMulticast>' in xml
+    assert '<AllowMulticast>spdp</AllowMulticast>' not in xml
+    assert '<Peer Address="127.0.0.1"/>' in xml
+    assert '<SharedMemory>' not in xml
 
 
 def test_campaign_forwards_distinct_campaign_owned_frontend_diagnostics():

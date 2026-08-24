@@ -228,6 +228,35 @@ def test_robust_selector_accepts_clear_cluster_and_rejects_outlier():
     assert set(selection.selected_indices) == {0, 1, 2}
 
 
+def test_robust_selector_rejects_nearby_yaw_outlier_from_six_candidates():
+    """A close-but-inconsistent registration must not poison the cluster."""
+    values = [
+        (-2.7962477372, -0.0142963933, 0.0226977369),
+        (-2.7726778499, 0.0002668353, 0.0),
+        (-2.7726778499, 0.0002668353, 0.0),
+        (-2.7726778499, -0.0297331641, 0.0),
+        (-2.7297047653, 0.0148109169, -0.0102339061),
+        (-2.7663514397, -0.0554152723, 0.0059169707),
+    ]
+    constraints = []
+    for index, transform in enumerate(values):
+        constraints.append(PoseConstraint(
+            transform=transform,
+            covariance=(0.0006 ** 2, 0.0, 0.0,
+                        0.0, 0.0006 ** 2, 0.0,
+                        0.0, 0.0, math.radians(0.0004) ** 2),
+            quality=0.95,
+            evidence_id=f'near-outlier-{index}',
+            source_center=(float(index), 0.0),
+            target_center=(float(index) + 0.7, -0.2),
+            source_timestamp_ns=index * 1_000_000_000,
+            target_timestamp_ns=(index + 1) * 1_000_000_000))
+
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
+    assert set(selection.selected_indices) == {1, 2, 3, 4, 5}
+
+
 def test_robust_selector_refuses_competing_hypotheses():
     first = [
         (1.0, 0.0, 0.02), (1.002, 0.001, 0.021),

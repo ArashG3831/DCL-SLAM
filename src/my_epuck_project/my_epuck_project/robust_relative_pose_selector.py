@@ -176,6 +176,52 @@ def _covariance_tuple(covariance: np.ndarray) -> tuple[float, ...]:
     return tuple(float(value) for value in result.ravel())
 
 
+def _compatible_subset(
+        indices: Iterable[int],
+        constraints: list[PoseConstraint],
+        max_translation_disagreement_m: float,
+        max_yaw_disagreement_rad: float) -> tuple[int, ...]:
+    """Return the largest deterministic mutually compatible inlier subset.
+
+    EM can otherwise settle at a compromise transform that gives every nearby
+    candidate a high posterior, even when one candidate is outside the
+    project's explicit pairwise consistency gate.  Selecting the largest
+    compatible subset before the M-step keeps that candidate as an outlier
+    without changing the gate thresholds or the score model.
+    """
+    import itertools
+
+    ordered = tuple(sorted(int(index) for index in indices))
+    if len(ordered) < 2:
+        return ordered
+
+    def compatible(first: int, second: int) -> bool:
+        translation, yaw = _distance(
+            constraints[first].transform, constraints[second].transform)
+        return (translation <= float(max_translation_disagreement_m) and
+                yaw <= float(max_yaw_disagreement_rad))
+
+    # Candidate batches are small (registration evidence, not frontier
+    # tasks).  Exhaustive bounded enumeration gives an exact, deterministic
+    # maximum clique for the usual case and avoids order-dependent greediness.
+    if len(ordered) <= 12:
+        for size in range(len(ordered), 1, -1):
+            candidates = []
+            for subset in itertools.combinations(ordered, size):
+                if all(compatible(a, b)
+                       for a, b in itertools.combinations(subset, 2)):
+                    candidates.append(subset)
+            if candidates:
+                return min(candidates)
+
+    # Defensive bounded fallback for an unexpectedly large batch.
+    selected = []
+    for index in ordered:
+        if all(compatible(index, other) for other in selected):
+            selected.append(index)
+    return tuple(selected)
+
+
 def select_robust_hypothesis(
         candidates: Iterable[PoseConstraint],
         min_inliers: int = 3,
@@ -238,8 +284,21 @@ def select_robust_hypothesis(
             log_outlier = np.asarray(log_outlier)
             logits = np.clip(log_inlier - log_outlier, -60.0, 60.0)
             updated_probabilities = 1.0 / (1.0 + np.exp(-logits))
-            weights = updated_probabilities * np.asarray(
-                [_safe_quality(item.quality) for item in items])
+            high = tuple(index for index, value in enumerate(
+                updated_probabilities)
+                         if float(value) >= float(min_inlier_probability) and
+                         _safe_quality(items[index].quality) >= float(min_quality))
+            compatible = _compatible_subset(
+                high, list(items), max_translation_disagreement_m,
+                max_yaw_disagreement_rad)
+            # Only mutually compatible high-probability candidates influence
+            # the M-step.  This is the bounded outlier rejection step; the
+            # remaining candidates retain their soft probabilities for the
+            # forensic record and are re-evaluated against the refined model.
+            inlier_mask = np.zeros(len(items), dtype=np.float64)
+            inlier_mask[list(compatible)] = 1.0
+            weights = (updated_probabilities * inlier_mask * np.asarray(
+                [_safe_quality(item.quality) for item in items]))
             if float(weights.sum()) <= 1e-9:
                 break
             updated_transform = _weighted_mean(list(items), weights)
@@ -253,16 +312,27 @@ def select_robust_hypothesis(
         high = tuple(index for index, value in enumerate(probabilities)
                      if float(value) >= float(min_inlier_probability) and
                      _safe_quality(items[index].quality) >= float(min_quality))
+        high = _compatible_subset(
+            high, list(items), max_translation_disagreement_m,
+            max_yaw_disagreement_rad)
         pairwise = []
         for first, second in __import__('itertools').combinations(high, 2):
             pairwise.append(_distance(items[first].transform,
                                       items[second].transform))
         max_translation = max((value[0] for value in pairwise), default=0.0)
         max_yaw = max((value[1] for value in pairwise), default=0.0)
-        weighted_mass = float(np.sum(probabilities))
+        # Score only the mutually compatible inlier model.  Probabilities for
+        # candidates outside that model are retained for diagnostics, but
+        # allowing them to contribute residual cost would let one rejected
+        # correspondence drag an otherwise well-supported cluster below the
+        # null score.
+        weighted_mass = float(np.sum(probabilities[list(high)])) \
+            if high else 0.0
         normalized_residual = 0.0
         for index, residual in enumerate(
                 [se2_residual(transform, item.transform) for item in items]):
+            if index not in high:
+                continue
             try:
                 normalized_residual += float(
                     probabilities[index] * residual @

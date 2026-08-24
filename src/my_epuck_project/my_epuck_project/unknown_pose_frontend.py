@@ -292,6 +292,11 @@ class UnknownPoseFrontend(Node):
         self.peer_hypothesis_summary = None
         self.peer_summary_source_ids = set()
         self.peer_summary_target_ids = {}
+        # A summary is an immutable digest of a selected evidence set.  Once
+        # this peer has independently verified that digest, repeated DDS
+        # deliveries of the same CANDIDATE must not trigger another crop
+        # request/registration cycle.
+        self._verified_peer_summary_hash = ''
         self.hypothesis_accumulator = IncrementalHypothesisAccumulator(
             min_inliers=self.min_consistent_constraints)
         self.registration_callback_depth = 0
@@ -1935,12 +1940,11 @@ class UnknownPoseFrontend(Node):
                 self.counters['rejected_hypotheses'] += 1
             self.pending_target_proposal = False
             return
-        # A non-canonical peer summary is independently verified by the
-        # canonical robot using the same physical evidence IDs.  This path is
-        # deliberately separate from proposal confirmation: no TF or shared
-        # map activation occurs until the canonical proposal/ack exchange.
-        if (self.robot_id < self.peer_robot_id and
-                message.keyframe_id in self.peer_summary_source_ids):
+        # A peer summary is independently verified by *both* robots using the
+        # same physical evidence IDs.  This path is deliberately separate
+        # from proposal confirmation: no TF or shared map activation occurs
+        # until the canonical proposal/ack exchange.
+        if (message.keyframe_id in self.peer_summary_source_ids):
             self.peer_summary_source_ids.discard(message.keyframe_id)
             if not self.peer_summary_source_ids:
                 self._verify_peer_hypothesis_summary()
@@ -2566,8 +2570,10 @@ class UnknownPoseFrontend(Node):
 
     def _verify_peer_hypothesis_summary(self):
         summary = self.peer_hypothesis_summary
-        if summary is None or self.robot_id != min(
-                self.robot_id, self.peer_robot_id):
+        if summary is None:
+            return
+        summary_hash = str(getattr(summary, 'evidence_set_hash', ''))
+        if summary_hash and summary_hash == self._verified_peer_summary_hash:
             return
         source_ids = [str(value) for value in
                       getattr(summary, 'evidence_source_keyframe_ids', [])]
@@ -2628,6 +2634,7 @@ class UnknownPoseFrontend(Node):
             evidence_target_keyframe_ids=source_ids)
         self.local_hypothesis_summary = summary_message
         self.local_hypothesis_result = canonical_result
+        self._verified_peer_summary_hash = summary_hash
         self.hypothesis_pub.publish(summary_message)
         self.counters['hypothesis_summaries_published'] += 1
         self._record_diagnostic_event(
@@ -2832,35 +2839,36 @@ class UnknownPoseFrontend(Node):
                 return
             self.peer_hypothesis_summary = message
             self.counters['hypothesis_summaries_received'] += 1
-            if (self.robot_id == min(self.robot_id, self.peer_robot_id) and
-                    self.peer_summary_source_ids):
+            incoming_hash = str(getattr(message, 'evidence_set_hash', ''))
+            if incoming_hash and incoming_hash == self._verified_peer_summary_hash:
+                self._record_diagnostic_event(
+                    'HYPOTHESIS_SUMMARY_ALREADY_VERIFIED',
+                    evidence_set_hash=incoming_hash)
+                return
+            if self.peer_summary_source_ids:
                 self._record_diagnostic_event(
                     'HYPOTHESIS_SUMMARY_IGNORED_PENDING_VERIFICATION',
                     evidence_set_hash=str(message.evidence_set_hash))
                 return
-            if self.robot_id == min(self.robot_id, self.peer_robot_id):
-                self.peer_summary_source_ids = set(
-                    str(value) for value in getattr(
-                        message, 'evidence_source_keyframe_ids', []))
-                self.peer_summary_target_ids = {
-                    str(source): str(target)
-                    for source, target in zip(
-                        getattr(message, 'evidence_source_keyframe_ids', []),
-                        getattr(message, 'evidence_target_keyframe_ids', []))}
-                self._request_source_for_confirmation(message)
-                # The summary may arrive after the ordinary verification
-                # traffic has already delivered these same peer crops.  In
-                # that ordering no new response will enter the crop callback
-                # to drain ``peer_summary_source_ids``, which previously left
-                # the canonical peer waiting forever despite having complete
-                # evidence.  Verify immediately when the bounded cache already
-                # contains the full requested set; otherwise the normal
-                # response path will trigger verification on the last crop.
-                if (not self.peer_summary_source_ids or all(
-                        source_id in self.received_peer_crops
-                        for source_id in self.peer_summary_source_ids)):
-                    self.peer_summary_source_ids.clear()
-                    self._verify_peer_hypothesis_summary()
+            self.peer_summary_source_ids = set(
+                str(value) for value in getattr(
+                    message, 'evidence_source_keyframe_ids', []))
+            self.peer_summary_target_ids = {
+                str(source): str(target)
+                for source, target in zip(
+                    getattr(message, 'evidence_source_keyframe_ids', []),
+                    getattr(message, 'evidence_target_keyframe_ids', []))}
+            self._request_source_for_confirmation(message)
+            # The summary may arrive after ordinary verification traffic has
+            # already delivered these same peer crops.  Verify immediately
+            # when the bounded cache already contains the full requested set;
+            # otherwise the normal response path triggers verification on the
+            # last crop.  This is intentionally symmetric across robot IDs.
+            if (not self.peer_summary_source_ids or all(
+                    source_id in self.received_peer_crops
+                    for source_id in self.peer_summary_source_ids)):
+                self.peer_summary_source_ids.clear()
+                self._verify_peer_hypothesis_summary()
             self._record_diagnostic_event(
                 'PEER_HYPOTHESIS_SUMMARY_RECEIVED',
                 evidence_set_hash=str(message.evidence_set_hash),

@@ -205,6 +205,28 @@ def test_peer_summary_verifies_when_crops_arrived_before_summary():
     assert 'self._verify_peer_hypothesis_summary()' in frontend
 
 
+def test_peer_summary_verification_is_symmetric_and_canonical_publish_is_not():
+    """Both peers verify exchanged evidence; only one publishes the proposal."""
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    verify_start = frontend.index('    def _verify_peer_hypothesis_summary(')
+    verify_end = frontend.index('    def _publish_canonical_proposal(',
+                                verify_start)
+    verify = frontend[verify_start:verify_end]
+    callback_start = frontend.index('    def hypothesis_callback(')
+    callback_end = frontend.index('    def _ack_message(', callback_start)
+    callback = frontend[callback_start:callback_end]
+    assert "self.robot_id != min(" not in verify
+    assert "message.keyframe_id in self.peer_summary_source_ids" in frontend
+    assert "self._verified_peer_summary_hash" in frontend
+    # Canonical publication remains deterministic and single-owner.
+    publish_start = frontend.index('    def _publish_canonical_proposal(')
+    publish_end = frontend.index('    def _publish_local_evidence_crops(',
+                                 publish_start)
+    publish = frontend[publish_start:publish_end]
+    assert "self.robot_id != min(" in publish
+    assert "self._publish_canonical_proposal(" in callback
+
+
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()

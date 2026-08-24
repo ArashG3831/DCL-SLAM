@@ -153,6 +153,15 @@ def test_hypothesis_callback_persists_directional_protocol_diagnostics():
     assert "'HYPOTHESIS_ACK_IGNORED_NO_PENDING_PROPOSAL'" in source
 
 
+def test_hypothesis_ack_uses_protocol_hash_not_registration_result_field():
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'pending_proposal_evidence_hashes' in source
+    assert 'proposal_evidence_set_hash' in source
+    assert 'bool(proposal_evidence_set_hash)' in source
+
+
 def test_accepted_alignment_is_published_as_persistent_static_tf():
     frontend = object.__new__(UnknownPoseFrontend)
     frontend.accepted = SimpleNamespace(

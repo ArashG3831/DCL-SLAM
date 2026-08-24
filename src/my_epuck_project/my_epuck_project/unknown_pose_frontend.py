@@ -358,6 +358,11 @@ class UnknownPoseFrontend(Node):
         self.confirmations = {}
         self.pending_requests = set()
         self.pending_proposals = {}
+        # Keep the exact evidence-set fingerprint alongside the local
+        # RegistrationResult.  RegistrationResult intentionally contains
+        # geometry/quality only; the fingerprint belongs to the replicated
+        # protocol envelope and must not be read as an attribute on it.
+        self.pending_proposal_evidence_hashes = {}
         self.peer_proposals = {}
         self.pending_target_proposal = False
         self.negotiation_started = False
@@ -2258,6 +2263,8 @@ class UnknownPoseFrontend(Node):
             rejection_reason='' if result.accepted else result.reason,
             evidence_source_keyframe_ids=source_ids,
             evidence_target_keyframe_ids=target_ids)
+        self.pending_proposal_evidence_hashes[(str(own_key), str(peer_key))] = (
+            str(proposal.evidence_set_hash))
         self.hypothesis_pub.publish(proposal)
         self.counters['proposals_published'] += 1
         self.batch_proposal_published = bool(result.accepted)
@@ -2469,6 +2476,9 @@ class UnknownPoseFrontend(Node):
                 self.pending_proposals.pop(
                     (str(message.source_keyframe_id),
                      str(message.target_keyframe_id)), None)
+                getattr(self, 'pending_proposal_evidence_hashes', {}).pop(
+                    (str(message.source_keyframe_id),
+                     str(message.target_keyframe_id)), None)
                 self.verification_batches.reopen_after_rejected_proposal()
             if self.robot_id == message.target_robot_id:
                 # A rejected proposal terminates the responder's pending
@@ -2520,9 +2530,15 @@ class UnknownPoseFrontend(Node):
                 target_keyframe_id=str(message.target_keyframe_id))
             return
         peer_selector_status = str(getattr(message, 'selector_status', ''))
+        proposal_key = (str(message.source_keyframe_id),
+                        str(message.target_keyframe_id))
+        proposal_evidence_set_hash = getattr(
+            self, 'pending_proposal_evidence_hashes', {}).get(proposal_key, '')
+        peer_evidence_set_hash = str(getattr(message, 'evidence_set_hash', ''))
         evidence_hash_matches = (
-            not getattr(message, 'evidence_set_hash', '') or
-            str(message.evidence_set_hash) == str(proposal.evidence_set_hash))
+            not peer_evidence_set_hash or
+            (bool(proposal_evidence_set_hash) and
+             peer_evidence_set_hash == proposal_evidence_set_hash))
         peer_selector_accepted = (
             peer_selector_status in ('', 'ACCEPTED_HYPOTHESIS') and
             int(getattr(message, 'consistent_constraint_count', 0)) >=
@@ -2530,9 +2546,8 @@ class UnknownPoseFrontend(Node):
         if not evidence_hash_matches or not peer_selector_accepted:
             self._record_diagnostic_event(
                 'HYPOTHESIS_ACK_IGNORED_ROBUST_SELECTOR_MISMATCH',
-                proposal_evidence_set_hash=str(proposal.evidence_set_hash),
-                peer_evidence_set_hash=str(getattr(
-                    message, 'evidence_set_hash', '')),
+                proposal_evidence_set_hash=str(proposal_evidence_set_hash),
+                peer_evidence_set_hash=peer_evidence_set_hash,
                 peer_selector_status=peer_selector_status,
                 peer_consistent_constraint_count=int(getattr(
                     message, 'consistent_constraint_count', 0)))

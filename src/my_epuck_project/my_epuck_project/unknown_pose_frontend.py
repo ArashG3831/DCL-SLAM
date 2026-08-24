@@ -606,6 +606,7 @@ class UnknownPoseFrontend(Node):
         lifecycle = (
             str(event_type).startswith(('EVIDENCE_ANNOUNCEMENT',
                                         'PEER_EVIDENCE_',
+                                        'PROPOSAL_',
                                         'LOCAL_HYPOTHESIS',
                                         'PEER_HYPOTHESIS',
                                         'HYPOTHESIS_',

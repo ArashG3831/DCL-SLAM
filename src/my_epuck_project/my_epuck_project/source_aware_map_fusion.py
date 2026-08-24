@@ -417,9 +417,29 @@ class SourceAwareMapFusion(Node):
         cosine, sine = math.cos(heading), math.sin(heading)
         return tx + cosine*x - sine*y, ty + sine*x + cosine*y
 
-    def map_transform(self, message):
+    @staticmethod
+    def _message_time(message):
+        """Return the ROS time carried by an occupancy-map sample."""
+        return Time.from_msg(message.header.stamp)
+
+    @classmethod
+    def _common_snapshot_time(cls, messages):
+        """Use one deterministic timestamp for a local/peer map pair.
+
+        Both fusion peers receive the same two source maps, but callbacks are
+        scheduled independently.  Looking up the latest TF at callback time
+        therefore made live-footprint sanitization differ between peers.  The
+        newest input-map stamp is a shared, message-derived snapshot boundary.
+        """
+        return max(
+            (cls._message_time(message) for message in messages),
+            key=lambda value: (value.nanoseconds,))
+
+    def map_transform(self, message, snapshot_time=None):
+        if snapshot_time is None:
+            snapshot_time = self._message_time(message)
         transform = self.tf_buffer.lookup_transform(
-            self.output_frame, message.header.frame_id, Time(),
+            self.output_frame, message.header.frame_id, snapshot_time,
             timeout=Duration(seconds=0.05)
         )
         return (
@@ -443,7 +463,7 @@ class SourceAwareMapFusion(Node):
             for x, y in ((0.0, 0.0), (width, 0.0), (0.0, height), (width, height))
         ]
 
-    def live_footprints(self):
+    def live_footprints(self, snapshot_time=None):
         """Return independent own/peer footprints and freshness telemetry.
 
         Own clearing is deliberately independent of peer TF availability. A
@@ -456,7 +476,8 @@ class SourceAwareMapFusion(Node):
             role = 'own' if frame.split('/')[0] == self.own_robot_id else 'peer'
             try:
                 transform = self.tf_buffer.lookup_transform(
-                    self.output_frame, frame, Time(),
+                    self.output_frame, frame,
+                    snapshot_time if snapshot_time is not None else Time(),
                     timeout=Duration(seconds=0.05))
                 stamp = Time.from_msg(transform.header.stamp)
                 now = self.get_clock().now()
@@ -686,8 +707,12 @@ class SourceAwareMapFusion(Node):
                 cpu_s=time.process_time() - started_cpu)
             return
         messages = [self.local_map, self.remote_map]
+        snapshot_time = self._common_snapshot_time(messages)
         try:
-            transforms = [self.map_transform(message) for message in messages]
+            transforms = [
+                self.map_transform(message, snapshot_time)
+                for message in messages
+            ]
         except TransformException as error:
             self.get_logger().warning(
                 f'Waiting for local-map transforms: {error}',
@@ -710,7 +735,8 @@ class SourceAwareMapFusion(Node):
         pose_key = None
         pose_telemetry = {}
         if self.sanitize_live_footprints:
-            footprints, pose_key, pose_telemetry = self.live_footprints()
+            footprints, pose_key, pose_telemetry = self.live_footprints(
+                snapshot_time)
         if not self.sanitize_live_footprints:
             fused, _ = self._make_base_grid(
                 messages, transforms, minimum_x, minimum_y, width, height)

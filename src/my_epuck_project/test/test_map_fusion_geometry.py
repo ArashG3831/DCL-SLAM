@@ -3,6 +3,7 @@
 import math
 from types import SimpleNamespace
 
+from builtin_interfaces.msg import Time as TimeMessage
 from my_epuck_project.source_aware_map_fusion import SourceAwareMapFusion
 from my_epuck_project.source_aware_map_fusion import (
     _changed_update_bounds,
@@ -132,6 +133,26 @@ def test_identical_map_content_ignores_timestamp_changes():
     second = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
     second.header.stamp = SimpleNamespace(sec=99, nanosec=2)
     assert _same_grid_content(first, second)
+
+
+def test_fusion_snapshot_time_is_the_newest_input_map_stamp():
+    """Both peers must sanitize one map pair at the same TF snapshot time."""
+    first = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    second = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    first.header.stamp = TimeMessage(sec=12, nanosec=100)
+    second.header.stamp = TimeMessage(sec=11, nanosec=900)
+    snapshot = SourceAwareMapFusion._common_snapshot_time([first, second])
+    assert snapshot.nanoseconds == 12_000_000_100
+
+
+def test_fusion_snapshot_time_is_independent_of_callback_order():
+    first = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    second = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    first.header.stamp = TimeMessage(sec=4, nanosec=1)
+    second.header.stamp = TimeMessage(sec=8, nanosec=2)
+    left = SourceAwareMapFusion._common_snapshot_time([first, second])
+    right = SourceAwareMapFusion._common_snapshot_time([second, first])
+    assert left.nanoseconds == right.nanoseconds == 8_000_000_002
 
 
 def test_changed_map_content_is_detected_without_list_comparison():

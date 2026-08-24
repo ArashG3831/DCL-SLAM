@@ -198,6 +198,13 @@ def test_expected_handoff_teardown_is_marked_before_local_children_stop():
     assert 'os.replace(temporary, self._handoff_marker_path)' in phase
 
 
+def test_peer_summary_verifies_when_crops_arrived_before_summary():
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert 'source_id in self.received_peer_crops' in frontend
+    assert 'self.peer_summary_source_ids.clear()' in frontend
+    assert 'self._verify_peer_hypothesis_summary()' in frontend
+
+
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()

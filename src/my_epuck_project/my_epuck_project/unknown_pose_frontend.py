@@ -2716,7 +2716,18 @@ class UnknownPoseFrontend(Node):
                         getattr(message, 'evidence_source_keyframe_ids', []),
                         getattr(message, 'evidence_target_keyframe_ids', []))}
                 self._request_source_for_confirmation(message)
-                if not self.peer_summary_source_ids:
+                # The summary may arrive after the ordinary verification
+                # traffic has already delivered these same peer crops.  In
+                # that ordering no new response will enter the crop callback
+                # to drain ``peer_summary_source_ids``, which previously left
+                # the canonical peer waiting forever despite having complete
+                # evidence.  Verify immediately when the bounded cache already
+                # contains the full requested set; otherwise the normal
+                # response path will trigger verification on the last crop.
+                if (not self.peer_summary_source_ids or all(
+                        source_id in self.received_peer_crops
+                        for source_id in self.peer_summary_source_ids)):
+                    self.peer_summary_source_ids.clear()
                     self._verify_peer_hypothesis_summary()
             self._record_diagnostic_event(
                 'PEER_HYPOTHESIS_SUMMARY_RECEIVED',

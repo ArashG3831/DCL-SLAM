@@ -2145,7 +2145,8 @@ class UnknownPoseFrontend(Node):
             evidence_source_keyframe_ids=[str(value) for value in evidence_sources],
             evidence_target_keyframe_ids=[str(value) for value in evidence_targets])
         result = self._run_registration(
-            evidence_pairs, 'target_confirmation', proposal.keyframe_id,
+            evidence_pairs, 'target_confirmation',
+            proposal.target_keyframe_id,
             evidence_timestamps=evidence_timestamps,
             evidence_ids=[self._canonical_evidence_id(
                 proposal.source_robot_id, proposal.target_robot_id,

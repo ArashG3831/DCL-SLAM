@@ -244,6 +244,8 @@ def test_proposal_confirmation_runs_from_cached_evidence_without_waiting_for_cro
     assert 'self._try_confirm_pending_proposal(proposal, message)' in crop
     assert "'PROPOSAL_CONFIRMATION_WAITING'" in helper
     assert "'PROPOSAL_ACK_PUBLISHED'" in helper
+    assert 'proposal.target_keyframe_id' in helper
+    assert 'proposal.keyframe_id' not in helper
 
 
 def test_single_constraint_evidence_is_relayed_for_peer_reverification():

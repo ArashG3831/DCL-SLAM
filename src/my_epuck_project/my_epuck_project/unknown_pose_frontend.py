@@ -2109,8 +2109,7 @@ class UnknownPoseFrontend(Node):
         try:
             evidence_ids = None
             accumulator = None
-            if source in ('incremental_consensus',
-                          'peer_summary_verification'):
+            if source == 'incremental_consensus':
                 evidence_ids = list(evidence_ids or [
                     f'{own_key}|{peer_key}'
                     for (own_key, peer_key) in self.evidence_pairs])
@@ -2701,6 +2700,12 @@ class UnknownPoseFrontend(Node):
                 return
             self.peer_hypothesis_summary = message
             self.counters['hypothesis_summaries_received'] += 1
+            if (self.robot_id == min(self.robot_id, self.peer_robot_id) and
+                    self.peer_summary_source_ids):
+                self._record_diagnostic_event(
+                    'HYPOTHESIS_SUMMARY_IGNORED_PENDING_VERIFICATION',
+                    evidence_set_hash=str(message.evidence_set_hash))
+                return
             if self.robot_id == min(self.robot_id, self.peer_robot_id):
                 self.peer_summary_source_ids = set(
                     str(value) for value in getattr(

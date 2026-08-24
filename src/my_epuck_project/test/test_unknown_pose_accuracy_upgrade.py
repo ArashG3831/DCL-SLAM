@@ -192,7 +192,8 @@ def test_multi_keyframe_consensus_rejects_one_wrong_constraint():
     assert result.projected_error_m < 0.20
 
 
-def _selector_constraint(transform, index, quality=0.95, source_center=None):
+def _selector_constraint(transform, index, quality=0.95, source_center=None,
+                         target_center=None):
     return PoseConstraint(
         transform=tuple(transform),
         covariance=(0.03 ** 2, 0.0, 0.0, 0.0, 0.03 ** 2,
@@ -200,7 +201,8 @@ def _selector_constraint(transform, index, quality=0.95, source_center=None):
         quality=quality,
         evidence_id=f'evidence-{index}',
         source_center=(float(index), 0.0) if source_center is None else source_center,
-        target_center=(float(index) + 0.7, -0.2),
+        target_center=((float(index) + 0.7, -0.2)
+                      if target_center is None else target_center),
         source_timestamp_ns=index * 1_000_000_000,
         target_timestamp_ns=(index + 1) * 1_000_000_000)
 
@@ -228,6 +230,18 @@ def test_incremental_accumulator_preserves_old_1313_degree_rejection():
     ])
     assert selection.status != ACCEPTED_HYPOTHESIS
     assert len(selection.selected_indices) < 3
+
+
+def test_spatial_baseline_is_invariant_to_reverse_verification_direction():
+    """A diverse target-frame baseline must survive peer-side inversion."""
+    constraints = [
+        _selector_constraint((0.7, -0.2, 0.03), index,
+                             source_center=(0.0, 0.0),
+                             target_center=(float(index), 0.0))
+        for index in range(3)]
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
+    assert selection.diagnostics[0]['spatial_baseline_m'] >= 2.0
 
 
 def test_incremental_accumulator_promotes_consistent_evidence_over_batches():

@@ -299,13 +299,26 @@ def _distance(first, second):
 
 
 def _spatial_baseline(constraints: list[PoseConstraint], indices):
-    centers = [constraints[index].source_center for index in indices
-               if constraints[index].source_center is not None]
-    if len(centers) < 2:
-        return 0.0
-    points = np.asarray(centers, dtype=np.float64)
-    return float(np.max(np.linalg.norm(points[:, None, :] - points[None, :, :],
-                                       axis=2)))
+    """Return the strongest baseline in either observation frame.
+
+    A cross-robot constraint has a source and target crop.  The same physical
+    evidence therefore has different source/target coordinates depending on
+    which peer verifies it.  Measuring only ``source_center`` made a valid
+    spatially diverse set fail when the reverse-direction verifier happened
+    to have the shorter baseline in its source frame.  Baseline is a
+    frame-local property, so take the maximum of the two independently
+    measurable baselines; never mix coordinates from different frames.
+    """
+    baselines = []
+    for field in ('source_center', 'target_center'):
+        centers = [getattr(constraints[index], field) for index in indices
+                   if getattr(constraints[index], field) is not None]
+        if len(centers) < 2:
+            continue
+        points = np.asarray(centers, dtype=np.float64)
+        baselines.append(float(np.max(np.linalg.norm(
+            points[:, None, :] - points[None, :, :], axis=2))))
+    return max(baselines, default=0.0)
 
 
 def _timestamp_span(constraints: list[PoseConstraint], indices):

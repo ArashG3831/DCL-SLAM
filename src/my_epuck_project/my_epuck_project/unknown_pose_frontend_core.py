@@ -1239,6 +1239,24 @@ def _crop_center(crop: GridCrop) -> tuple[float, float]:
                  .tolist())
 
 
+def _pair_spatial_baseline(pairs, indices):
+    """Measure baseline in each frame and retain the stronger one.
+
+    Source and target crop centers live in different map frames.  Compute
+    each frame's baseline independently and take the maximum; mixing the two
+    coordinate systems would make the gate order-dependent under inversion.
+    """
+    baselines = []
+    for side in (0, 1):
+        centers = [_crop_center(pairs[index][side]) for index in indices]
+        if len(centers) < 2:
+            continue
+        points = np.asarray(centers, dtype=np.float64)
+        baselines.append(float(np.max(np.linalg.norm(
+            points[:, None, :] - points[None, :, :], axis=2))))
+    return max(baselines, default=0.0)
+
+
 def consensus_subset_diagnostics(
         pairs: list[tuple[GridCrop, GridCrop]],
         results: list[RegistrationResult],
@@ -1318,10 +1336,8 @@ def consensus_subset_diagnostics(
         if (max_translation > max_translation_consistency_m or
                 max_yaw > max_yaw_consistency_rad):
             reasons.append('PAIRWISE_TRANSFORM_INCONSISTENT')
-        centres = np.asarray([_crop_center(pair[0]) for pair in subset_pairs])
-        spatial_baseline = float(np.max(np.linalg.norm(
-            centres[:, None, :] - centres[None, :, :], axis=2))) \
-            if len(centres) > 1 else 0.0
+        spatial_baseline = _pair_spatial_baseline(
+            pairs, indices)
         if spatial_baseline < min_spatial_baseline_m:
             reasons.append('INSUFFICIENT_SPATIAL_BASELINE')
         inlier_ratio = float(np.mean(
@@ -1525,21 +1541,10 @@ def register_crop_set(
     # from the estimated transforms (a correct rigid transform is expected to
     # be nearly identical for every crop).
     selected_result_ids = {id(selected) for selected in items}
-    source_centres = np.asarray([
-        tuple(np.asarray([pair[0].origin_x, pair[0].origin_y]) +
-              np.asarray([[math.cos(pair[0].origin_yaw),
-                           -math.sin(pair[0].origin_yaw)],
-                          [math.sin(pair[0].origin_yaw),
-                           math.cos(pair[0].origin_yaw)]]) @
-              np.asarray([0.5 * pair[0].values.shape[1] * pair[0].resolution,
-                          0.5 * pair[0].values.shape[0] * pair[0].resolution]))
-        for pair, item in zip(pair_list, results)
-        if id(item) in selected_result_ids])
-    if len(source_centres) > 1:
-        spatial_baseline = float(np.max(np.linalg.norm(
-            source_centres[:, None, :] - source_centres[None, :, :], axis=2)))
-    else:
-        spatial_baseline = 0.0
+    selected_pair_indices = [index for index, item in enumerate(results)
+                             if id(item) in selected_result_ids]
+    spatial_baseline = _pair_spatial_baseline(
+        pair_list, selected_pair_indices)
     yaws = np.asarray([item.transform[2] for item in items])
     angular_spread = (float(np.max([abs(wrap_angle(yaw - transform[2]))
                                     for yaw in yaws]))

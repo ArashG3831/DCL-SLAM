@@ -237,3 +237,48 @@ The next code change must be narrow and fail-closed:
 * stop without infrastructure retry after a fatal transport event.
 
 These changes must be tested offline before any Webots process is started.
+
+## Bounded transport diagnostics after Windows reboot (2026-08-25)
+
+After a full Windows reboot, the initial host baseline was healthy:
+
+```text
+Windows available memory: approximately 7.1 GB
+Pool Nonpaged Bytes:      approximately 868 MB
+Pool Paged Bytes:         approximately 411 MB
+WSL available memory:     approximately 6.8 GiB
+WSL swap:                 unused
+```
+
+The raw-scan relay had a real parameterization defect. The node declared
+`input_reliability` but always passed the hard-coded reliable `RAW_SCAN_QOS`
+to `create_subscription`. Commit `58a2af3` adds an explicit `raw_scan_qos()`
+selector and a depth-1 best-effort diagnostic profile; the focused
+scan/teardown/profile suite passed 25 tests.
+
+The corrected no-Webots CycloneDDS churn probe completed 120/120 child
+processes with zero assertions, aborts, invalid endpoint messages, or leaks.
+The monitored run's Windows nonpaged pool rose from approximately 901 MB to
+919 MB and stabilized after teardown. This is a small bounded residual, not
+the earlier multi-gigabyte slope. The artifacts are preserved under
+`results/transport_gate_dds_churn_20260825/`.
+
+The first Webots transport gate was then aborted before Webots startup because
+the host watchdog observed only approximately 1.9 GB Windows-available memory
+at launch. Inspection showed `vmmemWSL` holding approximately 7.56 GB while
+WSL reported approximately 6.7 GiB available internally; the WSL filesystem
+page cache had grown to approximately 6.7 GiB after the repeated child-process
+probe. Windows nonpaged pool was still approximately 923 MB. This was host
+commit pressure from the WSL VM/page cache, not proof of a new NETIO pool leak.
+
+One earlier churn attempt was not valid host-safety evidence because its
+sanitized `PATH` could not find PowerShell; its watchdog recorded
+`FileNotFoundError` rather than Windows counters. It is retained only as a
+harness-failure artifact. The watchdog now uses the absolute Windows
+PowerShell path and must check both Windows counters and WSL/vmmem pressure.
+
+Do not launch Webots while Windows available memory is below the measured
+safety floor, even if `free -h` inside WSL looks healthy. Reclaim WSL VM/cache
+memory (normally by a controlled `wsl --shutdown` or Windows restart), record
+a fresh baseline, and rerun the one-robot realtime transport gate before any
+dual-relay or fast-mode test.

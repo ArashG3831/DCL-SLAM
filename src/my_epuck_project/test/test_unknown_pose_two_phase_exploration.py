@@ -227,6 +227,42 @@ def test_peer_summary_verification_is_symmetric_and_canonical_publish_is_not():
     assert "self._publish_canonical_proposal(" in callback
 
 
+def test_proposal_confirmation_runs_from_cached_evidence_without_waiting_for_crop():
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    proposed_start = frontend.index(
+        "if message.status == 'PROPOSED' and self.robot_id == message.target_robot_id:")
+    proposed_end = frontend.index("if message.status == 'REJECTED':", proposed_start)
+    proposed = frontend[proposed_start:proposed_end]
+    crop_start = frontend.index('    def crop_callback(self, message):')
+    crop_end = frontend.index('    def _try_confirm_pending_proposal(', crop_start)
+    crop = frontend[crop_start:crop_end]
+    helper_start = frontend.index('    def _try_confirm_pending_proposal(')
+    helper_end = frontend.index('    def _record_physical_worker_result(', helper_start)
+    helper = frontend[helper_start:helper_end]
+    assert 'self._request_source_for_confirmation(message)' in proposed
+    assert 'self._try_confirm_pending_proposal(message)' in proposed
+    assert 'self._try_confirm_pending_proposal(proposal, message)' in crop
+    assert "'PROPOSAL_CONFIRMATION_WAITING'" in helper
+    assert "'PROPOSAL_ACK_PUBLISHED'" in helper
+
+
+def test_single_constraint_evidence_is_relayed_for_peer_reverification():
+    """Accepted evidence is exchanged without becoming a handoff."""
+    frontend = (PY / 'unknown_pose_frontend.py').read_text()
+    assert "status='EVIDENCE'" in frontend
+    assert 'self._publish_evidence_announcement(' in frontend
+    assert 'self._queue_peer_evidence_reverification' in frontend
+    assert "if message.status == 'EVIDENCE':" in frontend
+    # The relay is explicitly non-accepting; only the normal CANDIDATE /
+    # PROPOSED / ACCEPTED path may install TF or activate fusion.
+    relay_start = frontend.index('    def _publish_evidence_announcement(')
+    relay_end = frontend.index('    def _queue_peer_evidence_reverification(',
+                               relay_start)
+    relay = frontend[relay_start:relay_end]
+    assert 'accepted=False' in relay
+    assert "message.constraint_count = 1" in relay
+
+
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()

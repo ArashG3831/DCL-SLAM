@@ -181,6 +181,9 @@ class UnknownPoseFrontend(Node):
             'proposals_published': 0,
             'hypothesis_summaries_published': 0,
             'hypothesis_summaries_received': 0,
+            'evidence_announcements_published': 0,
+            'evidence_announcements_received': 0,
+            'evidence_reverification_requests': 0,
             'acks_published': 0,
             'accepted_hypotheses': 0,
             'rejected_hypotheses': 0,
@@ -222,6 +225,12 @@ class UnknownPoseFrontend(Node):
         self.temporal_gate_survivors = set()
         self.diagnostic_events = []
         self.diagnostic_event_drops = 0
+        # Keep the bounded ordinary trace small because descriptor/crop
+        # traffic is high-volume, but retain the complete protocol handshake
+        # trace in a separate bounded stream.  Without this split a long
+        # smoke can evict the proposal/ack reason before finalization.
+        self.protocol_lifecycle_events = []
+        self.protocol_lifecycle_event_drops = 0
         self.callback_stats = {}
         self.callback_started = 0
         self.callback_completed = 0
@@ -292,6 +301,15 @@ class UnknownPoseFrontend(Node):
         self.peer_hypothesis_summary = None
         self.peer_summary_source_ids = set()
         self.peer_summary_target_ids = {}
+        # Before either peer has three local constraints, exchange each
+        # geometrically accepted constraint so the other peer can request the
+        # same crops and independently re-register it.  This is the missing
+        # incremental, peer-to-peer evidence path; it never marks a single
+        # constraint as a handoff.
+        self.peer_evidence_announcements = {}
+        self.pending_peer_evidence_announcements = {}
+        self.evidence_announcements_published = set()
+        self._peer_evidence_requested = set()
         # A summary is an immutable digest of a selected evidence set.  Once
         # this peer has independently verified that digest, repeated DDS
         # deliveries of the same CANDIDATE must not trigger another crop
@@ -577,9 +595,6 @@ class UnknownPoseFrontend(Node):
 
     def _record_diagnostic_event(self, event_type, **fields):
         """Retain a bounded wall/ROS timestamped protocol trace."""
-        if len(self.diagnostic_events) >= 512:
-            self.diagnostic_event_drops += 1
-            return
         now = time.monotonic()
         ros_now = self.get_clock().now().nanoseconds
         event = {
@@ -588,7 +603,23 @@ class UnknownPoseFrontend(Node):
             'ros_time_s': ros_now / 1.0e9,
         }
         event.update(fields)
-        self.diagnostic_events.append(event)
+        lifecycle = (
+            str(event_type).startswith(('EVIDENCE_ANNOUNCEMENT',
+                                        'PEER_EVIDENCE_',
+                                        'LOCAL_HYPOTHESIS',
+                                        'PEER_HYPOTHESIS',
+                                        'HYPOTHESIS_',
+                                        'CANONICAL_',
+                                        'UNKNOWN_POSE_MERGE_')))
+        if lifecycle:
+            if len(self.protocol_lifecycle_events) < 512:
+                self.protocol_lifecycle_events.append(event)
+            else:
+                self.protocol_lifecycle_event_drops += 1
+        if len(self.diagnostic_events) < 512:
+            self.diagnostic_events.append(event)
+        else:
+            self.diagnostic_event_drops += 1
 
     def _timed_callback(self, name, callback, *args):
         """Measure callback service time without changing callback behavior."""
@@ -746,6 +777,7 @@ class UnknownPoseFrontend(Node):
     def tick(self):
         self._sample_cpu()
         self._drain_candidate_registration()
+        self._process_pending_peer_evidence()
         if time.monotonic() - self.last_descriptor_wall >= self.descriptor_period_s:
             self.publish_descriptor()
         # Drain at most one descriptor key per timer tick.  Descriptor
@@ -1882,63 +1914,7 @@ class UnknownPoseFrontend(Node):
         self.received_peer_crops[message.keyframe_id] = received_crop
         proposal = self.peer_proposals.get(message.keyframe_id)
         if self.robot_id > self.peer_robot_id and proposal is not None:
-            evidence_sources = list(getattr(
-                proposal, 'evidence_source_keyframe_ids', []))
-            evidence_targets = list(getattr(
-                proposal, 'evidence_target_keyframe_ids', []))
-            if not evidence_sources:
-                evidence_sources = [proposal.source_keyframe_id]
-                evidence_targets = [proposal.target_keyframe_id]
-            if len(evidence_sources) != len(evidence_targets):
-                self._record_crop_rejection('EVIDENCE_KEY_LENGTH_MISMATCH', message)
-                return
-            evidence_pairs = []
-            for source_key, target_key in zip(evidence_sources, evidence_targets):
-                target_entry = self.keyframes.get(target_key)
-                source_crop = self.received_peer_crops.get(source_key)
-                if target_entry is None or source_crop is None:
-                    self._record_crop_rejection('INCOMPLETE_EVIDENCE_SET', message)
-                    return
-                evidence_pairs.append((source_crop, target_entry[1]))
-            evidence_timestamps = []
-            for source_key, target_key in zip(evidence_sources, evidence_targets):
-                source_descriptor = self.peer_descriptors.get(source_key)
-                target_entry = self.keyframes.get(target_key)
-                evidence_timestamps.append((
-                    0 if source_descriptor is None else self._stamp_ns(source_descriptor),
-                    0 if target_entry is None else self._stamp_ns(target_entry[0]),
-                ))
-            result = self._run_registration(
-                evidence_pairs, 'target_confirmation', message.keyframe_id,
-                evidence_timestamps=evidence_timestamps)
-            tx, ty, yaw = result.transform
-            proposed_tx = proposal.source_to_target.translation.x
-            proposed_ty = proposal.source_to_target.translation.y
-            proposed_yaw = math.atan2(
-                2.0 * (proposal.source_to_target.rotation.w *
-                        proposal.source_to_target.rotation.z),
-                1.0 - 2.0 * proposal.source_to_target.rotation.z ** 2)
-            translation_error = math.hypot(tx - proposed_tx, ty - proposed_ty)
-            yaw_error = abs(math.atan2(
-                math.sin(yaw - proposed_yaw), math.cos(yaw - proposed_yaw)))
-            selector_agrees = (
-                str(getattr(proposal, 'selector_status', '')) in
-                ('', 'ACCEPTED_HYPOTHESIS'))
-            mutually_consistent = (
-                translation_error <= 0.12 and yaw_error <= 0.04 and
-                selector_agrees and
-                str(getattr(proposal, 'evidence_set_hash', '')) != '')
-            accepted = result.accepted and mutually_consistent
-            response = self._ack_message(
-                proposal, result, accepted,
-                '' if accepted else 'MUTUAL_TRANSFORM_INCONSISTENT')
-            self.hypothesis_pub.publish(response)
-            self.counters['acks_published'] += 1
-            if accepted:
-                self.counters['accepted_hypotheses'] += 1
-            else:
-                self.counters['rejected_hypotheses'] += 1
-            self.pending_target_proposal = False
+            self._try_confirm_pending_proposal(proposal, message)
             return
         # A peer summary is independently verified by *both* robots using the
         # same physical evidence IDs.  This path is deliberately separate
@@ -1949,6 +1925,7 @@ class UnknownPoseFrontend(Node):
             if not self.peer_summary_source_ids:
                 self._verify_peer_hypothesis_summary()
             return
+
         response_request_key = (
             str(message.keyframe_id), int(message.descriptor_checksum))
         request_metadata = self.request_metadata_by_request_key.get(
@@ -2104,6 +2081,117 @@ class UnknownPoseFrontend(Node):
             register_crops, self.keyframes[own_key][1], received_crop)
         return
 
+    def _try_confirm_pending_proposal(self, proposal, trigger_message=None):
+        """Confirm a canonical proposal once its complete evidence is local.
+
+        A proposal can arrive after the responder has already cached all of
+        the source crops while independently verifying the peer summary.  The
+        old path only attempted confirmation from a later crop callback, so a
+        complete proposal could remain pending forever.  This helper is called
+        both on proposal receipt and on each crop response.
+        """
+        evidence_sources = list(getattr(
+            proposal, 'evidence_source_keyframe_ids', []))
+        evidence_targets = list(getattr(
+            proposal, 'evidence_target_keyframe_ids', []))
+        if not evidence_sources:
+            evidence_sources = [proposal.source_keyframe_id]
+            evidence_targets = [proposal.target_keyframe_id]
+        if len(evidence_sources) != len(evidence_targets):
+            self._record_diagnostic_event(
+                'PROPOSAL_CONFIRMATION_REJECTED',
+                reason='EVIDENCE_KEY_LENGTH_MISMATCH',
+                source_keyframe_id=str(proposal.source_keyframe_id))
+            if trigger_message is not None:
+                self._record_crop_rejection(
+                    'EVIDENCE_KEY_LENGTH_MISMATCH', trigger_message)
+            return True
+        missing_source = [
+            source_key for source_key in evidence_sources
+            if source_key not in self.received_peer_crops]
+        missing_target = [
+            target_key for target_key in evidence_targets
+            if target_key not in self.keyframes]
+        if missing_source or missing_target:
+            self._record_diagnostic_event(
+                'PROPOSAL_CONFIRMATION_WAITING',
+                source_keyframe_id=str(proposal.source_keyframe_id),
+                missing_source_keyframe_ids=[str(value) for value in missing_source],
+                missing_target_keyframe_ids=[str(value) for value in missing_target])
+            if trigger_message is not None:
+                self._record_crop_rejection(
+                    'INCOMPLETE_EVIDENCE_SET', trigger_message,
+                    missing_source_keyframe_ids=missing_source,
+                    missing_target_keyframe_ids=missing_target)
+            return True
+        evidence_pairs = [
+            (self.received_peer_crops[source_key], self.keyframes[target_key][1])
+            for source_key, target_key in zip(evidence_sources, evidence_targets)]
+        evidence_timestamps = [
+            (self._stamp_ns(self.peer_descriptors[source_key]),
+             self._stamp_ns(self.keyframes[target_key][0]))
+            for source_key, target_key in zip(evidence_sources, evidence_targets)
+            if source_key in self.peer_descriptors]
+        if len(evidence_timestamps) != len(evidence_pairs):
+            self._record_diagnostic_event(
+                'PROPOSAL_CONFIRMATION_REJECTED',
+                reason='MISSING_EVIDENCE_METADATA',
+                source_keyframe_id=str(proposal.source_keyframe_id))
+            return True
+        self._record_diagnostic_event(
+            'PROPOSAL_CONFIRMATION_STARTED',
+            source_keyframe_id=str(proposal.source_keyframe_id),
+            target_keyframe_id=str(proposal.target_keyframe_id),
+            evidence_source_keyframe_ids=[str(value) for value in evidence_sources],
+            evidence_target_keyframe_ids=[str(value) for value in evidence_targets])
+        result = self._run_registration(
+            evidence_pairs, 'target_confirmation', proposal.keyframe_id,
+            evidence_timestamps=evidence_timestamps,
+            evidence_ids=[self._canonical_evidence_id(
+                proposal.source_robot_id, proposal.target_robot_id,
+                source_key, target_key)
+                for source_key, target_key in zip(evidence_sources, evidence_targets)])
+        tx, ty, yaw = result.transform
+        proposed_tx = proposal.source_to_target.translation.x
+        proposed_ty = proposal.source_to_target.translation.y
+        proposed_yaw = math.atan2(
+            2.0 * (proposal.source_to_target.rotation.w *
+                    proposal.source_to_target.rotation.z),
+            1.0 - 2.0 * proposal.source_to_target.rotation.z ** 2)
+        translation_error = math.hypot(tx - proposed_tx, ty - proposed_ty)
+        yaw_error = abs(math.atan2(
+            math.sin(yaw - proposed_yaw), math.cos(yaw - proposed_yaw)))
+        selector_agrees = (
+            str(getattr(proposal, 'selector_status', '')) in
+            ('', 'ACCEPTED_HYPOTHESIS'))
+        mutually_consistent = (
+            translation_error <= 0.12 and yaw_error <= 0.04 and
+            selector_agrees and
+            str(getattr(proposal, 'evidence_set_hash', '')) != '')
+        accepted = result.accepted and mutually_consistent
+        self._record_diagnostic_event(
+            'PROPOSAL_CONFIRMATION_RESULT',
+            accepted=bool(accepted), result_accepted=bool(result.accepted),
+            translation_error_m=float(translation_error),
+            yaw_error_rad=float(yaw_error),
+            selector_agrees=bool(selector_agrees),
+            evidence_set_hash=str(getattr(proposal, 'evidence_set_hash', '')))
+        response = self._ack_message(
+            proposal, result, accepted,
+            '' if accepted else 'MUTUAL_TRANSFORM_INCONSISTENT')
+        self.hypothesis_pub.publish(response)
+        self.counters['acks_published'] += 1
+        if accepted:
+            self.counters['accepted_hypotheses'] += 1
+        else:
+            self.counters['rejected_hypotheses'] += 1
+        self._record_diagnostic_event(
+            'PROPOSAL_ACK_PUBLISHED', accepted=bool(accepted),
+            evidence_set_hash=str(getattr(proposal, 'evidence_set_hash', '')))
+        self.pending_target_proposal = False
+        self.peer_proposals.pop(str(proposal.source_keyframe_id), None)
+        return True
+
     def _record_physical_worker_result(self, candidate, metadata, error=None):
         """Record a bounded worker failure without touching ROS state."""
         self._write_physical_evidence_diagnostic(
@@ -2184,6 +2272,8 @@ class UnknownPoseFrontend(Node):
             map_epoch=int(map_epoch),
             descriptor_checksum=int(descriptor_checksum),
             constraints_accumulated=len(self.evidence_physical_keys))
+        self._publish_evidence_announcement(
+            candidate, result, own_crop, received_crop)
         if len(self.evidence_physical_keys) < self.min_consistent_constraints:
             self._record_diagnostic_event(
                 'EVIDENCE_SET_WAITING',
@@ -2243,7 +2333,7 @@ class UnknownPoseFrontend(Node):
             'REGISTRATION_CALLBACK_ENTRY', source=source,
             keyframe_id=keyframe_id, constraint_count=len(evidence_pairs))
         try:
-            evidence_ids = None
+            evidence_ids = list(evidence_ids) if evidence_ids is not None else None
             accumulator = None
             if source == 'incremental_consensus':
                 evidence_ids = list(evidence_ids or [
@@ -2668,6 +2758,128 @@ class UnknownPoseFrontend(Node):
             source_keyframe_id=str(proposal.source_keyframe_id),
             target_keyframe_id=str(proposal.target_keyframe_id))
 
+    def _publish_evidence_announcement(self, candidate, result,
+                                       own_crop, peer_crop):
+        """Advertise one accepted constraint for symmetric accumulation.
+
+        This message is deliberately non-accepting.  The recipient requests
+        the advertised source crop and runs the same geometric registration
+        locally; only the resulting locally verified constraint enters its
+        selector.  Thus this path shares evidence, never trust, and cannot
+        trigger a TF or fusion handoff by itself.
+        """
+        peer_key, own_key, peer_descriptor, own_descriptor = (
+            self._candidate_fields(candidate))
+        evidence_id = self._canonical_evidence_id(
+            self.robot_id, self.peer_robot_id, own_key, peer_key)
+        if evidence_id in self.evidence_announcements_published:
+            return
+        message = self._hypothesis_message(
+            own_descriptor, peer_descriptor, result,
+            status='EVIDENCE', accepted=False, rejection_reason='',
+            evidence_source_keyframe_ids=[own_key],
+            evidence_target_keyframe_ids=[peer_key])
+        message.constraint_count = 1
+        message.consistent_constraint_count = 1
+        message.selector_status = 'INSUFFICIENT_EVIDENCE'
+        message.selector_runner_up_margin = 0.0
+        self.hypothesis_pub.publish(message)
+        self.evidence_announcements_published.add(evidence_id)
+        self.counters['evidence_announcements_published'] += 1
+        self._record_diagnostic_event(
+            'EVIDENCE_ANNOUNCEMENT_PUBLISHED',
+            evidence_id=evidence_id,
+            source_keyframe_id=str(own_key),
+            target_keyframe_id=str(peer_key),
+            transform=[float(value) for value in result.transform])
+
+    def _queue_peer_evidence_reverification(self, message):
+        """Request and independently re-register one peer-advertised pair."""
+        source_key = str(message.source_keyframe_id)
+        target_key = str(message.target_keyframe_id)
+        peer_descriptor = self.peer_descriptors.get(source_key)
+        own_entry = self.keyframes.get(target_key)
+        if peer_descriptor is None or own_entry is None:
+            self.pending_peer_evidence_announcements[
+                str(message.evidence_set_hash) or
+                f'{source_key}|{target_key}'] = message
+            return False
+        pair_key = (target_key, source_key)
+        if pair_key in self.evidence_pairs:
+            return True
+        request_key = (source_key, int(peer_descriptor.checksum))
+        if request_key in self.pending_requests:
+            return True
+        evidence_id = self._canonical_evidence_id(
+            self.peer_robot_id, self.robot_id, source_key, target_key)
+        # A single peer announcement is independent evidence, but duplicate
+        # deliveries of the same announcement must not start duplicate crop
+        # requests or registrations.
+        if evidence_id in self.peer_evidence_announcements and evidence_id in getattr(
+                self, '_peer_evidence_requested', set()):
+            return True
+        if not hasattr(self, '_peer_evidence_requested'):
+            self._peer_evidence_requested = set()
+        self._peer_evidence_requested.add(evidence_id)
+        queued = self._queue_crop_request(
+            source_key, target_key, peer_descriptor, own_entry[0],
+            self.verification_batches.batch_id or 0,
+            f'{self.robot_id}-peer-evidence-{source_key}-{target_key}')
+        if queued:
+            self.counters['evidence_reverification_requests'] += 1
+            self._record_diagnostic_event(
+                'PEER_EVIDENCE_REVERIFICATION_REQUESTED',
+                evidence_id=evidence_id,
+                source_keyframe_id=source_key,
+                target_keyframe_id=target_key)
+        return bool(queued)
+
+    def _process_pending_peer_evidence(self):
+        if not self.pending_peer_evidence_announcements:
+            return
+        for key, message in list(
+                self.pending_peer_evidence_announcements.items()):
+            if self._queue_peer_evidence_reverification(message):
+                self.pending_peer_evidence_announcements.pop(key, None)
+
+    def _handle_peer_evidence_announcement(self, message):
+        if {str(message.source_robot_id), str(message.target_robot_id)} != {
+                self.robot_id, self.peer_robot_id}:
+            return
+        source_ids = [str(value) for value in getattr(
+            message, 'evidence_source_keyframe_ids', [])]
+        target_ids = [str(value) for value in getattr(
+            message, 'evidence_target_keyframe_ids', [])]
+        if len(source_ids) != 1 or len(target_ids) != 1:
+            self._record_diagnostic_event(
+                'PEER_EVIDENCE_ANNOUNCEMENT_REJECTED',
+                reason='EXPECTED_ONE_CONSTRAINT',
+                source_keyframe_ids=source_ids,
+                target_keyframe_ids=target_ids)
+            return
+        if (str(message.source_robot_id) != self.peer_robot_id or
+                str(message.target_robot_id) != self.robot_id):
+            self._record_diagnostic_event(
+                'PEER_EVIDENCE_ANNOUNCEMENT_REJECTED',
+                reason='DIRECTION_OR_SCOPE_MISMATCH')
+            return
+        evidence_id = self._canonical_evidence_id(
+            self.peer_robot_id, self.robot_id, source_ids[0], target_ids[0])
+        if evidence_id in self.peer_evidence_announcements:
+            return
+        self.peer_evidence_announcements[evidence_id] = message
+        self.counters['evidence_announcements_received'] += 1
+        self._record_diagnostic_event(
+            'PEER_EVIDENCE_ANNOUNCEMENT_RECEIVED',
+            evidence_id=evidence_id,
+            source_keyframe_id=source_ids[0],
+            target_keyframe_id=target_ids[0],
+            advertised_transform=[
+                float(message.source_to_target.translation.x),
+                float(message.source_to_target.translation.y),
+                float(self._summary_transform(message)[2])])
+        self._queue_peer_evidence_reverification(message)
+
     def _publish_local_evidence_crops(self, keyframe_ids,
                                       evidence_candidates=None):
         """Make the initiator's bounded evidence available for peer verification."""
@@ -2830,6 +3042,9 @@ class UnknownPoseFrontend(Node):
                 'HYPOTHESIS_IGNORED_ALREADY_ACCEPTED',
                 status=str(message.status))
             return
+        if message.status == 'EVIDENCE':
+            self._handle_peer_evidence_announcement(message)
+            return
         if message.status == 'CANDIDATE':
             if self.robot_id != message.target_robot_id:
                 self._record_diagnostic_event(
@@ -2904,6 +3119,10 @@ class UnknownPoseFrontend(Node):
                     str(value) for value in
                     getattr(message, 'evidence_target_keyframe_ids', [])])
             self._request_source_for_confirmation(message)
+            # The source crops may already be cached from the independent
+            # peer-summary verification.  Do not wait for a duplicate crop
+            # response to trigger the confirmation path.
+            self._try_confirm_pending_proposal(message)
             return
         if message.status == 'REJECTED':
             if self.robot_id == message.source_robot_id:
@@ -3306,6 +3525,9 @@ class UnknownPoseFrontend(Node):
                 'cpu_samples': self.cpu_samples,
                 'protocol_events': self.diagnostic_events,
                 'protocol_event_drops': self.diagnostic_event_drops,
+                'protocol_lifecycle_events': self.protocol_lifecycle_events,
+                'protocol_lifecycle_event_drops': (
+                    self.protocol_lifecycle_event_drops),
                 'consensus_diagnostics_artifact': (
                     None if self.consensus_diagnostics is None else
                     self.consensus_diagnostics.path.name),

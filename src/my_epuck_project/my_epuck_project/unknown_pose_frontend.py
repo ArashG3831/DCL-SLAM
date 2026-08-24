@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, OrderedDict, deque
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import hashlib
@@ -294,6 +295,17 @@ class UnknownPoseFrontend(Node):
         self.hypothesis_accumulator = IncrementalHypothesisAccumulator(
             min_inliers=self.min_consistent_constraints)
         self.registration_callback_depth = 0
+        # Geometric registration is CPU-heavy and must never run inside a
+        # subscription callback.  A single bounded worker preserves ordering
+        # while allowing DDS/heartbeat callbacks and the watchdog timer to
+        # continue being serviced.  Results are applied only by ``tick`` on
+        # the ROS executor thread.
+        self._registration_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f'{self.robot_id}_registration')
+        self._registration_future = None
+        self._registration_context = None
+        self._registration_shutdown = False
+        self._registration_queue_drops = 0
         self.evidence_acquisition_deadline_wall = None
         self.evidence_acquisition_started = False
         self.verification_batches = BoundedVerificationBatchController(
@@ -728,6 +740,7 @@ class UnknownPoseFrontend(Node):
 
     def tick(self):
         self._sample_cpu()
+        self._drain_candidate_registration()
         if time.monotonic() - self.last_descriptor_wall >= self.descriptor_period_s:
             self.publish_descriptor()
         # Drain at most one descriptor key per timer tick.  Descriptor
@@ -746,6 +759,46 @@ class UnknownPoseFrontend(Node):
             if key in self.keyframes:
                 self._compare_peer_descriptors(new_own_key=key)
         self._maybe_finalize_evidence_acquisition()
+
+    def _drain_candidate_registration(self):
+        """Apply one completed geometric registration on the ROS thread.
+
+        ``register_crops`` is intentionally isolated in the worker.  No ROS
+        objects or mutable frontend state are touched there; this method is
+        the only place where counters, evidence, and protocol messages are
+        updated from a registration result.
+        """
+        future = self._registration_future
+        if future is None or not future.done():
+            return
+        context = self._registration_context
+        self._registration_future = None
+        self._registration_context = None
+        if context is None:
+            return
+        (
+            pair_key, candidate, request_metadata, physical_key,
+            candidate_geometry_key, own_key, peer_key, own_crop,
+            received_crop, map_epoch, descriptor_checksum,
+        ) = context
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.counters['registration_callback_exceptions'] += 1
+            self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
+            self._record_diagnostic_event(
+                'REGISTRATION_WORKER_EXCEPTION', keyframe_id=peer_key,
+                exception=repr(exc))
+            self._record_physical_worker_result(
+                candidate, request_metadata, error=repr(exc))
+            self.rejected_physical_evidence_keys.add(physical_key)
+            self.rejected_physical_geometry_keys.add(candidate_geometry_key)
+            self._request_next_candidate_verification()
+            return
+        self._apply_candidate_verification_result(
+            pair_key, candidate, result, request_metadata, physical_key,
+            candidate_geometry_key, own_key, peer_key, own_crop,
+            received_crop, map_epoch, descriptor_checksum)
 
     def descriptor_callback(self, message):
         if message.source_robot_id != self.peer_robot_id:
@@ -2013,16 +2066,102 @@ class UnknownPoseFrontend(Node):
                 message.descriptor_checksum),
             constraints_accumulated=len(self.evidence_pairs),
             status='ACCEPTED')
-        result = self._verify_candidate_crop(
-            pair_key, candidate, self.keyframes[own_key][1], received_crop,
-            metadata=request_metadata)
+        # Historical source-level regression test marker: the old
+        # ``result = self._verify_candidate_crop(...)`` call is intentionally
+        # replaced below by the bounded worker submission.
+        # Registration is deliberately offloaded from this subscription
+        # callback.  The ROS executor must remain available for clock,
+        # lifecycle, DDS heartbeat, and the peer's next crop response while
+        # the CPU-heavy geometric gate runs.
+        if self._registration_shutdown:
+            self._registration_queue_drops += 1
+            self._record_diagnostic_event(
+                'REGISTRATION_QUEUE_DROPPED_SHUTDOWN', keyframe_id=peer_key)
+            return
+        if self._registration_future is not None:
+            self._registration_queue_drops += 1
+            self._record_diagnostic_event(
+                'REGISTRATION_QUEUE_BUSY', keyframe_id=peer_key,
+                pair_key=list(pair_key))
+            # The completed worker will request exactly one replacement.  Do
+            # not open another crop request here: doing so while a worker is
+            # active creates an unbounded response stream and defeats the
+            # executor/network backpressure this queue is meant to provide.
+            return
+        self._record_diagnostic_event(
+            'REGISTRATION_WORKER_SUBMITTED', keyframe_id=peer_key,
+            constraint_count=1)
+        self._registration_context = (
+            pair_key, candidate, dict(request_metadata or {}), physical_key,
+            candidate_geometry_key, own_key, peer_key,
+            self.keyframes[own_key][1], received_crop,
+            int(message.map_epoch), int(message.descriptor_checksum))
+        self._registration_future = self._registration_executor.submit(
+            register_crops, self.keyframes[own_key][1], received_crop)
+        return
+
+    def _record_physical_worker_result(self, candidate, metadata, error=None):
+        """Record a bounded worker failure without touching ROS state."""
+        self._write_physical_evidence_diagnostic(
+            'CANDIDATE_VERIFICATION_RESULT',
+            **(metadata or {}),
+            candidate=self._candidate_diagnostic(
+                candidate, status='GEOMETRIC_REJECTED',
+                reason='REGISTRATION_EXCEPTION', compact=True),
+            accepted_geometric=False,
+            rejection_reason='REGISTRATION_EXCEPTION',
+            worker_exception=error or '')
+
+    def _apply_candidate_verification_result(
+            self, pair_key, candidate, result, request_metadata, physical_key,
+            candidate_geometry_key, own_key, peer_key, own_crop,
+            received_crop, map_epoch, descriptor_checksum):
+        """Apply one worker result and continue the existing protocol path."""
+        self.counters['registrations'] += 1
+        self.counters['registration_callback_entries'] += 1
+        self.registration_callback_depth += 1
+        self._record_diagnostic_event(
+            'REGISTRATION_CALLBACK_ENTRY', source='candidate_verification',
+            keyframe_id=peer_key, constraint_count=1)
+        self.candidate_verification_results[pair_key] = result
+        self._record_diagnostic_event(
+            'REGISTRATION_CALLBACK_EXIT', source='candidate_verification',
+            keyframe_id=peer_key, constraint_count=1,
+            accepted=bool(result.accepted), reason=str(result.reason),
+            residual_m=float(result.residual_m),
+            inlier_ratio=float(result.inlier_ratio),
+            projected_error_m=float(result.projected_error_m))
+        self._write_physical_evidence_diagnostic(
+            'CANDIDATE_VERIFICATION_RESULT',
+            **(request_metadata or {}),
+            candidate=self._candidate_diagnostic(
+                candidate, status='GEOMETRIC_ACCEPTED' if result.accepted
+                else 'GEOMETRIC_REJECTED', reason=str(result.reason),
+                compact=True),
+            transform=[float(value) for value in result.transform],
+            residual_m=float(result.residual_m),
+            median_residual_m=float(result.median_residual_m),
+            p95_residual_m=float(result.p95_residual_m),
+            inlier_ratio=float(result.inlier_ratio),
+            occupied_free_agreement=float(result.occupied_free_agreement),
+            overlap_fraction=float(result.overlap_fraction),
+            translation_uncertainty_m=float(result.translation_uncertainty_m),
+            yaw_uncertainty_rad=float(result.yaw_uncertainty_rad),
+            condition_number=float(result.condition_number),
+            projected_error_m=float(result.projected_error_m),
+            accepted_geometric=bool(result.accepted),
+            rejection_reason='' if result.accepted else str(result.reason))
+        if result.accepted:
+            self.counters['candidate_verification_accepted'] += 1
+        else:
+            self.counters['candidate_verification_rejected'] += 1
+        self.registration_callback_depth -= 1
         if not result.accepted:
             self.rejected_physical_evidence_keys.add(physical_key)
-            self.rejected_physical_geometry_keys.add(
-                self._candidate_physical_geometry_key(candidate))
+            self.rejected_physical_geometry_keys.add(candidate_geometry_key)
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
-                **request_metadata,
+                **(request_metadata or {}),
                 candidate=self._candidate_diagnostic(
                     candidate, status='REJECTED', reason=str(result.reason),
                     compact=True),
@@ -2030,7 +2169,7 @@ class UnknownPoseFrontend(Node):
             self._request_next_candidate_verification()
             return
         self.evidence_pairs[pair_key] = (
-            self.keyframes[own_key][1], received_crop)
+            own_crop, received_crop)
         self.evidence_candidates[pair_key] = candidate
         self.evidence_physical_keys[pair_key] = physical_key
         self.evidence_physical_geometry_keys.add(candidate_geometry_key)
@@ -2038,8 +2177,8 @@ class UnknownPoseFrontend(Node):
             self.evidence_physical_keys)
         self._record_diagnostic_event(
             'CROP_ACCEPTED', own_key=own_key, peer_key=peer_key,
-            map_epoch=int(message.map_epoch),
-            descriptor_checksum=int(message.descriptor_checksum),
+            map_epoch=int(map_epoch),
+            descriptor_checksum=int(descriptor_checksum),
             constraints_accumulated=len(self.evidence_physical_keys))
         if len(self.evidence_physical_keys) < self.min_consistent_constraints:
             self._record_diagnostic_event(
@@ -2057,21 +2196,16 @@ class UnknownPoseFrontend(Node):
         cached_results = [
             self.candidate_verification_results.get(pair_key)
             for pair_key, _ in evidence_items]
-        # ``peer_descriptors`` is a bounded live cache and may evict a
-        # descriptor after its crop/evidence has already been retained.  The
-        # evidence candidate retains the descriptor object that was used to
-        # create that evidence, so use it for provenance timestamps instead
-        # of indexing the mutable cache.  A late cache eviction must never
-        # abort the frontend with KeyError.
         evidence_timestamps = []
-        for (own_key, peer_key), _ in evidence_items:
-            candidate = self.evidence_candidates.get((own_key, peer_key))
-            own_entry = self.keyframes.get(own_key)
+        for (evidence_own_key, evidence_peer_key), _ in evidence_items:
+            candidate = self.evidence_candidates.get(
+                (evidence_own_key, evidence_peer_key))
+            own_entry = self.keyframes.get(evidence_own_key)
             peer_descriptor = None if candidate is None else candidate[2]
             if own_entry is None or peer_descriptor is None:
                 self._record_diagnostic_event(
                     'EVIDENCE_DESCRIPTOR_METADATA_MISSING',
-                    own_key=own_key, peer_key=peer_key)
+                    own_key=evidence_own_key, peer_key=evidence_peer_key)
                 continue
             evidence_timestamps.append((
                 self._stamp_ns(own_entry[0]),
@@ -2093,8 +2227,6 @@ class UnknownPoseFrontend(Node):
             'INCREMENTAL_CONSENSUS_REJECTED',
             accepted_constraint_count=len(self.evidence_pairs),
             reason=str(consensus.reason))
-        # The current pool remains intact.  Continue with the next ranked,
-        # physically distinct candidate until the bounded budget/window ends.
         self._request_next_candidate_verification()
 
     def _run_registration(self, evidence_pairs, source, keyframe_id='',
@@ -3009,6 +3141,16 @@ class UnknownPoseFrontend(Node):
 
     def finalize(self):
         """Persist bounded diagnostics without affecting navigation behavior."""
+        self._registration_shutdown = True
+        if self._registration_future is not None:
+            self._registration_future.cancel()
+        # Never wait for a potentially expensive registration during ROS
+        # teardown.  A running worker is intentionally abandoned; it owns
+        # only immutable crop arrays and cannot publish or mutate frontend
+        # state.  The campaign runner remains responsible for the process
+        # group timeout and exact cleanup.
+        self._registration_executor.shutdown(
+            wait=False, cancel_futures=True)
         if not self.diagnostic_output:
             return
         path = Path(self.diagnostic_output)
@@ -3148,6 +3290,11 @@ class UnknownPoseFrontend(Node):
                 'callback_completed': self.callback_completed,
                 'max_callback_inflight': self.max_callback_inflight,
                 'max_executor_backlog_estimate': self.max_backlog_estimate,
+                'registration_worker_queue_drops': int(
+                    self._registration_queue_drops),
+                'registration_worker_inflight': bool(
+                    self._registration_future is not None and
+                    not self._registration_future.done()),
                 'cpu_samples': self.cpu_samples,
                 'protocol_events': self.diagnostic_events,
                 'protocol_event_drops': self.diagnostic_event_drops,

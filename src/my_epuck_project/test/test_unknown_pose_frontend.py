@@ -297,6 +297,16 @@ def test_consensus_proposal_pool_retains_evicted_evidence_metadata():
     assert pool == [retained]
 
 
+def test_incremental_consensus_uses_retained_descriptor_after_cache_eviction():
+    """Evidence metadata must outlive the bounded live descriptor cache."""
+    source = (
+        __import__('pathlib').Path(__file__).parents[1] /
+        'my_epuck_project' / 'unknown_pose_frontend.py').read_text()
+    assert 'peer_descriptor = None if candidate is None else candidate[2]' in source
+    assert 'peer_descriptor = selected_pairs[0][2]' in source
+    assert 'self._stamp_ns(self.peer_descriptors[peer_key])' not in source
+
+
 def test_batch_reentry_never_changes_three_constraint_consensus_gate():
     assert not crop_batch_is_ready(2, 3)
     assert crop_batch_is_ready(3, 3)

@@ -2025,13 +2025,32 @@ class UnknownPoseFrontend(Node):
         cached_results = [
             self.candidate_verification_results.get(pair_key)
             for pair_key, _ in evidence_items]
+        # ``peer_descriptors`` is a bounded live cache and may evict a
+        # descriptor after its crop/evidence has already been retained.  The
+        # evidence candidate retains the descriptor object that was used to
+        # create that evidence, so use it for provenance timestamps instead
+        # of indexing the mutable cache.  A late cache eviction must never
+        # abort the frontend with KeyError.
+        evidence_timestamps = []
+        for (own_key, peer_key), _ in evidence_items:
+            candidate = self.evidence_candidates.get((own_key, peer_key))
+            own_entry = self.keyframes.get(own_key)
+            peer_descriptor = None if candidate is None else candidate[2]
+            if own_entry is None or peer_descriptor is None:
+                self._record_diagnostic_event(
+                    'EVIDENCE_DESCRIPTOR_METADATA_MISSING',
+                    own_key=own_key, peer_key=peer_key)
+                continue
+            evidence_timestamps.append((
+                self._stamp_ns(own_entry[0]),
+                self._stamp_ns(peer_descriptor)))
+        if len(evidence_timestamps) != len(evidence_items):
+            self._request_next_candidate_verification()
+            return
         consensus = self._run_registration(
             pairs, 'incremental_consensus', peer_key,
             individual_results=cached_results,
-            evidence_timestamps=[
-                (self._stamp_ns(self.keyframes[own_key][0]),
-                 self._stamp_ns(self.peer_descriptors[peer_key]))
-                for (own_key, peer_key), _ in evidence_items])
+            evidence_timestamps=evidence_timestamps)
         if consensus.accepted:
             self.evidence_acquisition_started = False
             self.evidence_acquisition_deadline_wall = None
@@ -2250,7 +2269,9 @@ class UnknownPoseFrontend(Node):
         own_key = selected_pairs[0][1]
         peer_key = selected_pairs[0][0]
         own_descriptor = self.keyframes[own_key][0]
-        peer_descriptor = self.peer_descriptors[peer_key]
+        # The descriptor is retained in the selected candidate even when the
+        # bounded live descriptor cache has since evicted its key.
+        peer_descriptor = selected_pairs[0][2]
         self.pending_proposals[(own_key, peer_key)] = result
         source_ids = [pair[1] for pair in selected_pairs]
         target_ids = [pair[0] for pair in selected_pairs]

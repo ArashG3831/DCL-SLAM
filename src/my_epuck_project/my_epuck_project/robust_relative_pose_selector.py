@@ -170,7 +170,17 @@ class IncrementalHypothesisAccumulator:
                     self.max_translation_disagreement_m,
                 max_yaw_disagreement_rad=self.max_yaw_disagreement_rad,
                 min_runner_up_margin=self.min_runner_up_margin)
-            if selection.status == ACCEPTED_HYPOTHESIS:
+            # Preserve a structurally valid but currently ambiguous cluster
+            # as a competing hypothesis.  Judging only already-ACCEPTED
+            # cliques made the accumulator forget the useful three-inlier
+            # cluster whenever one batch also contained a plausible outlier
+            # cluster; later independent evidence could then never increase
+            # that model's support.  The existing winner margin and all hard
+            # gates still decide acceptance below, so this does not relax the
+            # 0.10 safety threshold or accept an inconsistent set.
+            if (selection.status in (ACCEPTED_HYPOTHESIS,
+                                      AMBIGUOUS_HYPOTHESES) and
+                    len(selection.selected_indices) >= self.min_inliers):
                 probabilities = [0.0] * len(items)
                 for local, global_index in enumerate(clique):
                     if local < len(selection.inlier_probabilities):

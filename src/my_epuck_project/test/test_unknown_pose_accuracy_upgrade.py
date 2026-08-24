@@ -242,6 +242,19 @@ def test_incremental_accumulator_promotes_consistent_evidence_over_batches():
     assert result.diagnostics[-1]['kind'] == 'incremental_hypothesis_accumulator'
 
 
+def test_incremental_accumulator_retains_ambiguous_three_inlier_cluster():
+    """A valid cluster must survive a batch containing a competing outlier."""
+    accumulator = IncrementalHypothesisAccumulator()
+    result = accumulator.update([
+        _selector_constraint((0.7, -0.2, 0.03), 0),
+        _selector_constraint((0.702, -0.198, 0.031), 1),
+        _selector_constraint((0.698, -0.201, 0.029), 2),
+        _selector_constraint((1.7, 1.0, 0.5), 3, quality=0.60),
+    ])
+    assert len(result.selected_indices) >= 3
+    assert result.status == ACCEPTED_HYPOTHESIS
+
+
 def test_robust_selector_accepts_clear_cluster_and_rejects_outlier():
     selection = select_robust_hypothesis([
         _selector_constraint((0.7, -0.2, 0.03), 0),

@@ -295,7 +295,11 @@ velocity_smoother:
 collision_monitor:
   ros__parameters:
     qos_overrides./robot2/scan_d500_nav.subscription.reliability: best_effort
-    use_sim_time: False
+    # Collision Monitor compares scan header stamps with its current clock.
+    # The relay preserves Webots simulation stamps, so this node must use the
+    # same /clock domain even when the simulation is running faster than wall
+    # time.  Keeping this false makes a valid ~1 Hz scan appear stale.
+    use_sim_time: True
 
     # Frames (match your TF tree; you DO have odom->robot2/base_footprint)
     base_frame_id: "robot2/base_footprint"

@@ -139,6 +139,15 @@ def test_nav2_uses_isolated_latest_scan_relay():
         assert 'source_timeout: 3.0' in params
 
 
+def test_collision_monitor_uses_sim_clock_for_relay_scan_stamps():
+    """Safety timestamps must share the Webots clock with LaserScan headers."""
+    for robot in ('robot1', 'robot2'):
+        params = (RESOURCE / f'nav2_{robot}_shared_map.yaml').read_text(
+            encoding='utf-8')
+        collision = params[params.index('collision_monitor:'):]
+        assert 'use_sim_time: True' in collision
+
+
 def test_all_nested_launch_layers_accept_scan_matching_profile():
     names = (
         'two_robots_unknown_pose_exploration_launch.py',

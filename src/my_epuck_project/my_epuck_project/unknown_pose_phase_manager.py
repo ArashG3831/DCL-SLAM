@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import signal
 import time
+import math
 
 import rclpy
+from geometry_msgs.msg import TransformStamped
 from my_epuck_interfaces.msg import RelativePoseHypothesis
 from nav2_msgs.srv import ManageLifecycleNodes
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from tf2_ros import StaticTransformBroadcaster
 
 
 class UnknownPosePhaseManager(Node):
@@ -24,6 +27,13 @@ class UnknownPosePhaseManager(Node):
     def __init__(self):
         super().__init__('unknown_pose_phase_manager')
         self.robot_id = str(self.declare_parameter('robot_id', '').value)
+        self.peer_robot_id = str(self.declare_parameter(
+            'peer_robot_id', '').value)
+        if not self.peer_robot_id and self.robot_id in ('robot1', 'robot2'):
+            self.peer_robot_id = (
+                'robot2' if self.robot_id == 'robot1' else 'robot1')
+        self.shared_frame = str(self.declare_parameter(
+            'shared_frame', 'shared_map').value)
         local_service = str(self.declare_parameter(
             'local_manager_service', '').value)
         shared_service = str(self.declare_parameter(
@@ -43,6 +53,11 @@ class UnknownPosePhaseManager(Node):
             ManageLifecycleNodes, local_service)
         self._shared_client = self.create_client(
             ManageLifecycleNodes, shared_service)
+        # Keep the mutually accepted alignment alive after the frontend is
+        # intentionally torn down before shared Nav2 starts.  This relay only
+        # republishes the accepted protocol message; it never reads truth or
+        # estimates a transform.
+        self._tf_broadcaster = StaticTransformBroadcaster(self)
         self._accepted = False
         self._transition = 'WAITING_FOR_HANDOFF'
         self._request_in_flight = False
@@ -188,11 +203,55 @@ class UnknownPosePhaseManager(Node):
             return
         if not self._accepted:
             self._accepted = True
+            self._publish_accepted_tf(message)
             self._write_handoff_marker()
             self._transition = 'SHUTTING_DOWN_LOCAL'
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s accepted_handoff=true '
                 'transition=SHUTTING_DOWN_LOCAL' % self.robot_id)
+
+    @staticmethod
+    def _yaw_from_quaternion(rotation) -> float:
+        return math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z))
+
+    def _publish_accepted_tf(self, message: RelativePoseHypothesis) -> None:
+        """Relay the canonical accepted alignment through phase teardown."""
+        if (not self.peer_robot_id or
+                self.robot_id != min(self.robot_id, self.peer_robot_id)):
+            return
+        tx = float(message.source_to_target.translation.x)
+        ty = float(message.source_to_target.translation.y)
+        yaw = self._yaw_from_quaternion(message.source_to_target.rotation)
+        # The protocol transform maps source crop points into target crop
+        # coordinates.  TF needs the target child pose in the shared parent,
+        # hence one SE(2) inverse at this boundary.
+        inverse_yaw = -yaw
+        cos_yaw = math.cos(inverse_yaw)
+        sin_yaw = math.sin(inverse_yaw)
+        inverse_x = -(cos_yaw * tx - sin_yaw * ty)
+        inverse_y = -(sin_yaw * tx + cos_yaw * ty)
+        now = self.get_clock().now().to_msg()
+        identity = TransformStamped()
+        identity.header.stamp = now
+        identity.header.frame_id = self.shared_frame
+        identity.child_frame_id = f'{self.robot_id}/local_world'
+        identity.transform.rotation.w = 1.0
+        target = TransformStamped()
+        target.header.stamp = now
+        target.header.frame_id = self.shared_frame
+        target.child_frame_id = f'{self.peer_robot_id}/local_world'
+        target.transform.translation.x = inverse_x
+        target.transform.translation.y = inverse_y
+        target.transform.rotation.z = math.sin(inverse_yaw / 2.0)
+        target.transform.rotation.w = math.cos(inverse_yaw / 2.0)
+        self._tf_broadcaster.sendTransform([identity, target])
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s accepted_tf_relay=true '
+            'parent=%s child=%s evidence_set_hash=%s' % (
+                self.robot_id, self.shared_frame, target.child_frame_id,
+                str(getattr(message, 'evidence_set_hash', ''))))
 
     def _send(self, client, command, next_state: str) -> None:
         if (self._request_in_flight or

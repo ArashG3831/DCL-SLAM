@@ -386,6 +386,7 @@ def launch_setup(context):
                     parameters=[{
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                         'robot_id': robot,
+                        'shared_frame': 'shared_map',
                         'local_manager_service':
                             f'/{robot}/local_lifecycle_manager_navigation/manage_nodes',
                         'shared_manager_service':

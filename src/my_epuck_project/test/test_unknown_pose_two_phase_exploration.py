@@ -135,7 +135,7 @@ def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
     assert "if not bool(message.accepted) or str(message.status) != 'ACCEPTED'" in assignment
     assert "if not bool(message.accepted) or str(message.status) != 'ACCEPTED'" in fusion
     assert 'if (!message->accepted || message->status != "ACCEPTED"' in generator
-    assert "'shared_map'" not in (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert 'world_derived' not in (PY / 'unknown_pose_phase_manager.py').read_text()
 
 
 def test_unknown_mode_does_not_include_shared_assignment_before_handoff():
@@ -203,6 +203,16 @@ def test_expected_handoff_teardown_is_marked_before_local_children_stop():
     assert "'handoff_marker_path'" in phase
     assert 'self._write_handoff_marker()' in phase
     assert 'os.replace(temporary, self._handoff_marker_path)' in phase
+
+
+def test_phase_manager_relays_accepted_tf_after_frontend_teardown():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assert 'StaticTransformBroadcaster' in phase
+    assert 'self._publish_accepted_tf(message)' in phase
+    assert 'accepted_tf_relay=true' in phase
+    assert 'self.peer_robot_id' in phase
+    assert "'shared_frame': 'shared_map'" in full
 
 
 def test_source_ack_can_finalize_after_proposal_keyframes_are_evicted():

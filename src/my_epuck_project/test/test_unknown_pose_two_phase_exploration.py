@@ -187,6 +187,15 @@ def test_frontend_exit_watchdog_shuts_down_on_unexpected_exit():
     assert 'RegisterEventHandler' in full
     assert 'OnProcessExit' in full
     assert 'unknown-pose frontend exited with' in full
+    assert 'accepted_handoff.marker' in full
+    assert 'event.returncode == -9 and expected_handoff_teardown' in full
+
+
+def test_expected_handoff_teardown_is_marked_before_local_children_stop():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert "'handoff_marker_path'" in phase
+    assert 'self._write_handoff_marker()' in phase
+    assert 'os.replace(temporary, self._handoff_marker_path)' in phase
 
 
 def test_phase_manager_hypothesis_qos_matches_frontend_publisher():

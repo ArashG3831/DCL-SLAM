@@ -24,9 +24,12 @@ from launch_ros.actions import Node
 from my_epuck_project.cooperative_profiles import profile_for_world, profile_summary
 
 
-def _frontend_exit_handler(robot):
+def _frontend_exit_handler(robot, handoff_marker_path=''):
     def on_exit(event, context):
-        if event.returncode in (0, -2, -15):
+        expected_handoff_teardown = bool(
+            handoff_marker_path and os.path.isfile(handoff_marker_path))
+        if event.returncode in (0, -2, -15) or (
+                event.returncode == -9 and expected_handoff_teardown):
             return []
         return [EmitEvent(event=Shutdown(
             reason=(f'{robot} unknown-pose frontend exited with '
@@ -269,7 +272,10 @@ def launch_setup(context):
             frontend_watchdogs.append(RegisterEventHandler(
                 OnProcessExit(
                     target_action=unknown_pose_frontends[-1],
-                    on_exit=_frontend_exit_handler(robot),
+                    on_exit=_frontend_exit_handler(
+                        robot, os.path.join(
+                            diagnostic_output,
+                            f'{robot}_accepted_handoff.marker')),
                 )))
             local_phase_nodes.extend([
                 Node(
@@ -377,6 +383,9 @@ def launch_setup(context):
                             f'/{robot}/local_lifecycle_manager_navigation/manage_nodes',
                         'shared_manager_service':
                             f'/{robot}/lifecycle_manager_navigation/manage_nodes',
+                        'handoff_marker_path': os.path.join(
+                            diagnostic_output,
+                            f'{robot}_accepted_handoff.marker'),
                     }],
                 ),
             ])

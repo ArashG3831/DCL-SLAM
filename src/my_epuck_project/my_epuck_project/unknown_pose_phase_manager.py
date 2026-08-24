@@ -28,6 +28,8 @@ class UnknownPosePhaseManager(Node):
             'local_manager_service', '').value)
         shared_service = str(self.declare_parameter(
             'shared_manager_service', '').value)
+        self._handoff_marker_path = str(self.declare_parameter(
+            'handoff_marker_path', '').value)
         if not self.robot_id or not local_service or not shared_service:
             raise ValueError('robot_id and lifecycle manager services are required')
         qos = QoSProfile(
@@ -59,6 +61,33 @@ class UnknownPosePhaseManager(Node):
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE robot=%s phase=PRE_HANDOFF '
             'local_nav2_active=true shared_nav2_waiting=true' % self.robot_id)
+
+    def _write_handoff_marker(self) -> None:
+        """Record that local-child termination is an expected phase switch.
+
+        The launch graph treats an unexpected frontend exit as fatal.  During
+        the accepted handoff, however, the phase manager intentionally tears
+        down the pre-handoff frontend before starting the shared stack.  A
+        small per-robot marker lets that launch exit handler distinguish this
+        bounded, expected teardown from an active-runtime crash without
+        weakening fail-fast behavior for any other exit.
+        """
+        if not self._handoff_marker_path:
+            return
+        try:
+            parent = os.path.dirname(self._handoff_marker_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            temporary = self._handoff_marker_path + '.tmp'
+            with open(temporary, 'w', encoding='utf-8') as stream:
+                stream.write('accepted_handoff=true\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._handoff_marker_path)
+        except OSError as error:
+            self.get_logger().error(
+                'UNKNOWN_POSE_PHASE robot=%s handoff_marker_write_failed=%s' %
+                (self.robot_id, error))
 
     def _local_process_pids(self):
         """Return only this robot's pre-handoff process PIDs.
@@ -159,6 +188,7 @@ class UnknownPosePhaseManager(Node):
             return
         if not self._accepted:
             self._accepted = True
+            self._write_handoff_marker()
             self._transition = 'SHUTTING_DOWN_LOCAL'
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s accepted_handoff=true '

@@ -475,7 +475,8 @@ def test_phase_manager_terminates_only_deactivated_local_processes_before_shared
     assert 'def _local_process_pids' in phase
     assert "argv[index + 1] == '__ns:=/%s' % self.robot_id" in phase
     assert "name.startswith('local_')" in phase
-    assert "name == 'unknown_pose_frontend'" in phase
+    assert 'accepted frontend is deliberately retained' in phase
+    assert "name == 'unknown_pose_frontend'" not in phase
     assert 'os.kill(pid, signal.SIGTERM)' in phase
     assert 'os.kill(pid, signal.SIGKILL)' in phase
     assert "self._transition == 'SHUTTING_DOWN_LOCAL'" in phase

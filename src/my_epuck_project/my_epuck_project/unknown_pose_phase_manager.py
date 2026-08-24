@@ -111,9 +111,12 @@ class UnknownPosePhaseManager(Node):
         terminate their processes.  The post-handoff launch intentionally
         creates the shared-map Nav2 stack with different node names, so
         leaving the local processes resident doubles the controller/costmap
-        footprint.  Inspecting the exact ROS namespace and pre-handoff node
-        names keeps teardown scoped to this campaign robot; no broad ROS
-        process matching or global kill is used.
+        footprint.  The accepted frontend is deliberately retained: it is
+        the bounded post-handoff local-evidence relay that keeps publishing
+        ``PeerMap`` samples after the phase manager tears down local Nav2.
+        Inspecting the exact ROS namespace and local node names keeps teardown
+        scoped to this campaign robot; no broad ROS process matching or global
+        kill is used.
         """
         selected = []
         for entry in os.listdir('/proc'):
@@ -144,8 +147,7 @@ class UnknownPosePhaseManager(Node):
                 for index, arg in enumerate(argv[:-1])
                 if arg == '-r' and argv[index + 1].startswith('__node:=')
             ]
-            if any(name == 'unknown_pose_frontend' or
-                   name.startswith('local_') for name in node_names):
+            if any(name.startswith('local_') for name in node_names):
                 selected.append(pid)
         return sorted(set(selected))
 

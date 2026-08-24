@@ -8,6 +8,7 @@ import time
 
 from my_epuck_project.cooperative_regression import (
     apply_profile_defaults,
+    abnormal_ros_exit_evidence,
     attempt_namespace,
     classify_attempt,
     detect_slam_filter_output_stall,
@@ -80,6 +81,16 @@ def test_filter_output_stall_requires_fresh_fixed_input(tmp_path):
     result = detect_slam_filter_output_stall(observer)
     assert set(result) == {'robot1'}
     assert result['robot1']['first_observed_stale_ros_time_s'] == 20.0
+
+
+def test_invalid_cyclonedds_endpoint_is_fatal_transport_evidence(tmp_path):
+    launch_log = tmp_path / 'launch.log'
+    launch_log.write_text(
+        'ddsi_udp_conn_write to udp/127.0.0.1:65536 failed with retcode -3\n',
+        encoding='utf-8')
+    offset, matches = abnormal_ros_exit_evidence(launch_log)
+    assert offset == launch_log.stat().st_size
+    assert len(matches) == 1
 
 
 def test_claim_report_handles_missing_claim_during_startup_failure():

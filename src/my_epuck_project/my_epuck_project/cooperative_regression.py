@@ -69,6 +69,11 @@ REQUIRED_OBSERVER_FILES = (
 )
 ABNORMAL_ROS_EXIT_PATTERNS = (
     re.compile(r'ddsi_entity_index\.c:\d+.*Assertion'),
+    # A high ROS_DOMAIN_ID can make CycloneDDS compute an impossible RTPS
+    # endpoint (the observed failure was UDP port 65536).  Treat this as an
+    # immediate fatal transport condition instead of allowing retries to
+    # build host/WSL network buffers.
+    re.compile(r'ddsi_udp_conn_write.*udp/[^ ]+:65536\b'),
     re.compile(r'process has died .*exit code -6'),
     re.compile(r'potentially unexpected fatal signal 6'),
     re.compile(r'process has died .*exit code -11'),

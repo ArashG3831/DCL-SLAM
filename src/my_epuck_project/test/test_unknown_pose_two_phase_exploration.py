@@ -188,7 +188,14 @@ def test_frontend_exit_watchdog_shuts_down_on_unexpected_exit():
     assert 'OnProcessExit' in full
     assert 'unknown-pose frontend exited with' in full
     assert 'accepted_handoff.marker' in full
-    assert 'event.returncode == -9 and expected_handoff_teardown' in full
+    assert 'expected_handoff_teardown and event.returncode in (-9, 1)' in full
+
+
+def test_expected_handoff_frontend_exit_code_one_is_not_a_campaign_failure():
+    """ros2 wrappers may normalize expected signal teardown to exit code 1."""
+    full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    assert 'without the marker it remains a' in full
+    assert 'event.returncode in (-9, 1)' in full
 
 
 def test_expected_handoff_teardown_is_marked_before_local_children_stop():

@@ -28,8 +28,15 @@ def _frontend_exit_handler(robot, handoff_marker_path=''):
     def on_exit(event, context):
         expected_handoff_teardown = bool(
             handoff_marker_path and os.path.isfile(handoff_marker_path))
+        # The frontend is intentionally terminated after it writes the
+        # accepted-handoff marker.  Depending on whether the signal is
+        # observed by ros2's executable wrapper or by launch directly, a
+        # SIGTERM/SIGINT may be normalized to exit code 1 instead of the
+        # negative signal number.  Once the marker exists, code 1 is the
+        # same expected phase transition; without the marker it remains a
+        # fail-fast abnormal frontend exit.
         if event.returncode in (0, -2, -15) or (
-                event.returncode == -9 and expected_handoff_teardown):
+                expected_handoff_teardown and event.returncode in (-9, 1)):
             return []
         return [EmitEvent(event=Shutdown(
             reason=(f'{robot} unknown-pose frontend exited with '

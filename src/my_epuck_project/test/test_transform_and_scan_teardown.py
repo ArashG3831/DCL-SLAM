@@ -10,6 +10,9 @@ from my_epuck_project.d500_scan_fix import (
     D500ScanFix,
     LATEST_SCAN_QOS,
     LATEST_NAV_SCAN_QOS,
+    RAW_SCAN_BEST_EFFORT_QOS,
+    RAW_SCAN_QOS,
+    raw_scan_qos,
     shutdown_node as shutdown_scan_fix,
 )
 from my_epuck_project.twist_stamper import TwistStamper, shutdown_node as shutdown_stamper
@@ -38,6 +41,13 @@ def test_d500_corrected_scan_uses_bounded_reliable_qos():
     assert LATEST_SCAN_QOS.reliability.value == 1  # RELIABLE
     assert LATEST_NAV_SCAN_QOS.depth == 1
     assert LATEST_NAV_SCAN_QOS.reliability.value == 2  # BEST_EFFORT
+
+
+def test_raw_scan_input_reliability_selects_the_requested_qos():
+    assert raw_scan_qos('reliable') is RAW_SCAN_QOS
+    assert raw_scan_qos('best_effort') is RAW_SCAN_BEST_EFFORT_QOS
+    assert RAW_SCAN_BEST_EFFORT_QOS.depth == 1
+    assert RAW_SCAN_BEST_EFFORT_QOS.reliability.value == 2  # BEST_EFFORT
 
 
 def test_nav_relay_downsampling_is_explicitly_separate_from_slam_stream():

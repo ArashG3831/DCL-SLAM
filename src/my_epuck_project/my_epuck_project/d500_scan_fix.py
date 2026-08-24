@@ -37,6 +37,30 @@ RAW_SCAN_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.VOLATILE,
 )
+RAW_SCAN_BEST_EFFORT_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    # A raw sensor stream must not accumulate an unbounded backlog while the
+    # bridge is being used for transport isolation diagnostics.
+    depth=1,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+
+def raw_scan_qos(input_reliability):
+    """Return the explicitly requested QoS for the raw D500 input.
+
+    The launch argument is intentionally handled here rather than relying on
+    a graph-wide override.  That makes the transport A/B reproducible and
+    prevents a best-effort diagnostic from silently remaining reliable.
+    """
+    value = str(input_reliability).lower()
+    if value == 'reliable':
+        return RAW_SCAN_QOS
+    if value == 'best_effort':
+        return RAW_SCAN_BEST_EFFORT_QOS
+    raise ValueError(
+        f"input_reliability must be 'reliable' or 'best_effort', got {value!r}")
 
 
 class D500ScanFix(Node):
@@ -68,6 +92,7 @@ class D500ScanFix(Node):
             output_qos = CORRECTED_SCAN_QOS
         input_reliability = str(
             self.get_parameter('input_reliability').value).lower()
+        input_qos = raw_scan_qos(input_reliability)
         self._last_published_stamp = None
         self._received_count = 0
         self._published_count = 0
@@ -76,11 +101,7 @@ class D500ScanFix(Node):
             LaserScan,
             input_topic,
             self.callback,
-            # The Webots ROS driver advertises the raw D500 stream with the
-            # project's default reliable profile.  Keep this subscription
-            # reliable; using sensor-data best-effort here silently leaves
-            # the bridge without samples under CycloneDDS.
-            RAW_SCAN_QOS,
+            input_qos,
         )
 
         self.pub = self.create_publisher(

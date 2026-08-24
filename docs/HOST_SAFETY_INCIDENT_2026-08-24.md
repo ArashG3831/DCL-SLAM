@@ -192,6 +192,40 @@ conclusive that the allocation is outside campaign process RSS and survives
 ROS/Webots cleanup.  A full Windows reboot is required before any further
 Webots launch; do not use WSL `free` alone as a host-safety signal.
 
+### Leading source-level candidate (not yet runtime-proven)
+
+The failed run's recorded launch command contained, for both Webots drivers:
+
+```text
+qos_overrides./scan_d500.publisher.reliability:=reliable
+```
+
+The authoritative simulation profile also currently sets
+`scan_input_reliability: reliable`, and `d500_scan_fix.py` unconditionally uses
+`RAW_SCAN_QOS` with reliable reliability for its raw-scan subscription. This
+means the intended best-effort sensor-data path is overridden before the first
+720-beam scan crosses the Webots/WSL boundary. The raw stream is then copied
+through reliable DDS endpoints before the bounded corrected stream is produced.
+
+This is a credible explanation for why the invalid-port guard did not help:
+domain 46 is valid, but reliable fragmented sensor traffic can still exercise a
+WSL2/Hyper-V/Windows NETIO buffer/retransmission path. It is not yet proof of
+ownership or causality; the required A/B is:
+
+1. reboot Windows and record a healthy nonpaged-pool baseline;
+2. run one robot in realtime with the current raw reliable path;
+3. run the identical one-robot test with raw `/scan_d500` best-effort, depth 1,
+   and a parameter-selected best-effort `d500_scan_fix` subscription;
+4. compare Windows nonpaged-pool delta, Nbuf/Nnbl/Nnbf (if PoolMon is
+   available), scan receipt/correction counts, and SLAM quality;
+5. only then test two robots and fast mode.
+
+The corrected `/scan_d500_fixed` stream can remain reliable at its bounded
+1-Hz cadence initially; do not change map, consensus, or estimator semantics
+in the same experiment. If the raw-scan A/B is safe but the full campaign is
+not, isolate the next largest reliable payload separately (the transient-local
+`PeerMap`/occupancy-map stream) rather than changing all QoS policies at once.
+
 ## Required source hardening before resuming validation
 
 The next code change must be narrow and fail-closed:

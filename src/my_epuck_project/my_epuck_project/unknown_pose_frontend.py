@@ -2309,6 +2309,27 @@ class UnknownPoseFrontend(Node):
                     (self._stamp_ns(candidate[3]),
                      self._stamp_ns(candidate[2]))
                     for candidate in selected_pairs])
+        if result.accepted:
+            # The accumulated selector may reject some geometrically valid
+            # observations as outliers.  Exchange/request only its winning
+            # evidence IDs; sending the whole five/eight-candidate pool would
+            # make the peer re-run the selector with known outliers included.
+            winner_ids = set()
+            for diagnostic in reversed(
+                    getattr(result, 'consensus_diagnostics', ())):
+                if diagnostic.get('kind') == \
+                        'incremental_hypothesis_accumulator':
+                    winner_ids = set(str(value) for value in diagnostic.get(
+                        'winner_evidence_ids', ()))
+                    break
+            if winner_ids:
+                filtered = [
+                    (candidate, evidence)
+                    for candidate, evidence in zip(selected_pairs, pairs)
+                    if f'{candidate[1]}|{candidate[0]}' in winner_ids]
+                if len(filtered) >= self.min_consistent_constraints:
+                    selected_pairs = [item[0] for item in filtered]
+                    pairs = [item[1] for item in filtered]
         own_key = selected_pairs[0][1]
         peer_key = selected_pairs[0][0]
         own_descriptor = self.keyframes[own_key][0]

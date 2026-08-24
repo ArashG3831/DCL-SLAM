@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import time
 
 import rclpy
@@ -58,6 +60,83 @@ class UnknownPosePhaseManager(Node):
             'UNKNOWN_POSE_PHASE robot=%s phase=PRE_HANDOFF '
             'local_nav2_active=true shared_nav2_waiting=true' % self.robot_id)
 
+    def _local_process_pids(self):
+        """Return only this robot's pre-handoff process PIDs.
+
+        Lifecycle ``SHUTDOWN`` deactivates managed Nav2 nodes but does not
+        terminate their processes.  The post-handoff launch intentionally
+        creates the shared-map Nav2 stack with different node names, so
+        leaving the local processes resident doubles the controller/costmap
+        footprint.  Inspecting the exact ROS namespace and pre-handoff node
+        names keeps teardown scoped to this campaign robot; no broad ROS
+        process matching or global kill is used.
+        """
+        selected = []
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            try:
+                raw = open('/proc/%s/cmdline' % pid, 'rb').read()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            argv = [part.decode(errors='replace') for part in raw.split(b'\0')
+                    if part]
+            if not argv:
+                continue
+            namespace = any(arg == '-r' for arg in argv)
+            # Match the exact remap pair emitted by launch_ros, rather than
+            # accepting a robot name anywhere in an executable or parameter.
+            ns_match = any(
+                argv[index + 1] == '__ns:=/%s' % self.robot_id
+                for index, arg in enumerate(argv[:-1])
+                if arg == '-r')
+            if not namespace or not ns_match:
+                continue
+            node_names = [
+                argv[index + 1][len('__node:='):]
+                for index, arg in enumerate(argv[:-1])
+                if arg == '-r' and argv[index + 1].startswith('__node:=')
+            ]
+            if any(name == 'unknown_pose_frontend' or
+                   name.startswith('local_') for name in node_names):
+                selected.append(pid)
+        return sorted(set(selected))
+
+    def _terminate_local_processes(self) -> None:
+        """Terminate this robot's deactivated pre-handoff process set."""
+        pids = self._local_process_pids()
+        if not pids:
+            self.get_logger().info(
+                'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=none' %
+                self.robot_id)
+            return
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=term pids=%s' %
+            (self.robot_id, ','.join(str(pid) for pid in pids)))
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            remaining = [pid for pid in pids if os.path.exists('/proc/%s' % pid)]
+            if not remaining:
+                break
+            time.sleep(0.05)
+        remaining = [pid for pid in pids if os.path.exists('/proc/%s' % pid)]
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=complete '
+            'remaining=%s' % (self.robot_id, len(remaining)))
+
     def _hypothesis_callback(self, message: RelativePoseHypothesis) -> None:
         if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
             return
@@ -95,6 +174,9 @@ class UnknownPosePhaseManager(Node):
                     'UNKNOWN_POSE_PHASE robot=%s transition=%s rejected' %
                     (self.robot_id, self._transition))
                 return
+            if (self._transition == 'SHUTTING_DOWN_LOCAL' and
+                    next_state == 'STARTING_SHARED'):
+                self._terminate_local_processes()
             self._transition = next_state
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s transition_complete=%s' %

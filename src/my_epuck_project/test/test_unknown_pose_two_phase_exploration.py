@@ -334,6 +334,26 @@ def test_phase_manager_backoff_prevents_lifecycle_retry_spin():
     assert 'self._next_retry_at = time.monotonic() + self._retry_interval_s' in phase
 
 
+def test_phase_manager_terminates_only_deactivated_local_processes_before_shared_start():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert 'def _local_process_pids' in phase
+    assert "argv[index + 1] == '__ns:=/%s' % self.robot_id" in phase
+    assert "name.startswith('local_')" in phase
+    assert "name == 'unknown_pose_frontend'" in phase
+    assert 'os.kill(pid, signal.SIGTERM)' in phase
+    assert 'os.kill(pid, signal.SIGKILL)' in phase
+    assert "self._transition == 'SHUTTING_DOWN_LOCAL'" in phase
+    assert 'self._terminate_local_processes()' in phase
+
+
+def test_phase_manager_does_not_use_broad_ros_process_cleanup():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert 'pkill' not in phase
+    assert 'killall' not in phase
+    assert 'ros2 node list' not in phase
+    assert "os.listdir('/proc')" in phase
+
+
 def test_fast_runner_uses_remaining_startup_deadline_for_nav2():
     runner = (PY / 'cooperative_trial_fast.py').read_text()
     assert 'nav2_deadline = readiness_deadline' in runner

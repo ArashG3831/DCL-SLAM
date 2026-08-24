@@ -64,3 +64,17 @@ def test_nodes_tolerate_context_already_shutdown():
     stamp_node = TwistStamper()
     rclpy.shutdown()
     shutdown_stamper(stamp_node)
+
+
+def test_slam_wrapper_owns_signal_shutdown_and_destroys_before_shutdown():
+    """The C++ wrapper must avoid invalid-context teardown aborts."""
+    from pathlib import Path
+
+    source = (Path(__file__).parents[2] /
+              'reliable_slam_toolbox_wrapper' / 'src' /
+              'reliable_async_slam_toolbox_node.cpp').read_text(
+                  encoding='utf-8')
+    assert 'SignalHandlerOptions::None' in source
+    assert 'executor.spin_some' in source
+    assert 'node.reset();' in source
+    assert source.index('node.reset();') < source.index('rclcpp::shutdown();')

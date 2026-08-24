@@ -1,4 +1,7 @@
 #include <functional>
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <memory>
 
 #include "message_filters/subscriber.h"
@@ -58,14 +61,29 @@ protected:
 
 int main(int argc, char ** argv)
 {
-  rclcpp::init(argc, argv);
+  // Do not let rclcpp invalidate the context asynchronously from its signal
+  // handling thread.  Slam Toolbox's lifecycle cleanup can call sleep while
+  // unregistering its sensor; destroying the node after an asynchronous
+  // shutdown otherwise raises "context cannot be slept with because it's
+  // invalid" and exits with SIGABRT during an otherwise normal campaign stop.
+  rclcpp::init(argc, argv, rclcpp::InitOptions(),
+    rclcpp::SignalHandlerOptions::None);
+  static std::atomic_bool stop_requested{false};
+  auto request_stop = [](int) { stop_requested.store(true); };
+  std::signal(SIGINT, request_stop);
+  std::signal(SIGTERM, request_stop);
   auto node = std::make_shared<
     reliable_slam_toolbox_wrapper::ReliableAsynchronousSlamToolbox>(
     rclcpp::NodeOptions());
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node->get_node_base_interface());
-  executor.spin();
+  while (rclcpp::ok() && !stop_requested.load()) {
+    executor.spin_some(std::chrono::milliseconds(100));
+  }
+  executor.cancel();
   executor.remove_node(node->get_node_base_interface());
+  // Keep the context valid through the derived lifecycle-node destructor.
+  node.reset();
   rclcpp::shutdown();
   return 0;
 }

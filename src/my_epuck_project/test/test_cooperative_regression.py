@@ -186,7 +186,7 @@ def test_throughput_profile_is_explicit_reduced_sensor_experiment():
     assert args.sensor_profile == 'throughput'
 
 
-@pytest.mark.parametrize('base', [0, 232])
+@pytest.mark.parametrize('base', [0, 230])
 def test_ros_domain_boundary_values_are_valid(base):
     args = parser().parse_args([
         '--trials', '1', '--ros-domain-base', str(base)])
@@ -196,7 +196,7 @@ def test_ros_domain_boundary_values_are_valid(base):
 
 @pytest.mark.parametrize('option,value', [
     ('--ros-domain-base', '-1'),
-    ('--ros-domain-base', '233'),
+    ('--ros-domain-base', '231'),
 ])
 def test_invalid_ros_domain_is_rejected_before_probe(option, value):
     args = parser().parse_args([option, value])
@@ -206,7 +206,7 @@ def test_invalid_ros_domain_is_rejected_before_probe(option, value):
 
 def test_ros_domain_range_exhaustion_is_rejected():
     args = parser().parse_args([
-        '--trials', '2', '--ros-domain-base', '232'])
+        '--trials', '2', '--ros-domain-base', '230'])
     with pytest.raises(SystemExit, match='exceeds supported maximum'):
         validate_resource_bounds(args)
 

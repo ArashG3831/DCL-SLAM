@@ -94,7 +94,8 @@ from .dwb_zero_event_capture import (
     sequence_records,
 )
 from .ros_runtime_preflight import (
-    PreflightError, _bounded_subprocess, run_preflight,
+    PreflightError, ROS_DOMAIN_MIN, ROS_DOMAIN_MAX, _bounded_subprocess,
+    run_preflight,
 )
 from .webots_port_negotiation import (
     WebotsPortNegotiationError, negotiate_webots_port, parse_webots_port_event,
@@ -4965,7 +4966,7 @@ def runner_parser() -> argparse.ArgumentParser:
                         default='full')
     result.add_argument('--startup-timeout', type=float, default=300.0)
     result.add_argument('--emergency-wall-runtime', type=float, default=1200.0)
-    result.add_argument('--ros-domain-id', type=int, default=232)
+    result.add_argument('--ros-domain-id', type=int, default=100)
     result.add_argument('--webots-port', type=int, default=23667)
     result.add_argument(
         '--fusion-cpu-quota-percent', type=float, default=30.0,
@@ -5346,8 +5347,10 @@ def runner_run(args: argparse.Namespace) -> int:
 def runner_main(argv=None) -> int:
     """CLI entry point for the source-tree runner."""
     args = runner_parser().parse_args(argv)
-    if args.ros_domain_id < 0 or args.ros_domain_id > 232:
-        raise SystemExit('--ros-domain-id must be between 0 and 232')
+    if not ROS_DOMAIN_MIN <= args.ros_domain_id <= ROS_DOMAIN_MAX:
+        raise SystemExit(
+            f'--ros-domain-id must be between {ROS_DOMAIN_MIN} and '
+            f'{ROS_DOMAIN_MAX} for the active CycloneDDS port profile')
     if args.mission_timeout <= 0.0:
         raise SystemExit('--mission-timeout must be positive')
     if args.startup_timeout <= 0.0:

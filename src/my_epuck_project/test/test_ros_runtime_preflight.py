@@ -11,7 +11,7 @@ from my_epuck_project import nav2_frontier_diagnostic as diagnostic
 def _fake_bound(monkeypatch, *, daemon_ok=True, webots_ok=True,
                 node_return=0, topic_return=0, timed_out=False):
     def bind(port):
-        if port == preflight.ROS_DAEMON_BASE_PORT + 232:
+        if port == preflight.ROS_DAEMON_BASE_PORT + preflight.ROS_DOMAIN_MAX:
             return {'ok': daemon_ok, 'errno': 98 if not daemon_ok else None,
                     'error': 'address in use' if not daemon_ok else ''}
         if port == 23667:
@@ -43,10 +43,17 @@ def _fake_bound(monkeypatch, *, daemon_ok=True, webots_ok=True,
     monkeypatch.setattr(preflight, '_bounded_subprocess', bounded)
 
 
+def test_cyclonedds_port_headroom_bound_is_derived_from_profile():
+    assert preflight.ROS_DOMAIN_MAX == 230
+    assert preflight.dds_max_unicast_port(230) <= preflight.DDS_PORT_MAX
+    assert preflight.dds_max_unicast_port(231) > preflight.DDS_PORT_MAX
+
+
 def test_daemon_port_conflict_with_no_daemon_graph_continues(tmp_path, monkeypatch):
     _fake_bound(monkeypatch, daemon_ok=False)
     report = preflight.run_preflight(
-        ros_domain_id=232, webots_port=23667, output_dir=tmp_path)
+        ros_domain_id=preflight.ROS_DOMAIN_MAX, webots_port=23667,
+        output_dir=tmp_path)
     assert report['status'] == 'SAFE_DAEMON_INDEPENDENT'
     assert report['daemon_port_bind']['ok'] is False
     assert json.loads((tmp_path / 'ros_preflight.json').read_text())['safe_daemon_independent']
@@ -57,7 +64,8 @@ def test_no_daemon_graph_timeout_aborts(tmp_path, monkeypatch, which):
     _fake_bound(monkeypatch, daemon_ok=False, timed_out=True)
     with pytest.raises(preflight.PreflightError):
         preflight.run_preflight(
-            ros_domain_id=232, webots_port=23667, output_dir=tmp_path)
+            ros_domain_id=preflight.ROS_DOMAIN_MAX, webots_port=23667,
+            output_dir=tmp_path)
     report = json.loads((tmp_path / 'ros_preflight.json').read_text())
     assert report['status'] == 'ROS_MIDDLEWARE_PREFLIGHT_FAILED'
     assert report[f'{which}_list_no_daemon']['timed_out'] is True
@@ -67,7 +75,8 @@ def test_occupied_webots_port_aborts(tmp_path, monkeypatch):
     _fake_bound(monkeypatch, webots_ok=False)
     with pytest.raises(preflight.PreflightError):
         preflight.run_preflight(
-            ros_domain_id=232, webots_port=23667, output_dir=tmp_path)
+            ros_domain_id=preflight.ROS_DOMAIN_MAX, webots_port=23667,
+            output_dir=tmp_path)
 
 
 def test_project_d_state_aborts(tmp_path, monkeypatch):
@@ -77,15 +86,19 @@ def test_project_d_state_aborts(tmp_path, monkeypatch):
         lambda: [{'pid': 99, 'status': 'disk-sleep', 'command': 'ros2 launch'}])
     with pytest.raises(preflight.PreflightError):
         preflight.run_preflight(
-            ros_domain_id=232, webots_port=23667, output_dir=tmp_path)
+            ros_domain_id=preflight.ROS_DOMAIN_MAX, webots_port=23667,
+            output_dir=tmp_path)
 
 
-def test_domain_233_is_rejected_and_reported(tmp_path, monkeypatch):
+def test_domain_above_dds_port_safe_bound_is_rejected_and_reported(
+        tmp_path, monkeypatch):
     _fake_bound(monkeypatch)
-    with pytest.raises(preflight.PreflightError, match='between 0 and 232'):
+    with pytest.raises(preflight.PreflightError, match='between 0 and 230'):
         preflight.run_preflight(
-            ros_domain_id=233, webots_port=23667, output_dir=tmp_path)
-    assert json.loads((tmp_path / 'ros_preflight.json').read_text())['ros_domain_id'] == 233
+            ros_domain_id=preflight.ROS_DOMAIN_MAX + 1,
+            webots_port=23667, output_dir=tmp_path)
+    assert json.loads((tmp_path / 'ros_preflight.json').read_text())[
+        'ros_domain_id'] == preflight.ROS_DOMAIN_MAX + 1
 
 
 def test_no_daemon_stop_command_is_not_called(tmp_path, monkeypatch):
@@ -108,7 +121,8 @@ def test_no_daemon_stop_command_is_not_called(tmp_path, monkeypatch):
                 'timed_out': False, 'timeout_s': 10.0, 'kill_after_s': 2.0}
 
     monkeypatch.setattr(preflight, '_bounded_subprocess', fake)
-    preflight.run_preflight(ros_domain_id=232, webots_port=23667,
+    preflight.run_preflight(ros_domain_id=preflight.ROS_DOMAIN_MAX,
+                            webots_port=23667,
                             output_dir=tmp_path)
     assert not any('daemon' in item and 'stop' in item for cmd in commands for item in cmd)
 
@@ -135,7 +149,8 @@ def test_bounded_subprocess_records_deadlines(monkeypatch):
 def test_standalone_runner_writes_json_and_does_not_launch(tmp_path, monkeypatch):
     args = diagnostic.runner_parser().parse_args([
         '--preflight-only', '--results-directory', str(tmp_path),
-        '--ros-domain-id', '232', '--webots-port', '23667',
+        '--ros-domain-id', str(preflight.ROS_DOMAIN_MAX),
+        '--webots-port', '23667',
     ])
     world = tmp_path / 'world.wbt'
     world.write_text('WorldInfo {}\n')
@@ -160,7 +175,8 @@ def test_standalone_runner_writes_json_and_does_not_launch(tmp_path, monkeypatch
 
 def test_standalone_runner_does_not_launch_when_preflight_fails(tmp_path, monkeypatch):
     args = diagnostic.runner_parser().parse_args([
-        '--results-directory', str(tmp_path), '--ros-domain-id', '232',
+        '--results-directory', str(tmp_path), '--ros-domain-id',
+        str(preflight.ROS_DOMAIN_MAX),
         '--webots-port', '23667',
     ])
     world = tmp_path / 'world.wbt'

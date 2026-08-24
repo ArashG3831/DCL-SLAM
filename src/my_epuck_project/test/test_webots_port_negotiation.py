@@ -69,7 +69,7 @@ def test_partial_output_parser_handles_split_redirect():
 
 def test_launch_command_passes_confirmed_controller_port(tmp_path):
     args = runner_parser().parse_args([
-        '--webots-port', '25000', '--ros-domain-id', '232',
+        '--webots-port', '25000', '--ros-domain-id', '230',
     ])
     command = launch_command(args, Path('/tmp/world.wbt'), tmp_path,
                              controller_port=25002)

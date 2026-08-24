@@ -48,6 +48,7 @@ from .occupancy_map_comparison import (
     load_map,
     resample_semantic,
 )
+from .ros_runtime_preflight import ROS_DOMAIN_MIN, ROS_DOMAIN_MAX
 
 
 CLASSIFICATIONS = (
@@ -90,8 +91,6 @@ NAV2_NODES = (
     'route_server', 'behavior_server', 'velocity_smoother',
     'collision_monitor', 'bt_navigator', 'waypoint_follower',
 )
-ROS_DOMAIN_MIN = 0
-ROS_DOMAIN_MAX = 232
 WEBOTS_PORT_MIN = 1024
 WEBOTS_PORT_MAX = 65535
 PROGRESS_LOCK = threading.RLock()

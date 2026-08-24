@@ -238,7 +238,7 @@ def test_runner_supports_required_command_surface(tmp_path):
         '--sensor-profile', 'full', '--time-mode', 'sim',
         '--fast-mode', 'true', '--rendering', 'true', '--rviz', 'true',
         '--mission-timeout', '600', '--startup-timeout', '300',
-        '--emergency-wall-runtime', '1200', '--ros-domain-id', '232',
+        '--emergency-wall-runtime', '1200', '--ros-domain-id', '230',
         '--webots-port', '23667',
     ])
     command = launch_command(args, Path('/tmp/large.wbt'), tmp_path)

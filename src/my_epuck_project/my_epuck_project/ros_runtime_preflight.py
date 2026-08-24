@@ -13,9 +13,37 @@ import subprocess
 
 import psutil
 
+# CycloneDDS/RTPS default unicast-port arithmetic is:
+#
+#   PB + DG * domain + d3 + PG * participant_index
+#
+# with the Jazzy Cyclone defaults PB=7400, DG=250, d3=11, PG=2.  The
+# simulation profile permits automatic participant indices through 200.  A
+# domain of 231 or 232 can therefore produce an endpoint above the maximum
+# UDP port (65535); the observed failure was repeated writes to 65536.  Keep
+# the bound derived from the active profile rather than accepting the ROS 2
+# domain-ID maximum blindly.
+DDS_PORT_BASE = 7400
+DDS_DOMAIN_GAIN = 250
+DDS_UNICAST_OFFSET = 11
+DDS_PARTICIPANT_GAIN = 2
+DDS_MAX_AUTO_PARTICIPANT_INDEX = 200
+DDS_PORT_MAX = 65535
 ROS_DOMAIN_MIN = 0
-ROS_DOMAIN_MAX = 232
+ROS_DOMAIN_MAX = min(
+    232,
+    (DDS_PORT_MAX - DDS_PORT_BASE - DDS_UNICAST_OFFSET
+     - DDS_PARTICIPANT_GAIN * DDS_MAX_AUTO_PARTICIPANT_INDEX)
+    // DDS_DOMAIN_GAIN,
+)
 ROS_DAEMON_BASE_PORT = 11511
+
+
+def dds_max_unicast_port(domain):
+    """Return the highest CycloneDDS unicast port for a domain."""
+    return (DDS_PORT_BASE + DDS_DOMAIN_GAIN * int(domain)
+            + DDS_UNICAST_OFFSET
+            + DDS_PARTICIPANT_GAIN * DDS_MAX_AUTO_PARTICIPANT_INDEX)
 
 
 class PreflightError(RuntimeError):
@@ -206,6 +234,8 @@ def run_preflight(*, ros_domain_id, webots_port, output_dir, environment=None):
         'status': 'PREFLIGHT_RUNNING',
         'ros_domain_id': domain,
         'ros_daemon_port': ROS_DAEMON_BASE_PORT + domain,
+        'dds_max_auto_participant_index': DDS_MAX_AUTO_PARTICIPANT_INDEX,
+        'dds_max_unicast_port': dds_max_unicast_port(domain),
         'rmw_implementation': environment.get(
             'RMW_IMPLEMENTATION', 'default'),
         'webots_port': int(webots_port),
@@ -224,7 +254,9 @@ def run_preflight(*, ros_domain_id, webots_port, output_dir, environment=None):
         report['status'] = 'ROS_MIDDLEWARE_PREFLIGHT_FAILED'
         report['error'] = (
             f'ROS domain must be between {ROS_DOMAIN_MIN} and '
-            f'{ROS_DOMAIN_MAX}')
+            f'{ROS_DOMAIN_MAX} for the active CycloneDDS port profile; '
+            f'domain {domain} can reach UDP port '
+            f'{dds_max_unicast_port(domain)}')
         (output / 'ros_preflight.json').write_text(
             json.dumps(report, indent=2, sort_keys=True) + '\n')
         raise PreflightError(report['error'])

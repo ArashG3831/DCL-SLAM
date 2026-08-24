@@ -9,6 +9,8 @@ from rcl_interfaces.srv import GetParameters, ListParameters
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import parameter_value_to_python
 
+from .ros_runtime_preflight import ROS_DOMAIN_MIN, ROS_DOMAIN_MAX
+
 
 SNAPSHOT_SCHEMA = '2.0.0'
 
@@ -79,8 +81,10 @@ def collect_snapshots(node_names, domain_id, timeout_s=8.0):
     """Collect bounded snapshots in one rclpy context and ROS domain."""
     if isinstance(domain_id, bool) or not isinstance(domain_id, int):
         raise ValueError('allocated ROS domain must be an integer')
-    if not 0 <= domain_id <= 232:
-        raise ValueError('allocated ROS domain must be between 0 and 232')
+    if not ROS_DOMAIN_MIN <= domain_id <= ROS_DOMAIN_MAX:
+        raise ValueError(
+            f'allocated ROS domain must be between {ROS_DOMAIN_MIN} and '
+            f'{ROS_DOMAIN_MAX} for the active CycloneDDS port profile')
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
     os.environ['ROS_DOMAIN_ID'] = str(domain_id)
     context = rclpy.context.Context()

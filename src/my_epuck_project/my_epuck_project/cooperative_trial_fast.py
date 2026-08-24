@@ -45,6 +45,7 @@ from tf2_ros import Buffer, TransformListener
 
 from .cooperative_profiles import (
     PROFILE_SETTINGS, profile_for_world, profile_summary)
+from .ros_runtime_preflight import ROS_DOMAIN_MIN, ROS_DOMAIN_MAX
 
 
 _SOURCE_WORKSPACE = Path(__file__).resolve().parents[3]
@@ -756,8 +757,10 @@ def main(argv=None) -> int:
         args.mission_timeout = settings['mission_timeout']
     if args.startup_timeout is None:
         args.startup_timeout = settings['startup_timeout']
-    if args.ros_domain_id < 0 or args.ros_domain_id > 232:
-        raise SystemExit('--ros-domain-id must be between 0 and 232')
+    if not ROS_DOMAIN_MIN <= args.ros_domain_id <= ROS_DOMAIN_MAX:
+        raise SystemExit(
+            f'--ros-domain-id must be between {ROS_DOMAIN_MIN} and '
+            f'{ROS_DOMAIN_MAX} for the active CycloneDDS port profile')
     return run(args)
 
 

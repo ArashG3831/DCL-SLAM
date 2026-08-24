@@ -215,6 +215,15 @@ def test_phase_manager_relays_accepted_tf_after_frontend_teardown():
     assert "'shared_frame': 'shared_map'" in full
 
 
+def test_shared_phase_recreates_only_robot_local_frame_anchors():
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
+    assert 'shared_frame_anchors = []' in stack
+    assert 'shared_phase_local_map_frame_anchor' in stack
+    assert "'--frame-id', f'{robot}/local_world'" in stack
+    assert "'--child-frame-id', f'{robot}/map'" in stack
+    assert '*shared_frame_anchors' in stack
+
+
 def test_source_ack_can_finalize_after_proposal_keyframes_are_evicted():
     """An in-flight canonical proposal owns its immutable protocol envelope."""
     frontend = (PY / 'unknown_pose_frontend.py').read_text()

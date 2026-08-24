@@ -456,6 +456,28 @@ def launch_setup(context):
                         'fusion_cpu_quota_percent').perform(context) + '%'
                     if diagnostic_mode and quota_enabled else ''),
                 ))
+    # The pre-handoff mapping launch owns the robot-local frame anchors, but
+    # those processes are intentionally terminated with the local Nav2 stack
+    # at handoff.  Recreate the non-estimating local_world -> map anchors in
+    # the shared launch so shared_map -> local_world (from the accepted
+    # protocol TF relay) remains connected to each robot's SLAM map/odom/base
+    # chain.  These anchors are identity edges within one robot and contain no
+    # inter-robot pose information.
+    shared_frame_anchors = []
+    if unknown_initial_pose and launch_shared_stack:
+        for robot in ('robot1', 'robot2'):
+            shared_frame_anchors.append(Node(
+                package='tf2_ros',
+                executable='static_transform_publisher',
+                name='shared_phase_local_map_frame_anchor',
+                namespace=robot,
+                output='screen',
+                arguments=[
+                    '--x', '0.0', '--y', '0.0', '--z', '0.0', '--yaw', '0.0',
+                    '--frame-id', f'{robot}/local_world',
+                    '--child-frame-id', f'{robot}/map',
+                ],
+            ))
     nav2_actions = []
     for robot in ('robot1', 'robot2'):
         if unknown_initial_pose and launch_mapping:
@@ -484,7 +506,8 @@ def launch_setup(context):
                 LaunchConfiguration('controller_variant').perform(context),
                 use_sim_time_value=LaunchConfiguration(
                     'use_sim_time').perform(context)))
-    return [filtered_slam, *alignment, *exchange, *nav2_actions]
+    return [filtered_slam, *alignment, *exchange,
+            *shared_frame_anchors, *nav2_actions]
 
 
 def generate_launch_description():

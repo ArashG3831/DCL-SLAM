@@ -148,6 +148,50 @@ audit above proves that the bypass was possible and active in the investigative
 shell. Do not label the latest run as a clean-run regression until its runtime
 provenance is captured.
 
+## Follow-up incident: valid-domain clean run (2026-08-25)
+
+The bounded handoff attempt `gate_b_handoff_20260825_0815` was stopped after
+the host again entered the catastrophic state.  This attempt has complete
+runtime provenance and therefore separates the remaining mechanism from the
+old invalid-port trigger:
+
+* source/install commit: `635b66755e43c52b7d8b57204e4ab460c629c056`;
+* clean validation install and build tree were used;
+* `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`;
+* `CYCLONEDDS_URI` was the clean WSL loopback profile;
+* ROS domain `46` and Webots port `23092` (both below the safe bound);
+* Webots fast mode, two robots, full reliable sensor traffic;
+* no `ddsi_udp_conn_write ...:65536` text, DDS assertion, SIGABRT, or
+  active-runtime SIGSEGV was found in the attempt logs.
+
+The campaign's `process_metrics.csv` measured WSL process-tree RSS rising to
+approximately 3.77 GB while WSL available memory fell from approximately
+6.995 GB to 4.779 GB.  After the exact campaign process tree was terminated,
+WSL recovered to approximately 6.6 GB available and no campaign process or
+Webots port remained.  A Windows counter query after teardown still reported:
+
+```text
+Pool Nonpaged Bytes = 13,654,495,232 bytes (about 13.65 GB)
+Available MBytes    = 19 MB
+Pool Paged Bytes     = 497,905,664 bytes
+```
+
+Thus this attempt reproduces the Windows kernel-pool failure with a valid
+CycloneDDS domain and no invalid endpoint in the captured logs.  The map-fusion
+timestamp change in commit `635b667` cannot account for Windows network-pool
+allocation; it changes only ROS-side TF lookup timing.  The remaining trigger
+is therefore the accelerated two-robot reliable/full-sensor ROS traffic path
+through WSL2/Hyper-V/Windows networking (NETIO/NDIS/filter ownership remains
+unidentified).  The earlier domain-headroom and `:65536` fail-fast changes are
+still necessary, but they are not a complete fix for this valid-traffic path.
+
+No Windows nonpaged-pool baseline was captured immediately before this
+attempt, so the exact byte delta attributable to this individual run cannot be
+computed from the saved artifacts.  The post-teardown counter is nevertheless
+conclusive that the allocation is outside campaign process RSS and survives
+ROS/Webots cleanup.  A full Windows reboot is required before any further
+Webots launch; do not use WSL `free` alone as a host-safety signal.
+
 ## Required source hardening before resuming validation
 
 The next code change must be narrow and fail-closed:

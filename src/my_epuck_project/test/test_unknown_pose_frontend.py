@@ -1018,6 +1018,25 @@ def test_consensus_diagnostic_stream_survives_unrelated_protocol_traffic(tmp_pat
     assert len(unrelated_protocol_events) == 512
 
 
+def test_evidence_hash_is_direction_independent():
+    forward = UnknownPoseFrontend._canonical_evidence_hash(
+        'robot1', 'robot2', ['r1-k0', 'r1-k1'], ['r2-k0', 'r2-k1'])
+    reverse = UnknownPoseFrontend._canonical_evidence_hash(
+        'robot2', 'robot1', ['r2-k0', 'r2-k1'], ['r1-k0', 'r1-k1'])
+    assert forward == reverse
+
+
+def test_physical_diagnostic_writer_has_byte_bound(tmp_path):
+    stream = DedicatedDiagnosticJsonl(
+        tmp_path / 'bounded.jsonl', max_records=1000, max_bytes=1024)
+    for index in range(100):
+        stream.write({'record_type': 'REPETITIVE', 'payload': 'x' * 100,
+                       'index': index})
+    stream.close()
+    assert stream.bytes_written <= 1024
+    assert stream.dropped_records > 0
+
+
 def test_only_mutually_accepted_hypothesis_reaches_existing_merger_boundary():
     class ExistingMergerBoundary:
         def __init__(self):

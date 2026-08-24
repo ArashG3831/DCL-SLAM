@@ -29,6 +29,7 @@ from my_epuck_project.robust_relative_pose_selector import (
     ACCEPTED_HYPOTHESIS,
     AMBIGUOUS_HYPOTHESES,
     INSUFFICIENT_EVIDENCE,
+    IncrementalHypothesisAccumulator,
     PoseConstraint,
     select_robust_hypothesis,
 )
@@ -215,6 +216,30 @@ def test_robust_selector_rejects_current_internally_inconsistent_three_set():
     # The diagnostics may retain the high-probability set for forensic
     # reporting even when the structural compatibility gate rejects it.
     assert selection.runner_up_margin >= 0.0
+
+
+def test_incremental_accumulator_preserves_old_1313_degree_rejection():
+    """Accumulation must not turn the known inconsistent set into a handoff."""
+    accumulator = IncrementalHypothesisAccumulator()
+    selection = accumulator.update([
+        _selector_constraint((-2.7218818, 0.0085150, -0.0130691), 0),
+        _selector_constraint((-2.6999520, 0.0129301, -0.0239829), 1),
+        _selector_constraint((-2.7715699, 0.0130774, -0.0010675), 2),
+    ])
+    assert selection.status != ACCEPTED_HYPOTHESIS
+    assert len(selection.selected_indices) < 3
+
+
+def test_incremental_accumulator_promotes_consistent_evidence_over_batches():
+    accumulator = IncrementalHypothesisAccumulator()
+    first = [_selector_constraint((0.7, -0.2, 0.03), i) for i in range(2)]
+    assert accumulator.update(first).status != ACCEPTED_HYPOTHESIS
+    result = accumulator.update([
+        _selector_constraint((0.698, -0.201, 0.029), 2),
+    ])
+    assert result.status == ACCEPTED_HYPOTHESIS
+    assert len(result.selected_indices) >= 3
+    assert result.diagnostics[-1]['kind'] == 'incremental_hypothesis_accumulator'
 
 
 def test_robust_selector_accepts_clear_cluster_and_rejects_outlier():

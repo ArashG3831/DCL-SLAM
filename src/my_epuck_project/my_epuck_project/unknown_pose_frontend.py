@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict, deque
+import copy
 import json
 import hashlib
 import math
@@ -59,6 +60,7 @@ from .unknown_pose_frontend_core import (
     temporal_support_count,
     temporal_consistency,
 )
+from .robust_relative_pose_selector import IncrementalHypothesisAccumulator
 
 
 class UnknownPoseFrontend(Node):
@@ -149,12 +151,10 @@ class UnknownPoseFrontend(Node):
             self.physical_evidence_diagnostics = DedicatedDiagnosticJsonl(
                 Path(self.diagnostic_output) /
                 f'{self.robot_id}_physical_evidence_diagnostics.jsonl',
-                # Candidate observations can be numerous in a single
-                # diagnostic motion fixture.  Keep this stream independent
-                # from the protocol buffer and large enough that selection,
-                # crop, and state-transition records are not evicted before
-                # shutdown finalization.
-                max_records=1_000_000)
+                # Physical evidence is a forensic stream, not a raw data
+                # archive.  Keep it bounded so repeated candidate rejections
+                # cannot consume hundreds of megabytes and starve DDS.
+                max_records=20_000, max_bytes=32 * 1024 * 1024)
         else:
             self.physical_evidence_diagnostics = None
         self.counters = {
@@ -177,6 +177,8 @@ class UnknownPoseFrontend(Node):
             'registration_callback_exits': 0,
             'registration_callback_exceptions': 0,
             'proposals_published': 0,
+            'hypothesis_summaries_published': 0,
+            'hypothesis_summaries_received': 0,
             'acks_published': 0,
             'accepted_hypotheses': 0,
             'rejected_hypotheses': 0,
@@ -278,9 +280,16 @@ class UnknownPoseFrontend(Node):
         # remains unchanged and every request/result/rejection is still
         # recorded.
         self._diagnosed_duplicate_physical_candidates = set()
+        self._physical_diagnostic_summary = Counter()
+        self._physical_diagnostic_suppressed = Counter()
         self.received_peer_crops = {}
         self.batch_proposal_published = False
         self.pending_target_proposal = False
+        self.local_hypothesis_summary = None
+        self.local_hypothesis_result = None
+        self.peer_hypothesis_summary = None
+        self.hypothesis_accumulator = IncrementalHypothesisAccumulator(
+            min_inliers=self.min_consistent_constraints)
         self.registration_callback_depth = 0
         self.evidence_acquisition_deadline_wall = None
         self.evidence_acquisition_started = False
@@ -399,7 +408,20 @@ class UnknownPoseFrontend(Node):
 
     def _write_physical_evidence_diagnostic(self, record_type, **fields):
         """Stream formation evidence independently of protocol-event storage."""
+        self._physical_diagnostic_summary[str(record_type)] += 1
         if self.physical_evidence_diagnostics is None:
+            return
+        # High-volume negative scheduling records are summarized after a
+        # small forensic sample.  Important lifecycle, crop, registration,
+        # and handoff records remain lossless until the bounded writer cap.
+        repetitive = {
+            'CANDIDATE_VERIFICATION_SKIPPED',
+            'PENDING_CANDIDATE_DUPLICATE_SUPPRESSED',
+            'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
+        }
+        if str(record_type) in repetitive and \
+                self._physical_diagnostic_summary[str(record_type)] > 64:
+            self._physical_diagnostic_suppressed[str(record_type)] += 1
             return
         try:
             record = {
@@ -915,7 +937,7 @@ class UnknownPoseFrontend(Node):
     def _compare_peer_descriptors(self, new_peer_key=None, new_own_key=None):
         if not self.keyframes or not self.peer_descriptors:
             return
-        if self.robot_id > self.peer_robot_id or self.batch_proposal_published:
+        if self.batch_proposal_published:
             return
         if new_peer_key is not None or new_own_key is not None:
             peer_items = list(self.peer_descriptors.items())
@@ -1797,11 +1819,8 @@ class UnknownPoseFrontend(Node):
                              self._descriptor_geometry(expected_peer)),
             status='RECEIVED')
         self.received_peer_crops[message.keyframe_id] = received_crop
-        if self.robot_id > self.peer_robot_id:
-            proposal = self.peer_proposals.get(message.keyframe_id)
-            if proposal is None:
-                self._record_crop_rejection('UNMATCHED_TARGET_PROPOSAL', message)
-                return
+        proposal = self.peer_proposals.get(message.keyframe_id)
+        if self.robot_id > self.peer_robot_id and proposal is not None:
             evidence_sources = list(getattr(
                 proposal, 'evidence_source_keyframe_ids', []))
             evidence_targets = list(getattr(
@@ -2074,6 +2093,13 @@ class UnknownPoseFrontend(Node):
             'REGISTRATION_CALLBACK_ENTRY', source=source,
             keyframe_id=keyframe_id, constraint_count=len(evidence_pairs))
         try:
+            evidence_ids = None
+            accumulator = None
+            if source == 'incremental_consensus':
+                evidence_ids = [
+                    f'{own_key}|{peer_key}'
+                    for (own_key, peer_key) in self.evidence_pairs]
+                accumulator = self.hypothesis_accumulator
             result = register_crop_set(
                 evidence_pairs,
                 target_map_radius_m=self.target_map_radius_m,
@@ -2081,7 +2107,9 @@ class UnknownPoseFrontend(Node):
                 max_projected_registration_error_m=(
                     self.max_projected_registration_error_m),
                 individual_results=individual_results,
-                evidence_timestamps=evidence_timestamps)
+                evidence_timestamps=evidence_timestamps,
+                evidence_ids=evidence_ids,
+                hypothesis_accumulator=accumulator)
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
@@ -2171,7 +2199,7 @@ class UnknownPoseFrontend(Node):
         return candidate_pool
 
     def _publish_multi_constraint_proposal(self, result=None):
-        if self.batch_proposal_published or self.robot_id > self.peer_robot_id:
+        if self.batch_proposal_published:
             return
         if self.evidence_acquisition_started and result is None:
             return
@@ -2261,7 +2289,7 @@ class UnknownPoseFrontend(Node):
         self.counters['multi_constraint_attempts'] += 1
         if result is None:
             result = self._run_registration(
-                pairs, 'initiator_batch', selected_pairs[0][0],
+                pairs, 'incremental_consensus', selected_pairs[0][0],
                 evidence_timestamps=[
                     (self._stamp_ns(candidate[3]),
                      self._stamp_ns(candidate[2]))
@@ -2272,26 +2300,36 @@ class UnknownPoseFrontend(Node):
         # The descriptor is retained in the selected candidate even when the
         # bounded live descriptor cache has since evicted its key.
         peer_descriptor = selected_pairs[0][2]
-        self.pending_proposals[(own_key, peer_key)] = result
         source_ids = [pair[1] for pair in selected_pairs]
         target_ids = [pair[0] for pair in selected_pairs]
         self._publish_local_evidence_crops(
             source_ids, evidence_candidates=selected_pairs)
         proposal = self._hypothesis_message(
             own_descriptor, peer_descriptor, result,
-            status='PROPOSED' if result.accepted else 'REJECTED',
+            status='CANDIDATE' if result.accepted else 'REJECTED',
             accepted=False,
             rejection_reason='' if result.accepted else result.reason,
             evidence_source_keyframe_ids=source_ids,
             evidence_target_keyframe_ids=target_ids)
-        self.pending_proposal_evidence_hashes[(str(own_key), str(peer_key))] = (
-            str(proposal.evidence_set_hash))
         self.hypothesis_pub.publish(proposal)
-        self.counters['proposals_published'] += 1
-        self.batch_proposal_published = bool(result.accepted)
         if result.accepted:
+            self.local_hypothesis_summary = proposal
+            self.local_hypothesis_result = result
+            self.counters['hypothesis_summaries_published'] += 1
             self.verification_batches.mark_completed()
+            self._record_diagnostic_event(
+                'LOCAL_HYPOTHESIS_SUMMARY_PUBLISHED',
+                evidence_set_hash=str(proposal.evidence_set_hash),
+                selector_score=float(proposal.selector_score),
+                selector_runner_up_margin=float(
+                    proposal.selector_runner_up_margin),
+                consistent_constraint_count=int(
+                    proposal.consistent_constraint_count))
+            if (self.robot_id == min(self.robot_id, self.peer_robot_id) and
+                    self._peer_hypothesis_agrees(proposal)):
+                self._publish_canonical_proposal(proposal, result)
         else:
+            self.counters['proposals_published'] += 1
             self.counters['rejected_hypotheses'] += 1
             self.negotiation_started = False
             self._write_physical_evidence_diagnostic(
@@ -2300,6 +2338,79 @@ class UnknownPoseFrontend(Node):
                 constraints_accumulated=len(self.evidence_physical_keys),
                 reason='CONSENSUS_REJECTED',
                 state='WAITING_FOR_NOVEL_EVIDENCE')
+
+    @staticmethod
+    def _canonical_evidence_hash(source_robot_id, target_robot_id,
+                                  source_ids, target_ids):
+        """Hash evidence pairs in a robot-independent direction."""
+        entries = []
+        low_first = str(source_robot_id) < str(target_robot_id)
+        for source_id, target_id in zip(source_ids, target_ids):
+            if low_first:
+                entries.append(f'{source_robot_id}:{source_id}|'
+                               f'{target_robot_id}:{target_id}')
+            else:
+                entries.append(f'{target_robot_id}:{target_id}|'
+                               f'{source_robot_id}:{source_id}')
+        return hashlib.sha256('|'.join(sorted(entries)).encode('utf-8')).hexdigest()[:16]
+
+    @staticmethod
+    def _summary_transform(message):
+        rotation = message.source_to_target.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z),
+            1.0 - 2.0 * rotation.z ** 2)
+        return (float(message.source_to_target.translation.x),
+                float(message.source_to_target.translation.y), float(yaw))
+
+    def _peer_hypothesis_agrees(self, local_summary):
+        peer = self.peer_hypothesis_summary
+        if peer is None:
+            return False
+        if str(peer.evidence_set_hash) != str(local_summary.evidence_set_hash):
+            self._record_diagnostic_event(
+                'HYPOTHESIS_SUMMARY_MISMATCH',
+                local_evidence_set_hash=str(local_summary.evidence_set_hash),
+                peer_evidence_set_hash=str(peer.evidence_set_hash))
+            return False
+        local = self._summary_transform(local_summary)
+        peer_inverse = invert_se2(self._summary_transform(peer))
+        translation_error = math.hypot(local[0] - peer_inverse[0],
+                                       local[1] - peer_inverse[1])
+        yaw_error = abs(math.atan2(math.sin(local[2] - peer_inverse[2]),
+                                   math.cos(local[2] - peer_inverse[2])))
+        agrees = (str(peer.selector_status) == 'ACCEPTED_HYPOTHESIS' and
+                  int(peer.consistent_constraint_count) >=
+                  int(self.min_consistent_constraints) and
+                  translation_error <= 0.12 and yaw_error <= 0.04)
+        self._record_diagnostic_event(
+            'HYPOTHESIS_SUMMARY_VERIFIED',
+            evidence_set_hash=str(local_summary.evidence_set_hash),
+            translation_error_m=translation_error,
+            yaw_error_rad=yaw_error, agrees=agrees)
+        return agrees
+
+    def _publish_canonical_proposal(self, summary, result):
+        """Publish exactly one canonical proposal after peer verification."""
+        if self.batch_proposal_published or self.robot_id != min(
+                self.robot_id, self.peer_robot_id):
+            return
+        proposal = copy.deepcopy(summary)
+        proposal.status = 'PROPOSED'
+        proposal.accepted = False
+        key = (str(proposal.source_keyframe_id),
+               str(proposal.target_keyframe_id))
+        self.pending_proposals[key] = result
+        self.pending_proposal_evidence_hashes[key] = str(
+            proposal.evidence_set_hash)
+        self.hypothesis_pub.publish(proposal)
+        self.counters['proposals_published'] += 1
+        self.batch_proposal_published = True
+        self._record_diagnostic_event(
+            'CANONICAL_PROPOSAL_PUBLISHED',
+            evidence_set_hash=str(proposal.evidence_set_hash),
+            source_keyframe_id=str(proposal.source_keyframe_id),
+            target_keyframe_id=str(proposal.target_keyframe_id))
 
     def _publish_local_evidence_crops(self, keyframe_ids,
                                       evidence_candidates=None):
@@ -2406,10 +2517,8 @@ class UnknownPoseFrontend(Node):
         message.accepted = bool(accepted)
         source_ids = list(evidence_source_keyframe_ids or [own.keyframe_id])
         target_ids = list(evidence_target_keyframe_ids or [peer.keyframe_id])
-        evidence = '|'.join(f'{source}:{target}' for source, target in zip(
-            source_ids, target_ids))
-        message.evidence_set_hash = hashlib.sha256(
-            evidence.encode('utf-8')).hexdigest()[:16]
+        message.evidence_set_hash = self._canonical_evidence_hash(
+            self.robot_id, self.peer_robot_id, source_ids, target_ids)
         message.evidence_source_keyframe_ids = source_ids
         message.evidence_target_keyframe_ids = target_ids
         message.constraint_count = int(result.constraint_count)
@@ -2464,6 +2573,30 @@ class UnknownPoseFrontend(Node):
             self._record_diagnostic_event(
                 'HYPOTHESIS_IGNORED_ALREADY_ACCEPTED',
                 status=str(message.status))
+            return
+        if message.status == 'CANDIDATE':
+            if self.robot_id != message.target_robot_id:
+                self._record_diagnostic_event(
+                    'HYPOTHESIS_SUMMARY_IGNORED_SCOPE',
+                    source_robot_id=str(message.source_robot_id),
+                    target_robot_id=str(message.target_robot_id))
+                return
+            self.peer_hypothesis_summary = message
+            self.counters['hypothesis_summaries_received'] += 1
+            self._record_diagnostic_event(
+                'PEER_HYPOTHESIS_SUMMARY_RECEIVED',
+                evidence_set_hash=str(message.evidence_set_hash),
+                selector_status=str(message.selector_status),
+                consistent_constraint_count=int(
+                    message.consistent_constraint_count))
+            if (self.robot_id == min(self.robot_id, self.peer_robot_id) and
+                    self.local_hypothesis_summary is not None and
+                    self.local_hypothesis_result is not None and
+                    self._peer_hypothesis_agrees(
+                        self.local_hypothesis_summary)):
+                self._publish_canonical_proposal(
+                    self.local_hypothesis_summary,
+                    self.local_hypothesis_result)
             return
         if message.status == 'PROPOSED' and self.robot_id == message.target_robot_id:
             if self.pending_target_proposal:
@@ -2896,6 +3029,13 @@ class UnknownPoseFrontend(Node):
                 'physical_evidence_diagnostic_write_failures': (
                     0 if self.physical_evidence_diagnostics is None else
                     self.physical_evidence_diagnostics.write_failures),
+                'physical_evidence_record_counts': dict(
+                    self._physical_diagnostic_summary),
+                'physical_evidence_records_suppressed': dict(
+                    self._physical_diagnostic_suppressed),
+                'physical_evidence_bytes_written': (
+                    0 if self.physical_evidence_diagnostics is None else
+                    self.physical_evidence_diagnostics.bytes_written),
                 'verification_batch_state': {
                     'acquisition_batch_id': int(
                         self.verification_batches.batch_id),

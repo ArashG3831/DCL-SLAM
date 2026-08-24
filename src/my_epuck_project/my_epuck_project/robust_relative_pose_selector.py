@@ -10,7 +10,8 @@ handoff.  It is not a full pose-graph EM implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import combinations
 import math
 from typing import Iterable
 
@@ -79,6 +80,145 @@ class RobustPoseSelection:
     runner_up_score: float
     runner_up_margin: float
     diagnostics: tuple[dict, ...] = ()
+
+
+class IncrementalHypothesisAccumulator:
+    """Retain competing SE(2) hypotheses across evidence batches.
+
+    The selector itself remains unchanged, including its 0.10 winner margin.
+    This wrapper supplies the missing temporal part of the estimator: stable
+    evidence IDs are retained, compatible evidence clusters are evaluated as
+    competing models, and a cluster only becomes more competitive when new
+    independent observations support that same transform.  No threshold is
+    relaxed and no transform is accepted from a two-constraint cluster.
+    """
+
+    def __init__(self, min_inliers=3, min_spatial_baseline_m=0.75,
+                 max_translation_disagreement_m=0.15,
+                 max_yaw_disagreement_rad=math.radians(1.0),
+                 min_runner_up_margin=0.10):
+        self.min_inliers = int(min_inliers)
+        self.min_spatial_baseline_m = float(min_spatial_baseline_m)
+        self.max_translation_disagreement_m = float(
+            max_translation_disagreement_m)
+        self.max_yaw_disagreement_rad = float(max_yaw_disagreement_rad)
+        self.min_runner_up_margin = float(min_runner_up_margin)
+        self._constraints = {}
+        self.history = []
+
+    def _maximal_cliques(self, items):
+        """Return bounded deterministic mutually-compatible clusters."""
+        n = len(items)
+        if n < self.min_inliers:
+            return []
+
+        def compatible(a, b):
+            translation, yaw = _distance(items[a].transform,
+                                          items[b].transform)
+            return (translation <= self.max_translation_disagreement_m and
+                    yaw <= self.max_yaw_disagreement_rad)
+
+        # Registration evidence is intentionally bounded.  Exhaustive
+        # enumeration gives deterministic maximal cliques for the normal
+        # batch size and avoids order-dependent cluster accumulation.
+        if n <= 16:
+            cliques = []
+            for size in range(n, self.min_inliers - 1, -1):
+                for subset in combinations(range(n), size):
+                    if not all(compatible(a, b)
+                               for a, b in combinations(subset, 2)):
+                        continue
+                    if any(set(subset) < set(existing)
+                           for existing in cliques):
+                        continue
+                    cliques.append(tuple(subset))
+            return sorted(set(cliques), key=lambda value: value)
+
+        # Defensive fallback for an unexpectedly large diagnostic batch.
+        result = []
+        for index in range(n):
+            if all(compatible(index, other) for other in result):
+                result.append(index)
+        return [tuple(result)] if len(result) >= self.min_inliers else []
+
+    def update(self, candidates):
+        """Add a batch and return a selection indexed into the accumulated set."""
+        for candidate in candidates:
+            key = str(candidate.evidence_id)
+            if key not in self._constraints:
+                self._constraints[key] = candidate
+        items = [self._constraints[key]
+                 for key in sorted(self._constraints)]
+        if not items:
+            result = select_robust_hypothesis(
+                (), min_inliers=self.min_inliers,
+                min_spatial_baseline_m=self.min_spatial_baseline_m,
+                max_translation_disagreement_m=
+                    self.max_translation_disagreement_m,
+                max_yaw_disagreement_rad=self.max_yaw_disagreement_rad,
+                min_runner_up_margin=self.min_runner_up_margin)
+            self.history.append(result)
+            return result
+
+        hypotheses = []
+        for clique in self._maximal_cliques(items):
+            selection = select_robust_hypothesis(
+                [items[index] for index in clique],
+                min_inliers=self.min_inliers,
+                min_spatial_baseline_m=self.min_spatial_baseline_m,
+                max_translation_disagreement_m=
+                    self.max_translation_disagreement_m,
+                max_yaw_disagreement_rad=self.max_yaw_disagreement_rad,
+                min_runner_up_margin=self.min_runner_up_margin)
+            if selection.status == ACCEPTED_HYPOTHESIS:
+                probabilities = [0.0] * len(items)
+                for local, global_index in enumerate(clique):
+                    if local < len(selection.inlier_probabilities):
+                        probabilities[global_index] = selection.inlier_probabilities[local]
+                hypotheses.append((selection, clique, tuple(probabilities)))
+
+        # Keep the original selector as the null/diagnostic path.  This is
+        # important for forensic output and preserves the old bad-evidence
+        # rejection semantics when no compatible >=3 cluster exists.
+        fallback = select_robust_hypothesis(
+            items, min_inliers=self.min_inliers,
+            min_spatial_baseline_m=self.min_spatial_baseline_m,
+            max_translation_disagreement_m=
+                self.max_translation_disagreement_m,
+            max_yaw_disagreement_rad=self.max_yaw_disagreement_rad,
+            min_runner_up_margin=self.min_runner_up_margin)
+        if not hypotheses:
+            self.history.append(fallback)
+            return fallback
+
+        hypotheses.sort(key=lambda entry: (
+            -float(entry[0].score), tuple(items[index].evidence_id
+                                          for index in entry[1])))
+        winner, clique, probabilities = hypotheses[0]
+        runner_score = max(
+            [float(entry[0].score) for entry in hypotheses[1:]] +
+            [float(winner.null_score)])
+        margin = float(winner.score - runner_score)
+        status = (ACCEPTED_HYPOTHESIS if margin >= self.min_runner_up_margin
+                  else AMBIGUOUS_HYPOTHESES)
+        selected = tuple(int(index) for index in
+                         [clique[index] for index in winner.selected_indices])
+        result = replace(
+            winner, status=status, selected_indices=selected,
+            inlier_probabilities=tuple(probabilities),
+            runner_up_score=float(runner_score),
+            runner_up_margin=float(margin),
+            diagnostics=tuple(winner.diagnostics) + ({
+                'kind': 'incremental_hypothesis_accumulator',
+                'accumulated_evidence_count': len(items),
+                'competing_cluster_count': len(hypotheses),
+                'winner_evidence_ids': [
+                    str(items[clique[index]].evidence_id)
+                    for index in winner.selected_indices],
+                'runner_up_margin': margin,
+            },))
+        self.history.append(result)
+        return result
 
 
 def _safe_quality(value: float) -> float:

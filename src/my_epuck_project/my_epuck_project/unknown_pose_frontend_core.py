@@ -12,6 +12,7 @@ from functools import lru_cache
 from itertools import combinations
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
@@ -19,6 +20,7 @@ import numpy as np
 
 from .robust_relative_pose_selector import (
     ACCEPTED_HYPOTHESIS,
+    IncrementalHypothesisAccumulator,
     PoseConstraint,
     select_robust_hypothesis,
 )
@@ -42,9 +44,12 @@ MINIMUM_ACCEPTED_CONFIDENCE = 0.65
 class DedicatedDiagnosticJsonl:
     """Bounded streaming store independent from the protocol-event buffer."""
 
-    def __init__(self, path: str | Path, max_records: int = 8192):
+    def __init__(self, path: str | Path, max_records: int = 8192,
+                 max_bytes: int = 32 * 1024 * 1024):
         self.path = Path(path)
         self.max_records = max(1, int(max_records))
+        self.max_bytes = max(1024, int(max_bytes))
+        self.bytes_written = 0
         self.records_written = 0
         self.dropped_records = 0
         self.write_failures = 0
@@ -56,16 +61,23 @@ class DedicatedDiagnosticJsonl:
             self.write_failures += 1
 
     def write(self, record: dict) -> None:
-        if self.records_written + self.dropped_records >= self.max_records:
+        if (self.records_written + self.dropped_records >= self.max_records or
+                self.bytes_written >= self.max_bytes):
             self.dropped_records += 1
             return
         if self._stream is None:
             self.write_failures += 1
             return
         try:
-            self._stream.write(json.dumps(record, sort_keys=True) + '\n')
+            payload = json.dumps(record, sort_keys=True) + '\n'
+            encoded_size = len(payload.encode('utf-8'))
+            if self.bytes_written + encoded_size > self.max_bytes:
+                self.dropped_records += 1
+                return
+            self._stream.write(payload)
             self._stream.flush()
             self.records_written += 1
+            self.bytes_written += encoded_size
         except (OSError, TypeError, ValueError):
             self.write_failures += 1
 
@@ -1378,7 +1390,9 @@ def register_crop_set(
         max_robust_residual_m: float = 0.08,
         min_candidate_margin: float = 0.02,
         individual_results: Iterable[RegistrationResult] | None = None,
-        evidence_timestamps: Iterable[tuple[int, int]] | None = None
+        evidence_timestamps: Iterable[tuple[int, int]] | None = None,
+        evidence_ids: Iterable[str] | None = None,
+        hypothesis_accumulator: IncrementalHypothesisAccumulator | None = None
         ) -> RegistrationResult:
     """Estimate one transform from an independently verified crop set.
 
@@ -1428,6 +1442,7 @@ def register_crop_set(
                         if result.accepted]
     timestamp_list = list(evidence_timestamps or ())
     robust_candidates = []
+    evidence_id_list = list(evidence_ids or ())
     for index in accepted_indices:
         pair = pair_list[index]
         item = results[index]
@@ -1440,17 +1455,43 @@ def register_crop_set(
                 0.45 * item.inlier_ratio +
                 0.30 * item.occupied_free_agreement +
                 0.25 * item.overlap_fraction))),
-            evidence_id=str(index),
+            evidence_id=(str(evidence_id_list[index])
+                         if index < len(evidence_id_list) else str(index)),
             source_center=_crop_center(pair[0]),
             target_center=_crop_center(pair[1]),
             source_timestamp_ns=int(timestamp_pair[0]),
             target_timestamp_ns=int(timestamp_pair[1])))
-    robust = select_robust_hypothesis(
-        robust_candidates,
-        min_inliers=min_consistent_constraints,
-        min_spatial_baseline_m=min_spatial_baseline_m,
-        max_translation_disagreement_m=max_translation_consistency_m,
-        max_yaw_disagreement_rad=max_yaw_consistency_rad)
+    if hypothesis_accumulator is None:
+        robust = select_robust_hypothesis(
+            robust_candidates,
+            min_inliers=min_consistent_constraints,
+            min_spatial_baseline_m=min_spatial_baseline_m,
+            max_translation_disagreement_m=max_translation_consistency_m,
+            max_yaw_disagreement_rad=max_yaw_consistency_rad)
+    else:
+        robust = hypothesis_accumulator.update(robust_candidates)
+        # The accumulator keeps a lexicographically ordered historical set,
+        # while this registration call retains insertion order.  Convert the
+        # stable winner IDs back to the current result indices before the
+        # legacy RegistrationResult assembly below consumes them.
+        winner_ids = ()
+        for diagnostic in reversed(robust.diagnostics):
+            if diagnostic.get('kind') == 'incremental_hypothesis_accumulator':
+                winner_ids = tuple(str(value) for value in diagnostic.get(
+                    'winner_evidence_ids', ()))
+                break
+        if winner_ids:
+            id_to_index = {
+                str(candidate.evidence_id): index
+                for index, candidate in enumerate(robust_candidates)}
+            selected = tuple(id_to_index[value] for value in winner_ids
+                             if value in id_to_index)
+            selected_set = set(selected)
+            probabilities = tuple(
+                1.0 if index in selected_set else 0.0
+                for index in range(len(robust_candidates)))
+            robust = replace(robust, selected_indices=selected,
+                             inlier_probabilities=probabilities)
     forensic = tuple(forensic) + tuple(robust.diagnostics)
     if robust.status != ACCEPTED_HYPOTHESIS:
         return RegistrationResult(

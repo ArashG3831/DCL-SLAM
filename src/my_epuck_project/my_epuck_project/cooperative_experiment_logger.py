@@ -1060,7 +1060,7 @@ class CooperativeExperimentLogger(Node):
                 int(path == direct)),
         )
 
-    def wait_for_frontend_diagnostics(self, timeout_s=30.0):
+    def wait_for_frontend_diagnostics(self, timeout_s=10.0):
         """Allow frontend SIGINT handlers to finish before final validation."""
         try:
             unknown_pose = bool(json.loads(
@@ -1269,13 +1269,18 @@ class CooperativeExperimentLogger(Node):
         self.flush()
         successful=False
         try:
-            # ROS launch signals all children concurrently.  Frontend
-            # finalizers therefore need a bounded opportunity to close their
-            # JSON/JSONL streams before this observer freezes the artifact
-            # contract; otherwise a valid late file is recorded as missing.
-            self.wait_for_frontend_diagnostics()
+            # The scan-age artifact is observer-owned and must not depend on
+            # a frontend summary that may be delayed by ROS shutdown.  Emit it
+            # first so a missing/late frontend file can never erase the
+            # independent transport diagnostic.
             if self.scan_matching_enabled:
                 self.write_scan_pipeline_diagnostic()
+            # ROS launch signals all children concurrently.  Frontend
+            # finalizers therefore get a bounded opportunity to close their
+            # JSON/JSONL streams before this observer freezes the artifact
+            # contract; a missing summary is reported, never waited on
+            # indefinitely.
+            self.wait_for_frontend_diagnostics()
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]

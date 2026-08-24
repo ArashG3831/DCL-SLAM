@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, OrderedDict, deque
 import copy
+from dataclasses import replace
 import json
 import hashlib
 import math
@@ -288,6 +289,8 @@ class UnknownPoseFrontend(Node):
         self.local_hypothesis_summary = None
         self.local_hypothesis_result = None
         self.peer_hypothesis_summary = None
+        self.peer_summary_source_ids = set()
+        self.peer_summary_target_ids = {}
         self.hypothesis_accumulator = IncrementalHypothesisAccumulator(
             min_inliers=self.min_consistent_constraints)
         self.registration_callback_depth = 0
@@ -1879,6 +1882,16 @@ class UnknownPoseFrontend(Node):
                 self.counters['rejected_hypotheses'] += 1
             self.pending_target_proposal = False
             return
+        # A non-canonical peer summary is independently verified by the
+        # canonical robot using the same physical evidence IDs.  This path is
+        # deliberately separate from proposal confirmation: no TF or shared
+        # map activation occurs until the canonical proposal/ack exchange.
+        if (self.robot_id < self.peer_robot_id and
+                message.keyframe_id in self.peer_summary_source_ids):
+            self.peer_summary_source_ids.discard(message.keyframe_id)
+            if not self.peer_summary_source_ids:
+                self._verify_peer_hypothesis_summary()
+            return
         response_request_key = (
             str(message.keyframe_id), int(message.descriptor_checksum))
         request_metadata = self.request_metadata_by_request_key.get(
@@ -2085,7 +2098,8 @@ class UnknownPoseFrontend(Node):
         self._request_next_candidate_verification()
 
     def _run_registration(self, evidence_pairs, source, keyframe_id='',
-                          individual_results=None, evidence_timestamps=None):
+                          individual_results=None, evidence_timestamps=None,
+                          evidence_ids=None):
         self.counters['registrations'] += 1
         self.counters['registration_callback_entries'] += 1
         self.registration_callback_depth += 1
@@ -2095,10 +2109,11 @@ class UnknownPoseFrontend(Node):
         try:
             evidence_ids = None
             accumulator = None
-            if source == 'incremental_consensus':
-                evidence_ids = [
+            if source in ('incremental_consensus',
+                          'peer_summary_verification'):
+                evidence_ids = list(evidence_ids or [
                     f'{own_key}|{peer_key}'
-                    for (own_key, peer_key) in self.evidence_pairs]
+                    for (own_key, peer_key) in self.evidence_pairs])
                 accumulator = self.hypothesis_accumulator
             result = register_crop_set(
                 evidence_pairs,
@@ -2355,6 +2370,13 @@ class UnknownPoseFrontend(Node):
         return hashlib.sha256('|'.join(sorted(entries)).encode('utf-8')).hexdigest()[:16]
 
     @staticmethod
+    def _canonical_evidence_id(source_robot_id, target_robot_id,
+                               source_id, target_id):
+        if str(source_robot_id) < str(target_robot_id):
+            return f'{source_robot_id}:{source_id}|{target_robot_id}:{target_id}'
+        return f'{target_robot_id}:{target_id}|{source_robot_id}:{source_id}'
+
+    @staticmethod
     def _summary_transform(message):
         rotation = message.source_to_target.rotation
         yaw = math.atan2(
@@ -2389,6 +2411,81 @@ class UnknownPoseFrontend(Node):
             translation_error_m=translation_error,
             yaw_error_rad=yaw_error, agrees=agrees)
         return agrees
+
+    def _verify_peer_hypothesis_summary(self):
+        summary = self.peer_hypothesis_summary
+        if summary is None or self.robot_id != min(
+                self.robot_id, self.peer_robot_id):
+            return
+        source_ids = [str(value) for value in
+                      getattr(summary, 'evidence_source_keyframe_ids', [])]
+        target_ids = [str(value) for value in
+                      getattr(summary, 'evidence_target_keyframe_ids', [])]
+        if len(source_ids) < self.min_consistent_constraints or \
+                len(source_ids) != len(target_ids):
+            self._record_diagnostic_event(
+                'PEER_HYPOTHESIS_SUMMARY_REJECTED',
+                reason='INSUFFICIENT_EVIDENCE_IDS')
+            return
+        if any(source_id not in self.received_peer_crops or
+               target_id not in self.keyframes
+               for source_id, target_id in zip(source_ids, target_ids)):
+            self._record_diagnostic_event(
+                'PEER_HYPOTHESIS_SUMMARY_REJECTED',
+                reason='INCOMPLETE_EVIDENCE_CROPS')
+            return
+        evidence_pairs = [
+            (self.received_peer_crops[source_id],
+             self.keyframes[target_id][1])
+            for source_id, target_id in zip(source_ids, target_ids)]
+        evidence_timestamps = [
+            (self._stamp_ns(self.peer_descriptors[source_id]),
+             self._stamp_ns(self.keyframes[target_id][0]))
+            for source_id, target_id in zip(source_ids, target_ids)
+            if source_id in self.peer_descriptors]
+        if len(evidence_timestamps) != len(evidence_pairs):
+            self._record_diagnostic_event(
+                'PEER_HYPOTHESIS_SUMMARY_REJECTED',
+                reason='MISSING_EVIDENCE_METADATA')
+            return
+        canonical_ids = [self._canonical_evidence_id(
+            self.peer_robot_id, self.robot_id, source_id, target_id)
+            for source_id, target_id in zip(source_ids, target_ids)]
+        result = self._run_registration(
+            evidence_pairs, 'peer_summary_verification', source_ids[0],
+            evidence_timestamps=evidence_timestamps,
+            evidence_ids=canonical_ids)
+        if not result.accepted:
+            self._record_diagnostic_event(
+                'PEER_HYPOTHESIS_SUMMARY_REJECTED',
+                reason=str(result.reason),
+                selector_status=str(result.selector_status),
+                consistent_constraint_count=int(
+                    result.consistent_constraint_count))
+            return
+        # Registration above is R2 -> R1; the canonical protocol publishes
+        # R1 -> R2.  Invert exactly once at this protocol boundary.
+        canonical_result = replace(
+            result, transform=invert_se2(result.transform))
+        own_descriptor = self.keyframes[target_ids[0]][0]
+        peer_descriptor = self.peer_descriptors[source_ids[0]]
+        summary_message = self._hypothesis_message(
+            own_descriptor, peer_descriptor, canonical_result,
+            status='CANDIDATE', accepted=False, rejection_reason='',
+            evidence_source_keyframe_ids=target_ids,
+            evidence_target_keyframe_ids=source_ids)
+        self.local_hypothesis_summary = summary_message
+        self.local_hypothesis_result = canonical_result
+        self.hypothesis_pub.publish(summary_message)
+        self.counters['hypothesis_summaries_published'] += 1
+        self._record_diagnostic_event(
+            'LOCAL_PEER_SUMMARY_VERIFIED',
+            evidence_set_hash=str(summary_message.evidence_set_hash),
+            consistent_constraint_count=int(
+                canonical_result.consistent_constraint_count))
+        if self._peer_hypothesis_agrees(summary_message):
+            self._publish_canonical_proposal(summary_message,
+                                             canonical_result)
 
     def _publish_canonical_proposal(self, summary, result):
         """Publish exactly one canonical proposal after peer verification."""
@@ -2583,6 +2680,18 @@ class UnknownPoseFrontend(Node):
                 return
             self.peer_hypothesis_summary = message
             self.counters['hypothesis_summaries_received'] += 1
+            if self.robot_id == min(self.robot_id, self.peer_robot_id):
+                self.peer_summary_source_ids = set(
+                    str(value) for value in getattr(
+                        message, 'evidence_source_keyframe_ids', []))
+                self.peer_summary_target_ids = {
+                    str(source): str(target)
+                    for source, target in zip(
+                        getattr(message, 'evidence_source_keyframe_ids', []),
+                        getattr(message, 'evidence_target_keyframe_ids', []))}
+                self._request_source_for_confirmation(message)
+                if not self.peer_summary_source_ids:
+                    self._verify_peer_hypothesis_summary()
             self._record_diagnostic_event(
                 'PEER_HYPOTHESIS_SUMMARY_RECEIVED',
                 evidence_set_hash=str(message.evidence_set_hash),

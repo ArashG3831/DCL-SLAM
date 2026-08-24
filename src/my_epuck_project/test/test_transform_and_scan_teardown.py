@@ -5,7 +5,13 @@ import inspect
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 
-from my_epuck_project.d500_scan_fix import D500ScanFix, shutdown_node as shutdown_scan_fix
+from my_epuck_project.d500_scan_fix import (
+    CORRECTED_SCAN_QOS,
+    D500ScanFix,
+    LATEST_SCAN_QOS,
+    LATEST_NAV_SCAN_QOS,
+    shutdown_node as shutdown_scan_fix,
+)
 from my_epuck_project.twist_stamper import TwistStamper, shutdown_node as shutdown_stamper
 
 
@@ -22,6 +28,22 @@ def test_d500_scan_fix_uses_explicit_executor_and_idempotent_teardown():
     rclpy.init()
     node = D500ScanFix()
     _exercise_shutdown(node, shutdown_scan_fix)
+
+
+def test_d500_corrected_scan_uses_bounded_reliable_qos():
+    assert CORRECTED_SCAN_QOS.depth == 100
+    assert CORRECTED_SCAN_QOS.reliability.value == 1  # RELIABLE
+    assert CORRECTED_SCAN_QOS.durability.value == 2  # VOLATILE
+    assert LATEST_SCAN_QOS.depth == 1
+    assert LATEST_SCAN_QOS.reliability.value == 1  # RELIABLE
+    assert LATEST_NAV_SCAN_QOS.depth == 1
+    assert LATEST_NAV_SCAN_QOS.reliability.value == 2  # BEST_EFFORT
+
+
+def test_nav_relay_downsampling_is_explicitly_separate_from_slam_stream():
+    source = inspect.getsource(D500ScanFix)
+    assert 'output_sample_count' in source
+    assert 'Uniformly retain the corrected angular support' in source
 
 
 def test_twist_stamper_uses_explicit_executor_and_idempotent_teardown():

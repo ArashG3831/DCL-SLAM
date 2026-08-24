@@ -17,14 +17,15 @@ def test_teammate_masking_occurs_before_natural_no_return_completion():
     assert 'output.ranges[index] = math.nan' in source
 
 
-def test_nav2_and_collision_monitor_keep_the_fixed_scan():
+def test_nav2_and_collision_monitor_use_the_isolated_nav_scan():
     for robot in ('robot1', 'robot2'):
         params = (ROOT / 'resource' /
                   f'nav2_{robot}_shared_map.yaml').read_text()
-        assert f'/{robot}/scan_d500_fixed' in params
+        assert f'/{robot}/scan_d500_nav' in params
+        assert f'/{robot}/scan_d500_fixed' not in params
         assert f'/{robot}/scan_d500_slam' not in params
         collision = params[params.index('collision_monitor:'):]
-        assert f'/{robot}/scan_d500_fixed' in collision
+        assert f'/{robot}/scan_d500_nav' in collision
 
 
 def test_slam_toolbox_consumes_only_the_teammate_filtered_branch():

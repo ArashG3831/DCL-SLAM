@@ -37,7 +37,7 @@ amcl:
     z_max: 0.05
     z_rand: 0.5
     z_short: 0.05
-    scan_topic: /robot1/scan_d500_fixed
+    scan_topic: /robot1/scan_d500_nav
     set_initial_pose: True
     initial_pose:
       x: 0.005
@@ -127,6 +127,10 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
+      # Nav2 consumes the isolated latest-sample safety relay.  It is a
+      # downsampled best-effort stream; Slam Toolbox retains the reliable
+      # full-resolution /scan_d500_fixed stream.
+      qos_overrides./robot1/scan_d500_nav.subscription.reliability: best_effort
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: robot1/odom
@@ -153,7 +157,7 @@ local_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /robot1/scan_d500_fixed
+          topic: /robot1/scan_d500_nav
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -171,6 +175,7 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
+      qos_overrides./robot1/scan_d500_nav.subscription.reliability: best_effort
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: shared_map
@@ -185,7 +190,7 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /robot1/scan_d500_fixed
+          topic: /robot1/scan_d500_nav
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -297,6 +302,7 @@ velocity_smoother:
     velocity_timeout: 1.0
 collision_monitor:
   ros__parameters:
+    qos_overrides./robot1/scan_d500_nav.subscription.reliability: best_effort
     use_sim_time: False
 
     # Frames (match your TF tree; you DO have odom->robot1/base_footprint)
@@ -309,14 +315,16 @@ collision_monitor:
     state_topic: "collision_monitor_state"
 
     transform_tolerance: 0.2
-    source_timeout: 2.0
+    # Corrected Webots scans arrive at approximately 1 Hz of simulated time;
+    # allow one delayed sample in fast mode without forcing a safety stop.
+    source_timeout: 3.0
     stop_pub_timeout: 2.0
 
     # --- REQUIRED: define what sensors Collision Monitor uses ---
     observation_sources: ["scan"]
     scan:
       type: "scan"
-      topic: "/robot1/scan_d500_fixed"
+      topic: "/robot1/scan_d500_nav"
       enabled: True
 
     # --- REQUIRED: define at least one safety zone / polygon ---

@@ -124,6 +124,21 @@ def test_scan_pipeline_diagnostic_records_effective_params_and_rates():
     assert 'configured_throttle_scans' in logger
 
 
+def test_nav2_uses_isolated_latest_scan_relay():
+    launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
+        encoding='utf-8')
+    assert "output_topic': 'scan_d500_nav'" in launch
+    assert "'output_depth': 1" in launch
+    assert "name=f'{robot_name}_d500_nav_scan_fix'" in launch
+    for robot in ('robot1', 'robot2'):
+        params = (RESOURCE / f'nav2_{robot}_shared_map.yaml').read_text(
+            encoding='utf-8')
+        assert f'scan_topic: /{robot}/scan_d500_nav' in params
+        assert f'qos_overrides./{robot}/scan_d500_nav.subscription.reliability: best_effort' in params
+        assert f'/{robot}/scan_d500_fixed' not in params
+        assert 'source_timeout: 3.0' in params
+
+
 def test_all_nested_launch_layers_accept_scan_matching_profile():
     names = (
         'two_robots_unknown_pose_exploration_launch.py',

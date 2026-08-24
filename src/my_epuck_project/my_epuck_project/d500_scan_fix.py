@@ -4,8 +4,39 @@ import signal
 import rclpy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
+
+
+# The corrected stream stays reliable and retains a bounded history so the
+# full scan can be acknowledged by Slam Toolbox and Nav2 over WSL loopback.
+# Subscriber clock/QoS overrides, rather than an undersized reliable writer
+# history, prevent stale samples from becoming a transport deadlock.
+CORRECTED_SCAN_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=100,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+LATEST_SCAN_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+LATEST_NAV_SCAN_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+)
+RAW_SCAN_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=100,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
 
 
 class D500ScanFix(Node):
@@ -16,22 +47,31 @@ class D500ScanFix(Node):
         self.declare_parameter('output_topic', '/scan_d500_fixed')
         self.declare_parameter('minimum_time_interval', 0.0)
         self.declare_parameter('input_reliability', 'reliable')
+        self.declare_parameter('output_depth', 100)
+        self.declare_parameter('output_reliability', 'reliable')
+        self.declare_parameter('output_sample_count', 0)
 
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
         self.minimum_time_interval = max(
             0.0, float(self.get_parameter('minimum_time_interval').value))
+        output_depth = int(self.get_parameter('output_depth').value)
+        output_reliability = str(
+            self.get_parameter('output_reliability').value).lower()
+        self.output_sample_count = int(
+            self.get_parameter('output_sample_count').value)
+        if output_depth <= 1 and output_reliability == 'best_effort':
+            output_qos = LATEST_NAV_SCAN_QOS
+        elif output_depth <= 1:
+            output_qos = LATEST_SCAN_QOS
+        else:
+            output_qos = CORRECTED_SCAN_QOS
         input_reliability = str(
             self.get_parameter('input_reliability').value).lower()
         self._last_published_stamp = None
         self._received_count = 0
         self._published_count = 0
 
-        # Keep a bounded but deeper queue than the upstream driver.  In fast
-        # WSL runs the reliable writer can publish several simulation scans
-        # between executor wakeups; depth 10 otherwise leaves the bridge
-        # permanently draining an obsolete queue.
-        input_qos = 100
         self.sub = self.create_subscription(
             LaserScan,
             input_topic,
@@ -40,13 +80,13 @@ class D500ScanFix(Node):
             # project's default reliable profile.  Keep this subscription
             # reliable; using sensor-data best-effort here silently leaves
             # the bridge without samples under CycloneDDS.
-            input_qos,
+            RAW_SCAN_QOS,
         )
 
         self.pub = self.create_publisher(
             LaserScan,
             output_topic,
-            100,
+            output_qos,
         )
 
         self.get_logger().info(
@@ -55,8 +95,8 @@ class D500ScanFix(Node):
 
     def callback(self, msg: LaserScan):
         self._received_count += 1
-        n = len(msg.ranges)
-        if n < 2:
+        source_count = len(msg.ranges)
+        if source_count < 2:
             return
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if (self.minimum_time_interval > 0.0 and
@@ -69,17 +109,31 @@ class D500ScanFix(Node):
         fixed.header = msg.header
         fixed.header.frame_id = msg.header.frame_id
 
+        target_count = source_count
+        if 1 < self.output_sample_count < source_count:
+            target_count = self.output_sample_count
         fixed.angle_min = -math.pi
         fixed.angle_max = math.pi
-        fixed.angle_increment = (fixed.angle_max - fixed.angle_min) / (n - 1)
+        fixed.angle_increment = (fixed.angle_max - fixed.angle_min) / (target_count - 1)
 
         fixed.time_increment = msg.time_increment
         fixed.scan_time = msg.scan_time
         fixed.range_min = msg.range_min
         fixed.range_max = msg.range_max
 
-        fixed.ranges = list(reversed(msg.ranges))
-        fixed.intensities = list(reversed(msg.intensities)) if msg.intensities else []
+        ranges = list(reversed(msg.ranges))
+        intensities = list(reversed(msg.intensities)) if msg.intensities else []
+        if target_count != source_count:
+            # Uniformly retain the corrected angular support.  The Nav2
+            # safety stream may use fewer beams; Slam's full-resolution
+            # stream never requests this path.
+            indices = [round(i * (source_count - 1) / (target_count - 1))
+                       for i in range(target_count)]
+            ranges = [ranges[i] for i in indices]
+            if intensities:
+                intensities = [intensities[i] for i in indices]
+        fixed.ranges = ranges
+        fixed.intensities = intensities
 
         if rclpy.ok():
             self.pub.publish(fixed)

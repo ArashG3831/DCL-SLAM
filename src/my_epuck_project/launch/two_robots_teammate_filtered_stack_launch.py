@@ -102,11 +102,12 @@ _DWB_DIAGNOSTIC_FOLLOW_PATH = {
 }
 
 
-def _diagnostic_params(source, robot, variant, node_prefix=''):
+def _diagnostic_params(source, robot, variant, node_prefix='',
+                       use_sim_time_value=None):
     """Create a temporary controller variant; production YAML stays untouched."""
     # RPP is the authoritative production YAML.  Returning it directly keeps
     # the normal launch free of generated diagnostic files or overrides.
-    if variant == 'rpp' and not node_prefix:
+    if variant == 'rpp' and not node_prefix and use_sim_time_value is None:
         return source
     with open(source, encoding='utf-8') as stream:
         document = yaml.safe_load(stream)
@@ -121,6 +122,20 @@ def _diagnostic_params(source, robot, variant, node_prefix=''):
             (node_prefix + key if key in LIFECYCLE_NODES else key): value
             for key, value in document.items()
         }
+    if use_sim_time_value is not None:
+        sim_time = str(use_sim_time_value).lower() == 'true'
+
+        def rewrite_clock(value):
+            if isinstance(value, dict):
+                if isinstance(value.get('ros__parameters'), dict):
+                    value['ros__parameters']['use_sim_time'] = sim_time
+                for child in value.values():
+                    rewrite_clock(child)
+            elif isinstance(value, list):
+                for child in value:
+                    rewrite_clock(child)
+
+        rewrite_clock(document)
     controller = document[
         node_prefix + 'controller_server' if node_prefix else 'controller_server'
     ]['ros__parameters']
@@ -164,12 +179,13 @@ def _diagnostic_params(source, robot, variant, node_prefix=''):
 
 def nav2_nodes(package_dir, robot, selected, controller_variant,
                *, node_prefix='', global_frame='shared_map',
-               map_topic=None, autostart=None):
+               map_topic=None, autostart=None, use_sim_time_value=None):
     source = os.path.join(
         package_dir, 'resource', f'nav2_{robot}_shared_map.yaml'
     )
     source = _diagnostic_params(
-        source, robot, controller_variant, node_prefix=node_prefix)
+        source, robot, controller_variant, node_prefix=node_prefix,
+        use_sim_time_value=use_sim_time_value)
     parameter_node = lambda name: node_prefix + name if node_prefix else name
     diagnostic_rewrites = {
         f'{parameter_node("controller_server")}.ros__parameters.FollowPath.publish_evaluation':
@@ -448,6 +464,8 @@ def launch_setup(context):
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='local_', global_frame=f'{robot}/map',
                 map_topic=f'/{robot}/map',
+                use_sim_time_value=LaunchConfiguration(
+                    'use_sim_time').perform(context),
                 # The bounded runner explicitly disables automatic lifecycle
                 # startup so its readiness gate can start local Nav2 only
                 # after both wheel controllers have produced odom/TF.
@@ -457,11 +475,15 @@ def launch_setup(context):
                 package_dir, robot, selected,
                 LaunchConfiguration('controller_variant').perform(context),
                 node_prefix='', global_frame='shared_map',
-                map_topic=f'/{robot}/shared_map', autostart=False))
+                map_topic=f'/{robot}/shared_map', autostart=False,
+                use_sim_time_value=LaunchConfiguration(
+                    'use_sim_time').perform(context)))
         elif not unknown_initial_pose:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
-                LaunchConfiguration('controller_variant').perform(context)))
+                LaunchConfiguration('controller_variant').perform(context),
+                use_sim_time_value=LaunchConfiguration(
+                    'use_sim_time').perform(context)))
     return [filtered_slam, *alignment, *exchange, *nav2_actions]
 
 

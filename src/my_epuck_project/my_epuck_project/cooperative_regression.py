@@ -48,7 +48,9 @@ from .occupancy_map_comparison import (
     load_map,
     resample_semantic,
 )
-from .ros_runtime_preflight import ROS_DOMAIN_MIN, ROS_DOMAIN_MAX
+from .ros_runtime_preflight import (
+    ROS_DOMAIN_MIN, ROS_DOMAIN_MAX, require_runtime_provenance,
+)
 
 
 CLASSIFICATIONS = (
@@ -1723,6 +1725,12 @@ def capture_live_parameter_snapshots(
 
 def internal_trial(args):
     """Run one launch and collector as children of one isolated supervisor."""
+    # Never silently fall back to Fast DDS.  The campaign is validated only
+    # with the pinned CycloneDDS loopback profile, and provenance must be
+    # checked before creating the attempt directory or any ROS participant.
+    environment = os.environ.copy()
+    runtime_provenance = require_runtime_provenance(
+        args.workspace, environment, args.ros_domain_id)
     attempt = Path(args.attempt_dir).resolve()
     attempt.mkdir(parents=True, exist_ok=False)
     (attempt / 'observer').mkdir()
@@ -1732,14 +1740,9 @@ def internal_trial(args):
     (attempt / 'tmp').mkdir()
     shutdown_events = attempt / 'shutdown_events.jsonl'
     start = time.monotonic()
-    requested_rmw = os.environ.get('RMW_IMPLEMENTATION', '').strip()
-    # Jazzy installations used by this workspace provide Fast DDS but may
-    # not ship librmw_cyclonedds_cpp.so. Keep Fast DDS and disable its shared
-    # memory transport, whose lock-file collision was observed in the failed
-    # Robot 2 spawner.
-    rmw_implementation = (
-        requested_rmw if requested_rmw and requested_rmw != 'default'
-        else 'rmw_fastrtps_cpp')
+    requested_rmw = environment.get('RMW_IMPLEMENTATION', '').strip()
+    rmw_implementation = requested_rmw
+    cyclone_uri = environment.get('CYCLONEDDS_URI', '').strip()
     fastdds_use_shm = os.environ.get('RMW_FASTRTPS_USE_SHM', '0')
     os.environ['RMW_IMPLEMENTATION'] = rmw_implementation
     os.environ['RMW_FASTRTPS_USE_SHM'] = fastdds_use_shm
@@ -1767,6 +1770,7 @@ def internal_trial(args):
         'supervisor_pid': os.getpid(),
         'process_group_id': os.getpgrp(),
         'utc_start': utc_now(),
+        'runtime_provenance': runtime_provenance,
         'launch_arguments': {
             'world_profile': args.world_profile,
             'source_world_path': args.source_world_path,
@@ -1809,6 +1813,7 @@ def internal_trial(args):
         'encoder_profile': args.profile_metadata['encoder_profile'],
             'logger_console_status': False,
             'rmw_implementation': rmw_implementation,
+            'cyclonedds_uri': cyclone_uri,
             'rmw_fastdds_use_shm': fastdds_use_shm,
         },
         'rviz_requested': args.launch_rviz,
@@ -1818,11 +1823,11 @@ def internal_trial(args):
         'startup_timeline': startup_timeline,
     }
     mark_startup_stage('runtime_parameters_generated')
-    environment = os.environ.copy()
     # Prepare the exact campaign environment before preflight.
     environment.update({
         'ROS_DOMAIN_ID': str(args.ros_domain_id),
         'RMW_IMPLEMENTATION': rmw_implementation,
+        'CYCLONEDDS_URI': cyclone_uri,
         'RMW_FASTRTPS_USE_SHM': fastdds_use_shm,
         'ROS_LOG_DIR': str(attempt / 'ros_logs'),
         'TMPDIR': str(attempt / 'tmp'),
@@ -3129,6 +3134,11 @@ def shlex_quote(value):
 
 def campaign_main(args):
     workspace = Path(args.workspace).resolve()
+    # Validate the parent process too.  Checking only the internal child is
+    # insufficient: a contaminated parent can import an older runner and
+    # create ROS participants before the child ever executes its guard.
+    require_runtime_provenance(
+        workspace, os.environ, args.ros_domain_base)
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     campaign_id = args.campaign_id or safe_campaign_id()

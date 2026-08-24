@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import inspect
 
@@ -47,6 +48,81 @@ def test_cyclonedds_port_headroom_bound_is_derived_from_profile():
     assert preflight.ROS_DOMAIN_MAX == 230
     assert preflight.dds_max_unicast_port(230) <= preflight.DDS_PORT_MAX
     assert preflight.dds_max_unicast_port(231) > preflight.DDS_PORT_MAX
+
+
+def _clean_runtime_environment(workspace, domain=34):
+    profile = workspace / 'config/cyclonedds/wsl_loopback.xml'
+    return {
+        'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp',
+        'CYCLONEDDS_URI': f'file://{profile}',
+        'ROS_DOMAIN_ID': str(domain),
+        'PYTHONPATH': str(workspace / 'build/my_epuck_project'),
+        'AMENT_PREFIX_PATH': str(
+            workspace / 'install/frontier_exploration_ros2'),
+        'COLCON_PREFIX_PATH': str(workspace / 'install'),
+        'MY_EPUCK_FRONTIER_PREFIX': str(
+            workspace / 'install/frontier_exploration_ros2'),
+    }
+
+
+def test_runtime_provenance_requires_clean_cyclone_environment():
+    workspace = Path(__file__).resolve().parents[3]
+    report = preflight.runtime_provenance(
+        workspace, _clean_runtime_environment(workspace), 34)
+    assert report['passed'], report['issues']
+    assert report['source_build_parity']
+    assert all(path.startswith(str(workspace))
+               for path in report['module_paths'].values() if path)
+
+
+def test_runtime_provenance_rejects_original_checkout_imports():
+    workspace = Path(__file__).resolve().parents[3]
+    environment = _clean_runtime_environment(workspace)
+    environment['PYTHONPATH'] = '/home/arash/webots_ws/build/my_epuck_project'
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert not report['passed']
+    assert any('original dirty checkout' in issue
+               for issue in report['issues'])
+
+
+def test_runtime_provenance_rejects_original_frontier_dependency():
+    workspace = Path(__file__).resolve().parents[3]
+    environment = _clean_runtime_environment(workspace)
+    environment['AMENT_PREFIX_PATH'] = (
+        '/home/arash/webots_ws/install/frontier_exploration_ros2')
+    environment['MY_EPUCK_FRONTIER_PREFIX'] = str(
+        workspace / 'install/frontier_exploration_ros2')
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert not report['passed']
+    assert any('frontier_exploration_ros2' in issue
+               and ('outside' in issue or 'dirty' in issue)
+               for issue in report['issues'])
+
+
+def test_runtime_provenance_allows_explicit_clean_external_underlay():
+    workspace = Path(__file__).resolve().parents[3]
+    environment = _clean_runtime_environment(workspace)
+    environment['AMENT_PREFIX_PATH'] = os.pathsep.join((
+        str(workspace / 'install/frontier_exploration_ros2'),
+        '/home/arash/webots_ws/install/webots_ros2'))
+    environment['MY_EPUCK_ALLOWED_EXTERNAL_PREFIXES'] = (
+        '/home/arash/webots_ws/install/webots_ros2')
+    # The frontier package is intentionally still required from the selected
+    # validation prefix; this test only covers the external Webots underlay.
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert report['contaminated_environment_paths'] == []
+
+
+def test_runtime_provenance_rejects_fastdds_and_wrong_domain_environment():
+    workspace = Path(__file__).resolve().parents[3]
+    environment = _clean_runtime_environment(workspace, domain=34)
+    environment['RMW_IMPLEMENTATION'] = 'rmw_fastrtps_cpp'
+    environment['ROS_DOMAIN_ID'] = '232'
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert not report['passed']
+    assert any('rmw_cyclonedds_cpp' in issue for issue in report['issues'])
+    assert any('differs from requested domain' in issue
+               for issue in report['issues'])
 
 
 def test_daemon_port_conflict_with_no_daemon_graph_continues(tmp_path, monkeypatch):

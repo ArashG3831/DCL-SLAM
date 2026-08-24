@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib
 import os
 from pathlib import Path
 import re
@@ -10,6 +12,8 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
+from urllib.parse import unquote, urlparse
 
 import psutil
 
@@ -48,6 +52,216 @@ def dds_max_unicast_port(domain):
 
 class PreflightError(RuntimeError):
     """A required pre-launch runtime condition is not safe."""
+
+
+CRITICAL_RUNTIME_MODULES = (
+    'my_epuck_project.cooperative_regression',
+    'my_epuck_project.ros_runtime_preflight',
+    'my_epuck_project.unknown_pose_frontend',
+    'my_epuck_project.unknown_pose_frontend_core',
+    'my_epuck_project.robust_relative_pose_selector',
+)
+
+
+def _sha256_file(path):
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def _sha256_tree(root):
+    """Hash a source tree deterministically without including build metadata."""
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(item for item in root.rglob('*') if item.is_file()):
+            relative = path.relative_to(root).as_posix()
+            if any(part in {'build', 'install', '.git', '__pycache__'}
+                   for part in path.parts):
+                continue
+            digest.update(relative.encode('utf-8'))
+            digest.update(b'\0')
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            digest.update(b'\0')
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _ament_package_prefix(package_name, environment):
+    """Resolve a package prefix using only the selected AMENT underlays."""
+    for value in environment.get('AMENT_PREFIX_PATH', '').split(os.pathsep):
+        if not value:
+            continue
+        prefix = Path(value).resolve()
+        marker = (prefix / 'share/ament_index/resource_index/packages' /
+                  package_name)
+        if marker.is_file():
+            return prefix
+    return None
+
+
+def _workspace_path(path, workspace):
+    """Return whether a path is inside the selected validation checkout."""
+    try:
+        Path(path).resolve().relative_to(Path(workspace).resolve())
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def runtime_provenance(workspace, environment=None, ros_domain_id=None):
+    """Audit middleware, import paths, and source/build parity before launch.
+
+    This check is intentionally independent of ROS graph discovery.  A shell
+    that inherited the original dirty checkout can otherwise import an older
+    runner and bypass the DDS domain guard before any preflight report exists.
+    """
+    workspace = Path(workspace).resolve()
+    environment = dict(environment or os.environ)
+    dirty_root = Path('/home/arash/webots_ws').resolve()
+    allowed_external_prefixes = []
+    for value in environment.get('MY_EPUCK_ALLOWED_EXTERNAL_PREFIXES', '').split(
+            os.pathsep):
+        if value:
+            allowed_external_prefixes.append(Path(value).resolve())
+    issues = []
+    rmw = environment.get('RMW_IMPLEMENTATION', '').strip()
+    cyclone_uri = environment.get('CYCLONEDDS_URI', '').strip()
+    if rmw != 'rmw_cyclonedds_cpp':
+        issues.append('RMW_IMPLEMENTATION must be rmw_cyclonedds_cpp')
+    parsed_uri = urlparse(cyclone_uri)
+    uri_path = Path(unquote(parsed_uri.path)).resolve() if (
+        parsed_uri.scheme == 'file' and parsed_uri.path) else None
+    expected_uri_path = (workspace / 'config/cyclonedds/wsl_loopback.xml').resolve()
+    if uri_path != expected_uri_path:
+        issues.append(
+            'CYCLONEDDS_URI must point to the validation WSL loopback profile')
+    if ros_domain_id is not None:
+        try:
+            inherited_domain = environment.get('ROS_DOMAIN_ID', '').strip()
+            if inherited_domain and int(inherited_domain) != int(ros_domain_id):
+                issues.append(
+                    f'inherited ROS_DOMAIN_ID={inherited_domain} differs from '
+                    f'requested domain {int(ros_domain_id)}')
+        except ValueError:
+            issues.append('inherited ROS_DOMAIN_ID is not an integer')
+    contaminated = []
+    for variable in ('PYTHONPATH', 'AMENT_PREFIX_PATH', 'COLCON_PREFIX_PATH'):
+        for value in environment.get(variable, '').split(os.pathsep):
+            if not value:
+                continue
+            try:
+                resolved = Path(value).resolve()
+            except OSError:
+                continue
+            if resolved == dirty_root or dirty_root in resolved.parents:
+                if (not _workspace_path(resolved, workspace)
+                        and not any(
+                            resolved == prefix or prefix in resolved.parents
+                            for prefix in allowed_external_prefixes)):
+                    contaminated.append({
+                        'variable': variable, 'path': str(resolved)})
+    if contaminated:
+        issues.append('environment references the original dirty checkout')
+
+    module_paths = {}
+    module_hashes = {}
+    for module_name in CRITICAL_RUNTIME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as error:  # pragma: no cover - launch-only path
+                module_paths[module_name] = None
+                module_hashes[module_name] = None
+                issues.append(f'cannot import {module_name}: {error}')
+                continue
+        module_path = getattr(module, '__file__', None)
+        module_paths[module_name] = str(module_path) if module_path else None
+        module_hashes[module_name] = _sha256_file(module_path)
+        if not module_path or not _workspace_path(module_path, workspace):
+            issues.append(
+                f'{module_name} loaded outside validation checkout: '
+                f'{module_path}')
+
+    parity = {}
+    frontier_prefix = _ament_package_prefix(
+        'frontier_exploration_ros2', environment)
+    frontier_source = workspace / 'src/frontier-exploration-ros2'
+    expected_frontier_prefix = Path(
+        environment.get('MY_EPUCK_FRONTIER_PREFIX', workspace / 'install'))
+    frontier_report = {
+        'package': 'frontier_exploration_ros2',
+        'prefix': str(frontier_prefix) if frontier_prefix else None,
+        'expected_prefix': str(expected_frontier_prefix.resolve()),
+        'source': str(frontier_source),
+        'source_tree_sha256': _sha256_tree(frontier_source),
+        'pinned_commit': '476aaf4',
+    }
+    if frontier_prefix is None:
+        issues.append('frontier_exploration_ros2 is not present in selected AMENT prefixes')
+    else:
+        if not _workspace_path(frontier_prefix, workspace):
+            configured_prefix = expected_frontier_prefix.resolve()
+            if frontier_prefix != configured_prefix:
+                issues.append(
+                    'frontier_exploration_ros2 resolved outside validation install: '
+                    f'{frontier_prefix}')
+        if dirty_root in frontier_prefix.parents and not _workspace_path(
+                frontier_prefix, workspace):
+            issues.append('frontier_exploration_ros2 resolved from original dirty checkout')
+        config = (frontier_prefix / 'share/frontier_exploration_ros2/cmake/'
+                  'frontier_exploration_ros2Config.cmake')
+        if not config.is_file():
+            issues.append(f'frontier_exploration_ros2 config missing: {config}')
+
+    for relative in (
+            'cooperative_regression.py', 'ros_runtime_preflight.py',
+            'unknown_pose_frontend.py', 'unknown_pose_frontend_core.py',
+            'robust_relative_pose_selector.py'):
+        source = workspace / 'src/my_epuck_project/my_epuck_project' / relative
+        build = workspace / 'build/my_epuck_project/my_epuck_project' / relative
+        parity[relative] = {
+            'source': str(source), 'build': str(build),
+            'source_sha256': _sha256_file(source),
+            'build_sha256': _sha256_file(build),
+        }
+        if parity[relative]['source_sha256'] != parity[relative]['build_sha256']:
+            issues.append(f'source/build mismatch: {relative}')
+
+    return {
+        'workspace': str(workspace),
+        'rmw_implementation': rmw,
+        'cyclonedds_uri': cyclone_uri,
+        'expected_cyclonedds_uri': f'file://{expected_uri_path}',
+        'requested_ros_domain_id': ros_domain_id,
+        'module_paths': module_paths,
+        'module_sha256': module_hashes,
+        'source_build_parity': parity,
+        'frontier_dependency': frontier_report,
+        'contaminated_environment_paths': contaminated,
+        'allowed_external_prefixes': [str(path) for path in allowed_external_prefixes],
+        'issues': issues,
+        'passed': not issues,
+    }
+
+
+def require_runtime_provenance(workspace, environment=None, ros_domain_id=None):
+    """Raise before launch when campaign provenance is not reproducible."""
+    report = runtime_provenance(workspace, environment, ros_domain_id)
+    if not report['passed']:
+        raise PreflightError('; '.join(report['issues']))
+    return report
 
 
 def _bounded_subprocess(command, *, env=None, timeout_s=10.0,

@@ -291,8 +291,10 @@ def launch_setup(context):
                 # Four reliable chunks are published back-to-back, but the
                 # full Nav2/frontier graph can delay one callback for more
                 # than a quarter second.  Keep assembly bounded while
-                # allowing one complete 1 Hz scan to arrive atomically.
-                'assembly_timeout_s': 1.0,
+                # allowing one complete 1 Hz scan to arrive atomically.  The
+                # timeout is still finite and the pending-scan cap bounds
+                # memory even if a peer disappears.
+                'assembly_timeout_s': 2.0,
                 'max_chunks': 8,
                 'output_topic': 'scan_d500_fixed',
                 'input_reliability': scan_input_reliability,

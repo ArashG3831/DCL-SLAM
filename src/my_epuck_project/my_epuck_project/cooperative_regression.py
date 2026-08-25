@@ -2829,6 +2829,17 @@ def print_progress(campaign_id, progress, running, requested):
 
 def run_parallel_stage(args, campaign, progress, trial_numbers,
                        concurrency):
+    # A single-trial campaign is the normal validation mode.  Keep it in the
+    # main thread so wait_for_attempt_supervisor can install its temporary
+    # SIGTERM handler and reap every reparented launch session when the host
+    # watchdog stops the run.  ThreadPoolExecutor cannot install process-wide
+    # signal handlers from a worker thread.
+    if concurrency == 1:
+        for number in trial_numbers:
+            perform_attempt(
+                args, campaign, progress, number,
+                not args.no_infrastructure_retry)
+        return 1
     pending = list(trial_numbers)
     active = {}
     last_progress = 0.0

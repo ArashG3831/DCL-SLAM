@@ -27,6 +27,7 @@ from my_epuck_project.cooperative_regression import (
     perform_attempt,
     readiness_probe_due,
     required_graph_ready,
+    run_parallel_stage,
     resolved_trial_resources,
     rviz_gui_environment,
     scoped_shutdown,
@@ -531,6 +532,25 @@ def test_watchdog_sigterm_enters_exact_cleanup(monkeypatch, tmp_path):
     assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
     assert sent == [(13579, signal.SIGINT)]
     assert cleaned == [(attempt, 13579)]
+
+
+def test_single_campaign_runs_in_main_thread(monkeypatch, tmp_path):
+    """Concurrency one must preserve process-wide watchdog signal handling."""
+    (tmp_path / 'attempts').mkdir()
+    progress = {'attempts': [], 'valid_trials': {}, 'adaptive_reductions': []}
+    calls = []
+
+    def fake_attempt(args, campaign, state, number, retry=True):
+        calls.append((number, retry))
+        return {'classification': 'PASS', 'wall_time_s': 0.0}
+
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.perform_attempt',
+        fake_attempt)
+    args = options(tmp_path, trials=1)
+    args.no_infrastructure_retry = False
+    assert run_parallel_stage(args, tmp_path, progress, [1], 1) == 1
+    assert calls == [(1, True)]
 
 
 def test_failure_before_completion_is_not_held(monkeypatch, tmp_path):

@@ -1,5 +1,6 @@
 import json
 import math
+from pathlib import Path
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from my_epuck_interfaces.msg import ExplorationClaim, ExplorationStatus
@@ -14,6 +15,13 @@ from my_epuck_project.cooperative_trial_collector import (
 )
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
+
+
+def test_collector_accepts_local_map_before_handoff_and_reads_shared_maps():
+    source = (Path(__file__).resolve().parents[1] / 'my_epuck_project' /
+              'cooperative_trial_collector.py').read_text(encoding='utf-8')
+    assert 'shared_map_reader = QoSProfile' in source
+    assert "and self.messages[robot]['local_map'] is None" in source
 
 
 def occupancy(width=3, height=2):

@@ -309,6 +309,15 @@ class CooperativeTrialCollector(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
+        # Shared maps are created only after the unknown-pose handoff.  The
+        # collector is already alive by then, so a volatile subscription is
+        # the least restrictive compatible reader for both transient-local
+        # and volatile map publishers and avoids a late QoS match failure.
+        shared_map_reader = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         for robot in self.messages:
             self.create_subscription(
                 ExplorationStatus, f'/cslam/{robot}/exploration_status',
@@ -325,7 +334,8 @@ class CooperativeTrialCollector(Node):
             self.create_subscription(
                 OccupancyGrid, f'/{robot}/shared_map',
                 lambda message, item=robot:
-                    self.store(item, 'shared_map', message), transient)
+                    self.store(item, 'shared_map', message),
+                shared_map_reader)
             self.create_subscription(
                 OccupancyGrid, f'/{robot}/map',
                 lambda message, item=robot:
@@ -386,7 +396,11 @@ class CooperativeTrialCollector(Node):
 
     def readiness(self):
         for robot in self.messages:
-            if self.messages[robot]['shared_map'] is None:
+            # Before handoff only local maps exist; shared-map readiness is a
+            # post-handoff condition and must not make the pre-handoff
+            # collector appear unhealthy.
+            if (self.messages[robot]['shared_map'] is None
+                    and self.messages[robot]['local_map'] is None):
                 return False
             has_legacy = (
                 self.messages[robot]['status'] is not None

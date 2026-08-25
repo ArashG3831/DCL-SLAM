@@ -99,6 +99,13 @@ def test_handoff_node_shutdown_paths_are_idempotent():
         assert 'if rclpy.ok()' in source
 
 
+def test_map_fusion_stops_executor_before_shutdown_subscription_teardown():
+    fusion = (PY / 'source_aware_map_fusion.py').read_text()
+    assert 'signal.signal(signal.SIGTERM, stop)' in fusion
+    assert 'rclpy.spin_once(node, timeout_sec=0.2)' in fusion
+    assert 'if not stopping.is_set() and rclpy.ok():' in fusion
+
+
 def test_shared_inputs_are_created_once_after_handoff():
     assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     fusion = (PY / 'source_aware_map_fusion.py').read_text()

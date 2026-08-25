@@ -1,4 +1,6 @@
 import math
+import signal
+import threading
 import time
 
 import numpy as np
@@ -844,10 +846,29 @@ class SourceAwareMapFusion(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SourceAwareMapFusion()
+    stopping = threading.Event()
+
+    def stop(signum, frame):
+        del signum, frame
+        stopping.set()
+        # Stop executor callbacks before DDS/rclpy tears down subscriptions.
+        # Without this ordering, a final subscription take can race
+        # pybind11 destruction and raise a shutdown-only conversion error.
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not stopping.is_set():
+            rclpy.spin_once(node, timeout_sec=0.2)
     except (KeyboardInterrupt, ExternalShutdownException):
-        pass
+        stopping.set()
+    except RuntimeError:
+        # A take/conversion RuntimeError is benign only after shutdown has
+        # started; unexpected active-runtime errors must remain visible.
+        if not stopping.is_set() and rclpy.ok():
+            raise
     finally:
         if node.context.ok():
             node.destroy_node()

@@ -235,6 +235,7 @@ class D500ScanFix(Node):
         self._last_published_stamp = None
         self._received_count = 0
         self._published_count = 0
+        self._zero_stamp_drops = 0
         self._input_mode = input_mode
         self._assembler = None
         if input_mode in ('chunks', 'chunked'):
@@ -284,6 +285,13 @@ class D500ScanFix(Node):
         if source_count < 2:
             return
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # Webots can emit the first sensor sample at simulation time zero,
+        # before Ros2Supervisor has advanced /clock.  Publishing that sample
+        # creates a permanently stale LaserScan for TF/message filters.  Drop
+        # it atomically; the next scan carries a valid simulation timestamp.
+        if stamp <= 0.0:
+            self._zero_stamp_drops += 1
+            return
         if (self.minimum_time_interval > 0.0 and
                 self._last_published_stamp is not None and
                 stamp - self._last_published_stamp <

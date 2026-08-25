@@ -140,6 +140,29 @@ def test_nav2_uses_single_raw_relay_secondary_output():
         assert 'source_timeout: 3.0' in params
 
 
+def test_wsl_full_resolution_transport_uses_chunked_single_reader_path():
+    """The supported WSL path must not silently select raw 720-beam DDS."""
+    launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
+        encoding='utf-8')
+    assert "'scan_transport', default_value='chunked'" in launch
+    assert "choices=['chunked', 'laser_scan']" in launch
+    assert "'scan_d500_chunks' if scan_transport == 'chunked'" in launch
+    assert "'input_mode': scan_transport" in launch
+    assert "webots_controller_module.controller_ip_address = lambda: '127.0.0.1'" in launch
+    assert "webots_launcher_module.controller_url_prefix = lambda port='1234': f'tcp://127.0.0.1:{port}/'" in launch
+    # Chunked mode removes the stock 720-beam Ros2Lidar device instead of
+    # leaving a second raw publisher beside the fragment-safe plugin.
+    assert "re.sub(" in launch
+    assert "reference=\"d500_lidar\" type=\"Lidar\"" in launch
+
+
+def test_nested_stack_forwards_fragment_safe_scan_transport():
+    launch = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text(
+        encoding='utf-8')
+    assert "'scan_transport': LaunchConfiguration('scan_transport')" in launch
+    assert "DeclareLaunchArgument('scan_transport', default_value='chunked'" in launch
+
+
 def test_scan_publish_period_is_converted_to_ros_double():
     launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
         encoding='utf-8')

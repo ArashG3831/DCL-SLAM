@@ -277,11 +277,12 @@ def launch_setup(context):
             namespace=robot_name,
             output='screen',
             parameters=[{
-                # Scan headers already carry Webots simulation timestamps;
-                # the fixer has no timers.  Avoid subscribing it to the very
-                # high-rate /clock stream in fast mode so raw scans continue
-                # to reach the corrected output.
-                'use_sim_time': False,
+                # The raw Webots driver and the corrected Slam Toolbox stream
+                # share the simulation clock.  The fixer must use that same
+                # clock as well: otherwise a zero/old simulation stamp can be
+                # treated as stale by TF/message filters and only the first
+                # scan reaches Slam Toolbox.
+                'use_sim_time': use_sim_time,
                 'input_topic': (
                     'scan_d500_chunks' if scan_transport == 'chunked'
                     else 'scan_d500'),

@@ -63,3 +63,45 @@ graph discovery, map updates, Slam Toolbox reception, stable Windows pool
 telemetry, and complete process/port cleanup. Unknown-pose handoff,
 navigation soak and the final campaign must remain blocked until that gate
 passes.
+
+## Mirrored-WSL bounded graph validation (2026-08-25)
+
+The raw cross-process diagnostic remains an expected negative control: a
+720-beam `LaserScan` publisher emitted 150 samples while its separate
+best-effort subscriber received zero under the CycloneDDS loopback profile.
+This is not the production path and must not be used as evidence that the
+chunked adapter failed.
+
+The supported one-reader project launch was then run in realtime with the
+current install, two active robots, `scan_transport:=chunked`, raw input
+best-effort, and `use_sim_time:=true` (40 seconds, no Nav2/SLAM campaign).
+Both Webots controllers and `Ros2Supervisor` connected. The independent
+probe recorded:
+
+```text
+                         robot1   robot2
+chunk messages              140      140
+complete /scan_d500_fixed    35       35   (720 beams each)
+/scan_d500_nav               35       35   (180 beams each)
+nonzero /clock             1746 messages, 0.02 -> 34.92 s
+```
+
+Every received scan stamp was nonzero. Pool Nonpaged Bytes stayed near
+`1.00--1.01 GiB`, available Windows memory stayed above `6.9 GiB`, and the
+complete launch tree and port `24703` were cleanly released. This proves the
+fragment-safe transport and one-reader topology at the sensor/controller
+graph boundary; it does not yet prove Slam Toolbox/map/fusion or terminal
+exploration.
+
+Mirrored WSL requires the project launch's explicit `127.0.0.1` controller
+override. The stock `webots_ros2_driver` helper derives the NAT gateway from
+`/etc/resolv.conf`, which is wrong when WSL uses `networkingMode=mirrored`.
+
+The final rebuilt-install smoke (`install_transport_fixed_20260825` plus the
+current Python overlay) recorded 112 chunks and 28 complete 720-beam fixed
+scans per robot, 28 complete 180-beam Nav2 scans per robot, and 1,367
+nonzero `/clock` samples (`0.02` to `27.34` s). A startup sample at exactly
+zero simulation time is now dropped by `d500_scan_fix` rather than published
+as stale data; all delivered fixed/Nav2 scan stamps in this run were
+nonzero. Pool Nonpaged Bytes remained approximately `1.01 GiB` and no
+process or port remained after teardown.

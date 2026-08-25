@@ -403,6 +403,7 @@ def launch_setup(context):
             'sensor_profile': LaunchConfiguration('sensor_profile'),
             'scan_input_reliability': LaunchConfiguration(
                 'scan_input_reliability'),
+            'scan_transport': LaunchConfiguration('scan_transport'),
             'world_path': world_path,
             'use_scan_matching': LaunchConfiguration('use_scan_matching'),
             'do_loop_closing': LaunchConfiguration('do_loop_closing'),
@@ -590,6 +591,8 @@ def generate_launch_description():
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
                               choices=['reliable', 'best_effort']),
+        DeclareLaunchArgument('scan_transport', default_value='chunked',
+                              choices=['chunked', 'laser_scan']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),

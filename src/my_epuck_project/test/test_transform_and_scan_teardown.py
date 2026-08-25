@@ -1,6 +1,7 @@
 """Executor lifecycle regressions for the small project ROS nodes."""
 
 import inspect
+from types import SimpleNamespace
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
@@ -48,6 +49,21 @@ def test_raw_scan_input_reliability_selects_the_requested_qos():
     assert raw_scan_qos('best_effort') is RAW_SCAN_BEST_EFFORT_QOS
     assert RAW_SCAN_BEST_EFFORT_QOS.depth == 1
     assert RAW_SCAN_BEST_EFFORT_QOS.reliability.value == 2  # BEST_EFFORT
+
+
+def test_scan_fixer_drops_zero_simulation_timestamp_before_publish():
+    rclpy.init()
+    node = D500ScanFix()
+    msg = SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=0, nanosec=0), frame_id='diag_lidar'),
+        ranges=[1.0, 1.0], intensities=[], time_increment=0.0,
+        scan_time=0.1, range_min=0.02, range_max=12.0)
+    node.callback(msg)
+    assert node._received_count == 1
+    assert node._published_count == 0
+    assert node._zero_stamp_drops == 1
+    shutdown_scan_fix(node)
 
 
 def test_nav_relay_downsampling_is_explicitly_separate_from_slam_stream():

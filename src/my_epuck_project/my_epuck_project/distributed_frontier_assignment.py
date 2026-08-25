@@ -1081,8 +1081,8 @@ class DistributedFrontierAssignment(Node):
                 if self._nav2.shared_map is None:
                     self.get_logger().warning(
                         'BURGARD_LOS_MAP_UNAVAILABLE round=%s; retaining range '
-                        'utility reduction gate with zero reduction until a map exists',
-                        round_work.round_id,
+                        'utility reduction gate with zero reduction until a map exists'
+                        % round_work.round_id,
                     )
                 decision = choose_burgard_assignment(
                     round_work.round_id, round_work.union,

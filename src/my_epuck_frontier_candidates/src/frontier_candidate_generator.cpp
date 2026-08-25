@@ -113,6 +113,13 @@ public:
     P(std::string, candidate_topic, "frontier_candidates");
     P(std::string, marker_topic, "frontier_candidate_markers");
     P(std::string, path_query_lock_path, "");
+    // Occupancy grids are large fragmented samples.  The generator only needs
+    // the newest complete map; deployments may select best-effort/volatile
+    // KeepLast(1) to avoid retaining reliable-fragment state on constrained
+    // transports.  The publisher remains reliable and the final dispatch gate
+    // still validates fresh costmap/path data independently.
+    P(std::string, grid_subscription_reliability, "reliable");
+    P(std::string, grid_subscription_durability, "transient_local");
     P(double, processing_rate_hz, .5);
     P(bool, handoff_gated, false);
     P(bool, stop_after_handoff, false);
@@ -157,12 +164,34 @@ public:
     if (path_query_lock_path_.empty()) {
       path_query_lock_path_ = "/tmp/my_epuck_" + robot_id_ + "_compute_path.lock";
     }
-    auto transient_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    auto grid_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+    if (grid_subscription_durability_ == "volatile") {
+      grid_qos.durability_volatile();
+    } else if (grid_subscription_durability_ == "transient_local") {
+      grid_qos.transient_local();
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "invalid grid_subscription_durability=%s; using transient_local",
+        grid_subscription_durability_.c_str());
+      grid_qos.transient_local();
+    }
+    if (grid_subscription_reliability_ == "reliable") {
+      grid_qos.reliable();
+    } else if (grid_subscription_reliability_ == "best_effort") {
+      grid_qos.best_effort();
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "invalid grid_subscription_reliability=%s; using reliable",
+        grid_subscription_reliability_.c_str());
+      grid_qos.reliable();
+    }
     map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-      map_topic_, transient_qos,
+      map_topic_, grid_qos,
       [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {map_cb(message);});
     cost_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-      global_costmap_topic_, transient_qos,
+      global_costmap_topic_, grid_qos,
       [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) {cost_cb(message);});
     pub_ = create_publisher<my_epuck_interfaces::msg::FrontierCandidateArray>(
       candidate_topic_, rclcpp::QoS(1).reliable());
@@ -227,6 +256,9 @@ public:
       "candidate generator: persistent fair frontier evaluation map=%s costmap=%s planner=%s budget=%d handoff_gated=%s",
       map_topic_.c_str(), global_costmap_topic_.c_str(), compute_path_action_.c_str(),
       maximum_path_queries_per_cycle_, handoff_gated_ ? "true" : "false");
+    RCLCPP_INFO(
+      get_logger(), "GENERATOR_GRID_QOS reliability=%s durability=%s depth=1",
+      grid_subscription_reliability_.c_str(), grid_subscription_durability_.c_str());
   }
 
   ~Generator() override
@@ -1260,6 +1292,7 @@ private:
   int path_lock_fd_{-1};
   std::string robot_id_, map_topic_, global_costmap_topic_, global_frame_, robot_base_frame_;
   std::string compute_path_action_, candidate_topic_, marker_topic_, path_query_lock_path_;
+  std::string grid_subscription_reliability_, grid_subscription_durability_;
   std::string planner_id_;
   double processing_rate_hz_, minimum_frontier_length_m_, stable_id_quantization_m_;
   bool handoff_gated_{false};

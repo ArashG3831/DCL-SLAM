@@ -493,3 +493,28 @@ separate Nav2 relay), reliable DDS delivery, the WSL loopback/fragmentation
 profile, and the complete two-robot ROS graph.  The exact contribution of
 those mechanisms remains unseparated until a clean post-reboot A/B captures
 Windows pool counters for each run.
+
+## Clean realtime raw-QoS A/B (2026-08-25)
+
+After a Windows reboot, the current install at commit `60628e5` was exercised
+with the same dynamic 20 ms close-start world, CycloneDDS loopback, realtime
+Webots, two robots, throughput sensor profile, and no rendering/RViz. The
+runner was bounded and stopped before any handoff or long mission.
+
+The best-effort raw-input run used domain 82 / Webots port 23190 and reached
+the normal readiness path. Pool Nonpaged Bytes stayed approximately
+1.54--1.57 GB during the run and all campaign processes were removed. The
+reliable raw-input run used domain 83 / port 23200 with the same install and
+configuration. Pool Nonpaged Bytes rose from approximately 1.57 GB to
+1.71 GB in about 90 seconds; available Windows memory fell to approximately
+3.5 GB during the active interval and recovered after teardown. There were
+no DDS assertions, SIGABRTs, SIGSEGVs, or active-runtime ROS failures.
+
+This is not a proof of the exact Windows driver owner, but it is a controlled
+transport boundary: reliable raw Webots scan delivery produces materially
+more nonpaged-pool growth than best-effort delivery under the same bounded
+graph. The corrected 720-beam Slam Toolbox stream remains reliable in both
+runs; only the raw Webots-to-relay input was changed. The result supports
+using best-effort at the raw latest-sample boundary while retaining reliable
+delivery for the corrected Slam input, subject to a longer bounded handoff
+validation before any 1,200-second campaign.

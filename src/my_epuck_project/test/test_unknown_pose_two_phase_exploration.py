@@ -127,6 +127,21 @@ def test_shared_activation_declares_boolean_launch_parameters_with_boolean_types
     assert "Trying to set parameter 'webots_gui'" not in activation
 
 
+def test_fusion_quota_wrapper_is_optional_when_user_systemd_is_unavailable():
+    """WSL must still start handoff-gated fusion without a user systemd bus."""
+    module = _load_nav_launch()
+    module._user_systemd_scope_available = lambda: False
+    assert module._fusion_process_prefix(0, True, True, 30) == ''
+    assert module._fusion_process_prefix(-5, False, False, 30) == 'nice -n -5'
+
+
+def test_fusion_quota_wrapper_is_used_only_with_a_live_user_bus(monkeypatch):
+    module = _load_nav_launch()
+    monkeypatch.setattr(module, '_user_systemd_scope_available', lambda: True)
+    assert module._fusion_process_prefix(0, True, True, 30) == (
+        'systemd-run --user --scope --quiet -p CPUQuota=30%')
+
+
 def test_rejected_or_missing_handoff_keeps_shared_work_disabled():
     assignment = (PY / 'distributed_frontier_assignment.py').read_text()
     fusion = (PY / 'source_aware_map_fusion.py').read_text()

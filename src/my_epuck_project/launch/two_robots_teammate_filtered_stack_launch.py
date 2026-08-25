@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
+import subprocess
 import tempfile
 
 import yaml
@@ -52,6 +54,53 @@ def _progress_movement_time_allowance(selected):
     if _is_large_world_profile(selected):
         return '18.0'
     return '10.0'
+
+
+def _user_systemd_scope_available():
+    """Return whether a user systemd scope can actually be launched.
+
+    WSL images commonly ship ``systemd-run`` without a user bus.  Passing a
+    systemd prefix in that environment makes the fusion process fail before
+    it creates its ROS node (``Failed to connect to bus: No medium found``).
+    A process-limit wrapper is optional; the map-fusion node itself is not.
+    """
+    if not (
+            shutil.which('systemd-run') is not None
+            and os.path.isdir('/run/systemd/system')
+            and bool(os.environ.get('DBUS_SESSION_BUS_ADDRESS'))):
+        return False
+    try:
+        # A socket and environment variable can exist in WSL even when the
+        # user manager is not actually serving requests.  Probe the exact
+        # wrapper once, with no ROS process attached, before using it.
+        subprocess.run(
+            ['systemd-run', '--user', '--scope', '--quiet', '--wait', 'true'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def _fusion_process_prefix(
+        fusion_process_nice, diagnostic_mode, quota_enabled, quota_percent):
+    """Build a safe optional prefix for the map-fusion process.
+
+    ``nice`` is inherited from the campaign supervisor and is sufficient for
+    the normal WSL validation path.  Use a CPUQuota scope only when a live
+    user systemd bus is provably available; never make fusion startup depend
+    on an unavailable service manager.
+    """
+    if fusion_process_nice != 0 and not (diagnostic_mode and quota_enabled):
+        return 'nice -n ' + str(fusion_process_nice)
+    if diagnostic_mode and quota_enabled and _user_systemd_scope_available():
+        return (
+            'systemd-run --user --scope --quiet -p CPUQuota='
+            + str(quota_percent) + '%')
+    return ''
 
 
 # Historical diagnostic baseline.  Production YAML now contains RPP; keeping
@@ -447,14 +496,12 @@ def launch_setup(context):
                     # evidence cannot make either robot its own obstacle.
                     'sanitize_live_footprints': True,
                 }],
-                prefix=(
-                    'nice -n ' + str(fusion_process_nice)
-                    if fusion_process_nice != 0 and not (
-                        diagnostic_mode and quota_enabled) else
-                    'systemd-run --user --scope --quiet '
-                    '-p CPUQuota=' + LaunchConfiguration(
-                        'fusion_cpu_quota_percent').perform(context) + '%'
-                    if diagnostic_mode and quota_enabled else ''),
+                prefix=_fusion_process_prefix(
+                    fusion_process_nice,
+                    diagnostic_mode,
+                    quota_enabled,
+                    LaunchConfiguration(
+                        'fusion_cpu_quota_percent').perform(context)),
                 ))
     # The pre-handoff mapping launch owns the robot-local frame anchors, but
     # those processes are intentionally terminated with the local Nav2 stack

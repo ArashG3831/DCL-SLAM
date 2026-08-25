@@ -282,3 +282,39 @@ safety floor, even if `free -h` inside WSL looks healthy. Reclaim WSL VM/cache
 memory (normally by a controlled `wsl --shutdown` or Windows restart), record
 a fresh baseline, and rerun the one-robot realtime transport gate before any
 dual-relay or fast-mode test.
+
+## WSL fusion launch failure (2026-08-25)
+
+The diagnostic CPU-quota prefix previously wrapped the pre-handoff
+`source_aware_map_fusion` processes unconditionally with:
+
+```text
+systemd-run --user --scope --quiet -p CPUQuota=30%
+```
+
+The validation WSL image provides the `systemd-run` executable but no usable
+user systemd bus (`/run/systemd/system` and `DBUS_SESSION_BUS_ADDRESS` are not
+available).  Each fusion process therefore exited immediately with:
+`Failed to connect to bus: No medium found`.  The rest of the launch continued,
+making this look like a handoff/map-fusion failure and leaving shared-map
+evidence unavailable.
+
+The launch now probes the exact user scope command before using it.  If the
+probe fails, fusion starts without that optional wrapper (the campaign-level
+`nice`/CPU affinity still applies); it never makes map-fusion startup depend on
+an absent service manager.  The fallback and live-bus paths are covered by
+focused tests.  A fresh-install smoke on 2026-08-25 showed both fusion PIDs
+alive with `FUSION_PHASE pre_handoff=true`, and both exited cleanly during
+teardown.  Future validation must use the fresh install and must check the
+fusion PIDs before declaring a handoff/shared-map gate passed.
+
+The external nonpaged-pool guard also has a cross-session cleanup requirement:
+the campaign supervisor intentionally creates new sessions for its internal
+trial and ROS launch children.  Killing only the guard's original process
+group can therefore leave those descendants running.  The guard now
+enumerates the exact `psutil` descendant tree and terminates it across
+session/process-group boundaries, followed by bounded kill escalation.  A
+synthetic `setsid` child test confirmed that no descendant survives.  Every
+guarded Webots run must still perform an exact campaign-path process/port audit
+after termination; a pool-triggered stop is not considered clean merely
+because the top-level PID exited.

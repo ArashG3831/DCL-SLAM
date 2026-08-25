@@ -350,3 +350,37 @@ fragmentation.  These changes are the correct isolation boundary for the
 remaining Windows/WSL kernel-pool behavior.  A Windows reboot is required to
 clear this kernel pool before another Webots campaign; WSL shutdown alone did
 not reclaim the Nbuf/Nnbl/Nnbf allocations.
+
+## Valid-domain upstream-core gate stop (2026-08-25)
+
+The guarded run `upstream_core_gate_b_fast_20260825` used CycloneDDS domain 37,
+Webots port 23143, Fast Webots mode, two robots, reliable full scan transport,
+and the upstream-core frontier adapter.  It reached `/clock`, local Nav2
+readiness, upstream frontier snapshots on both robots, three compatible
+unknown-pose constraints, peer-confirmed evidence hash
+`3f8b1c3b0346eadf`, one canonical handoff, and post-handoff shared fusion and
+allocation.  It was stopped at 296.66 simulated seconds by the Windows pool
+watchdog, not by a DDS assertion or ROS crash.  The watchdog samples crossed
+the hard 6,000 MB ceiling:
+
+```text
+5831.1, 5856.7, 5881.3, 5905.4, 5932.4, 5953.6, 5973.0,
+5995.6, 6021.3 MB (Pool Nonpaged Bytes)
+```
+
+No `SIGABRT`, `SIGSEGV`, CycloneDDS assertion, or physics-step failure was
+observed.  WSL available memory was approximately 4.3 GB during the run and
+returned to approximately 6.8 GB after exact campaign-process termination, but
+the Windows nonpaged pool remained above the safety ceiling (6,369.3 MB at a
+later read).  The final shared-map arrays were not equal because the watchdog
+interrupted active map updates; this is not a valid shared-map pass.
+
+The first watchdog stop exposed a teardown race: sending SIGTERM to the outer
+campaign supervisor bypassed the KeyboardInterrupt-only descendant cleanup,
+leaving reparented ROS/Webots sessions alive.  Commits `56419aa` and `9da137c`
+install a temporary SIGTERM handler that enters the same exact campaign-path
+cleanup and add a regression test.  The stopped run used the pre-fix installed
+Python package, so its manual cleanup does not count as a normal cleanup pass.
+Do not launch another Webots campaign until Windows has been rebooted, the
+nonpaged-pool baseline is healthy, and the corrected install is proven to reap
+all campaign-owned processes.

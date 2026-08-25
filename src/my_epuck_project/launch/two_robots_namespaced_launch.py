@@ -287,7 +287,7 @@ def launch_setup(context):
                     else 'scan_d500'),
                 'input_mode': scan_transport,
                 'source_robot_id': robot_name,
-                'max_pending_scans': 4,
+                'max_pending_scans': 8,
                 # Four reliable chunks are published back-to-back, but the
                 # full Nav2/frontier graph can delay one callback for more
                 # than a quarter second.  Keep assembly bounded while

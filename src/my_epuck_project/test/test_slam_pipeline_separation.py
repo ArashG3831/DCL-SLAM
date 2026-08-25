@@ -65,7 +65,9 @@ def test_removed_pose_state_and_geometry_parameters_are_absent():
         'physical_free_space_completion', "'mode': 'simulation'",
     )
     assert not [name for name in removed if name in launch]
-    assert "'peer_radius_m': 0.035" in launch
+    # The later D500 silhouette calibration uses the measured 0.060 m
+    # exclusion radius; 0.035 m was the obsolete pre-calibration value.
+    assert "'peer_radius_m': 0.060" in launch
     assert "'range_tolerance_m': 0.005" in launch
 
 

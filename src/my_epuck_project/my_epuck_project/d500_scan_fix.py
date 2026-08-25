@@ -49,11 +49,11 @@ RAW_SCAN_BEST_EFFORT_QOS = QoSProfile(
 )
 CHUNK_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
-    # Four chunks arrive in a burst.  A larger bounded reader queue prevents
-    # a delayed Python callback in the full Nav2 graph from evicting a chunk
-    # before the assembler sees it.
-    depth=64,
-    reliability=ReliabilityPolicy.RELIABLE,
+    # Four chunks arrive in a burst.  Keep a bounded burst-sized reader queue
+    # so best-effort delivery does not evict the first chunks before the
+    # assembler sees them.
+    depth=8,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
 )
 

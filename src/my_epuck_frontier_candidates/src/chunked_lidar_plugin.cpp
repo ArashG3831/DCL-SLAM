@@ -35,11 +35,12 @@ public:
     }
     const int timestep = wb_robot_get_basic_time_step();
     wb_lidar_enable(lidar_, timestep > 0 ? timestep : 20);
-    // Chunk samples are each below the observed DDS fragmentation boundary;
-    // reliable delivery is safe here and prevents losing one of four chunks
-    // while retaining a complete 720-beam scan atomically.
+    // Chunk samples are each below the observed DDS fragmentation boundary.
+    // Best-effort avoids reliable-reader repair buffers in the WSL/Hyper-V
+    // path.  The downstream assembler publishes no scan unless all chunks
+    // for one sequence arrive and pass integrity checks.
     publisher_ = node_->create_publisher<my_epuck_interfaces::msg::ScanChunk>(
-      topic_, rclcpp::QoS(rclcpp::KeepLast(8)).reliable());
+      topic_, rclcpp::QoS(rclcpp::KeepLast(8)).best_effort());
     RCLCPP_INFO(node_->get_logger(),
                 "Chunked lidar transport active: %s -> %s (%u beams/chunk)",
                 lidar_name_.c_str(), topic_.c_str(), chunk_beams_);

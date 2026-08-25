@@ -34,10 +34,13 @@ The stock Webots `Ros2Lidar` device block is removed in chunked mode. Leaving
 an `enabled=false` block still creates a raw publisher with the installed
 driver, so removal is required to preserve the one-reader topology.
 
-Reliable QoS is used only for the small chunk messages and the reconstructed
-corrected scan. No reliable raw 720-beam DDS sample is used. Slam Toolbox
-continues to receive the full corrected stream with `throttle_scans=1` and
-scan matching enabled.
+The small chunk messages use best-effort depth-eight QoS to avoid reliable
+reader-repair buffers in the WSL/Hyper-V path while retaining the four-message
+burst. The assembler is atomic: loss
+of any chunk discards that complete scan and never produces a partial sample.
+Only the reconstructed corrected scan is reliable. No reliable raw 720-beam
+DDS sample is used. Slam Toolbox continues to receive the full corrected
+stream with `throttle_scans=1` and scan matching enabled.
 
 ## Focused evidence
 

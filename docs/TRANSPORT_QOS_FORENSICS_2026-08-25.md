@@ -146,3 +146,14 @@ must not be silently substituted for the existing decentralized UDP profile.
 Therefore the TCP result is recorded as a lead, not as evidence that the
 one-relay campaign gate has passed. No handoff, soak, or 1,200-second campaign
 was launched after the full-resolution best-effort gate failed.
+
+## Version cross-check
+
+An isolated CycloneDDS `11.0.1` build (with `ENABLE_TCP=ON`) was loaded only
+through a temporary `libddsc.so.0` shim against the installed Jazzy
+`rmw_cyclonedds_cpp`; it was not installed into ROS or committed. Its UDP
+cross-process result was still `0/60` received 720-beam best-effort samples,
+while its TCP result was `60/60`. This rules out a simple “upgrade Cyclone and
+keep UDP” resolution for this WSL loopback boundary. The experiment is not a
+production version upgrade because the Jazzy RMW package is built and tested
+against the pinned 0.10.5 ABI/configuration.

@@ -75,6 +75,26 @@ def test_runtime_provenance_requires_clean_cyclone_environment():
                for path in report['module_paths'].values() if path)
 
 
+def test_runtime_provenance_binds_parity_to_explicit_build_overlay(tmp_path):
+    workspace = Path(__file__).resolve().parents[3]
+    build_base = tmp_path / 'build_overlay'
+    module_root = build_base / 'my_epuck_project/my_epuck_project'
+    module_root.mkdir(parents=True)
+    source_root = workspace / 'src/my_epuck_project/my_epuck_project'
+    for relative in (
+            'cooperative_regression.py', 'ros_runtime_preflight.py',
+            'unknown_pose_frontend.py', 'unknown_pose_frontend_core.py',
+            'robust_relative_pose_selector.py'):
+        (module_root / relative).write_bytes(
+            (source_root / relative).read_bytes())
+    environment = _clean_runtime_environment(workspace, domain=34)
+    environment['MY_EPUCK_BUILD_BASE'] = str(build_base)
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert report['passed'], report['issues']
+    assert all(item['build'].startswith(str(build_base))
+               for item in report['source_build_parity'].values())
+
+
 def test_runtime_provenance_rejects_original_checkout_imports():
     workspace = Path(__file__).resolve().parents[3]
     environment = _clean_runtime_environment(workspace)

@@ -225,12 +225,21 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         if not config.is_file():
             issues.append(f'frontier_exploration_ros2 config missing: {config}')
 
+    # A campaign may deliberately use an isolated colcon overlay (for
+    # example, ``build_current_<commit>``) rather than the workspace's
+    # default ``build`` directory.  Provenance must inspect the exact build
+    # selected by the launch environment; silently falling back to
+    # ``workspace/build`` can report a stale mismatch while the running
+    # modules are correct.  Keep the default for backwards compatibility,
+    # but allow the runner to bind this check to its explicit build base.
+    build_base = Path(environment.get('MY_EPUCK_BUILD_BASE',
+                                      workspace / 'build')).resolve()
     for relative in (
             'cooperative_regression.py', 'ros_runtime_preflight.py',
             'unknown_pose_frontend.py', 'unknown_pose_frontend_core.py',
             'robust_relative_pose_selector.py'):
         source = workspace / 'src/my_epuck_project/my_epuck_project' / relative
-        build = workspace / 'build/my_epuck_project/my_epuck_project' / relative
+        build = build_base / 'my_epuck_project/my_epuck_project' / relative
         parity[relative] = {
             'source': str(source), 'build': str(build),
             'source_sha256': _sha256_file(source),

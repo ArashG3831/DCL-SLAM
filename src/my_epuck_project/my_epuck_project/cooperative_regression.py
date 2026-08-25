@@ -1858,6 +1858,7 @@ def internal_trial(args):
         f'webots_mode:={args.webots_mode}',
         f'webots_gui:={str(args.webots_gui).lower()}',
         f'sensor_profile:={args.sensor_profile}',
+        f'scan_input_reliability:={args.scan_input_reliability}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
         # Local Nav2 is started by the readiness gate only after controllers,
@@ -2534,6 +2535,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             getattr(args, 'sensor_profile', None) or
             ('throughput' if getattr(args, 'execution_profile', None) ==
              'throughput' else 'full')),
+        scan_input_reliability=getattr(
+            args, 'scan_input_reliability', 'reliable'),
         use_scan_matching=getattr(args, 'use_scan_matching', False),
         do_loop_closing=getattr(args, 'do_loop_closing', False),
         unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
@@ -3576,6 +3579,12 @@ def parser():
     result.add_argument(
         '--sensor-profile', choices=['full', 'throughput'], default=None,
         help='Simulated-device set; physical launches are unchanged.')
+    result.add_argument(
+        '--scan-input-reliability', choices=['reliable', 'best_effort'],
+        default='reliable',
+        help=('Reliability of the raw Webots D500 scan input. The corrected '
+              'Slam stream remains reliable; best_effort is a bounded '
+              'transport-isolation option.'))
     result.add_argument(
         '--diagnostic-mode', type=boolean, default=False, metavar='BOOL',
         help='Enable bounded Nav2 command-pipeline diagnostics.')

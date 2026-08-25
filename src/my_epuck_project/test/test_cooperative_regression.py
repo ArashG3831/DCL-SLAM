@@ -174,6 +174,18 @@ def test_slam_diagnostic_overrides_default_false_and_cross_trial_boundary(
     assert command[command.index('--do-loop-closing') + 1] == 'false'
 
 
+def test_scan_input_reliability_crosses_trial_boundary(tmp_path):
+    args = parser().parse_args(['--scan-input-reliability', 'best_effort'])
+    assert args.scan_input_reliability == 'best_effort'
+    args = options(tmp_path, trials=1)
+    args.world_profile = 'large'
+    args.source_world_path = str(tmp_path / 'large.wbt')
+    args.scan_input_reliability = 'best_effort'
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    assert command[command.index('--scan-input-reliability') + 1] == 'best_effort'
+
+
 def test_ideal_encoder_sensing_defaults_true_and_crosses_trial_boundary(tmp_path):
     args = parser().parse_args([])
     assert args.ideal_encoder_sensing is True

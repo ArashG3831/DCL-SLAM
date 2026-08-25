@@ -106,6 +106,8 @@ def generate_launch_description():
             'slam_tf_publication_mode': LaunchConfiguration(
                 'slam_tf_publication_mode'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'scan_input_reliability': LaunchConfiguration(
+                'scan_input_reliability'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
             'diagnostic_frontier_capture': LaunchConfiguration(
                 'diagnostic_frontier_capture'),
@@ -150,6 +152,8 @@ def generate_launch_description():
                               choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
+                              choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('diagnostic_frontier_capture', default_value='false',

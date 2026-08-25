@@ -30,6 +30,24 @@ def test_local_phase_uses_each_robot_local_map_and_local_nav2():
     assert "if self._local_only:" in assignment
 
 
+def test_scan_reliability_override_reaches_the_driver_launch():
+    """The transport A/B flag must survive every nested launch include."""
+    chain = [
+        (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text(),
+        (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text(),
+        (LAUNCH / 'two_robots_frontier_candidates_launch.py').read_text(),
+        (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text(),
+        (LAUNCH / 'two_robots_teammate_filtered_dual_slam_launch.py').read_text(),
+        (LAUNCH / 'two_robots_namespaced_launch.py').read_text(),
+    ]
+    for source in chain:
+        assert 'scan_input_reliability' in source
+        assert 'best_effort' in source
+    for source in chain[:-1]:
+        assert "'scan_input_reliability': LaunchConfiguration(" in source
+    assert "'input_reliability': scan_input_reliability" in chain[-1]
+
+
 def test_shared_stack_is_inert_until_accepted_handoff():
     stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()

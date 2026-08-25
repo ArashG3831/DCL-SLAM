@@ -401,6 +401,8 @@ def launch_setup(context):
             'webots_mode': LaunchConfiguration('webots_mode'),
             'webots_gui': LaunchConfiguration('webots_gui'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'scan_input_reliability': LaunchConfiguration(
+                'scan_input_reliability'),
             'world_path': world_path,
             'use_scan_matching': LaunchConfiguration('use_scan_matching'),
             'do_loop_closing': LaunchConfiguration('do_loop_closing'),
@@ -586,6 +588,8 @@ def generate_launch_description():
                               choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
+                              choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),

@@ -189,6 +189,8 @@ def launch_setup(context):
             'fusion_process_nice': LaunchConfiguration(
                 'fusion_process_nice'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'scan_input_reliability': LaunchConfiguration(
+                'scan_input_reliability'),
             'nav2_autostart': LaunchConfiguration('nav2_autostart'),
             'dispatch_enabled': str(shared_dispatch_enabled).lower(),
             'controller_variant': LaunchConfiguration('controller_variant'),
@@ -226,6 +228,8 @@ def launch_setup(context):
             'slam_tf_publication_mode': LaunchConfiguration(
                 'slam_tf_publication_mode'),
             'sensor_profile': LaunchConfiguration('sensor_profile'),
+            'scan_input_reliability': LaunchConfiguration(
+                'scan_input_reliability'),
             'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
             'fusion_cpu_quota_percent': LaunchConfiguration(
                 'fusion_cpu_quota_percent'),
@@ -440,6 +444,8 @@ def launch_setup(context):
                 'use_scan_matching': activation_scan_matching,
                 'do_loop_closing': activation_loop_closing,
                 'sensor_profile': LaunchConfiguration('sensor_profile'),
+                'scan_input_reliability': LaunchConfiguration(
+                    'scan_input_reliability'),
                 'diagnostic_mode': LaunchConfiguration('diagnostic_mode'),
                 'diagnostic_frontier_capture': LaunchConfiguration(
                     'diagnostic_frontier_capture'),
@@ -615,6 +621,8 @@ def generate_launch_description():
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
+        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
+                              choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('nav2_autostart', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='true',

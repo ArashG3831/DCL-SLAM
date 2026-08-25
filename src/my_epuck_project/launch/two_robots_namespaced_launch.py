@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import tempfile
 
 from launch import LaunchDescription
@@ -45,6 +46,7 @@ def launch_setup(context):
     lidar_update_rate = LaunchConfiguration('lidar_update_rate').perform(context)
     scan_input_reliability = LaunchConfiguration(
         'scan_input_reliability').perform(context)
+    scan_transport = LaunchConfiguration('scan_transport').perform(context)
     # ROS parameter typing is strict. LaunchConfiguration values are strings;
     # convert the scan period before passing it to rclpy's DOUBLE parameter.
     scan_publish_period = float(
@@ -109,15 +111,44 @@ def launch_setup(context):
 
     robot_actions = []
     for robot_name in ('robot1', 'robot2'):
-        lidar_properties = (
-            '<topicName>/scan_d500</topicName>\n'
-            f'                <frameName>{robot_name}/d500_lidar</frameName>'
-        )
-        if float(lidar_update_rate) > 0.0:
+        if scan_transport == 'chunked':
+            # The stock Ros2Lidar publisher serializes a 720-beam LaserScan
+            # as one DDS sample.  That sample is dropped by the verified WSL
+            # best-effort path before d500_scan_fix can see it.  Disable only
+            # that publisher and let the in-process Webots plugin publish
+            # bounded 180-beam chunks from the same lidar device.
+            # Remove the stock Ros2Lidar device block entirely.  An
+            # ``enabled=false`` property still leaves a publisher endpoint
+            # in this driver version, so retaining it would create an
+            # unconsumed full-size LaserScan writer alongside the chunk
+            # publisher.
+            robot_urdf_base = re.sub(
+                r'\s*<device reference="d500_lidar" type="Lidar">.*?</device>\s*',
+                '\n', base_urdf, count=1, flags=re.DOTALL)
+            lidar_properties = None
+        else:
+            lidar_properties = (
+                '<topicName>/scan_d500</topicName>\n'
+                f'                <frameName>{robot_name}/d500_lidar</frameName>'
+            )
+        if lidar_properties is not None and float(lidar_update_rate) > 0.0:
             lidar_properties += (
                 f'\n                <updateRate>{lidar_update_rate}</updateRate>')
-        robot_urdf = base_urdf.replace(
-            '<topicName>/scan_d500</topicName>', lidar_properties, 1)
+        robot_urdf = (robot_urdf_base if scan_transport == 'chunked' else
+                      base_urdf.replace(
+                          '<topicName>/scan_d500</topicName>', lidar_properties, 1))
+        if scan_transport == 'chunked':
+            plugin = (
+                '        <plugin type="my_epuck_frontier_candidates::ChunkedLidarPlugin">\n'
+                f'            <robot_id>{robot_name}</robot_id>\n'
+                '            <topic>scan_d500_chunks</topic>\n'
+                f'            <frame_id>{robot_name}/d500_lidar</frame_id>\n'
+                '            <chunk_beams>180</chunk_beams>\n'
+                f'            <update_rate>{lidar_update_rate}</update_rate>\n'
+                '            <lidar_name>d500_lidar</lidar_name>\n'
+                '        </plugin>\n'
+            )
+            robot_urdf = robot_urdf.replace('    </webots>', plugin + '    </webots>', 1)
         robot_urdf_path = os.path.join(
             tempfile.gettempdir(), f'my_epuck_project_{robot_name}.urdf')
         with open(robot_urdf_path, 'w') as f:
@@ -251,7 +282,14 @@ def launch_setup(context):
                 # high-rate /clock stream in fast mode so raw scans continue
                 # to reach the corrected output.
                 'use_sim_time': False,
-                'input_topic': 'scan_d500',
+                'input_topic': (
+                    'scan_d500_chunks' if scan_transport == 'chunked'
+                    else 'scan_d500'),
+                'input_mode': scan_transport,
+                'source_robot_id': robot_name,
+                'max_pending_scans': 4,
+                'assembly_timeout_s': 0.25,
+                'max_chunks': 8,
                 'output_topic': 'scan_d500_fixed',
                 'input_reliability': scan_input_reliability,
                 'minimum_time_interval': scan_publish_period,
@@ -342,5 +380,9 @@ def generate_launch_description():
             'scan_input_reliability', default_value='reliable',
             choices=['reliable', 'best_effort'],
             description='Reliability for the raw Webots lidar stream.'),
+        DeclareLaunchArgument(
+            'scan_transport', default_value='chunked',
+            choices=['chunked', 'laser_scan'],
+            description='Raw Webots scan transport; chunked avoids DDS fragmentation.'),
         OpaqueFunction(function=launch_setup),
     ])

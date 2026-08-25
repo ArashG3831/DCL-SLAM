@@ -1,0 +1,7 @@
+<library path="chunked_lidar_plugin">
+  <class
+    type="my_epuck_frontier_candidates::ChunkedLidarPlugin"
+    base_class_type="webots_ros2_driver::PluginInterface">
+    <description>Fragment-safe D500 scan publisher for the WSL/Webots transport boundary.</description>
+  </class>
+</library>

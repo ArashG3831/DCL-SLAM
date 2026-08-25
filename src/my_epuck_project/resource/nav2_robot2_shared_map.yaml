@@ -224,7 +224,9 @@ planner_server:
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
-      use_astar: false
+      # Keep planner parity with robot1.  This fixes the observed NavFn
+      # potential-extraction failure pattern without changing safety gates.
+      use_astar: true
       allow_unknown: true
 
 smoother_server:

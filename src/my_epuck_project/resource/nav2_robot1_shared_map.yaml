@@ -232,7 +232,10 @@ planner_server:
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
-      use_astar: false
+      # A* avoids the repeated NavFn potential-extraction failures observed
+      # for long frontier routes while preserving the same costmap safety
+      # checks and unknown-cell policy.
+      use_astar: true
       allow_unknown: true
 
 smoother_server:

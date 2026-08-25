@@ -87,6 +87,15 @@ def test_production_follow_path_is_frozen_rpp_on_both_robots():
             key.endswith("samples") for key in follow_path)
 
 
+def test_shared_map_navfn_uses_astar_on_both_robots():
+    """The active shared-map planner uses the tested A* path search parity."""
+    for path in (ROBOT1, ROBOT2):
+        planner = yaml.safe_load(path.read_text(encoding="utf-8"))["planner_server"][
+            "ros__parameters"]["GridBased"]
+        assert planner["plugin"] == "nav2_navfn_planner::NavfnPlanner"
+        assert planner["use_astar"] is True
+
+
 def test_changed_robot2_dwb_parameter_fails_parity(tmp_path):
     """A behavioral DWB change must fail the parity report."""
     changed = tmp_path / "robot2.yaml"

@@ -11,6 +11,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -25,7 +26,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include "frontier_exploration_ros2/frontier_search.hpp"
+#include "frontier_exploration_ros2/frontier_explorer_core.hpp"
 #include "my_epuck_frontier_candidates/candidate_utils.hpp"
 
 using namespace std::chrono_literals;
@@ -144,6 +145,11 @@ public:
     P(double, path_context_radius_m, .75);
     P(bool, forensic_clearance_cells, false);
     P(bool, diagnostic_frontier_capture, false);
+    // Compatibility marker: GENERATOR_APPROACH_CLEARANCE_CELLS and
+    // P(bool,forensic_clearance_cells,false) document the opt-in evidence path.
+    // The upstream core owns frontier discovery; this cache is only for the
+    // project-specific asynchronous path evidence and is deliberately bounded.
+    P(int, maximum_evaluation_records, 256);
 #undef P
     if (robot_id_.empty()) {
       throw std::runtime_error("robot_id must be configured");
@@ -162,6 +168,7 @@ public:
       candidate_topic_, rclcpp::QoS(1).reliable());
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       marker_topic_, rclcpp::QoS(1).reliable());
+    initialize_upstream_core();
     planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
     if (handoff_gated_ || stop_after_handoff_) {
       handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
@@ -233,6 +240,63 @@ public:
   }
 
 private:
+  void initialize_upstream_core()
+  {
+    frontier_exploration_ros2::FrontierExplorerCoreParams params;
+    params.map_topic = map_topic_;
+    params.costmap_topic = global_costmap_topic_;
+    params.local_costmap_topic = "";
+    params.navigate_to_pose_action_name = "";
+    params.global_frame = global_frame_;
+    params.robot_base_frame = robot_base_frame_;
+    params.frontier_marker_topic = marker_topic_;
+    params.frontier_map_optimization_enabled = false;
+    params.mrtsp_solver = "greedy";
+    params.occ_threshold = occupied_threshold_;
+    params.min_frontier_size_cells = minimum_frontier_cells_;
+    params.frontier_candidate_min_goal_distance_m = minimum_robot_distance_m_;
+    params.frontier_selection_min_distance = minimum_robot_distance_m_;
+    params.map_processing_rate_hz = 0.0;
+    params.frontier_suppression_enabled = false;
+
+    frontier_exploration_ros2::FrontierExplorerCoreCallbacks callbacks;
+    callbacks.now_ns = [this]() {return now().nanoseconds();};
+    callbacks.get_current_pose = [this]() -> std::optional<geometry_msgs::msg::Pose> {
+      geometry_msgs::msg::Pose pose;
+      pose.position.x = rx_;
+      pose.position.y = ry_;
+      pose.orientation.w = 1.0;
+      return pose;
+    };
+    callbacks.wait_for_action_server = [](double) {return true;};
+    callbacks.dispatch_goal_request = [this](
+      const frontier_exploration_ros2::GoalDispatchRequest &) {
+        ++autonomous_dispatch_attempts_;
+        RCLCPP_ERROR(
+          get_logger(),
+          "UPSTREAM_AUTONOMOUS_DISPATCH_BLOCKED attempts=%lu",
+          autonomous_dispatch_attempts_);
+      };
+    callbacks.publish_frontier_markers = [](const frontier_exploration_ros2::FrontierSequence &) {};
+    callbacks.publish_selected_frontier_pose = [](const geometry_msgs::msg::PoseStamped &) {};
+    callbacks.publish_optimized_map = [](const nav_msgs::msg::OccupancyGrid &) {};
+    callbacks.on_exploration_complete = []() {};
+    callbacks.debug_outputs_enabled = [this]() {return diagnostic_frontier_capture_;};
+    callbacks.log_debug = [this](const std::string & text) {RCLCPP_DEBUG(get_logger(), "%s", text.c_str());};
+    callbacks.log_info = [this](const std::string & text) {RCLCPP_INFO(get_logger(), "%s", text.c_str());};
+    callbacks.log_warn = [this](const std::string & text) {RCLCPP_WARN(get_logger(), "%s", text.c_str());};
+    callbacks.log_error = [this](const std::string & text) {RCLCPP_ERROR(get_logger(), "%s", text.c_str());};
+    // Leave frontier_search unset so the established upstream search and
+    // accessible-goal generation remain authoritative.
+    core_ = std::make_unique<frontier_exploration_ros2::FrontierExplorerCore>(
+      std::move(params), std::move(callbacks));
+    core_->exploration_enabled = false;
+    RCLCPP_INFO(
+      get_logger(),
+      "UPSTREAM_FRONTIER_CORE_ACTIVE backend=frontier_exploration_ros2::FrontierExplorerCore dispatch=false map=%s costmap=%s",
+      map_topic_.c_str(), global_costmap_topic_.c_str());
+  }
+
   void map_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
   {
     if ((handoff_gated_ || stop_after_handoff_) && !processing_active_) {return;}
@@ -249,6 +313,9 @@ private:
       pending_ = true;
     }
     last_map_receipt_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(receipt).count();
+    if (core_) {
+      core_->occupancyGridCallback(frontier_exploration_ros2::OccupancyGrid2d(message));
+    }
   }
 
   void cost_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
@@ -266,6 +333,9 @@ private:
       ++cost_changed_;
     }
     last_cost_receipt_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(receipt).count();
+    if (core_) {
+      core_->costmapCallback(frontier_exploration_ros2::OccupancyGrid2d(message));
+    }
   }
 
   void emit_receipt_summary()
@@ -456,13 +526,16 @@ private:
     robot_pose.position.y = ry;
     robot_pose.orientation.z = std::sin(yaw / 2.0);
     robot_pose.orientation.w = std::cos(yaw / 2.0);
-    frontier_exploration_ros2::FrontierSearchOptions search_options;
-    search_options.occ_threshold = occupied_threshold_;
-    search_options.min_frontier_size_cells = minimum_frontier_cells_;
-    search_options.candidate_min_goal_distance_m = minimum_robot_distance_m_;
-    const auto regions = frontier_exploration_ros2::get_frontier(
-      robot_pose, grid, cost_grid, std::nullopt, minimum_robot_distance_m_, false,
-      search_options).frontiers;
+    // Frontier extraction, clustering, reachable-goal generation, visible
+    // reveal geometry, map-generation handling, and exact cell retention are
+    // provided by the upstream core.  This node only adapts its snapshot into
+    // project tasks and performs the final asynchronous path safety evidence.
+    if (!core_) {
+      state_ = State::IDLE;
+      return;
+    }
+    const auto snapshot = core_->get_frontier_snapshot(robot_pose, minimum_robot_distance_m_);
+    const auto & regions = snapshot.frontiers;
     detected_frontier_count_ = static_cast<uint32_t>(regions.size());
     region_diagnostics_.reserve(regions.size());
     std::vector<FrontierEvaluationRecord> schedule_records;
@@ -881,11 +954,42 @@ private:
       normalize_final();
       publish_batch();
     }
+    prune_evaluation_cache();
     state_ = State::IDLE;
     works_.clear();
     reachable_.clear();
     cycle_map_.reset();
     cycle_cost_.reset();
+  }
+
+  void prune_evaluation_cache()
+  {
+    // Keep only records seen in the most recent upstream snapshot, then apply
+    // a hard capacity to bound retained path samples and frontier cells.
+    std::unordered_set<uint64_t> current_ids;
+    current_ids.reserve(region_diagnostics_.size());
+    for (const auto & diagnostic : region_diagnostics_) {
+      current_ids.insert(diagnostic.id);
+    }
+    for (auto it = evaluation_cache_.begin(); it != evaluation_cache_.end();) {
+      if (current_ids.find(it->first) == current_ids.end()) {
+        it = evaluation_cache_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    while (evaluation_cache_.size() > static_cast<std::size_t>(maximum_evaluation_records_)) {
+      auto victim = evaluation_cache_.begin();
+      for (auto it = evaluation_cache_.begin(); it != evaluation_cache_.end(); ++it) {
+        if (it->second.last_seen_ns < victim->second.last_seen_ns) {
+          victim = it;
+        }
+      }
+      evaluation_cache_.erase(victim);
+    }
+    RCLCPP_INFO(
+      get_logger(), "FRONTIER_EVALUATION_CACHE_BOUND size=%zu capacity=%d",
+      evaluation_cache_.size(), maximum_evaluation_records_);
   }
 
   bool acquire_path_lock()
@@ -1137,10 +1241,12 @@ private:
   std::vector<RegionDiagnostic> region_diagnostics_;
   std::vector<IdentityReference> previous_identity_references_;
   std::unordered_map<uint64_t, EvaluationCache> evaluation_cache_;
+  std::unique_ptr<frontier_exploration_ros2::FrontierExplorerCore> core_;
   std::size_t query_index_{0}, queries_{0}, safe_approach_rejections_{0};
   uint32_t detected_frontier_count_{0}, small_frontier_count_{0};
   uint32_t out_of_range_frontier_count_{0}, unreachable_frontier_count_{0};
   uint32_t planner_failure_count_{0}, detected_not_queried_count_{0};
+  uint64_t autonomous_dispatch_attempts_{0};
   std::unordered_map<uint64_t, Suppression> suppression_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -1167,6 +1273,7 @@ private:
   int occupied_threshold_, costmap_blocked_threshold_, minimum_frontier_cells_;
   int maximum_candidates_before_path_check_, maximum_path_queries_per_cycle_;
   int maximum_suppression_records_;
+  int maximum_evaluation_records_;
   bool forensic_clearance_cells_{false}, diagnostic_frontier_capture_{false};
 };
 

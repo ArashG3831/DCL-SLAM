@@ -74,6 +74,12 @@ class D500ScanFix(Node):
         self.declare_parameter('output_depth', 100)
         self.declare_parameter('output_reliability', 'reliable')
         self.declare_parameter('output_sample_count', 0)
+        # One raw subscription can feed both corrected outputs.  This avoids
+        # duplicated raw DDS readers while keeping Slam and Nav2 QoS separate.
+        self.declare_parameter('secondary_output_topic', '')
+        self.declare_parameter('secondary_output_depth', 1)
+        self.declare_parameter('secondary_output_reliability', 'best_effort')
+        self.declare_parameter('secondary_output_sample_count', 0)
 
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
@@ -84,6 +90,10 @@ class D500ScanFix(Node):
             self.get_parameter('output_reliability').value).lower()
         self.output_sample_count = int(
             self.get_parameter('output_sample_count').value)
+        self.secondary_output_topic = str(
+            self.get_parameter('secondary_output_topic').value).strip()
+        self.secondary_output_sample_count = int(
+            self.get_parameter('secondary_output_sample_count').value)
         if output_depth <= 1 and output_reliability == 'best_effort':
             output_qos = LATEST_NAV_SCAN_QOS
         elif output_depth <= 1:
@@ -109,6 +119,20 @@ class D500ScanFix(Node):
             output_topic,
             output_qos,
         )
+        self.secondary_pub = None
+        if self.secondary_output_topic:
+            secondary_depth = int(
+                self.get_parameter('secondary_output_depth').value)
+            secondary_reliability = str(
+                self.get_parameter('secondary_output_reliability').value).lower()
+            if secondary_depth <= 1 and secondary_reliability == 'best_effort':
+                secondary_qos = LATEST_NAV_SCAN_QOS
+            elif secondary_depth <= 1:
+                secondary_qos = LATEST_SCAN_QOS
+            else:
+                secondary_qos = CORRECTED_SCAN_QOS
+            self.secondary_pub = self.create_publisher(
+                LaserScan, self.secondary_output_topic, secondary_qos)
 
         self.get_logger().info(
             f'D500 scan fixer started: {input_topic} -> {output_topic}'
@@ -158,6 +182,33 @@ class D500ScanFix(Node):
 
         if rclpy.ok():
             self.pub.publish(fixed)
+            if self.secondary_pub is not None:
+                fixed_count = len(fixed.ranges)
+                secondary_count = fixed_count
+                if (1 < self.secondary_output_sample_count < fixed_count):
+                    secondary_count = self.secondary_output_sample_count
+                secondary = fixed
+                if secondary_count != fixed_count:
+                    secondary = LaserScan()
+                    secondary.header = fixed.header
+                    secondary.angle_min = fixed.angle_min
+                    secondary.angle_max = fixed.angle_max
+                    secondary.angle_increment = (
+                        (fixed.angle_max - fixed.angle_min) /
+                        (secondary_count - 1))
+                    secondary.time_increment = fixed.time_increment
+                    secondary.scan_time = fixed.scan_time
+                    secondary.range_min = fixed.range_min
+                    secondary.range_max = fixed.range_max
+                    indices = [
+                        round(i * (fixed_count - 1) /
+                              (secondary_count - 1))
+                        for i in range(secondary_count)]
+                    secondary.ranges = [fixed.ranges[i] for i in indices]
+                    if fixed.intensities:
+                        secondary.intensities = [
+                            fixed.intensities[i] for i in indices]
+                self.secondary_pub.publish(secondary)
             self._last_published_stamp = stamp
             self._published_count += 1
             if self._published_count == 1 or self._published_count % 100 == 0:

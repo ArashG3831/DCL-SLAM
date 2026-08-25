@@ -59,7 +59,7 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
         # corrected scan must be available to Slam Toolbox.
         'minimum_time_interval': 1.0,
         'lidar_update_rate': 1.0,
-        'scan_input_reliability': 'best_effort',
+        'scan_input_reliability': 'reliable',
         'map_update_interval': 1.0,
     }
     assert parameters == expected
@@ -124,12 +124,13 @@ def test_scan_pipeline_diagnostic_records_effective_params_and_rates():
     assert 'configured_throttle_scans' in logger
 
 
-def test_nav2_uses_isolated_latest_scan_relay():
+def test_nav2_uses_single_raw_relay_secondary_output():
     launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
         encoding='utf-8')
-    assert "output_topic': 'scan_d500_nav'" in launch
-    assert "'output_depth': 1" in launch
-    assert "name=f'{robot_name}_d500_nav_scan_fix'" in launch
+    assert "'secondary_output_topic': 'scan_d500_nav'" in launch
+    assert "'secondary_output_depth': 1" in launch
+    assert "'secondary_output_sample_count': 180" in launch
+    assert "name=f'{robot_name}_d500_nav_scan_fix'" not in launch
     for robot in ('robot1', 'robot2'):
         params = (RESOURCE / f'nav2_{robot}_shared_map.yaml').read_text(
             encoding='utf-8')
@@ -143,7 +144,7 @@ def test_scan_publish_period_is_converted_to_ros_double():
     launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
         encoding='utf-8')
     assert "scan_publish_period = float(" in launch
-    assert launch.count("'minimum_time_interval': scan_publish_period") == 2
+    assert launch.count("'minimum_time_interval': scan_publish_period") == 1
 
 
 def test_collision_monitor_uses_sim_clock_for_relay_scan_stamps():

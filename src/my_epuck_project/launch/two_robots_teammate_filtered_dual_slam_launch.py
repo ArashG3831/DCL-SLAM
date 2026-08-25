@@ -238,7 +238,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
-        DeclareLaunchArgument('scan_input_reliability', default_value='best_effort',
+        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
                               choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
         DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),

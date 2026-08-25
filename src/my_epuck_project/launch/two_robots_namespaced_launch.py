@@ -255,34 +255,13 @@ def launch_setup(context):
                 'output_topic': 'scan_d500_fixed',
                 'input_reliability': scan_input_reliability,
                 'minimum_time_interval': scan_publish_period,
-            }],
-        )
-
-        # Keep Nav2's safety/costmap scan stream independent from the
-        # full-resolution Slam Toolbox stream.  Slam Toolbox may take longer
-        # than one simulated scan period to process a 720-reading scan; a
-        # shared reliable writer would then back-pressure collision_monitor
-        # and deliver old simulation timestamps to the local controller.
-        # Both relays consume the same raw Webots scan and apply the identical
-        # deterministic angle correction.  This is transport isolation only;
-        # it does not provide any estimator or ground-truth information.
-        nav_scan_fix_node = Node(
-            package='my_epuck_project',
-            executable='d500_scan_fix',
-            name=f'{robot_name}_d500_nav_scan_fix',
-            namespace=robot_name,
-            output='screen',
-            parameters=[{
-                'use_sim_time': False,
-                'input_topic': 'scan_d500',
-                'output_topic': 'scan_d500_nav',
-                # Nav2 must consume the newest safety scan rather than queue
-                # a long reliable backlog behind its 1 Hz source.
-                'output_depth': 1,
-                'output_reliability': 'best_effort',
-                'output_sample_count': 180,
-                'input_reliability': scan_input_reliability,
-                'minimum_time_interval': scan_publish_period,
+                # One raw reader publishes both corrected streams.  Slam
+                # receives the full reliable output; Nav2 receives a bounded
+                # latest-sample best-effort output.
+                'secondary_output_topic': 'scan_d500_nav',
+                'secondary_output_depth': 1,
+                'secondary_output_reliability': 'best_effort',
+                'secondary_output_sample_count': 180,
             }],
         )
 
@@ -305,7 +284,6 @@ def launch_setup(context):
             robot_driver,
             twist_stamper_node,
             scan_fix_node,
-            nav_scan_fix_node,
             start_joint_state_broadcaster,
             waiting_nodes,
         ])
@@ -361,7 +339,7 @@ def generate_launch_description():
             'lidar_update_rate', default_value='0.0',
             description='Optional Webots ROS lidar publication rate in Hz.'),
         DeclareLaunchArgument(
-            'scan_input_reliability', default_value='best_effort',
+            'scan_input_reliability', default_value='reliable',
             choices=['reliable', 'best_effort'],
             description='Reliability for the raw Webots lidar stream.'),
         OpaqueFunction(function=launch_setup),

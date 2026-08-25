@@ -518,3 +518,43 @@ runs; only the raw Webots-to-relay input was changed. The result supports
 using best-effort at the raw latest-sample boundary while retaining reliable
 delivery for the corrected Slam input, subject to a longer bounded handoff
 validation before any 1,200-second campaign.
+
+## One-raw-reader correction and best-effort delivery result (2026-08-25)
+
+The preceding A/B result is qualified by the full headless best-effort run
+`handoff_best_effort_transport_gate_20260825`. Although its process graph
+started both Slam Toolbox wrappers and the upstream frontier core, the raw
+Webots best-effort boundary delivered zero corrected scans and zero maps on
+both robots (`scan_pipeline_diagnostic.json`: `corrected_scan_messages=0`,
+`map_messages=0`, `nav_scan_messages=0`). Therefore best-effort cannot be
+the default raw Webots QoS for this WSL loopback setup; it is a diagnostic
+isolation mode only. The run was clean from a host-safety perspective but
+failed the transport readiness gate and did not reach handoff.
+
+The source correction now uses one `d500_scan_fix` process and one raw DDS
+subscription per robot. That process publishes the full 720-beam reliable
+`scan_d500_fixed` stream for Slam Toolbox and a depth-1, 180-beam
+best-effort `scan_d500_nav` stream for Nav2. The former second
+`d500_nav_scan_fix` process and its duplicate raw reader were removed from
+`two_robots_namespaced_launch.py`. Raw input defaults were restored to
+`reliable` in all authoritative launch/profile layers because the best-effort
+raw publisher/subscriber pair produced no samples.
+
+The bounded one-relay realtime probe
+`transport_one_relay_reliable_20260825c` used the one-relay source changes,
+CycloneDDS domain 85, Webots port 23220, `fast_mode=false`, full sensors, no
+rendering/RViz, scan matching enabled, and reliable raw input. Its graph
+contained exactly one `robotN_d500_scan_fix` node per robot and no
+`d500_nav_scan_fix` node. It received 34/33 local-map messages and 35 Nav2
+scans per robot over roughly 36 simulated seconds, with map update rate
+about 1.03 Hz and Nav2 scan rate about 0.94 Hz. The probe was manually
+stopped before handoff because the host began with only about 1.0 GB
+available Windows memory; this is not a campaign pass. Exact campaign
+cleanup was clean and no active-runtime DDS assertion or process crash
+occurred.
+
+The one-relay source/build/install hashes matched, and focused scan,
+teardown, Slam-separation, and upstream-adapter tests passed 39/39. The
+remaining required gate is a clean-host, longer bounded one-relay handoff
+run with Windows pool monitoring; no long or 1,200-second campaign is
+authorized from the low-available-memory baseline.

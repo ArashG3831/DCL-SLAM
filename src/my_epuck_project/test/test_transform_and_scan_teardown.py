@@ -53,6 +53,8 @@ def test_raw_scan_input_reliability_selects_the_requested_qos():
 def test_nav_relay_downsampling_is_explicitly_separate_from_slam_stream():
     source = inspect.getsource(D500ScanFix)
     assert 'output_sample_count' in source
+    assert 'secondary_output_sample_count' in source
+    assert 'secondary_pub' in source
     assert 'Uniformly retain the corrected angular support' in source
 
 

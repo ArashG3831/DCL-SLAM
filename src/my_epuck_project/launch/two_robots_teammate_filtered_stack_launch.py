@@ -588,7 +588,7 @@ def generate_launch_description():
                               choices=['', 'SYNCHRONOUS', 'ASYNCHRONOUS']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
-        DeclareLaunchArgument('scan_input_reliability', default_value='best_effort',
+        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
                               choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('diagnostic_mode', default_value='false',
                               choices=['true', 'false']),

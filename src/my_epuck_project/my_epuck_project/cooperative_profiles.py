@@ -32,11 +32,11 @@ CONSERVATIVE_SCAN_MATCHING_PARAMETERS = {
     # the source cadence and the SLAM input cadence aligned.
     # Resolution, range, and noise are unchanged.
     'lidar_update_rate': 1.0,
-    # The Webots D500 topic is a raw sensor stream. Keep its input
-    # latest-sample/best-effort so the Windows/WSL transport cannot retain a
-    # reliable backlog. The corrected 720-beam stream remains reliable for
-    # Slam Toolbox; this setting applies only to the raw Webots boundary.
-    'scan_input_reliability': 'best_effort',
+    # The Webots D500 raw topic remains reliable because its best-effort
+    # publisher/subscriber pair delivered zero samples under the WSL loopback
+    # profile. One relay per robot prevents the former duplicated-reader
+    # pressure, while the corrected full Slam stream remains reliable.
+    'scan_input_reliability': 'reliable',
     'map_update_interval': 1.0,
 }
 

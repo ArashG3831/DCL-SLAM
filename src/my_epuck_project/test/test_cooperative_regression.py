@@ -1,9 +1,11 @@
 import argparse
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from my_epuck_project.cooperative_regression import (
@@ -486,10 +488,49 @@ def test_hold_ctrl_c_forwards_one_scoped_sigint_and_finishes(
     monkeypatch.setattr(
         'my_epuck_project.cooperative_regression.os.killpg',
         lambda pid, signum: sent.append((pid, signum)))
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression._terminate_attempt_descendants',
+        lambda *unused: None)
     namespace = argparse.Namespace(
         hold_open_after_completion=True, launch_rviz=False)
     assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
     assert sent == [(13579, signal.SIGINT)]
+
+
+def test_watchdog_sigterm_enters_exact_cleanup(monkeypatch, tmp_path):
+    """A watchdog SIGTERM must not orphan the attempt's child sessions."""
+    attempt = tmp_path / 'attempt'
+    attempt.mkdir()
+
+    class Process:
+        pid = 13579
+        returncode = 0
+        calls = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            self.calls += 1
+            if self.calls == 1:
+                threading.Timer(
+                    0.01, lambda: os.kill(os.getpid(), signal.SIGTERM)
+                ).start()
+                time.sleep(0.05)
+                raise subprocess.TimeoutExpired('supervisor', 0.2)
+            return self.returncode
+
+    sent = []
+    cleaned = []
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression.os.killpg',
+        lambda pid, signum: sent.append((pid, signum)))
+    monkeypatch.setattr(
+        'my_epuck_project.cooperative_regression._terminate_attempt_descendants',
+        lambda path, pid: cleaned.append((path, pid)))
+    namespace = argparse.Namespace(
+        hold_open_after_completion=False, launch_rviz=False)
+    assert wait_for_attempt_supervisor(Process(), namespace, attempt) == 0
+    assert sent == [(13579, signal.SIGINT)]
+    assert cleaned == [(attempt, 13579)]
 
 
 def test_failure_before_completion_is_not_held(monkeypatch, tmp_path):

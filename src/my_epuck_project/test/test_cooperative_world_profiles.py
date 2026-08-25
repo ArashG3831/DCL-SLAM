@@ -88,18 +88,29 @@ def test_close_start_profile_matches_manual_saved_world_poses():
     assert content.count('E-puck {') == 2
 
 
-def test_close_start_20ms_profile_changes_only_basic_time_step():
+def test_close_start_20ms_profile_preserves_close_start_geometry():
     value = selected('large_unknown_pose_close_start_20ms')
     reference = selected('large_unknown_pose_close_start')
     assert value['world'] == (
         'epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt')
     assert value['physics_profile'] == 'dynamic_low_slip_20ms_finite'
-    assert value['world_metadata']['robots'] == reference['world_metadata']['robots']
-    assert value['world_metadata']['initial_separation_m'] == (
-        reference['world_metadata']['initial_separation_m'])
+    # The 20 ms fixture intentionally changes Robot 2's pose to keep the
+    # robots 2.77 m apart; the 4 ms saved world places Robot 2 at x=18.77.
+    assert value['world_metadata']['robots']['robot1'] == (
+        reference['world_metadata']['robots']['robot1'])
+    assert value['world_metadata']['robots']['robot2'].translation == (
+        16.0, 2.77, 0.001)
+    assert value['world_metadata']['robots']['robot2'].rotation == (
+        reference['world_metadata']['robots']['robot2'].rotation)
+    assert math.isclose(
+        value['world_metadata']['initial_separation_m'], 2.77, abs_tol=1e-9)
     reference_text = Path(reference['world_path']).read_text(encoding='utf-8')
     actual_text = Path(value['world_path']).read_text(encoding='utf-8')
-    assert actual_text.replace('basicTimeStep 20', 'basicTimeStep 4') == reference_text
+    expected_text = reference_text.replace(
+        'basicTimeStep 4', 'basicTimeStep 20', 1).replace(
+            'translation 18.77 -1.6718e-17 0.001',
+            'translation 16 2.77 0.001', 1)
+    assert actual_text == expected_text
     assert 'CFM 0.00001' in actual_text
     assert 'ERP 0.2' in actual_text
     assert 'randomSeed 20260818' in actual_text

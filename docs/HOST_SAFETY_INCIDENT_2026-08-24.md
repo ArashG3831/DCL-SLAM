@@ -558,3 +558,16 @@ teardown, Slam-separation, and upstream-adapter tests passed 39/39. The
 remaining required gate is a clean-host, longer bounded one-relay handoff
 run with Windows pool monitoring; no long or 1,200-second campaign is
 authorized from the low-available-memory baseline.
+
+The subsequent clean-baseline attempt
+`one_relay_best_effort_handoff_20260825` used domain 86, Webots port 23230,
+realtime Webots, full sensors, scan matching enabled, and the one-relay
+install with `scan_input_reliability=best_effort`. After 109.18 simulated
+seconds, the finalized diagnostic still recorded zero corrected scans, zero
+Nav2 scans, and zero map messages for both robots. Slam Toolbox processes were
+present and active, so this is a raw Webots QoS delivery failure rather than
+Slam omission. The runner classified it `INFRASTRUCTURE_FAILURE` and exact
+process/port cleanup completed. Pool Nonpaged Bytes stayed near 1.69 GB and
+available memory recovered above 5.4 GB; the attempt was not stopped by the
+host watchdog. Best-effort raw input is therefore rejected as a campaign
+configuration, not promoted as the default.

@@ -318,3 +318,35 @@ synthetic `setsid` child test confirmed that no descendant survives.  Every
 guarded Webots run must still perform an exact campaign-path process/port audit
 after termination; a pool-triggered stop is not considered clean merely
 because the top-level PID exited.
+
+## Valid-domain fast-campaign pool evidence (2026-08-25)
+
+The guarded fresh-install run `robust_handoff_fusion_fixed_fresh_20260825_long3`
+used CycloneDDS domain 68 (not the invalid 231/232 domains), port 23117, two
+robots, Fast Webots mode, and the full reliable scan path.  Windows
+`Pool Nonpaged Bytes` rose from 2,236 MB at launch to 3,675 MB before the
+guard stopped the process group.  The exact campaign descendants were then
+terminated manually because the pre-fix external guard did not cross the
+supervisor-created sessions.  A subsequent PoolMon snapshot identified the
+retained network-buffer tags:
+
+```text
+Nbuf  1,923,020,784 bytes   1,036,111 outstanding allocations
+Nnbl    449,729,008 bytes   1,041,030 outstanding allocations
+Nnbf    233,194,752 bytes   1,041,029 outstanding allocations
+```
+
+The exact PoolMon files are on the Windows desktop as
+`pool_snapshot_after_wsl_shutdown_20260825.log` and
+`pool_snapshot_idle_after_wsl_shutdown_20260825.log`; after 30 seconds idle,
+the three byte totals were unchanged.  This run produced no `:65536` endpoint
+messages and no CycloneDDS assertion, so the invalid-port guard was not the
+complete fix.  The evidence instead shows that valid accelerated reliable DDS
+traffic is sufficient to leave Windows NETIO/WSL networking buffers retained.
+The recent traffic increase came from the scan-transport history: commit
+`919ec85` introduced a reliable Slam Toolbox scan transport, while `b4d2696`
+added a separate reliable Nav2 scan relay; `2248a3a` then adjusted CycloneDDS
+fragmentation.  These changes are the correct isolation boundary for the
+remaining Windows/WSL kernel-pool behavior.  A Windows reboot is required to
+clear this kernel pool before another Webots campaign; WSL shutdown alone did
+not reclaim the Nbuf/Nnbl/Nnbf allocations.

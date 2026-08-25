@@ -407,3 +407,67 @@ The agreed 6,000 MB hard ceiling therefore leaves insufficient headroom for a
 long-navigation soak.  Do not launch the soak or final campaign from this
 baseline.  Reboot Windows, record a clean pool baseline, and repeat the
 bounded transport gate before continuing.
+
+## Why the earlier transport fix did not fix the leak (2026-08-25)
+
+The current evidence does not show an active application-RSS leak.  After the
+last campaign, the exact campaign process audit was empty and WSL reported
+approximately 6.7 GiB available.  Windows `Pool Nonpaged Bytes` nevertheless
+remained at approximately 5,616--5,617 MB over idle samples.  This is retained
+Windows kernel-pool state, not a currently running ROS process.  WSL shutdown
+can reclaim the guest VM and `vmmemWSL`; it does not reclaim these Windows
+`Nbuf`/`Nnbl`/`Nnbf` allocations.  A Windows reboot is required for a clean
+baseline.
+
+The source-level change in `58a2af3` was narrower than the campaign workload:
+it made the raw-scan subscription honor `input_reliability`, but it did not
+change the authoritative campaign default.  The current A* campaign manifest
+and launch log prove:
+
+```text
+scan_input_reliability:=reliable
+qos_overrides./scan_d500.publisher.reliability:=reliable
+d500_scan_fix input_reliability=reliable
+RAW_SCAN_QOS: KEEP_LAST depth=100, RELIABLE
+CORRECTED_SCAN_QOS: KEEP_LAST depth=100, RELIABLE
+Nav2 /scan_d500_nav: KEEP_LAST depth=1, BEST_EFFORT
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ROS_DOMAIN_ID=50
+CYCLONEDDS_URI=file:///home/arash/webots_ws_clean_validation_20260823/config/cyclonedds/wsl_loopback.xml
+```
+
+Thus the fix removed a hard-coded selector bug but the full proof campaign
+continued to exercise the same reliable raw/full-sensor transport path.  The
+recent transport history shows why this is a real regression boundary:
+`919ec85` changed Slam Toolbox scan transport to reliable, `b4d2696` added a
+second Nav2 scan relay, and `2248a3a` changed CycloneDDS fragmentation.  These
+changes post-date the original project lidar path and increase the number of
+reliable fragmented DDS streams; the lidar geometry itself was not changed by
+the leak guard.
+
+The available PoolMon snapshots identify the allocation site but not an owning
+PID or a unique driver:
+
+```text
+Nbuf  1,923,020,784 bytes  (1,036,111 outstanding)  after valid fast traffic
+Nnbl    449,729,008 bytes  (1,041,030 outstanding)
+Nnbf    233,194,752 bytes  (1,041,029 outstanding)
+```
+
+The same tag family remained essentially unchanged after WSL shutdown.  The
+Windows binding inventory contains Hyper-V/WSL, VMware, TAP/Outline, and
+industrial Ethernet filter drivers, so the evidence cannot honestly name
+`CycloneDDS`, `WSL`, or one NDIS filter as the sole owner without a captured
+ETW/PoolMon stack trace.  The strongest proven statement is: valid accelerated
+ROS 2 UDP traffic from the Webots workload causes Windows NETIO/NDIS buffer
+retention; the invalid-domain/port bug was a catastrophic amplifier, not the
+complete cause.
+
+Short fresh transport probes are not equivalent to the full workload.  The
+recorded one-robot reliable probe increased pool by less than 1 MB, the
+one-robot best-effort probe by roughly 2--3 MB, and the short two-robot fast
+probe by roughly 10 MB.  Those bounded results neither reproduce nor disprove
+the multi-gigabyte slope seen after full SLAM/Nav2/map-fusion traffic.  A
+clean post-reboot A/B must therefore isolate raw scan QoS, corrected scan QoS,
+and large reliable map/fusion topics one variable at a time before any long
+campaign.

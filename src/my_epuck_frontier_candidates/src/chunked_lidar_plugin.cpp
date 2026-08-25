@@ -3,6 +3,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -38,12 +39,17 @@ public:
     // Chunk samples are each below the observed DDS fragmentation boundary.
     // Best-effort avoids reliable-reader repair buffers in the WSL/Hyper-V
     // path.  The downstream assembler publishes no scan unless all chunks
-    // for one sequence arrive and pass integrity checks.
+    // for one sequence arrive and pass integrity checks.  Chunks are paced
+    // one Webots step apart (rather than published as a four-message burst),
+    // because the loopback best-effort path can drop a burst even when each
+    // individual 180-beam payload is below the fragmentation boundary.
     publisher_ = node_->create_publisher<my_epuck_interfaces::msg::ScanChunk>(
       topic_, rclcpp::QoS(rclcpp::KeepLast(8)).best_effort());
+    chunk_publish_interval_s_ = timestep > 0 ? timestep / 1000.0 : 0.02;
     RCLCPP_INFO(node_->get_logger(),
-                "Chunked lidar transport active: %s -> %s (%u beams/chunk)",
-                lidar_name_.c_str(), topic_.c_str(), chunk_beams_);
+                "Chunked lidar transport active: %s -> %s (%u beams/chunk, %.3fs paced)",
+                lidar_name_.c_str(), topic_.c_str(), chunk_beams_,
+                chunk_publish_interval_s_);
   }
 
   void step() override
@@ -52,6 +58,21 @@ public:
       return;
     }
     const double simulation_time = wb_robot_get_time();
+
+    // Publish at most one chunk per Webots step.  This keeps the wire stream
+    // below the observed burst-loss boundary while retaining every beam.
+    if (!pending_chunks_.empty()) {
+      if (simulation_time + 1e-9 >= next_chunk_publish_time_) {
+        publisher_->publish(pending_chunks_[next_chunk_index_]);
+        ++next_chunk_index_;
+        next_chunk_publish_time_ = simulation_time + chunk_publish_interval_s_;
+        if (next_chunk_index_ >= pending_chunks_.size()) {
+          pending_chunks_.clear();
+          next_chunk_index_ = 0;
+        }
+      }
+      return;
+    }
     if (update_rate_hz_ > 0.0 && last_publish_time_ >= 0.0 &&
         simulation_time - last_publish_time_ < 1.0 / update_rate_hz_) {
       return;
@@ -80,6 +101,8 @@ public:
       (robot_id_.empty() ? "d500_lidar" : robot_id_ + "/d500_lidar") : frame_id_;
     ++sequence_;
     last_publish_time_ = simulation_time;
+    pending_chunks_.clear();
+    pending_chunks_.reserve(total_chunks);
     for (unsigned chunk = 0; chunk < total_chunks; ++chunk) {
       const unsigned begin = chunk * chunk_beams_;
       const unsigned end = std::min<unsigned>(
@@ -101,8 +124,10 @@ public:
       message.range_max = static_cast<float>(wb_lidar_get_max_range(lidar_));
       message.ranges.assign(image + begin, image + end);
       message.checksum = checksum(message.ranges, sequence_, chunk);
-      publisher_->publish(message);
+      pending_chunks_.push_back(std::move(message));
     }
+    next_chunk_index_ = 0;
+    next_chunk_publish_time_ = simulation_time;
   }
 
 private:
@@ -157,7 +182,11 @@ private:
   unsigned chunk_beams_{180};
   double update_rate_hz_{0.0};
   double last_publish_time_{-1.0};
+  double chunk_publish_interval_s_{0.02};
   uint32_t sequence_{0};
+  std::vector<my_epuck_interfaces::msg::ScanChunk> pending_chunks_;
+  std::size_t next_chunk_index_{0};
+  double next_chunk_publish_time_{0.0};
 };
 
 }  // namespace my_epuck_frontier_candidates

@@ -145,6 +145,10 @@ def launch_setup(context):
             'scan_input_reliability': LaunchConfiguration(
                 'scan_input_reliability'),
             'scan_transport': LaunchConfiguration('scan_transport'),
+            'corrected_scan_reliability': LaunchConfiguration(
+                'corrected_scan_reliability'),
+            'corrected_scan_depth': LaunchConfiguration(
+                'corrected_scan_depth'),
         }.items(),
     )
     filters = []
@@ -243,6 +247,10 @@ def generate_launch_description():
                               choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('scan_transport', default_value='chunked',
                               choices=['chunked', 'laser_scan']),
+        DeclareLaunchArgument(
+            'corrected_scan_reliability', default_value='reliable',
+            choices=['reliable', 'best_effort']),
+        DeclareLaunchArgument('corrected_scan_depth', default_value='100'),
         DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
         DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
         DeclareLaunchArgument('slam_tf_publication_mode', default_value='',

@@ -47,6 +47,10 @@ def launch_setup(context):
     scan_input_reliability = LaunchConfiguration(
         'scan_input_reliability').perform(context)
     scan_transport = LaunchConfiguration('scan_transport').perform(context)
+    corrected_scan_reliability = LaunchConfiguration(
+        'corrected_scan_reliability').perform(context)
+    corrected_scan_depth = int(LaunchConfiguration(
+        'corrected_scan_depth').perform(context))
     # ROS parameter typing is strict. LaunchConfiguration values are strings;
     # convert the scan period before passing it to rclpy's DOUBLE parameter.
     scan_publish_period = float(
@@ -298,6 +302,8 @@ def launch_setup(context):
                 'assembly_timeout_s': 2.0,
                 'max_chunks': 8,
                 'output_topic': 'scan_d500_fixed',
+                'output_depth': corrected_scan_depth,
+                'output_reliability': corrected_scan_reliability,
                 'input_reliability': scan_input_reliability,
                 'minimum_time_interval': scan_publish_period,
                 # One raw reader publishes both corrected streams.  Slam
@@ -391,5 +397,12 @@ def generate_launch_description():
             'scan_transport', default_value='chunked',
             choices=['chunked', 'laser_scan'],
             description='Raw Webots scan transport; chunked avoids DDS fragmentation.'),
+        DeclareLaunchArgument(
+            'corrected_scan_reliability', default_value='reliable',
+            choices=['reliable', 'best_effort'],
+            description='QoS reliability for reconstructed full-resolution scans.'),
+        DeclareLaunchArgument(
+            'corrected_scan_depth', default_value='100',
+            description='DDS history depth for reconstructed full-resolution scans.'),
         OpaqueFunction(function=launch_setup),
     ])

@@ -144,6 +144,7 @@ def launch_setup(context):
                 slam_runtime_parameters.get('lidar_update_rate', 0.0)),
             'scan_input_reliability': LaunchConfiguration(
                 'scan_input_reliability'),
+            'scan_transport': LaunchConfiguration('scan_transport'),
         }.items(),
     )
     filters = []
@@ -240,6 +241,8 @@ def generate_launch_description():
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
                               choices=['reliable', 'best_effort']),
+        DeclareLaunchArgument('scan_transport', default_value='chunked',
+                              choices=['chunked', 'laser_scan']),
         DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
         DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
         DeclareLaunchArgument('slam_tf_publication_mode', default_value='',

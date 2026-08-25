@@ -105,3 +105,22 @@ zero simulation time is now dropped by `d500_scan_fix` rather than published
 as stale data; all delivered fixed/Nav2 scan stamps in this run were
 nonzero. Pool Nonpaged Bytes remained approximately `1.01 GiB` and no
 process or port remained after teardown.
+
+The full-resolution SLAM gate was then run from the rebuilt overlay with the
+two namespaced reliable Slam Toolbox wrappers (unknown-pose local maps,
+scan matching enabled, loop closing disabled, 38 seconds). It recorded:
+
+```text
+                         robot1   robot2
+chunk messages              120      120
+complete /scan_d500_fixed    27       26   (720 beams each)
+/scan_d500_nav               27       26   (180 beams each)
+local map updates             27       26
+nonzero /clock             1482 messages, 0.02 -> 29.64 s
+```
+
+Slam Toolbox activated for both robots and no DDS assertion, abort, or active
+process crash occurred. Pool Nonpaged Bytes remained approximately
+`1.01--1.02 GiB`; available memory remained above `6.45 GiB`. The complete
+launch tree and port `24707` were cleanly released. This closes the bounded
+full-resolution transport gate for the current WSL validation topology.

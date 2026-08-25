@@ -161,6 +161,10 @@ def test_nested_stack_forwards_fragment_safe_scan_transport():
         encoding='utf-8')
     assert "'scan_transport': LaunchConfiguration('scan_transport')" in launch
     assert "DeclareLaunchArgument('scan_transport', default_value='chunked'" in launch
+    dual = (LAUNCH / 'two_robots_teammate_filtered_dual_slam_launch.py').read_text(
+        encoding='utf-8')
+    assert "'scan_transport': LaunchConfiguration('scan_transport')" in dual
+    assert "DeclareLaunchArgument('scan_transport', default_value='chunked'" in dual
 
 
 def test_scan_publish_period_is_converted_to_ros_double():

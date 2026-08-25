@@ -117,3 +117,32 @@ The current evidence is an infrastructure/transport blocker, not evidence
 against the FrontierExplorerCore refactor. Unknown-pose handoff, shared-map
 activation, navigation soak, and terminal exploration remain unvalidated on
 the corrected transport path.
+
+## TCP transport probe (not a project-wide fix)
+
+Because CycloneDDS 0.10.5 includes its optional TCP transport, a temporary
+two-process profile was tested outside the repository. With ROS discovery
+environment variables unset (the `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`
+override prevents this static TCP peer setup), two processes exchanged a
+720-beam best-effort `LaserScan` stream at 10 Hz:
+
+```text
+published: 601 samples / 60 s
+received:  601 samples / 60 s
+Pool Nonpaged Bytes: 1612.6–1621.4 MB (+6.6 MB)
+WSL available memory: 6749–6796 MB
+```
+
+This proves that TCP can carry the large sample in a minimal two-process
+experiment, but it is not yet a valid campaign profile. CycloneDDS TCP needs
+known peer/listener ports. A fixed TCP port can be shared by the two probe
+processes only with the temporary setup; a same-port multi-process ROS probe
+received zero samples, and dynamically allocated listener ports cannot be
+discovered by the current static loopback peer list. The project launch starts
+many independent ROS processes, so adopting TCP would require a separately
+designed discovery/port architecture and its own end-to-end validation. It
+must not be silently substituted for the existing decentralized UDP profile.
+
+Therefore the TCP result is recorded as a lead, not as evidence that the
+one-relay campaign gate has passed. No handoff, soak, or 1,200-second campaign
+was launched after the full-resolution best-effort gate failed.

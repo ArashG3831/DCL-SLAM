@@ -1054,6 +1054,43 @@ def _refine_registration(source_points, target_points, target, seed,
     return transform
 
 
+def _occupancy_consistency(
+        points: np.ndarray, crop: GridCrop) -> tuple[float, float, float]:
+    """Score transformed occupied points in one map frame.
+
+    The geometric verifier is run independently in both directions by the
+    two robots.  A target-only occupancy score therefore made an otherwise
+    identical crop pair depend on which peer happened to be the verifier.
+    Return occupied agreement, known-free consistency, and in-bounds overlap
+    in the supplied crop frame so the caller can combine both directions
+    symmetrically.  Map-origin yaw is handled explicitly here; the old
+    target-only calculation assumed an axis-aligned crop.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    if not len(points):
+        return 0.0, 0.0, 0.0
+    cosine, sine = math.cos(crop.origin_yaw), math.sin(crop.origin_yaw)
+    rotation_t = np.asarray([[cosine, sine], [-sine, cosine]])
+    local = (points - np.asarray([crop.origin_x, crop.origin_y])) @ rotation_t.T
+    columns = np.rint(local[:, 0] / crop.resolution - 0.5).astype(int)
+    rows = np.rint(local[:, 1] / crop.resolution - 0.5).astype(int)
+    values = np.asarray(crop.values)
+    valid = (
+        (columns >= 0) & (columns < values.shape[1]) &
+        (rows >= 0) & (rows < values.shape[0]))
+    occupied_match = np.zeros(len(points), dtype=bool)
+    occupied_match[valid] = (
+        values[rows[valid], columns[valid]] >= OCCUPIED_THRESHOLD)
+    known_free = np.zeros(len(points), dtype=bool)
+    known_free[valid] = values[rows[valid], columns[valid]] == 0
+    occupied_fraction = float(np.count_nonzero(occupied_match)) / float(
+        len(points))
+    free_consistency = 1.0 - float(np.count_nonzero(known_free)) / float(
+        len(points))
+    overlap = float(np.count_nonzero(valid)) / float(len(points))
+    return occupied_fraction, free_consistency, overlap
+
+
 def _registration_quality(source: GridCrop, target: GridCrop,
                           source_points: np.ndarray,
                           target_points: np.ndarray, transform,
@@ -1082,31 +1119,20 @@ def _registration_quality(source: GridCrop, target: GridCrop,
     reverse_ratio = float(np.count_nonzero(reverse_distances <= reverse_threshold)) / \
         float(max(1, len(target_points)))
 
-    target_extent = _world_extent(target)
-    in_target = (
-        (transformed[:, 0] >= target_extent[0]) &
-        (transformed[:, 0] <= target_extent[2]) &
-        (transformed[:, 1] >= target_extent[1]) &
-        (transformed[:, 1] <= target_extent[3]))
-    overlap = float(np.count_nonzero(in_target)) / float(max(1, len(transformed)))
-    target_array = np.asarray(target.values)
-    columns = np.rint(
-        (transformed[:, 0] - target.origin_x) / target.resolution - 0.5).astype(int)
-    rows = np.rint(
-        (transformed[:, 1] - target.origin_y) / target.resolution - 0.5).astype(int)
-    valid = (
-        (columns >= 0) & (columns < target_array.shape[1]) &
-        (rows >= 0) & (rows < target_array.shape[0]))
-    occupied_match = np.zeros(len(transformed), dtype=bool)
-    occupied_match[valid] = target_array[rows[valid], columns[valid]] >= OCCUPIED_THRESHOLD
-    occupied_fraction = float(np.count_nonzero(occupied_match)) / float(max(1, len(transformed)))
-    # Unknown is neutral.  Only known free cells are conflicts.
-    known_free = np.zeros(len(transformed), dtype=bool)
-    known_free[valid] = target_array[rows[valid], columns[valid]] == 0
-    free_consistency = 1.0 - float(np.count_nonzero(known_free)) / float(max(1, len(transformed)))
+    forward_occupied, forward_free, forward_overlap = _occupancy_consistency(
+        transformed, target)
+    reverse_occupied, reverse_free, reverse_overlap = _occupancy_consistency(
+        reverse, source)
+    # Both peers must score the same physical evidence the same way.  Use the
+    # mean map consistency from both frames (unknown cells remain neutral) and
+    # the stricter overlap of the two frames.  This preserves the existing
+    # 0.55 acceptance threshold instead of lowering it for one direction.
+    occupied_fraction = 0.5 * (forward_occupied + reverse_occupied)
+    free_consistency = 0.5 * (forward_free + reverse_free)
     occupied_agreement = max(
         0.0, min(1.0, 0.55 * min(inlier_ratio, reverse_ratio)
                  + 0.25 * occupied_fraction + 0.20 * free_consistency))
+    overlap = min(forward_overlap, reverse_overlap)
 
     centered = source_points - source_points.mean(axis=0)
     eigenvalues = np.linalg.eigvalsh(centered.T @ centered)

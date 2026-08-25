@@ -166,6 +166,26 @@ def test_rotated_map_origin_is_applied_once():
     assert abs(result.transform[2]) < math.radians(0.25)
 
 
+def test_registration_quality_is_direction_invariant_for_asymmetric_maps():
+    """Peer verification must score one physical pair identically either way."""
+    values = structured_scene()
+    target_values = values.copy()
+    # A small map-only addition makes the two views intentionally asymmetric;
+    # it must not make the quality metric depend on the verifier direction.
+    target_values[90:110, 130:140] = 100
+    source = GridCrop(values, 0.05, 0.0, 0.0)
+    target = GridCrop(target_values, 0.05, 0.7, -0.2)
+    forward = register_crops(source, target)
+    reverse = register_crops(target, source)
+    assert forward.accepted == reverse.accepted
+    assert np.allclose(
+        np.asarray(reverse.transform[:2]), -np.asarray(forward.transform[:2]),
+        atol=0.08)
+    assert abs(forward.occupied_free_agreement -
+               reverse.occupied_free_agreement) < 1e-9
+    assert abs(forward.overlap_fraction - reverse.overlap_fraction) < 1e-9
+
+
 def test_long_baseline_projected_error_rejects_one_degree_uncertainty():
     assert projected_registration_error((0.02, 0.01, math.radians(1.0)), 40.0) > 0.6
     assert projected_registration_error((0.03, 0.02, math.radians(0.2)), 40.0) < 0.20

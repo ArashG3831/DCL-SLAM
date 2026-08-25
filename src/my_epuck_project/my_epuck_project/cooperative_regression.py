@@ -2603,66 +2603,84 @@ def wait_for_attempt_supervisor(process, namespace, attempt):
     """Wait and forward Ctrl+C only to this attempt's process group."""
     hold_announced = False
     rviz_announced = False
-    while True:
-        try:
-            return process.wait(timeout=0.2)
-        except subprocess.TimeoutExpired:
-            wants_rviz_status = (
-                getattr(namespace, 'launch_rviz', False)
-                and not rviz_announced)
-            wants_hold_status = (
-                getattr(namespace, 'hold_open_after_completion', False)
-                and not hold_announced)
-            if wants_rviz_status or wants_hold_status:
-                try:
-                    metadata = json.loads(
-                        (attempt / 'runner_metadata.json').read_text(
-                            encoding='utf-8'))
-                except (OSError, ValueError):
-                    metadata = {}
-                if wants_rviz_status and metadata.get('rviz_pid'):
-                    print(
-                        f'RVIZ_STARTED pid={metadata["rviz_pid"]}',
-                        flush=True,
-                    )
-                    rviz_announced = True
-                if wants_hold_status and metadata.get('hold_open_active'):
-                    print(
-                        'Mission complete. Webots and RViz are being kept '
-                        'open for inspection.\n'
-                        'Press Ctrl+C to shut down and finalize the campaign.',
-                        flush=True,
-                    )
-                    hold_announced = True
-        except KeyboardInterrupt:
-            # The internal trial deliberately creates separate sessions for
-            # launch, collectors, and diagnostics.  Killing only the internal
-            # supervisor's process group therefore leaves reparented ROS and
-            # Webots children alive.  Snapshot and terminate the exact trial
-            # command tree before returning to the campaign supervisor.
+    terminate_requested = False
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_termination(_signum, _frame):
+        """Defer SIGTERM handling until the polling loop can clean up."""
+        nonlocal terminate_requested
+        terminate_requested = True
+
+    # Watchdogs use SIGTERM, while an interactive stop raises
+    # KeyboardInterrupt.  Installing a temporary handler makes both paths
+    # enter the same exact descendant cleanup instead of killing this
+    # supervisor before it can reap its launch sessions.
+    signal.signal(signal.SIGTERM, request_termination)
+    try:
+        while True:
             try:
-                os.killpg(process.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=30)
+                if terminate_requested:
+                    raise KeyboardInterrupt
+                return process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
-                # Do not mask the user's Ctrl+C with a second traceback when
-                # a Webots/ROS child takes longer than the graceful window.
+                wants_rviz_status = (
+                    getattr(namespace, 'launch_rviz', False)
+                    and not rviz_announced)
+                wants_hold_status = (
+                    getattr(namespace, 'hold_open_after_completion', False)
+                    and not hold_announced)
+                if wants_rviz_status or wants_hold_status:
+                    try:
+                        metadata = json.loads(
+                            (attempt / 'runner_metadata.json').read_text(
+                                encoding='utf-8'))
+                    except (OSError, ValueError):
+                        metadata = {}
+                    if wants_rviz_status and metadata.get('rviz_pid'):
+                        print(
+                            f'RVIZ_STARTED pid={metadata["rviz_pid"]}',
+                            flush=True,
+                        )
+                        rviz_announced = True
+                    if wants_hold_status and metadata.get('hold_open_active'):
+                        print(
+                            'Mission complete. Webots and RViz are being kept '
+                            'open for inspection.\n'
+                            'Press Ctrl+C to shut down and finalize the campaign.',
+                            flush=True,
+                        )
+                        hold_announced = True
+            except KeyboardInterrupt:
+                # The internal trial deliberately creates separate sessions for
+                # launch, collectors, and diagnostics.  Killing only the internal
+                # supervisor's process group therefore leaves reparented ROS and
+                # Webots children alive.  Snapshot and terminate the exact trial
+                # command tree before returning to the campaign supervisor.
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGINT)
                 except ProcessLookupError:
                     pass
                 try:
-                    process.wait(timeout=10)
+                    process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
+                    # Do not mask the user's Ctrl+C with a second traceback when
+                    # a Webots/ROS child takes longer than the graceful window.
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                    process.wait(timeout=5)
-            _terminate_attempt_descendants(attempt, process.pid)
-            return process.returncode
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
+                _terminate_attempt_descendants(attempt, process.pid)
+                return process.returncode
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _terminate_attempt_descendants(attempt, supervisor_pid):

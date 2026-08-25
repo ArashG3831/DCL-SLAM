@@ -591,3 +591,63 @@ suppressed as `PHYSICAL_GEOMETRY_PREVIOUSLY_REJECTED`; this is why the
 peer-confirmed robust subset never formed. The artifact is a valid
 `VALIDATION_INCOMPLETE -- ROBUST_HANDOFF_NOT_PROVEN` run, not a shared-map or
 navigation soak result.
+
+## Frame-invariant peer verification and bounded handoff (2026-08-25)
+
+The failed handoff exposed a separate geometric-gate defect. The same
+physical crop pair was accepted by Robot 1 with
+`occupied_free_agreement=0.621` but rejected by Robot 2 in the inverse
+direction at `0.539847`, just below the unchanged `0.55` gate. The old
+implementation scored occupancy/free consistency only in the target map, so
+the result depended on which peer performed verification.
+
+Commit `0bce057` fixes this without lowering any handoff threshold. The
+registration quality calculation now evaluates transformed occupied points in
+both source and target map frames, handles rotated map origins, averages the
+two map-consistency scores, and uses the stricter two-frame overlap. A focused
+regression test proves that an asymmetric map pair receives identical quality
+and acceptance in forward and inverse verification. The focused unknown-pose
+suite passed 35/35; the transport/SLAM/teardown/upstream-adapter suite passed
+74/74. The current source and installed runtime hashes match.
+
+The bounded runtime gate
+`symmetric_handoff_one_relay_0bce057_20260825` used commit `0bce057`, one raw
+relay per robot, reliable raw Webots input, reliable full-resolution Slam
+input, a best-effort 180-beam Nav2 output, CycloneDDS loopback domain 88,
+realtime Webots port 23250, no fixture, no rendering/RViz, and a 300-second
+simulated mission budget. Both peers independently selected and verified the
+same three-inlier hypothesis:
+
+* evidence hash: `43746539cae192fb` on both peers;
+* Robot 1 / Robot 2 accepted hypotheses: 1 / 1;
+* accepted inliers: 3 / 3;
+* spatial baseline: approximately 2.2066 m on both peers;
+* pairwise maximum translation disagreement: approximately 0.0488 m;
+* pairwise maximum yaw disagreement: approximately 0.00816 rad;
+* projected registration error: approximately 0.00127 m;
+* canonical proposals: exactly one;
+* TF handoffs: exactly one on Robot 1 and one verified handoff record on
+  Robot 2;
+* shared map/fusion activation: observed before the watchdog stop;
+* shared occupancy snapshot: 72,130 jointly known cells with zero semantic
+  disagreement in the captured snapshot.
+
+The run was intentionally stopped at approximately 229 simulated seconds by
+the external host-safety watchdog when Windows available memory reached
+approximately 1.44 GB. Pool Nonpaged Bytes peaked at approximately 3.27 GB
+in the captured external timeline. The campaign then terminated its complete
+process tree, released port 23250, and left no campaign-owned processes. This
+is a handoff-gate pass, not a navigation-soak or final-campaign pass.
+
+Evidence files:
+
+* `results/symmetric_handoff_one_relay_0bce057_20260825/campaign_report.md`
+* `results/symmetric_handoff_one_relay_0bce057_20260825/campaign_summary.json`
+* `results/symmetric_handoff_one_relay_0bce057_20260825/attempts/trial_01_attempt_01/observer/frontend/robot1_unknown_pose_frontend.json`
+* `results/symmetric_handoff_one_relay_0bce057_20260825/attempts/trial_01_attempt_01/observer/frontend/robot2_unknown_pose_frontend.json`
+* `results/symmetric_handoff_one_relay_0bce057_20260825/host_watch_windows_external.csv`
+
+The remaining gates are a clean-baseline navigation soak and the final
+campaign. They must not start while the Windows pool remains elevated from
+this transport run; a verified Windows reboot and read-only baseline are
+required first.

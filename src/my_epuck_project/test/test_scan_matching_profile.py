@@ -139,6 +139,13 @@ def test_nav2_uses_isolated_latest_scan_relay():
         assert 'source_timeout: 3.0' in params
 
 
+def test_scan_publish_period_is_converted_to_ros_double():
+    launch = (LAUNCH / 'two_robots_namespaced_launch.py').read_text(
+        encoding='utf-8')
+    assert "scan_publish_period = float(" in launch
+    assert launch.count("'minimum_time_interval': scan_publish_period") == 2
+
+
 def test_collision_monitor_uses_sim_clock_for_relay_scan_stamps():
     """Safety timestamps must share the Webots clock with LaserScan headers."""
     for robot in ('robot1', 'robot2'):

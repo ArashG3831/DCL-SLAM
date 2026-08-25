@@ -45,6 +45,10 @@ def launch_setup(context):
     lidar_update_rate = LaunchConfiguration('lidar_update_rate').perform(context)
     scan_input_reliability = LaunchConfiguration(
         'scan_input_reliability').perform(context)
+    # ROS parameter typing is strict. LaunchConfiguration values are strings;
+    # convert the scan period before passing it to rclpy's DOUBLE parameter.
+    scan_publish_period = float(
+        LaunchConfiguration('scan_publish_period').perform(context))
 
     base_urdf_path = os.path.join(package_dir, 'resource', 'epuck_d500_webots.urdf')
     base_control_path = os.path.join(package_dir, 'resource', 'ros2_control.yml')
@@ -250,8 +254,7 @@ def launch_setup(context):
                 'input_topic': 'scan_d500',
                 'output_topic': 'scan_d500_fixed',
                 'input_reliability': scan_input_reliability,
-                'minimum_time_interval': LaunchConfiguration(
-                    'scan_publish_period'),
+                'minimum_time_interval': scan_publish_period,
             }],
         )
 
@@ -279,8 +282,7 @@ def launch_setup(context):
                 'output_reliability': 'best_effort',
                 'output_sample_count': 180,
                 'input_reliability': scan_input_reliability,
-                'minimum_time_interval': LaunchConfiguration(
-                    'scan_publish_period'),
+                'minimum_time_interval': scan_publish_period,
             }],
         )
 

@@ -2635,6 +2635,11 @@ def wait_for_attempt_supervisor(process, namespace, attempt):
                     )
                     hold_announced = True
         except KeyboardInterrupt:
+            # The internal trial deliberately creates separate sessions for
+            # launch, collectors, and diagnostics.  Killing only the internal
+            # supervisor's process group therefore leaves reparented ROS and
+            # Webots children alive.  Snapshot and terminate the exact trial
+            # command tree before returning to the campaign supervisor.
             try:
                 os.killpg(process.pid, signal.SIGINT)
             except ProcessLookupError:
@@ -2656,7 +2661,53 @@ def wait_for_attempt_supervisor(process, namespace, attempt):
                     except ProcessLookupError:
                         pass
                     process.wait(timeout=5)
+            _terminate_attempt_descendants(attempt, process.pid)
             return process.returncode
+
+
+def _terminate_attempt_descendants(attempt, supervisor_pid):
+    """Terminate this attempt's exact descendants, including new sessions.
+
+    The normal in-attempt cleanup handles its own launch group.  This outer
+    guard is only for an interrupted/aborted internal supervisor and prevents
+    reparented observers or Webots children from surviving that interruption.
+    """
+    descendants = []
+    try:
+        root = psutil.Process(supervisor_pid)
+        descendants = root.children(recursive=True)
+    except (psutil.Error, OSError):
+        pass
+    groups = {supervisor_pid}
+    for child in descendants:
+        try:
+            groups.add(os.getpgid(child.pid))
+        except (OSError, psutil.Error):
+            pass
+    for group in groups:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    for child in descendants:
+        try:
+            os.kill(child.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if not any(psutil.pid_exists(item.pid) for item in descendants):
+            break
+        time.sleep(0.1)
+    # The campaign path is an exact ownership key; this catches children that
+    # reparented after their session leader exited.
+    campaign = attempt.parents[1]
+    remaining = campaign_owned_processes(campaign)
+    for item in remaining:
+        try:
+            os.kill(item['pid'], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
 
 def execute_attempt(namespace):

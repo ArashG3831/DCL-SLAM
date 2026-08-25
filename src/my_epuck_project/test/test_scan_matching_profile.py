@@ -59,7 +59,7 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
         # corrected scan must be available to Slam Toolbox.
         'minimum_time_interval': 1.0,
         'lidar_update_rate': 1.0,
-        'scan_input_reliability': 'reliable',
+        'scan_input_reliability': 'best_effort',
         'map_update_interval': 1.0,
     }
     assert parameters == expected

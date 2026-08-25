@@ -54,7 +54,7 @@ class UnknownPoseSharedStackActivation(Node):
                 # request fail because the nodes are already active.
                 ('nav2_autostart', False),
                 ('sensor_profile', 'full'),
-                ('scan_input_reliability', 'reliable'),
+                ('scan_input_reliability', 'best_effort'),
                 ('diagnostic_mode', False),
                 ('diagnostic_frontier_capture', False),
                 ('fusion_process_nice', 0),

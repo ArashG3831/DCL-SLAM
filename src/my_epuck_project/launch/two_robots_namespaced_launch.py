@@ -361,7 +361,7 @@ def generate_launch_description():
             'lidar_update_rate', default_value='0.0',
             description='Optional Webots ROS lidar publication rate in Hz.'),
         DeclareLaunchArgument(
-            'scan_input_reliability', default_value='reliable',
+            'scan_input_reliability', default_value='best_effort',
             choices=['reliable', 'best_effort'],
             description='Reliability for the raw Webots lidar stream.'),
         OpaqueFunction(function=launch_setup),

@@ -2536,7 +2536,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             ('throughput' if getattr(args, 'execution_profile', None) ==
              'throughput' else 'full')),
         scan_input_reliability=getattr(
-            args, 'scan_input_reliability', 'reliable'),
+            args, 'scan_input_reliability', 'best_effort'),
         use_scan_matching=getattr(args, 'use_scan_matching', False),
         do_loop_closing=getattr(args, 'do_loop_closing', False),
         unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
@@ -3661,7 +3661,7 @@ def parser():
         help='Simulated-device set; physical launches are unchanged.')
     result.add_argument(
         '--scan-input-reliability', choices=['reliable', 'best_effort'],
-        default='reliable',
+        default='best_effort',
         help=('Reliability of the raw Webots D500 scan input. The corrected '
               'Slam stream remains reliable; best_effort is a bounded '
               'transport-isolation option.'))

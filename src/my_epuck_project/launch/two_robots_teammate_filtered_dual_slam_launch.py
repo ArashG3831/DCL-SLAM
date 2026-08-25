@@ -44,7 +44,12 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
             f'/{robot}/scan_d500_slam'),
     }
     if slam_runtime_parameters:
-        runtime_parameters.update(slam_runtime_parameters)
+        # Raw Webots transport QoS belongs to the namespaced driver/relay
+        # launch. Do not pass it as an undeclared Slam Toolbox parameter.
+        runtime_parameters.update({
+            key: value for key, value in slam_runtime_parameters.items()
+            if key != 'scan_input_reliability'
+        })
     else:
         # Existing profiles retain their launch-argument override path.
         runtime_parameters.update({
@@ -233,7 +238,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
-        DeclareLaunchArgument('scan_input_reliability', default_value='reliable',
+        DeclareLaunchArgument('scan_input_reliability', default_value='best_effort',
                               choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
         DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),

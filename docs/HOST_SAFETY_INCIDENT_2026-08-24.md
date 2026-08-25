@@ -571,3 +571,23 @@ process/port cleanup completed. Pool Nonpaged Bytes stayed near 1.69 GB and
 available memory recovered above 5.4 GB; the attempt was not stopped by the
 host watchdog. Best-effort raw input is therefore rejected as a campaign
 configuration, not promoted as the default.
+
+The correct one-relay reliable-input handoff gate
+`one_relay_handoff_reliable_raw_20260825` then ran from the recovered host
+baseline with domain 87, port 23240, realtime Webots, scan matching enabled,
+and no motion fixture. It completed approximately 304 simulated seconds and
+was cleaned up exactly. Transport was healthy: each robot produced 313--314
+map messages, approximately 1 Hz Nav2 scans, and 313--314 scan-correction
+records. Pool Nonpaged Bytes reached approximately 2.67 GB and then began to
+recover; the watchdog did not fire.
+
+The handoff gate itself failed for evidence, not transport. Robot 1 recorded
+4 accepted geometric registrations and Robot 2 recorded 1. Robot 1 had
+`constraints_accumulated=4`, while Robot 2 had `constraints_accumulated=1`;
+both had `hypothesis_summaries_published=0`, `evidence_sets_formed=0`, and
+`tf_handoffs=0`. Robot 2's physical-evidence log shows the shared candidates
+were geometrically rejected (`GEOMETRIC_VERIFICATION_REJECTED`) and then
+suppressed as `PHYSICAL_GEOMETRY_PREVIOUSLY_REJECTED`; this is why the
+peer-confirmed robust subset never formed. The artifact is a valid
+`VALIDATION_INCOMPLETE -- ROBUST_HANDOFF_NOT_PROVEN` run, not a shared-map or
+navigation soak result.

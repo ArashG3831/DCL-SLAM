@@ -384,3 +384,26 @@ Python package, so its manual cleanup does not count as a normal cleanup pass.
 Do not launch another Webots campaign until Windows has been rebooted, the
 nonpaged-pool baseline is healthy, and the corrected install is proven to reap
 all campaign-owned processes.
+
+## Valid-domain A* smoke residual pool (2026-08-25)
+
+The corrected upstream-core smoke `upstream_core_gate_b_astar_65640f6_20260825`
+used the clean validation install, CycloneDDS loopback domain 50, Webots port
+23155, the dynamic 20 ms close-start world, reliable full scan transport, and
+`use_astar=true` in both active shared-map NavFn profiles.  It completed its
+300-second bounded mission with exact process/port/file cleanup and no DDS
+assertion, SIGABRT, SIGSEGV, or physics-step failure.
+
+Windows `Pool Nonpaged Bytes` nevertheless rose from approximately 4,396 MB
+before launch to 5,611 MB by shutdown.  After the campaign and WSL VM were
+stopped, it remained approximately 5,618 MB for at least two minutes while no
+campaign process remained.  WSL guest memory returned to approximately 6.9 GB
+available, and Windows free memory recovered, but the Windows nonpaged pool did
+not.  This is residual host kernel allocation associated with the valid DDS /
+Webots transport workload; it is not evidence of an application RSS leak being
+fixed by A*.
+
+The agreed 6,000 MB hard ceiling therefore leaves insufficient headroom for a
+long-navigation soak.  Do not launch the soak or final campaign from this
+baseline.  Reboot Windows, record a clean pool baseline, and repeat the
+bounded transport gate before continuing.

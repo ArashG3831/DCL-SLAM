@@ -345,9 +345,6 @@ private:
       pending_ = true;
     }
     last_map_receipt_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(receipt).count();
-    if (core_) {
-      core_->occupancyGridCallback(frontier_exploration_ros2::OccupancyGrid2d(message));
-    }
   }
 
   void cost_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
@@ -365,8 +362,33 @@ private:
       ++cost_changed_;
     }
     last_cost_receipt_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(receipt).count();
-    if (core_) {
-      core_->costmapCallback(frontier_exploration_ros2::OccupancyGrid2d(message));
+  }
+
+  void apply_pending_core_inputs(
+    const nav_msgs::msg::OccupancyGrid::ConstSharedPtr & map,
+    const nav_msgs::msg::OccupancyGrid::ConstSharedPtr & costmap,
+    uint64_t map_revision, uint64_t costmap_revision)
+  {
+    if (!core_) {
+      return;
+    }
+    // Apply only checksum-changing revisions from the bounded processing
+    // timer.  Calling the upstream core synchronously from every reliable
+    // OccupancyGrid callback repeatedly rebuilt its decision-map state and
+    // invalidated its snapshot even when the map contents were unchanged.
+    // Coalescing keeps the latest complete sample, lets DDS return from the
+    // callback promptly, and preserves the existing timer/freshness policy.
+    if (map && map_revision != core_map_revision_) {
+      core_->occupancyGridCallback(frontier_exploration_ros2::OccupancyGrid2d(map));
+      core_map_revision_ = map_revision;
+      RCLCPP_INFO(
+        get_logger(), "GENERATOR_CORE_INPUT_APPLY kind=map revision=%lu", map_revision);
+    }
+    if (costmap && costmap_revision != core_costmap_revision_) {
+      core_->costmapCallback(frontier_exploration_ros2::OccupancyGrid2d(costmap));
+      core_costmap_revision_ = costmap_revision;
+      RCLCPP_INFO(
+        get_logger(), "GENERATOR_CORE_INPUT_APPLY kind=costmap revision=%lu", costmap_revision);
     }
   }
 
@@ -420,6 +442,7 @@ private:
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "map/costmap frame mismatch");
       return;
     }
+    apply_pending_core_inputs(map, costmap, map_revision, costmap_revision);
     geometry_msgs::msg::TransformStamped transform;
     try {
       transform = tf_buffer_.lookupTransform(
@@ -1261,6 +1284,7 @@ private:
   State state_{State::WAITING_FOR_INPUTS};
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_map_, latest_cost_, cycle_map_, cycle_cost_;
   uint64_t map_sum_{0}, cost_sum_{0}, revision_{0}, cost_revision_{0};
+  uint64_t core_map_revision_{0}, core_costmap_revision_{0};
   uint64_t cycle_revision_{0}, cycle_cost_revision_{0}, stale_results_{0};
   uint64_t request_generation_{0}, active_request_{0}, query_event_sequence_{0};
   uint64_t map_receipts_{0}, map_changed_{0};

@@ -471,3 +471,25 @@ the multi-gigabyte slope seen after full SLAM/Nav2/map-fusion traffic.  A
 clean post-reboot A/B must therefore isolate raw scan QoS, corrected scan QoS,
 and large reliable map/fusion topics one variable at a time before any long
 campaign.
+
+## Correction: the realtime handoff incident was not Fast Webots (2026-08-25)
+
+The incident referred to as `upstream_core_gate_b_handoff_20260825` used
+`fast_mode=false` and Webots `--mode=realtime`.  Its manifest records source
+commit `fb20df3`, CycloneDDS domain 36, the full sensor profile, and the
+default `scan_input_reliability:=reliable`.  It ran for approximately 280
+wall seconds with 56 campaign processes; WSL process-tree RSS reached about
+2.8 GB and WSL available memory fell from about 7.0 GB to 5.6 GB.  That run's
+artifact did not capture Windows pool counters, so its individual nonpaged
+delta cannot be computed from the repository alone.
+
+The later `upstream_core_gate_b_fast_20260825` and
+`upstream_core_gate_b_astar_65640f6_20260825` runs were separate Fast Webots
+runs.  Their evidence must not be substituted for the realtime incident.
+Therefore the defensible conclusion for the realtime event is not “Fast
+Webots caused it.”  The common recent transport boundary is instead the
+combination of duplicated raw-scan subscriptions (full-resolution Slam plus a
+separate Nav2 relay), reliable DDS delivery, the WSL loopback/fragmentation
+profile, and the complete two-robot ROS graph.  The exact contribution of
+those mechanisms remains unseparated until a clean post-reboot A/B captures
+Windows pool counters for each run.

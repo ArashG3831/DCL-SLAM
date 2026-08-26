@@ -2321,12 +2321,19 @@ class UnknownPoseFrontend(Node):
                     missing_source_keyframe_ids=missing_source,
                     missing_target_keyframe_ids=missing_target)
             return True
+        # The canonical proposal is source-robot -> target-robot.  The
+        # responder independently verifies the same physical views in its
+        # local direction (target-robot -> source-robot), then inverts exactly
+        # once below before comparing with the canonical proposal.  Passing
+        # the crops in canonical order here while treating the result as
+        # reverse direction caused valid proposals to be rejected.
         evidence_pairs = [
-            (self.received_peer_crops[source_key], self.keyframes[target_key][1])
+            (self.keyframes[target_key][1],
+             self.received_peer_crops[source_key])
             for source_key, target_key in zip(evidence_sources, evidence_targets)]
         evidence_timestamps = [
-            (self._stamp_ns(self.peer_descriptors[source_key]),
-             self._stamp_ns(self.keyframes[target_key][0]))
+            (self._stamp_ns(self.keyframes[target_key][0]),
+             self._stamp_ns(self.peer_descriptors[source_key]))
             for source_key, target_key in zip(evidence_sources, evidence_targets)
             if source_key in self.peer_descriptors]
         if len(evidence_timestamps) != len(evidence_pairs):
@@ -2341,7 +2348,7 @@ class UnknownPoseFrontend(Node):
             target_keyframe_id=str(proposal.target_keyframe_id),
             evidence_source_keyframe_ids=[str(value) for value in evidence_sources],
             evidence_target_keyframe_ids=[str(value) for value in evidence_targets])
-        result = self._run_registration(
+        reverse_result = self._run_registration(
             evidence_pairs, 'target_confirmation',
             proposal.target_keyframe_id,
             evidence_timestamps=evidence_timestamps,
@@ -2349,6 +2356,11 @@ class UnknownPoseFrontend(Node):
                 proposal.source_robot_id, proposal.target_robot_id,
                 source_key, target_key)
                 for source_key, target_key in zip(evidence_sources, evidence_targets)])
+        # ``target_confirmation`` registered target->source above.  Convert
+        # that independently verified result into the canonical source->target
+        # direction exactly once before comparing and acknowledging it.
+        result = replace(reverse_result,
+                         transform=invert_se2(reverse_result.transform))
         tx, ty, yaw = result.transform
         proposed_tx = proposal.source_to_target.translation.x
         proposed_ty = proposal.source_to_target.translation.y
@@ -2366,7 +2378,7 @@ class UnknownPoseFrontend(Node):
             translation_error <= 0.12 and yaw_error <= 0.04 and
             selector_agrees and
             str(getattr(proposal, 'evidence_set_hash', '')) != '')
-        accepted = result.accepted and mutually_consistent
+        accepted = reverse_result.accepted and mutually_consistent
         self._record_diagnostic_event(
             'PROPOSAL_CONFIRMATION_RESULT',
             accepted=bool(accepted), result_accepted=bool(result.accepted),

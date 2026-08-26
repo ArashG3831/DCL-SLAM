@@ -328,6 +328,11 @@ def test_proposal_confirmation_runs_from_cached_evidence_without_waiting_for_cro
     assert "'PROPOSAL_ACK_PUBLISHED'" in helper
     assert 'proposal.target_keyframe_id' in helper
     assert 'proposal.keyframe_id' not in helper
+    # Confirmation registers in the responder's local (target->source)
+    # direction and inverts once before comparing with the canonical proposal.
+    assert 'reverse_result = self._run_registration(' in helper
+    assert 'transform=invert_se2(reverse_result.transform)' in helper
+    assert 'accepted = reverse_result.accepted and mutually_consistent' in helper
 
 
 def test_single_constraint_evidence_is_relayed_for_peer_reverification():

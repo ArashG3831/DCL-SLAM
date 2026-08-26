@@ -1,162 +1,270 @@
-# Unknown-pose handoff reliability report (2026-08-27 update)
+# Unknown-pose handoff reliability report
 
-## Verdict
+Updated 2026-08-27. This report is limited to unknown-pose evidence
+acquisition, peer verification, and recording/export. Frontier extraction is
+the already-validated upstream `FrontierExplorerCore` adapter and is not
+changed here. Map fusion, Nav2, and traffic are reported only at their
+handoff boundary.
 
-`VALIDATION_INCOMPLETE — ROBUST_HANDOFF_NOT_PROVEN`.
+## Current verdict
 
-The unknown-pose protocol is functional but not yet repeatable under the
-current fast NAT runtime. One post-fix trial reached a valid peer-confirmed
-handoff; four matched post-fix trials did not. No estimator gate was lowered.
-The 600-second soak and 1,200-second campaign remain blocked until three fresh
-dedicated handoffs pass.
+`VALIDATION_INCOMPLETE — TERMINAL_EXPLORATION_NOT_REACHED`
 
-## Scope and provenance
+The source-level handoff defects are fixed and three fresh dedicated trials
+(19--21) independently accepted a peer-confirmed hypothesis in every trial.
+A clean 600-second wall-time post-handoff soak completed with continued shared
+allocation and navigation. The required 1,200-second campaign also completed
+with clean teardown and stable host resources, but it produced no accepted
+handoff and no terminal cooperative-exploration state. No acceptance
+threshold was lowered; the overall completion claim therefore remains
+blocked by terminal exploration.
 
-All work was performed in `/home/arash/webots_ws_clean_validation_20260823`;
+## Provenance
+
+All changes and tests were performed in
+`/home/arash/webots_ws_clean_validation_20260823`. The original dirty checkout
 `/home/arash/webots_ws` was not modified. Branch:
-`validation/nat-gate-20260826`. Starting source was `69bafe3`; the current
-uncommitted source includes the changes described below. The rebuilt isolated
-overlay is `build_unknown_pose_reliability_20260827` /
-`install_unknown_pose_reliability_20260827`; runtime package resolution and
-launch logs point to that install.
-
-Runtime configuration for trials 6–14 was fast, headless Webots, NAT
-CycloneDDS `eth0` profile, subnet discovery, chunked best-effort raw input,
-reliable reconstructed 720-beam output, `use_sim_time=true`, scan matching
-enabled, and loop closing disabled. Each run used a unique ROS domain and
-Webots port and ended with the runner's automatic process-tree cleanup.
-
-## Evidence comparison
-
-Historical artifacts:
-
-* `results/fast_nat_handoff_delay20_407177b_retry` succeeded, but used source
-  `407177b` with the older build/install overlay.
-* `results/fast_nat_final_delay20_407177b` and
-  `results/fast_nat_handoff_batches200_407177b` failed without handoff and
-  carried stale-build provenance relative to their reported source.
-
-Current matched trials:
-
-| Trial | Delay | Peer result | Evidence | Acquisition result |
-|---|---:|---|---|---|
-| `trial6_fast` | 20 s | both rejected | 3 accepted geometric constraints, inconsistent | 0 queue drops; 42 temporal rejections/peer |
-| `trial7_fast` | 20 s | both rejected | 5–6 constraints, dominant two-inlier cluster | 0 queue drops; 44–50 novelty/temporal deferrals |
-| `trial8_fast` | 120 s | both rejected | 0–1 accepted constraints | robots remained too static for spatial diversity |
-| `trial9_fast` | 40 s | both rejected | two compatible plus aliases | 0 queue drops; selector correctly rejected aliases |
-| `trial10_fast` | 20 s | both rejected | 9–10 accepted constraints, dominant two-inlier cluster | geometry suppression greatly reduced |
-| `trial11_fast` | 60 s | both rejected | 6–9 accepted constraints | no three-inlier compatible model |
-| `trial12_fast` | 40 s | **both accepted** | 4 compatible inliers; hash `96dbdd23e64aa0b8`; baseline 1.9200 m; confidence ~0.870 | shared activation occurred |
-| `trial13_fast` | 40 s | both rejected | 0 accepted geometric constraints | descriptor candidates were aliases/poor geometry |
-| `trial14_fast` | 40 s | both rejected | robot1 3, robot2 1 accepted constraints | no common three-inlier set |
-
-Trial 12 is a valid functional handoff, not a repeatability proof. Both peers
-reported the same evidence hash and accepted four constraints; no second
-handoff was observed. The differing hashes across trials are expected because
-keyframe IDs differ.
-
-## Root cause and source fix
-
-The source-level acquisition defect was permanent suppression of a
-revision-independent crop geometry after one geometric rejection. The same
-physical footprint was then excluded from every later verification batch, even
-when a later map/keyframe revision could have produced a valid registration.
-This was visible in the failed artifacts as thousands of
-`physical_geometry_rejections_suppressed` events and exhausted batches despite
-zero registration-queue drops.
-
-`unknown_pose_frontend.py` now keeps the rejection set bounded by acquisition
-batch: a rejected geometry is suppressed for the current batch only and may be
-retried after batch rollover. Exact physical evidence and accepted-evidence
-deduplication remain authoritative; no threshold or acceptance gate changed.
-The helper `_geometry_rejected_in_active_batch()` implements the rule, and a
-regression test covers expiry on batch rollover.
-
-The fast runner also now explicitly starts local Nav2 (`nav2_autostart:=true`),
-recognizes already-active lifecycle nodes without issuing a redundant STARTUP,
-and exposes `--prehandoff-dispatch-delay-s`. These changes address observed
-clock/controller startup behavior and make the overlap hold an explicit
-one-variable experiment; they do not alter estimator gates.
-
-## Queue, rejection, and selector analysis
-
-Across trials 6–14, registration queue drops were zero. The worker was receiving
-responses; failures arose before consensus because accepted single-crop
-registrations formed incompatible transform clusters or no accepted geometry.
-Examples from consensus diagnostics:
-
-* trial 6: transforms near `(-2.74, 0.18, 0.028)`,
-  `(-2.78, -0.006, 0.008)`, and `(-2.84, 0.006, -0.014)`; only one mutually
-  compatible under the unchanged 0.15 m / 1° pairwise gate;
-* trial 9: one valid `(+2.78, -0.049, -0.004)` constraint and a false
-  `(+3.20, +3.77, 1.57)` alias;
-* trial 10: the accumulator retained more evidence, but the best model still
-  had only two mutually compatible constraints;
-* trial 12: four constraints converged near the accepted `-2.76 m` transform.
-
-Therefore the selector is correctly rejecting insufficient or aliased sets;
-the failure is evidence quality/overlap timing, not peer disagreement or
-silent worker loss. The 120-second hold prevented motion and therefore failed
-the spatial-baseline requirement. The 20–60 second holds permit motion, but
-the current fast world can move beyond useful common observation before a
-third compatible view is acquired.
-
-## Focused tests and build
-
-The focused suites after the changes passed **113 tests**:
+`validation/nat-gate-20260826`. Source HEAD after the recorder fix is
+`94b103323bd226b3672cbd2bc2b1e1eab092829e` (the handoff-direction fix is
+`574dcbd8ac434b78a295e421979bc6cb886b3680`). The isolated build/install used
+for all post-fix runs is:
 
 ```text
-PYTHONPATH=src/my_epuck_project:$PYTHONPATH \
-python3 -m pytest -q \
-  src/my_epuck_project/test/test_unknown_pose_frontend.py \
-  src/my_epuck_project/test/test_unknown_pose_accuracy_upgrade.py \
-  src/my_epuck_project/test/test_cooperative_trial_fast.py
-113 passed
+build_unknown_pose_reliability_20260827
+install_unknown_pose_reliability_20260827
 ```
 
+The runner resolved `my_epuck_project` from that install prefix. The world
+SHA-256 recorded in each run is
+`2bf044aee250be4d2179da89b5f28a6b6cee04bd96f982b03b47b552d86cb84c`.
+Runtime was NAT WSL, CycloneDDS `eth0`, subnet discovery, unique domains and
+Webots ports, Fast/headless Webots, chunked best-effort raw input, reliable
+reconstructed 720-beam scan output, `use_sim_time=true`, scan matching on,
+loop closing off, and no rendering/RViz/motion fixture.
+
+## Source changes
+
+### Evidence acquisition and peer verification
+
+* `src/my_epuck_project/my_epuck_project/unknown_pose_frontend.py`
+  * `_geometry_rejected_in_active_batch()` (line 1548) scopes a rejected
+    geometry key to its acquisition batch instead of suppressing that physical
+    footprint forever. This preserves later evidence windows without changing
+    geometry thresholds.
+  * `_request_next_candidate_verification()` (line 1788) and
+    `_verification_worker_busy()` (line 1869) keep a batch open while an
+    in-flight worker drains. Budget exhaustion is not reported until queued
+    work has completed.
+  * `_request_batch_id()` (line 923) binds late worker results and exceptions
+    to the batch that requested them, rather than the current batch.
+  * `_try_confirm_pending_proposal()` (line 2281) now verifies the responder's
+    local direction (target-local keyframe to the received source crop), then
+    applies exactly one `invert_se2` to compare with the canonical proposal.
+    The old code passed the opposite direction while treating it as reverse;
+    this caused valid proposals to be rejected by the responder.
+
+### Recording/export
+
+* `cooperative_experiment_logger.py`: `enable_local_map_capture` defaults to
+  true. The passive `ForensicEvidenceWriter` now records local maps, odometry,
+  TF, and scan-correction evidence whenever the logger is enabled, without
+  starting the optional Supervisor/ground-truth observer. Required-artifact
+  validation requires Supervisor output only when that observer was explicitly
+  requested.
+* `cooperative_map_png_export.py`: direct fast-trial layouts are selectable;
+  local final maps are resolved when no shared map exists; local odometry is
+  projected through captured `robotN/map <- robotN/odom` TF; no-handoff exports
+  write per-robot local PNGs, path overlays, and
+  `NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt`. Shared maps are never synthesized.
+* `scripts/validation_host_watch.py`: Windows counters are sampled through the
+  absolute PowerShell path and include Pool Nonpaged Bytes, Available MBytes,
+  and committed-memory percentage.
+
+## Exact failure diagnosis
+
+The failed pre-fix run 18 (`results/unknown_pose_reliability_trial18_fast_20260827`)
+contained enough evidence for both peers to build compatible local clusters,
+but the canonical proposal responder rejected it. The proposal sender's
+direction was source robot to target robot. The responder's confirmation code
+constructed `received_peer_crops[source]` with the local target keyframe but
+classified the result as if it were already canonical reverse evidence. The
+comparison therefore applied the wrong direction. The log shows proposal hash
+`7150def...` rejected with `result_accepted=false` despite the sender's
+accepted summary. This is a deterministic transform-direction bug, not weak
+geometry and not peer disagreement.
+
+The earlier trials 6--17 had a separate acquisition problem: a geometry key
+rejected once remained suppressed across later batches, and the worker could
+finish after the batch had been marked exhausted. Those behaviors caused
+valid late evidence to be dropped or misattributed. The fixes preserve all
+three-inlier, covariance, baseline, residual, temporal, confidence, and margin
+gates.
+
+## Successful versus failed evidence timeline
+
+| Run | Result | Evidence | Interpretation |
+|---|---|---|---|
+| `fast_nat_handoff_delay20_407177b_retry` | both accepted | old build; hash `f8700d12d7ba2dce`; 3 inliers | historical functional baseline only |
+| `unknown_pose_reliability_trial12_fast_20260827` | both accepted | old post-acquisition fix; hash `96dbdd23e64aa0b8`; 4 inliers; baseline 1.9200 m | proves protocol can succeed |
+| trials 13--17 | no handoff | 0--2 mutually compatible constraints or insufficient spatial diversity | selector correctly withheld handoff |
+| trial 18 | no handoff | local clusters reached 3--5 constraints; responder rejected canonical proposal due direction bug | source-level peer-verification defect |
+| trial 19 | both accepted | hash `e818c2904ba1bdcb`; 3 inliers; baseline 1.8238 m; residual 0.01937 m; margin 0.05752 | fixed-direction pass |
+| trial 20 | both accepted | hash `94587d4c2cd5d93f`; 5 inliers; baseline 2.2163 m; residual 0.02269 m; margin 0.06944 | fixed-direction pass |
+| trial 21 | both accepted | hash `3550e7c7940febd3`; 3 inliers; baseline 1.7400 m; residual 0.02306 m; margin 0.05852 | fixed-direction pass |
+
+In trials 19--21 both JSON summaries report `accepted=true`, identical
+`evidence_set_hash`, identical margin/confidence and compatible residuals. Each
+has an `robot1_accepted_handoff.marker` and
+`robot2_accepted_handoff.marker`; launch logs show one handoff start per peer,
+local pre-handoff teardown, and `POST_HANDOFF_SHARED`. No second canonical
+handoff event occurs.
+
+## Queue and rejection analysis
+
+The pre-fix queue problem was not a DDS drop: the failed runs report zero
+registration queue drops in the relevant trials. The measured loss was local
+geometry suppression and batch-finalization ordering. The fixed diagnostics
+retain batch IDs, candidate age, residual, inlier ratio, baseline, temporal
+consistency, peer agreement, selector margin, and rejection reason. The
+verification worker drain barrier ensures an in-flight request cannot be
+silently counted against a completed batch.
+
+Focused regression coverage includes geometry suppression expiry, late-result
+batch attribution, worker-busy budget handling, queue overflow/backpressure,
+stale and duplicate candidate rejection, temporal inconsistency, peer
+disagreement, verification-budget exhaustion, three-inlier consensus, one
+canonical handoff, and no second handoff.
+
+The 20/40-second prehandoff delay is an observation hold, not an estimator
+threshold. A 120-second hold kept robots static and failed baseline diversity;
+40 seconds allowed both spatial diversity and sufficient overlap. The three
+post-fix trials show that this runtime hold is effective, not that a threshold
+was weakened.
+
+## Recording/export validation
+
+The first no-handoff recorder run exposed an artifact-contract error: local
+maps existed but finalization incorrectly required a Supervisor CSV when
+Supervisor capture was disabled. Commit `94b1033` separates optional
+Supervisor capture from mandatory local evidence. The rebuilt no-handoff run
+`results/no_handoff_recorder_trial_20260827_1787785482` has
+`artifact_finalization.json` with `complete=true`, local map NPZs, odom CSVs,
+TF CSV, scan-correction JSONL, and all bounded frontend diagnostics.
+
+The exporter produced:
+
+```text
+robot1_local_map.png
+robot1_local_map_with_paths.png
+robot2_local_map.png
+robot2_local_map_with_paths.png
+final_merged_map.png (robot1 local map, explicitly marked no-handoff)
+final_merged_map_with_paths.png (same explicit status)
+NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt
+export_manifest.json
+```
+
+The manifest contains `handoff_occurred=false`,
+`status_label="NO_HANDOFF — SHARED MAP UNAVAILABLE"`, and never writes an
+exact shared-map difference image. The exporter regression suite covers
+occupancy colors, rotated origins, path overlays, direct fast-trial layouts,
+and no-handoff local-map/status output. Accepted-handoff runs retain shared
+map outputs and exact-difference artifacts only when both shared maps exist.
+
+## Soak result
+
+`results/unknown_pose_reliability_soak600_fast_retry_20260827` completed with
+runner exit reason `mission_timeout`, wall duration 628.70 s, launch return 0,
+and complete artifact finalization. The run includes both peer handoff starts,
+`POST_HANDOFF_SHARED`, shared fusion/allocation, 44 accepted goals (18
+successful), and continued frontier/allocator activity. It recorded 1,993.44
+simulated seconds because Fast Webots advances simulation faster than wall
+time. There were 13 NavFn warnings; they did not prevent handoff or shared
+activation. The run ended with 22 remaining frontiers and is therefore not a
+terminal-exploration pass.
+
+Host watcher samples: 89. Pool Nonpaged Bytes ranged from 0.9992 to 1.0375 GiB
+and ended at 1.0096 GiB; committed-memory percentage ranged 41.18--47.24%.
+No hard resource stop occurred. Post-run process audit found no Webots, ROS,
+frontend, logger, or campaign process and no selected-port residue.
+
+## NavFn warning classification
+
+The warning `Failed to create a plan from potential when a legal potential was
+found` is emitted by NavFn/global planner attempts associated with individual
+frontier goals. In the successful handoff trials it did not prevent evidence
+collection, peer agreement, local-stack teardown, or shared activation. The
+600-second soak still recorded 25 failed goals and 13 warning occurrences,
+while `planner_failed_count` remained zero in its mission artifact. In the
+1,200-second campaign there were 86 such warnings, 45 accepted goals, 42
+successes, and 3 failed goals (including one controller timeout and one TF
+failure). The warning stream is associated with individual frontier planning
+attempts; it did not directly reject an evidence set. It is nevertheless an
+independent Nav2 planner/goal-feasibility limitation and prevents a claim of
+fully reliable navigation until separately resolved. Warnings were not
+suppressed.
+
+## Final 1,200-second campaign
+
+`results/unknown_pose_reliability_final1200_fast_20260827` completed with
+`exit_reason=mission_timeout`, wall runtime 1219.95 s, launch return code 0,
+and `artifact_finalization.complete=true`. The run used the current isolated
+install, Fast Webots, NAT CycloneDDS, domain 156, Webots port 25096, and the
+same chunked-scan/reliable-reconstructed-720-beam configuration as the soak.
+
+Both frontends exchanged descriptors and crops and independently accepted
+geometric registrations, but no mutually compatible three-inlier hypothesis
+was formed. Robot 1 accumulated 36 geometric constraints and Robot 2 22;
+the final consensus attempts repeatedly had only two and one mutually
+consistent constraints respectively. The high-similarity candidates were
+spatially/transform-inconsistent (for example, Robot 1 accepted transforms
+with y components 0.398, -0.638, and -2.042 m), so the unchanged selector
+correctly returned `INSUFFICIENT_EVIDENCE`. The peers did not publish a
+matching hypothesis summary, no canonical handoff occurred, and shared
+fusion/allocation were never activated. This is evidence of insufficient
+overlap/descriptor ambiguity after navigation, not evidence of a map-merge
+failure and not a reason to weaken the gates.
+
+The run recorded 548/552 descriptors published, 119/107 crop requests sent,
+104/115 registration callbacks, 22/36 accepted geometric candidates, and
+64 bounded verification batches per peer. The robots began local navigation
+before a compatible evidence set was available; later candidate families
+were dominated by repetitive corridor-like false matches. This explains why
+the dedicated close-start trials passed while this longer naturally evolving
+run did not.
+
+Final host telemetry contained 174 samples: Pool Nonpaged Bytes
+1.004--1.005 GiB (pre/peak/post approximately 1.004/1.005/1.001 GiB),
+committed memory 41.28--46.71%, and no hard resource stop. Automatic cleanup
+left no campaign process, Webots instance, or selected-port residue. These
+resource results are a pass for stability, not a handoff or terminal-state
+pass.
+
+## Tests and build
+
 The isolated colcon build of `my_epuck_project` and
-`reliable_slam_toolbox_wrapper` succeeded, and `git diff --check` passed.
-The test coverage includes incremental hypothesis behavior, historical bad
-evidence rejection, compatible three-inlier acceptance, queue/backpressure,
-peer verification, canonical handoff suppression, lifecycle readiness, and
-the new batch-scoped geometry rejection rule.
+`reliable_slam_toolbox_wrapper` succeeded after the recorder changes. The
+combined focused run passed 124 tests (unknown-pose frontend, two-phase peer
+verification, and map PNG exporter). The earlier full unknown-pose focused
+set passed 166 tests after the direction and worker fixes. `git diff --check`
+passed. Source/build/install are bound to the isolated overlay above.
 
-## NavFn warnings
+## Remaining state
 
-The repeated `Failed to create a plan from potential when a legal potential
-was found` messages are associated with frontier path-validation requests and
-controller/costmap failures for individual goals. They do not appear in the
-successful handoff's accepted evidence path and did not produce a DDS or
-process failure. They remain a separate Nav2/planner limitation: their exact
-impact on long-run exploration is not yet fully classified, so full Nav2
-reliability is not claimed.
+The handoff reliability gate is repeatably passed in the three dedicated
+trials (3/3), and the 600-second post-handoff soak is complete and
+resource-safe. The final campaign completed safely but failed the required
+handoff and terminal-exploration gates. Therefore this task remains
+`VALIDATION_INCOMPLETE — TERMINAL_EXPLORATION_NOT_REACHED`. Traffic
+coordination is outside this task and remains unimplemented/untested.
 
-## Artifact capture
+Evidence paths:
 
-Trials 6–14 used bounded frontend diagnostics but disabled forensic capture, so
-they prove handoff behavior and cleanup, not PNG/map export behavior. The
-no-handoff local-map/path exporter must still be validated against a dedicated
-no-handoff artifact and a successful-handoff artifact before the final report
-can claim complete recorder coverage. No shared map is inferred when handoff
-was absent.
-
-## Cleanup and runtime status
-
-Every completed trial recorded a graceful launch shutdown and no remaining
-campaign-owned process in the runner audit. A few Webots driver PIDs were
-observed by the runner during teardown and were terminated by its
-campaign-driver cleanup path; this is recorded in each trial summary. No
-second handoff, DDS assertion, SIGABRT, or SIGSEGV occurred in these trials.
-
-## Next required work
-
-1. Run at least two more fresh dedicated trials using the batch-scoped fix and
-   the 40-second overlap hold; require both peers to accept the same hash and
-   three or more compatible inliers in each.
-2. Validate local-map/path PNG export for both no-handoff and accepted-handoff
-   artifacts.
-3. Classify/fix remaining NavFn planner failures if they affect navigation.
-4. Only after repeatable handoff and artifact capture pass, run the 600-second
-   post-handoff soak, then the 1,200-second terminal campaign.
-
-Traffic coordination remains outside this reliability task and was not run.
+* `results/unknown_pose_reliability_trial19_fast_20260827`
+* `results/unknown_pose_reliability_trial20_fast_20260827`
+* `results/unknown_pose_reliability_trial21_fast_20260827`
+* `results/no_handoff_recorder_trial_20260827_1787785482`
+* `results/unknown_pose_reliability_soak600_fast_retry_20260827`
+* `results/unknown_pose_reliability_final1200_fast_20260827`
+* `build_unknown_pose_reliability_20260827`
+* `install_unknown_pose_reliability_20260827`

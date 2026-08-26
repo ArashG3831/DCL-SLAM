@@ -2,6 +2,7 @@
 
 import os
 import re
+import subprocess
 import tempfile
 
 from launch import LaunchDescription
@@ -10,6 +11,7 @@ from launch.actions import (
     OpaqueFunction,
     RegisterEventHandler,
 )
+from launch.actions import LogInfo
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.actions import Node
@@ -26,10 +28,52 @@ from webots_ros2_driver.webots_controller import WebotsController
 from webots_ros2_driver.wait_for_controller_connection import WaitForControllerConnection
 
 
+def _default_route_gateway():
+    """Return the Linux default-route gateway used to reach Windows in NAT mode."""
+    try:
+        result = subprocess.run(
+            ['ip', 'route', 'show', 'default'],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            'Unable to resolve the WSL NAT gateway with ip route') from exc
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if fields and fields[0] == 'default' and 'via' in fields:
+            gateway = fields[fields.index('via') + 1]
+            if gateway:
+                return gateway
+    raise RuntimeError(
+        'No default-route gateway found; cannot connect to Windows Webots in NAT mode')
+
+
+def _resolve_controller_host():
+    """Resolve the external Webots controller endpoint for mirrored WSL or NAT."""
+    explicit_mode = os.environ.get('MY_EPUCK_WEBOTS_NETWORK_MODE', '').strip().lower()
+    if explicit_mode in ('mirrored', 'loopback'):
+        return '127.0.0.1'
+    if explicit_mode in ('nat', 'subnet'):
+        return _default_route_gateway()
+
+    localhost_only = os.environ.get('ROS_LOCALHOST_ONLY', '').strip().lower()
+    discovery = os.environ.get('ROS_AUTOMATIC_DISCOVERY_RANGE', '').strip().upper()
+    if localhost_only in ('1', 'true', 'yes') or discovery != 'SUBNET':
+        return '127.0.0.1'
+    return _default_route_gateway()
+
+
 def launch_setup(context):
-    # WSL reaches Windows Webots through this fixed external-controller endpoint.
-    webots_controller_module.controller_ip_address = lambda: '127.0.0.1'
-    webots_launcher_module.controller_url_prefix = lambda port='1234': f'tcp://127.0.0.1:{port}/'
+    # Mirrored WSL reaches Windows through loopback.  NAT WSL reaches the
+    # Windows host through the Linux default-route gateway; using resolv.conf
+    # or a fixed loopback address makes controllers unable to connect.
+    controller_host = _resolve_controller_host()
+    webots_controller_module.controller_ip_address = lambda: controller_host
+    webots_launcher_module.controller_url_prefix = (
+        lambda port='1234': f'tcp://{controller_host}:{port}/')
 
     package_dir = get_package_share_directory('my_epuck_project')
     world = LaunchConfiguration('world').perform(context)
@@ -102,7 +146,7 @@ def launch_setup(context):
             output='screen',
             additional_env={
                 'WEBOTS_CONTROLLER_URL': (
-                    f'tcp://127.0.0.1:{controller_port}/Ros2Supervisor'),
+                    f'tcp://{controller_host}:{controller_port}/Ros2Supervisor'),
                 'WEBOTS_HOME': get_package_prefix('webots_ros2_driver'),
             },
             respawn=False,
@@ -341,7 +385,11 @@ def launch_setup(context):
 
     # WebotsLauncher creates the official Ros2Supervisor action separately;
     # include it so its single /clock publisher is actually launched.
-    return [webots, webots._supervisor] + robot_actions
+    endpoint_log = LogInfo(msg=(
+        f'WEBOTS_CONTROLLER_ENDPOINT host={controller_host} '
+        f'port={controller_port} '
+        f'network_mode={os.environ.get("MY_EPUCK_WEBOTS_NETWORK_MODE", "auto")}'))
+    return [endpoint_log, webots, webots._supervisor] + robot_actions
 
 
 def generate_launch_description():

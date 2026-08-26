@@ -7,6 +7,16 @@ claim that the underlying Windows/WSL network-buffer behavior is fixed.
 No further Webots or ROS campaign may start until the host has been rebooted
 and the transport provenance checks below pass.
 
+**Current-policy supersession (2026-08-26):** This document preserves the
+historical incident and the launch guidance that applied at the time. Its
+older advice to stop on a measured Windows-available-memory floor is no longer
+the automatic in-run rule. The authoritative current rule is
+[`HOST_RESOURCE_STOP_POLICY.md`](HOST_RESOURCE_STOP_POLICY.md): stop a run
+only when Windows `Pool Nonpaged Bytes >= 6 GiB` or Windows RAM usage
+`>= 99%`. WSL/vmmemWSL working-set growth, reclaimable Linux page cache, and a
+transient Available-MBytes fluctuation below those thresholds are informative
+only and must not by themselves trigger a campaign kill or `wsl --shutdown`.
+
 ## What happened
 
 During a two-robot ROS 2/Webots campaign, Windows kernel networking counters

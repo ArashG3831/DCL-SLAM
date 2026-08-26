@@ -223,6 +223,7 @@ class UnknownPoseFrontend(Node):
             'verification_lifetime_expired': 0,
             'stale_verification_batch_responses': 0,
             'diagnostic_write_failures': 0,
+            'post_handoff_protocol_ticks_skipped': 0,
         }
         self.gate_rejection_counts = Counter()
         self.temporal_gate_rejection_counts = Counter()
@@ -822,6 +823,15 @@ class UnknownPoseFrontend(Node):
     def tick(self):
         self._sample_cpu()
         self._drain_candidate_registration()
+        # Once both peers have installed the immutable canonical handoff,
+        # descriptor/crop acquisition and hypothesis re-auctioning are no
+        # longer valid work.  Continuing them only creates avoidable reliable
+        # DDS traffic and can compete with shared-map/navigation callbacks.
+        # Map callbacks remain active and independently rate-limit PeerMap
+        # export, so this does not stop local SLAM or fusion inputs.
+        if self.accepted is not None:
+            self.counters['post_handoff_protocol_ticks_skipped'] += 1
+            return
         self._process_pending_peer_evidence()
         if time.monotonic() - self.last_descriptor_wall >= self.descriptor_period_s:
             self.publish_descriptor()

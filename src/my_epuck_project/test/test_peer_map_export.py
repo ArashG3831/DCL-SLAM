@@ -82,3 +82,10 @@ def test_handoff_export_can_bypass_cadence():
     text = open(source, encoding='utf-8').read()
     assert 'self.publish_local_map(force=True)' in text
     assert 'peer_map_publish_period_s' in text
+
+
+def test_post_handoff_frontend_stops_descriptor_protocol_work():
+    source = open(frontend_module.__file__, encoding='utf-8').read()
+    assert "if self.accepted is not None:" in source
+    assert 'post_handoff_protocol_ticks_skipped' in source
+    assert "self._process_pending_peer_evidence()" in source

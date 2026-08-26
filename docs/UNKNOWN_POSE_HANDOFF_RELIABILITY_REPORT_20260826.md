@@ -233,6 +233,16 @@ were dominated by repetitive corridor-like false matches. This explains why
 the dedicated close-start trials passed while this longer naturally evolving
 run did not.
 
+The corrected exporter was then run against this exact no-handoff attempt. It
+produced `robot1_local_map.png`, `robot1_local_map_with_paths.png`,
+`robot2_local_map.png`, and `robot2_local_map_with_paths.png`, plus the explicit
+`NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt` marker and
+`export_manifest.json` under
+`results/unknown_pose_reliability_final1200_fast_20260827/exported_maps`.
+The manifest records `handoff_occurred=false`; the compatibility-named
+`final_merged_map*.png` images are explicitly labelled as local/no-handoff
+outputs and are not presented as a shared map.
+
 Final host telemetry contained 174 samples: Pool Nonpaged Bytes
 1.004--1.005 GiB (pre/peak/post approximately 1.004/1.005/1.001 GiB),
 committed memory 41.28--46.71%, and no hard resource stop. Automatic cleanup

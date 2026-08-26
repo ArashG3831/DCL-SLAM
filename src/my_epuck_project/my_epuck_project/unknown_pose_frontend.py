@@ -337,6 +337,18 @@ class UnknownPoseFrontend(Node):
         self._registration_context = None
         self._registration_shutdown = False
         self._registration_queue_drops = 0
+        # Crop responses can arrive faster than the single CPU-heavy
+        # registration worker.  The previous implementation discarded every
+        # response observed while the worker was busy, even though the
+        # corresponding verification attempt had already been consumed.  Keep
+        # a bounded FIFO of immutable work items instead; a full queue is an
+        # explicit, diagnosable overflow rather than silent evidence loss.
+        self._registration_pending_contexts = deque(maxlen=max(
+            32, self.candidate_verification_budget * 4))
+        self._registration_pending_keys = set()
+        self._registration_queue_enqueues = 0
+        self._registration_queue_dequeues = 0
+        self._registration_queue_max_depth = 0
         self.evidence_acquisition_deadline_wall = None
         self.evidence_acquisition_started = False
         self.verification_batches = BoundedVerificationBatchController(
@@ -869,7 +881,7 @@ class UnknownPoseFrontend(Node):
         if context is None:
             return
         (
-            pair_key, candidate, request_metadata, physical_key,
+            request_key, pair_key, candidate, request_metadata, physical_key,
             candidate_geometry_key, own_key, peer_key, own_crop,
             received_crop, map_epoch, descriptor_checksum,
         ) = context
@@ -886,11 +898,78 @@ class UnknownPoseFrontend(Node):
             self.rejected_physical_evidence_keys.add(physical_key)
             self.rejected_physical_geometry_keys.add(candidate_geometry_key)
             self._request_next_candidate_verification()
+            self._start_next_registration_context()
             return
         self._apply_candidate_verification_result(
             pair_key, candidate, result, request_metadata, physical_key,
             candidate_geometry_key, own_key, peer_key, own_crop,
             received_crop, map_epoch, descriptor_checksum)
+        self._start_next_registration_context()
+
+    def _start_registration_context(self, context):
+        """Submit one immutable crop pair to the serialized worker."""
+        (
+            request_key, pair_key, candidate, request_metadata, physical_key,
+            candidate_geometry_key, own_key, peer_key, own_crop,
+            received_crop, map_epoch, descriptor_checksum,
+        ) = context
+        self._registration_context = context
+        self._registration_future = self._registration_executor.submit(
+            register_crops, own_crop, received_crop)
+        self._record_diagnostic_event(
+            'REGISTRATION_WORKER_SUBMITTED', keyframe_id=peer_key,
+            constraint_count=1, queue_depth=len(
+                self._registration_pending_contexts),
+            request_key=list(request_key))
+
+    def _queue_registration_context(self, context):
+        """Queue a response while the worker is busy, with a hard bound."""
+        request_key = context[0]
+        if request_key in self._registration_pending_keys:
+            return True
+        if len(self._registration_pending_contexts) >= \
+                self._registration_pending_contexts.maxlen:
+            self._registration_queue_drops += 1
+            self._record_diagnostic_event(
+                'REGISTRATION_QUEUE_FULL', request_key=list(request_key),
+                queue_capacity=self._registration_pending_contexts.maxlen)
+            self._write_physical_evidence_diagnostic(
+                'REGISTRATION_QUEUE_DROPPED', request_key=list(request_key),
+                reason='QUEUE_FULL',
+                queue_capacity=self._registration_pending_contexts.maxlen)
+            return False
+        self._registration_pending_contexts.append(context)
+        self._registration_pending_keys.add(request_key)
+        self._registration_queue_enqueues += 1
+        self._registration_queue_max_depth = max(
+            self._registration_queue_max_depth,
+            len(self._registration_pending_contexts))
+        self._record_diagnostic_event(
+            'REGISTRATION_QUEUED', request_key=list(request_key),
+            queue_depth=len(self._registration_pending_contexts))
+        return True
+
+    def _start_next_registration_context(self):
+        """Start the next queued response after the worker completes."""
+        if self._registration_future is not None:
+            return
+        if self.accepted is not None or not self._registration_pending_contexts:
+            return
+        context = self._registration_pending_contexts.popleft()
+        self._registration_pending_keys.discard(context[0])
+        self._registration_queue_dequeues += 1
+        self._start_registration_context(context)
+
+    def _clear_pending_registration_contexts(self, reason):
+        """Release queued crop arrays once no further registration is needed."""
+        count = len(self._registration_pending_contexts)
+        if not count:
+            return
+        self._registration_pending_contexts.clear()
+        self._registration_pending_keys.clear()
+        self._record_diagnostic_event(
+            'REGISTRATION_QUEUE_CLEARED', reason=str(reason),
+            cleared_count=count)
 
     def descriptor_callback(self, message):
         if message.source_robot_id != self.peer_robot_id:
@@ -2074,11 +2153,9 @@ class UnknownPoseFrontend(Node):
             self.request_candidate_by_request_key.pop(request_key, None)
             self._request_next_candidate_verification()
             return
-        self.pending_requests.discard(request_key)
-        self.completed_request_keys.add(request_key)
         request_metadata = self.request_metadata_by_request_key.get(
             request_key, {})
-        candidate = self.request_candidate_by_request_key.pop(
+        candidate = self.request_candidate_by_request_key.get(
             request_key, candidate)
         self.counters['crop_responses_accepted'] += 1
         accepted_metadata = dict(request_metadata or {})
@@ -2102,38 +2179,29 @@ class UnknownPoseFrontend(Node):
                 message.descriptor_checksum),
             constraints_accumulated=len(self.evidence_pairs),
             status='ACCEPTED')
-        # Historical source-level regression test marker: the old
-        # ``result = self._verify_candidate_crop(...)`` call is intentionally
-        # replaced below by the bounded worker submission.
         # Registration is deliberately offloaded from this subscription
         # callback.  The ROS executor must remain available for clock,
         # lifecycle, DDS heartbeat, and the peer's next crop response while
-        # the CPU-heavy geometric gate runs.
+        # the CPU-heavy geometric gate runs.  Responses are retained in a
+        # bounded FIFO when the worker is busy; they are not silently lost.
+        registration_context = (
+            request_key, pair_key, candidate, dict(request_metadata or {}),
+            physical_key, candidate_geometry_key, own_key, peer_key,
+            self.keyframes[own_key][1], received_crop,
+            int(message.map_epoch), int(message.descriptor_checksum))
+        self.pending_requests.discard(request_key)
+        self.completed_request_keys.add(request_key)
+        self.request_candidate_by_request_key.pop(request_key, None)
+        self.request_metadata_by_request_key.pop(request_key, None)
         if self._registration_shutdown:
             self._registration_queue_drops += 1
             self._record_diagnostic_event(
                 'REGISTRATION_QUEUE_DROPPED_SHUTDOWN', keyframe_id=peer_key)
             return
         if self._registration_future is not None:
-            self._registration_queue_drops += 1
-            self._record_diagnostic_event(
-                'REGISTRATION_QUEUE_BUSY', keyframe_id=peer_key,
-                pair_key=list(pair_key))
-            # The completed worker will request exactly one replacement.  Do
-            # not open another crop request here: doing so while a worker is
-            # active creates an unbounded response stream and defeats the
-            # executor/network backpressure this queue is meant to provide.
+            self._queue_registration_context(registration_context)
             return
-        self._record_diagnostic_event(
-            'REGISTRATION_WORKER_SUBMITTED', keyframe_id=peer_key,
-            constraint_count=1)
-        self._registration_context = (
-            pair_key, candidate, dict(request_metadata or {}), physical_key,
-            candidate_geometry_key, own_key, peer_key,
-            self.keyframes[own_key][1], received_crop,
-            int(message.map_epoch), int(message.descriptor_checksum))
-        self._registration_future = self._registration_executor.submit(
-            register_crops, self.keyframes[own_key][1], received_crop)
+        self._start_registration_context(registration_context)
         return
 
     def _try_confirm_pending_proposal(self, proposal, trigger_message=None):
@@ -2372,6 +2440,7 @@ class UnknownPoseFrontend(Node):
             self.evidence_acquisition_deadline_wall = None
             self.verification_batches.mark_completed()
             self._publish_multi_constraint_proposal(result=consensus)
+            self._clear_pending_registration_contexts('CONSENSUS_ACCEPTED')
             return
         self._write_physical_evidence_diagnostic(
             'INCREMENTAL_CONSENSUS_REJECTED',
@@ -3622,6 +3691,16 @@ class UnknownPoseFrontend(Node):
                 'max_executor_backlog_estimate': self.max_backlog_estimate,
                 'registration_worker_queue_drops': int(
                     self._registration_queue_drops),
+                'registration_worker_queue_capacity': int(
+                    self._registration_pending_contexts.maxlen),
+                'registration_worker_queue_enqueues': int(
+                    self._registration_queue_enqueues),
+                'registration_worker_queue_dequeues': int(
+                    self._registration_queue_dequeues),
+                'registration_worker_queue_max_depth': int(
+                    self._registration_queue_max_depth),
+                'registration_worker_queue_depth_at_finalize': int(
+                    len(self._registration_pending_contexts)),
                 'registration_worker_inflight': bool(
                     self._registration_future is not None and
                     not self._registration_future.done()),

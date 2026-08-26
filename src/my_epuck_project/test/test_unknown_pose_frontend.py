@@ -2,6 +2,7 @@
 
 import json
 import math
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
@@ -209,6 +210,33 @@ def test_descriptor_comparisons_are_queued_and_bounded_per_timer_tick():
     assert 'descriptor_pair_budget_per_tick = 16' in source
     assert 'len(uncomputed_pairs) < self.descriptor_pair_budget_per_tick' in source
     assert "if self.pending_descriptor_pair_keys:" in source
+
+
+def test_busy_registration_responses_are_retained_in_bounded_fifo():
+    """A busy worker must queue valid responses instead of losing evidence."""
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend._registration_pending_contexts = deque(maxlen=3)
+    frontend._registration_pending_keys = set()
+    frontend._registration_queue_drops = 0
+    frontend._registration_queue_enqueues = 0
+    frontend._registration_queue_max_depth = 0
+    frontend._record_diagnostic_event = lambda *args, **kwargs: None
+    frontend._write_physical_evidence_diagnostic = (
+        lambda *args, **kwargs: None)
+
+    for index in range(3):
+        context = ((f'peer-{index}', index),) + (None,) * 11
+        assert frontend._queue_registration_context(context)
+    assert len(frontend._registration_pending_contexts) == 3
+    assert frontend._registration_queue_enqueues == 3
+    assert frontend._registration_queue_max_depth == 3
+    assert frontend._registration_queue_drops == 0
+    # A fourth item is explicitly bounded and diagnosed, never silently
+    # replacing an earlier response.
+    overflow = (('peer-overflow', 99),) + (None,) * 11
+    assert not frontend._queue_registration_context(overflow)
+    assert frontend._registration_queue_drops == 1
+    assert frontend._registration_pending_contexts[0][0] == ('peer-0', 0)
 
 
 def test_keyframe_identity_and_timestamp_are_not_map_revision_identity():

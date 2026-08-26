@@ -216,6 +216,7 @@ class UnknownPoseFrontend(Node):
             'candidate_verification_accepted': 0,
             'candidate_verification_rejected': 0,
             'candidate_verification_budget_exhausted': 0,
+            'candidate_verification_budget_waits': 0,
             'verification_batches_opened': 0,
             'verification_batches_exhausted': 0,
             'verification_batch_reentries': 0,
@@ -1801,6 +1802,20 @@ class UnknownPoseFrontend(Node):
                 service_watermark=self._registration_backpressure_depth)
             return False
         if self.candidate_verification_batch_attempts >= self.candidate_verification_budget:
+            # A bounded batch must drain all responses already admitted to the
+            # worker before it is closed.  Otherwise a late result is applied
+            # after a newer batch opens and its rejection/acceptance is
+            # attributed to the wrong acquisition window.
+            if self._verification_worker_busy():
+                self.counters['candidate_verification_budget_waits'] += 1
+                self._record_diagnostic_event(
+                    'CANDIDATE_VERIFICATION_BUDGET_WAITING_FOR_WORKER',
+                    acquisition_batch_id=self.verification_batches.batch_id,
+                    batch_attempts=self.candidate_verification_batch_attempts,
+                    budget=self.candidate_verification_budget,
+                    queue_depth=len(self._registration_pending_contexts),
+                    inflight=bool(self._registration_future is not None))
+                return False
             self.counters['candidate_verification_budget_exhausted'] += 1
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_VERIFICATION_BUDGET_EXHAUSTED',
@@ -1850,6 +1865,11 @@ class UnknownPoseFrontend(Node):
         return self._queue_crop_request(
             peer_key, own_key, peer, own,
             self.verification_batches.batch_id, correlation_id)
+
+    def _verification_worker_busy(self):
+        """Whether admitted registration work still needs to be drained."""
+        return (self._registration_future is not None or
+                bool(self._registration_pending_contexts))
 
     def _request_additional_evidence_candidates(self):
         """Request one more candidate; retained as a compatibility wrapper."""

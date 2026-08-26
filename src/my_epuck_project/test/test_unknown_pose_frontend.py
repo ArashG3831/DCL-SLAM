@@ -75,6 +75,18 @@ def test_late_registration_result_uses_request_batch_for_geometry_suppression():
     assert frontend._request_batch_id({}) == 9
 
 
+def test_verification_budget_waits_for_inflight_registration_work():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend._registration_future = object()
+    frontend._registration_pending_contexts = deque()
+    assert frontend._verification_worker_busy()
+    frontend._registration_future = None
+    frontend._registration_pending_contexts.append(object())
+    assert frontend._verification_worker_busy()
+    frontend._registration_pending_contexts.clear()
+    assert not frontend._verification_worker_busy()
+
+
 def test_exhausted_verification_batch_waits_without_immediate_retry():
     gate = BoundedVerificationBatchController(
         budget=2, max_batches=3, lifetime_s=100.0)

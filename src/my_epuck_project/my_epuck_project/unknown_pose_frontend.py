@@ -345,6 +345,12 @@ class UnknownPoseFrontend(Node):
         # explicit, diagnosable overflow rather than silent evidence loss.
         self._registration_pending_contexts = deque(maxlen=max(
             32, self.candidate_verification_budget * 4))
+        # Keep in-flight crop responses below the worker's service capacity.
+        # Responses already on the wire may still enter the FIFO, so the
+        # separate hard capacity above remains the final safety bound.
+        self._registration_backpressure_depth = max(
+            4, min(8, self.candidate_verification_budget))
+        self._registration_backpressure_events = 0
         self._registration_pending_keys = set()
         self._registration_queue_enqueues = 0
         self._registration_queue_dequeues = 0
@@ -1464,7 +1470,8 @@ class UnknownPoseFrontend(Node):
     def _schedule_active_evidence_request(self):
         """Request newly available evidence without reopening a batch."""
         if (self.evidence_acquisition_started and
-                not self.batch_proposal_published):
+                not self.batch_proposal_published and
+                not getattr(self, '_registration_shutdown', False)):
             self._request_next_candidate_verification()
 
     @staticmethod
@@ -1744,7 +1751,20 @@ class UnknownPoseFrontend(Node):
         return None if not ranked else ranked[0]
 
     def _request_next_candidate_verification(self):
-        if self.batch_proposal_published or not self.evidence_acquisition_started:
+        if (self.batch_proposal_published or
+                not self.evidence_acquisition_started or
+                getattr(self, '_registration_shutdown', False)):
+            return False
+        # Do not create more crop requests while the bounded registration
+        # FIFO is at its service watermark.  This preserves fresh evidence
+        # for the worker instead of filling the queue and dropping responses.
+        if len(self._registration_pending_contexts) >= \
+                self._registration_backpressure_depth:
+            self._registration_backpressure_events += 1
+            self._record_diagnostic_event(
+                'REGISTRATION_BACKPRESSURE',
+                queue_depth=len(self._registration_pending_contexts),
+                service_watermark=self._registration_backpressure_depth)
             return False
         if self.candidate_verification_batch_attempts >= self.candidate_verification_budget:
             self.counters['candidate_verification_budget_exhausted'] += 1
@@ -3693,6 +3713,10 @@ class UnknownPoseFrontend(Node):
                     self._registration_queue_drops),
                 'registration_worker_queue_capacity': int(
                     self._registration_pending_contexts.maxlen),
+                'registration_worker_backpressure_depth': int(
+                    self._registration_backpressure_depth),
+                'registration_worker_backpressure_events': int(
+                    self._registration_backpressure_events),
                 'registration_worker_queue_enqueues': int(
                     self._registration_queue_enqueues),
                 'registration_worker_queue_dequeues': int(

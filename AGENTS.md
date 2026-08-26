@@ -8,6 +8,10 @@ Before any ROS or Webots launch, read:
 
 `docs/HOST_SAFETY_INCIDENT_2026-08-24.md`
 
+Also read the authoritative threshold policy:
+
+`docs/HOST_RESOURCE_STOP_POLICY.md`
+
 The incident documented there is a hard preflight blocker. Never trust a run
 merely because its command contains `--workspace`: `AMENT_PREFIX_PATH`,
 `PYTHONPATH`, `CMAKE_PREFIX_PATH`, `COLCON_PREFIX_PATH`,
@@ -29,7 +33,17 @@ env -i HOME=/home/arash PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/
   '
 ```
 
-Do not launch if any check fails. Do not use Fast DDS as a silent fallback for
-this simulation. A full Windows reboot and a healthy host baseline are required
-after a Windows nonpaged-pool incident. WSL's reported available memory is not
-a substitute for the Windows host counters.
+Do not launch if any provenance, process, port, or telemetry check fails. Do not
+use Fast DDS as a silent fallback for this simulation. A full Windows reboot and
+a clean baseline are required after a Windows nonpaged-pool incident.
+
+The only automatic in-run resource stops are the explicit thresholds in
+`docs/HOST_RESOURCE_STOP_POLICY.md`: Windows Pool Nonpaged Bytes at or above
+6 GiB, or Windows RAM usage at or above 99%. WSL/vmmemWSL allocation, Linux
+page cache, and a transient Available-MBytes value below an older heuristic are
+informational unless one of those Windows thresholds is reached. Never invoke
+`wsl --shutdown` merely to reduce a normal WSL cache/VM allocation.
+
+Record WSL memory and Windows counters separately; WSL's reported values do not
+replace the Windows counters, and Windows counters do not by themselves identify
+a Linux process owner.

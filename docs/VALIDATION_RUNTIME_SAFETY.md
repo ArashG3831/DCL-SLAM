@@ -1,5 +1,11 @@
 # Validation runtime safety contract
 
+The authoritative in-run stop thresholds are documented in
+[`HOST_RESOURCE_STOP_POLICY.md`](HOST_RESOURCE_STOP_POLICY.md). In short, stop
+only at Windows Pool Nonpaged Bytes `>= 6 GiB` or Windows RAM usage `>= 99%`;
+WSL/vmmemWSL allocation and reclaimable Linux page cache are recorded but are
+not independent stop conditions.
+
 This checkout is the only supported source for Webots/ROS 2 validation. The
 original dirty checkout at `/home/arash/webots_ws` must not appear in
 `PYTHONPATH`, `AMENT_PREFIX_PATH`, or `COLCON_PREFIX_PATH`.
@@ -48,7 +54,9 @@ host counters must still be sampled independently.
 4. Use a unique safe domain (0--230) and Webots port.
 5. Run headless, without RViz or rendering, with one campaign instance.
 6. Abort on a DDS assertion, SIGABRT/SIGSEGV, invalid endpoint, clock stall,
-   unsafe host pressure, or incomplete process-tree cleanup.
+   either explicit Windows resource threshold, or incomplete process-tree
+   cleanup. Do not stop solely because WSL's VM allocation or Linux cache is
+   large.
 
 The final report must distinguish WSL process RSS from Windows nonpaged-pool
 usage. A single ROS PID cannot be named as the owner of kernel nonpaged pool

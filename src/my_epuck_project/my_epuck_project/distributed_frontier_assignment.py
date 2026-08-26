@@ -86,6 +86,17 @@ from .mission_termination import (
 )
 
 
+def dispatch_delay_elapsed(start_wall_s: float, now_wall_s: float,
+                           delay_s: float) -> bool:
+    """Return whether the optional pre-handoff dispatch hold has elapsed.
+
+    The hold is a bounded evidence-acquisition aid for unknown-pose runs.  It
+    is evaluated against monotonic wall time so a zero simulation clock or a
+    paused Webots startup cannot accidentally release navigation early.
+    """
+    return delay_s <= 0.0 or now_wall_s - start_wall_s >= delay_s
+
+
 @dataclass
 class RoundWork:
     """Mutable bounded work for one uncommitted canonical round."""
@@ -201,6 +212,8 @@ class DistributedFrontierAssignment(Node):
         self._dispatch_enabled = bool(
             self.declare_parameter('dispatch_enabled', False).value,
         )
+        self._prehandoff_dispatch_delay_s = max(0.0, float(
+            self.declare_parameter('prehandoff_dispatch_delay_s', 0.0).value))
         self._mission_timeout_enabled = bool(
             self.declare_parameter('enable_mission_timeout', False).value,
         )
@@ -211,6 +224,7 @@ class DistributedFrontierAssignment(Node):
             self.declare_parameter('planner_failure_confirmation_s', 30.0).value,
         )
         self._mission_started_steady_s = time.monotonic()
+        self._dispatch_hold_started_steady_s = self._mission_started_steady_s
         self._synthetic_bids = bool(
             self.declare_parameter('synthetic_bids', False).value,
         )
@@ -904,6 +918,11 @@ class DistributedFrontierAssignment(Node):
                 return
             local = self._fresh_snapshot(self._robot_id, now)
             if local is not None:
+                if (not self._handoff_complete and
+                        not dispatch_delay_elapsed(
+                            self._dispatch_hold_started_steady_s, now,
+                            self._prehandoff_dispatch_delay_s)):
+                    return
                 self._continue_degraded_solo(local)
             return
         if self._terminal or self._state == CoordinatorState.COMPLETE:

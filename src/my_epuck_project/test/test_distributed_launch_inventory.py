@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from my_epuck_project.distributed_frontier_assignment import dispatch_delay_elapsed
+
 
 LAUNCH = Path(__file__).parents[1] / 'launch'
 
@@ -44,3 +46,16 @@ def test_legacy_baseline_remains_explicitly_reachable():
     """Preserve the old claim-only launch for thesis comparison."""
     text = (LAUNCH / 'two_robots_legacy_claim_baseline_launch.py').read_text()
     assert 'two_robots_observed_continuous_exploration_launch.py' in text
+
+
+def test_prehandoff_dispatch_hold_is_explicit_and_forwarded():
+    """Unknown-pose evidence may hold local motion without changing defaults."""
+    launch = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
+    allocator = (LAUNCH.parent / 'my_epuck_project' /
+                 'distributed_frontier_assignment.py').read_text()
+    assert "DeclareLaunchArgument('prehandoff_dispatch_delay_s'" in launch
+    assert "'prehandoff_dispatch_delay_s': LaunchConfiguration(" in launch
+    assert 'dispatch_delay_elapsed' in allocator
+    assert not dispatch_delay_elapsed(10.0, 15.0, 10.0)
+    assert dispatch_delay_elapsed(10.0, 20.0, 10.0)
+    assert dispatch_delay_elapsed(10.0, 10.0, 0.0)

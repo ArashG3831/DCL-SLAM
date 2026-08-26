@@ -370,6 +370,8 @@ def launch_setup(context):
                         # diagnostic dispatch-off run can now exercise the
                         # identical graph without Nav2 goal traffic.
                         'dispatch_enabled': dispatch_enabled,
+                        'prehandoff_dispatch_delay_s': LaunchConfiguration(
+                            'prehandoff_dispatch_delay_s'),
                         'synthetic_bids': False,
                         'maximum_tasks_per_source': 5,
                         'maximum_union_tasks': 5,
@@ -635,6 +637,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('prehandoff_dispatch_delay_s',
+                              default_value='0.0'),
         DeclareLaunchArgument('unknown_initial_pose', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('unknown_pose_diagnostic_output',

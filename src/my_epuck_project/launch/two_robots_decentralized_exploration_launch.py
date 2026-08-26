@@ -364,7 +364,12 @@ def launch_setup(context):
                         # action boundary; one executor avoids four-worker
                         # waitable/GIL contention without changing task logic.
                         'executor_threads': 1,
-                        'dispatch_enabled': True,
+                        # Keep the declared launch switch effective for the
+                        # local pre-handoff peers as well as the known-pose
+                        # shared allocator.  The default remains true; a
+                        # diagnostic dispatch-off run can now exercise the
+                        # identical graph without Nav2 goal traffic.
+                        'dispatch_enabled': dispatch_enabled,
                         'synthetic_bids': False,
                         'maximum_tasks_per_source': 5,
                         'maximum_union_tasks': 5,

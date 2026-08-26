@@ -909,7 +909,7 @@ class UnknownPoseFrontend(Node):
             self.rejected_physical_evidence_keys.add(physical_key)
             self.rejected_physical_geometry_keys.add(candidate_geometry_key)
             self.rejected_physical_geometry_batches[candidate_geometry_key] = (
-                self.verification_batches.batch_id)
+                self._request_batch_id(request_metadata))
             self._request_next_candidate_verification()
             self._start_next_registration_context()
             return
@@ -918,6 +918,20 @@ class UnknownPoseFrontend(Node):
             candidate_geometry_key, own_key, peer_key, own_crop,
             received_crop, map_epoch, descriptor_checksum)
         self._start_next_registration_context()
+
+    def _request_batch_id(self, request_metadata):
+        """Return the acquisition batch that created a worker request.
+
+        Registration is asynchronous: a response from an older batch can be
+        applied after a newer batch has opened.  Geometry-only suppression is
+        intentionally batch-scoped, so it must use the request's immutable
+        batch ID rather than the currently active batch.
+        """
+        try:
+            return int((request_metadata or {}).get(
+                'acquisition_batch_id', self.verification_batches.batch_id))
+        except (TypeError, ValueError):
+            return int(self.verification_batches.batch_id)
 
     def _start_registration_context(self, context):
         """Submit one immutable crop pair to the serialized worker."""
@@ -2416,7 +2430,7 @@ class UnknownPoseFrontend(Node):
             self.rejected_physical_evidence_keys.add(physical_key)
             self.rejected_physical_geometry_keys.add(candidate_geometry_key)
             self.rejected_physical_geometry_batches[candidate_geometry_key] = (
-                self.verification_batches.batch_id)
+                self._request_batch_id(request_metadata))
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
                 **(request_metadata or {}),

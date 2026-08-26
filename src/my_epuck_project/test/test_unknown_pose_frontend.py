@@ -68,6 +68,13 @@ def test_geometry_rejection_is_scoped_to_verification_batch():
     assert not frontend._geometry_rejected_in_active_batch(geometry_key)
 
 
+def test_late_registration_result_uses_request_batch_for_geometry_suppression():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.verification_batches = SimpleNamespace(batch_id=9)
+    assert frontend._request_batch_id({'acquisition_batch_id': 3}) == 3
+    assert frontend._request_batch_id({}) == 9
+
+
 def test_exhausted_verification_batch_waits_without_immediate_retry():
     gate = BoundedVerificationBatchController(
         budget=2, max_batches=3, lifetime_s=100.0)

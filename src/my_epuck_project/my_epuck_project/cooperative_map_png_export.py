@@ -258,6 +258,118 @@ def load_shared_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
     return result
 
 
+def _forensic_transforms(attempt):
+    """Load captured transforms without consulting simulator/world state."""
+    path = next((candidate for candidate in (
+        Path(attempt) / 'forensic' / 'transforms.csv',
+        *sorted((Path(attempt) / 'observer').glob(
+            '*/forensic/transforms.csv')),
+    ) if candidate.is_file()), None)
+    if path is None:
+        return []
+    try:
+        with path.open(newline='', encoding='utf-8') as stream:
+            return list(csv.DictReader(stream))
+    except OSError:
+        return []
+
+
+def _apply_transform(row, point):
+    """Apply a captured planar target<-source transform to an odom point."""
+    yaw_value = _yaw_from_quaternion(row)
+    cosine, sine = math.cos(yaw_value), math.sin(yaw_value)
+    x, y = point
+    return (float(row['translation_x']) + cosine * x - sine * y,
+            float(row['translation_y']) + sine * x + cosine * y)
+
+
+def load_local_map_poses(attempt):
+    """Load local-map poses from odometry and captured map<-odom TF.
+
+    This is deliberately separate from :func:`load_final_shared_poses`: a
+    no-handoff run has no valid shared frame, so only each robot's own map
+    frame may be used.
+    """
+    attempt = Path(attempt)
+    transforms = _forensic_transforms(attempt)
+    result = {}
+    for robot in ('robot1', 'robot2'):
+        tf_row = _transform_row(transforms, f'{robot}/map', f'{robot}/odom')
+        paths = sorted((attempt / 'forensic').glob(f'{robot}_odom.csv'))
+        if not paths:
+            paths = sorted(attempt.glob(f'**/{robot}_odom.csv'))
+        if not paths or tf_row is None:
+            continue
+        try:
+            with paths[-1].open(newline='', encoding='utf-8') as stream:
+                rows = list(csv.DictReader(stream))
+        except OSError:
+            continue
+        for row in reversed(rows):
+            try:
+                point = _apply_transform(tf_row, (
+                    float(row['pose_x']), float(row['pose_y'])))
+                result[robot] = {
+                    'x_m': point[0], 'y_m': point[1],
+                    'yaw_rad': float(row.get('pose_yaw') or 0.0),
+                    'query_ros_time_s': float(
+                        row.get('received_ros_time_s') or 0.0),
+                    'source': f'{paths[-1]} + captured {robot}/map<-{robot}/odom',
+                }
+                break
+            except (KeyError, TypeError, ValueError):
+                continue
+    return result
+
+
+def load_local_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
+    """Project captured odom trajectories into each robot's local map frame."""
+    attempt = Path(attempt)
+    transforms = _forensic_transforms(attempt)
+    result = {}
+    for robot in ('robot1', 'robot2'):
+        tf_row = _transform_row(transforms, f'{robot}/map', f'{robot}/odom')
+        paths = sorted((attempt / 'forensic').glob(f'{robot}_odom.csv'))
+        if not paths:
+            paths = sorted(attempt.glob(f'**/{robot}_odom.csv'))
+        if not paths or tf_row is None:
+            continue
+        try:
+            with paths[-1].open(newline='', encoding='utf-8') as stream:
+                rows = list(csv.DictReader(stream))
+        except OSError:
+            continue
+        segments, current = [], []
+        previous_time, previous_point = None, None
+        for row in rows:
+            try:
+                point = _apply_transform(tf_row, (
+                    float(row['pose_x']), float(row['pose_y'])))
+                timestamp = float(row.get('received_ros_time_s') or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            gap = timestamp - previous_time if previous_time is not None else 0.0
+            jump = (math.hypot(point[0] - previous_point[0],
+                               point[1] - previous_point[1])
+                    if previous_point is not None else 0.0)
+            if current and (gap > max_gap_s or jump > max_jump_m):
+                if len(current) >= 2:
+                    segments.append(current)
+                current = []
+            current.append(point)
+            previous_time, previous_point = timestamp, point
+        if len(current) >= 2:
+            segments.append(current)
+        if segments:
+            result[robot] = {
+                'source': f'{paths[-1]} projected with captured '
+                          f'{robot}/map<-{robot}/odom',
+                'segments': segments,
+                'point_count': sum(len(segment) for segment in segments),
+            }
+    return result
+
+
 def _draw_line(rgb, start, end, color, width=1):
     """Draw a bounded anti-aliased-free line into an RGB array."""
     height, width_pixels, _ = rgb.shape
@@ -539,8 +651,10 @@ def _fast_trial_map_dir(trial):
     candidates = sorted(trial.glob('observer/*/forensic/maps'))
     candidates.extend(sorted(trial.glob('**/forensic/maps')))
     for candidate in candidates:
-        if (candidate / 'robot1_shared_map_final.npz').is_file() and (
-                candidate / 'robot2_shared_map_final.npz').is_file():
+        if ((candidate / 'robot1_shared_map_final.npz').is_file() and
+                (candidate / 'robot2_shared_map_final.npz').is_file()) or (
+                (candidate / 'robot1_map_final.npz').is_file() and
+                (candidate / 'robot2_map_final.npz').is_file()):
             return candidate
     return None
 
@@ -553,22 +667,35 @@ def _fast_trial_attempts(campaign):
     )
 
 
-def _final_map_path(attempt, robot):
-    """Resolve a final shared-map path in legacy or fast-trial layouts."""
-    direct = Path(attempt) / f'{robot}_final_shared_map.npz'
+def _final_map_path(attempt, robot, shared=True):
+    """Resolve final shared or local map artifacts."""
+    direct = (Path(attempt) / f'{robot}_final_shared_map.npz'
+              if shared else Path(attempt) / f'{robot}_map_final.npz')
     if direct.is_file():
         return direct
-    candidates = sorted(Path(attempt).glob(
-        f'**/forensic/maps/{robot}_shared_map_final.npz'))
+    stem = 'shared_map_final' if shared else 'map_final'
+    candidates = sorted(Path(attempt).glob(f'**/forensic/maps/{robot}_{stem}.npz'))
     if candidates:
         return candidates[-1]
     raise ValueError(
-        f'{attempt} has no final shared map for {robot}')
+        f'{attempt} has no final {"shared" if shared else "local"} map for {robot}')
 
 
 def selected_attempt(campaign, trial_id=None, allow_incomplete=False):
     """Resolve a selected trial, optionally including an interrupted attempt."""
     campaign = Path(campaign)
+    # A fast trial can be passed directly (for example by ``webotsreport``)
+    # rather than through a campaign-progress file.  Treat its own forensic
+    # directory as the attempt and preserve the local-only no-handoff mode.
+    if (campaign / 'forensic' / 'maps').is_dir():
+        local_pair = all((campaign / 'forensic' / 'maps' /
+                          f'{robot}_map_final.npz').is_file()
+                         for robot in ('robot1', 'robot2'))
+        shared_pair = all((campaign / 'forensic' / 'maps' /
+                           f'{robot}_shared_map_final.npz').is_file()
+                          for robot in ('robot1', 'robot2'))
+        if local_pair or shared_pair:
+            return campaign, trial_id or campaign.name
     progress_path = campaign / 'campaign_progress.json'
     if not progress_path.is_file():
         fast_trials = _fast_trial_attempts(campaign)
@@ -613,19 +740,38 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
     output = Path(output_dir).resolve()
     attempt, selected_trial = selected_attempt(
         campaign, trial_id, allow_incomplete=allow_incomplete)
-    robot1 = load_map(_final_map_path(attempt, 'robot1'))
-    robot2 = load_map(_final_map_path(attempt, 'robot2'))
-    same_geometry = robot1.geometry == robot2.geometry
-    exact_equal = (
-        same_geometry and np.array_equal(robot1.data, robot2.data)
-    )
-    canonical_path = attempt / 'canonical_final_map.npz'
-    if canonical_path.is_file():
-        canonical = load_map(canonical_path)
+    def has_map(robot, shared):
+        stem = 'shared_map_final' if shared else 'map_final'
+        return ((Path(attempt) / f'{robot}_{stem}.npz').is_file() or
+                any(Path(attempt).glob(f'**/forensic/maps/{robot}_{stem}.npz')))
+
+    shared_available = all(has_map(robot, True) for robot in ('robot1', 'robot2'))
+    # Resolve the map pair without treating a missing shared map as an error:
+    # a no-handoff run is expected to contain only local final maps.
+    if shared_available:
+        robot1 = load_map(_final_map_path(attempt, 'robot1', shared=True))
+        robot2 = load_map(_final_map_path(attempt, 'robot2', shared=True))
+        canonical_path = attempt / 'canonical_final_map.npz'
+        if canonical_path.is_file():
+            canonical = load_map(canonical_path)
+        else:
+            canonical, _, _ = canonical_map(robot1, robot2)
+        poses = load_final_shared_poses(attempt) if draw_poses else {}
+        paths = load_shared_map_paths(attempt) if draw_paths else {}
+        path_frame = 'shared_map'
+        status_label = 'HANDOFF — SHARED MAP AVAILABLE'
     else:
-        canonical, _, _ = canonical_map(robot1, robot2)
-    poses = load_final_shared_poses(attempt) if draw_poses else {}
-    paths = load_shared_map_paths(attempt) if draw_paths else {}
+        robot1 = load_map(_final_map_path(attempt, 'robot1', shared=False))
+        robot2 = load_map(_final_map_path(attempt, 'robot2', shared=False))
+        # Local maps are independent coordinate frames before handoff and
+        # must never be merged or compared as though they shared a frame.
+        canonical = robot1
+        poses = load_local_map_poses(attempt) if draw_poses else {}
+        paths = load_local_map_paths(attempt) if draw_paths else {}
+        path_frame = 'robotN/map (projected from robotN/odom)'
+        status_label = 'NO_HANDOFF — SHARED MAP UNAVAILABLE'
+    same_geometry = (shared_available and robot1.geometry == robot2.geometry)
+    exact_equal = (same_geometry and np.array_equal(robot1.data, robot2.data))
     output.mkdir(parents=True, exist_ok=False)
     written = []
     pose_records = {}
@@ -649,34 +795,47 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
     else:
         path_records = {}
     if include_robot_maps:
-        image, records = render_map_with_poses(
-            robot1.data, robot1.geometry, poses, scale=scale,
-            margin_cells=margin_cells)
-        save(
-            'robot1_final_shared_map.png',
-            image, records)
-        image, records = render_map_with_poses(
-            robot2.data, robot2.geometry, poses, scale=scale,
-            margin_cells=margin_cells)
-        save(
-            'robot2_final_shared_map.png',
-            image, records)
-        if draw_paths:
-            image, records, robot_path_records = render_map_with_paths(
-                robot1.data, robot1.geometry, poses, paths, scale=scale,
+        if not shared_available:
+            for robot, local_map in (('robot1', robot1), ('robot2', robot2)):
+                local_poses = {robot: poses[robot]} if robot in poses else {}
+                local_paths = {robot: paths[robot]} if robot in paths else {}
+                image, records = render_map_with_poses(
+                    local_map.data, local_map.geometry, local_poses,
+                    scale=scale, margin_cells=margin_cells)
+                save(f'{robot}_local_map.png', image, records)
+                if draw_paths:
+                    image, records, local_path_records = render_map_with_paths(
+                        local_map.data, local_map.geometry, local_poses,
+                        local_paths, scale=scale, margin_cells=margin_cells)
+                    save(f'{robot}_local_map_with_paths.png', image, records)
+                    path_records[robot] = local_path_records.get(robot, {})
+            label_path = output / 'NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt'
+            label_path.write_text(status_label + '\n', encoding='utf-8')
+            written.append(str(label_path))
+        else:
+            image, records = render_map_with_poses(
+                robot1.data, robot1.geometry, poses, scale=scale,
                 margin_cells=margin_cells)
-            save('robot1_final_shared_map_with_paths.png', image, records)
-            image, records, _ = render_map_with_paths(
-                robot2.data, robot2.geometry, poses, paths, scale=scale,
+            save('robot1_final_shared_map.png', image, records)
+            image, records = render_map_with_poses(
+                robot2.data, robot2.geometry, poses, scale=scale,
                 margin_cells=margin_cells)
-            save('robot2_final_shared_map_with_paths.png', image, records)
-            # All robot map replicas use the same shared-map coordinate frame;
-            # retain one compact path manifest rather than duplicating it.
-            path_records = robot_path_records
-        if same_geometry:
-            save(
-                'robot1_robot2_exact_difference.png',
-                difference_rgb(robot1.data, robot2.data, scale=scale))
+            save('robot2_final_shared_map.png', image, records)
+            if draw_paths:
+                image, records, robot_path_records = render_map_with_paths(
+                    robot1.data, robot1.geometry, poses, paths, scale=scale,
+                    margin_cells=margin_cells)
+                save('robot1_final_shared_map_with_paths.png', image, records)
+                image, records, _ = render_map_with_paths(
+                    robot2.data, robot2.geometry, poses, paths, scale=scale,
+                    margin_cells=margin_cells)
+                save('robot2_final_shared_map_with_paths.png', image, records)
+                # All robot map replicas use the same shared-map coordinate frame;
+                # retain one compact path manifest rather than duplicating it.
+                path_records = robot_path_records
+            if same_geometry:
+                save('robot1_robot2_exact_difference.png',
+                     difference_rgb(robot1.data, robot2.data, scale=scale))
     manifest = {
         'schema_version': '1.0.0',
         'campaign_id': campaign.name,
@@ -688,7 +847,9 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
         'margin_cells': int(margin_cells),
         'pose_overlay_enabled': bool(draw_poses),
         'path_overlay_enabled': bool(draw_paths),
-        'path_frame': 'shared_map',
+        'status_label': status_label,
+        'handoff_occurred': shared_available,
+        'path_frame': path_frame,
         'path_projection': (
             'shared_map coordinates projected through the OccupancyGrid '
             'origin translation and inverse origin yaw exactly once'),

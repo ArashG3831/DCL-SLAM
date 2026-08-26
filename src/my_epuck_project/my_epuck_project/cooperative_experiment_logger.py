@@ -68,7 +68,7 @@ def default_run_id(): return time.strftime('%Y-%m-%dT%H%M%SZ',time.gmtime())+'_'
 class CooperativeExperimentLogger(Node):
     def __init__(self, **node_kwargs):
         super().__init__('cooperative_experiment_logger', **node_kwargs)
-        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
+        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'enable_local_map_capture':True,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
         defaults.update({
             'world_profile': 'small',
             'source_world_path': '',
@@ -118,6 +118,14 @@ class CooperativeExperimentLogger(Node):
         if isinstance(contact_enabled, str):
             contact_enabled = contact_enabled.lower() == 'true'
         self.contact_capture = bool(contact_enabled)
+        local_capture_enabled = self.p.get('enable_local_map_capture', True)
+        if isinstance(local_capture_enabled, str):
+            local_capture_enabled = local_capture_enabled.lower() == 'true'
+        self.local_map_capture = bool(local_capture_enabled)
+        # Local occupancy/odom/TF capture is useful even when the optional
+        # Supervisor observer is disabled.  Keeping these concerns separate
+        # ensures a no-handoff run still has honest local-map artifacts without
+        # starting a ground-truth process or changing the runtime graph.
         try:
             initial_configuration = json.loads(
                 self.p['initial_configuration_json'])
@@ -132,12 +140,14 @@ class CooperativeExperimentLogger(Node):
         self.forensic = (ForensicEvidenceWriter(
             self.directory, self.robots, self.p['forensic_snapshot_interval_s'],
             scan_matching_enabled=scan_matching_enabled)
-            if forensic_enabled else None)
+            if (forensic_enabled or self.local_map_capture) else None)
+        self.forensic_supervisor_enabled = bool(forensic_enabled or
+                                                self.contact_capture)
         self.ground_truth_process = None
         self.ground_truth_log = None
         self.ground_truth_ready_file = None
         self.ground_truth_exit_reported = False
-        if self.forensic is not None or self.contact_capture:
+        if self.forensic_supervisor_enabled:
             self.start_forensic_ground_truth()
         self.stack_ready=False; self.divergence_since=None; self.divergence_reported=False; self.last_progress={}; self.tf_state={}; self.shared_map_seen=set()
         # Bounded scan-pipeline evidence.  These samples are passive and are
@@ -953,10 +963,12 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None:
             required.extend([
                 self.directory/'forensic'/'transforms.csv',
-                self.directory/'forensic'/'supervisor_ground_truth.csv',
                 self.directory/'forensic'/'maps'/'robot1_map_final.npz',
                 self.directory/'forensic'/'maps'/'robot2_map_final.npz',
             ])
+            if self.forensic_supervisor_enabled:
+                required.append(
+                    self.directory/'forensic'/'supervisor_ground_truth.csv')
             # Shared-map exports are a post-handoff contract.  A valid
             # no-handoff run must not be marked incomplete merely because
             # those files correctly do not exist.  If either shared-map topic

@@ -15,6 +15,9 @@ import subprocess
 import time
 
 
+POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
+
 def command(*args: str) -> str:
     try:
         return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT,
@@ -33,10 +36,13 @@ def snapshot(event: str) -> dict:
         "loadavg": os.getloadavg(),
     }
     record["windows"] = command(
-        "powershell.exe", "-NoProfile", "-Command",
-        "$o=Get-CimInstance Win32_OperatingSystem; [pscustomobject]@{"
-        "last_boot=$o.LastBootUpTime.ToString('o'); now=(Get-Date).ToString('o')}"
-        " | ConvertTo-Json -Compress")
+        POWERSHELL, "-NoProfile", "-Command",
+        "$o=Get-CimInstance Win32_OperatingSystem; $p=Get-Counter "
+        "'\\Memory\\Pool Nonpaged Bytes','\\Memory\\Available MBytes',"
+        "'\\Memory\\% Committed Bytes In Use'; [pscustomobject]@{"
+        "last_boot=$o.LastBootUpTime.ToString('o'); now=(Get-Date).ToString('o');"
+        "counters=@($p.CounterSamples | ForEach-Object {[pscustomobject]@{"
+        "path=$_.Path; value=$_.CookedValue}})} | ConvertTo-Json -Compress")
     record["memory"] = command("free", "-b")
     record["processes"] = command(
         "ps", "-eo", "pid,ppid,stat,pcpu,pmem,etime,comm", "--sort=-pcpu")

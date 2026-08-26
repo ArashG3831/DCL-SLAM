@@ -15,9 +15,10 @@ from my_epuck_project.cooperative_map_png_export import (
     difference_rgb,
     occupancy_rgb,
     selected_attempt,
+    export_maps,
     write_rgb_png,
 )
-from my_epuck_project.occupancy_map_comparison import Geometry
+from my_epuck_project.occupancy_map_comparison import Geometry, OccupancyMap, save_map
 
 import numpy as np
 
@@ -152,3 +153,31 @@ def test_flat_fast_trial_layout_is_selectable_without_campaign_progress(tmp_path
     selected, trial = selected_attempt(campaign)
     assert selected.name == 'fast_trial_20260818T173122Z'
     assert trial == 'fast_trial_20260818T173122Z'
+
+
+def test_no_handoff_local_maps_export_with_explicit_status(tmp_path):
+    """No-handoff runs export local maps and never invent a shared map."""
+    campaign = tmp_path / 'unknown_pose_no_handoff'
+    trial = campaign / 'fast_trial_20260827T000000Z' / 'forensic' / 'maps'
+    trial.mkdir(parents=True)
+    (campaign / 'fast_trial_20260827T000000Z' / 'forensic' /
+     'transforms.csv').write_text('', encoding='utf-8')
+    geometry = Geometry(4, 3, 0.1, 0.0, 0.0, 0.0)
+    for robot, value in (('robot1', 0), ('robot2', 100)):
+        save_map(trial / f'{robot}_map_final.npz', OccupancyMap(
+            np.full((3, 4), value, dtype=np.int8), geometry,
+            {'topic': f'/{robot}/map', 'robot_id': robot,
+             'frame_id': f'{robot}/map', 'header_stamp': '1.000000000',
+             'header_stamp_s': 1.0, 'map_load_time': '1.000000000',
+             'received_ros_time_s': 1.0, 'received_wall_elapsed_s': 1.0,
+             'dtype': 'int8', 'data_length': 12}))
+    output = tmp_path / 'png'
+    manifest = export_maps(campaign, output, scale=1, draw_poses=False,
+                            draw_paths=False)
+    assert manifest['handoff_occurred'] is False
+    assert manifest['status_label'] == 'NO_HANDOFF — SHARED MAP UNAVAILABLE'
+    assert (output / 'robot1_local_map.png').is_file()
+    assert (output / 'robot2_local_map.png').is_file()
+    assert (output / 'NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt').read_text(
+        encoding='utf-8').strip() == manifest['status_label']
+    assert not (output / 'robot1_robot2_exact_difference.png').exists()

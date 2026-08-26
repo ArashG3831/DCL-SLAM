@@ -62,7 +62,8 @@ def test_launch_command_reuses_authoritative_campaign_launch(tmp_path):
         'ros2', 'launch', 'my_epuck_project', LAUNCH_FILE]
     assert 'enable_observer:=false' in command
     assert 'enable_forensic_capture:=false' in command
-    assert 'nav2_autostart:=false' in command
+    assert 'nav2_autostart:=true' in command
+    assert 'prehandoff_dispatch_delay_s:=20.0' in command
     assert 'unknown_initial_pose:=true' in command
     assert 'controller_variant:=rpp' in command
     assert 'sensor_profile:=throughput' in command
@@ -76,6 +77,12 @@ def test_launch_command_reuses_authoritative_campaign_launch(tmp_path):
         item.startswith('slam_tf_publication_mode:=')
         for item in command)
     assert 'webots_gui:=true' in command
+
+
+def test_prehandoff_delay_is_explicitly_overridable():
+    args = parser().parse_args(['--prehandoff-dispatch-delay-s', '120'])
+    command = launch_command(args, Path('/tmp/test_world.wbt'))
+    assert 'prehandoff_dispatch_delay_s:=120.0' in command
 
 
 def test_launch_command_can_enable_passive_evidence_in_attempt_directory(tmp_path):
@@ -175,6 +182,12 @@ def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
     assert 'LOCAL_NAV2_NODES' in method_source
     assert 'lifecycle_manager_navigation/manage_nodes' in method_source
     assert 'ManageLifecycleNodes.Request.STARTUP' in method_source
+
+
+def test_fast_runner_accepts_already_autostarted_local_nav2():
+    method_source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
+    assert 'active_now = True' in method_source
+    assert 'startup_results[robot] = True' in method_source
 
 
 def test_nav2_readiness_retries_a_failed_lifecycle_startup():

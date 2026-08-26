@@ -57,6 +57,17 @@ def _batch_candidate(own_key, peer_key, own_timestamp, peer_timestamp,
     }
 
 
+def test_geometry_rejection_is_scoped_to_verification_batch():
+    frontend = object.__new__(UnknownPoseFrontend)
+    geometry_key = ('source-geometry', 'target-geometry')
+    frontend.rejected_physical_geometry_keys = {geometry_key}
+    frontend.rejected_physical_geometry_batches = {geometry_key: 3}
+    frontend.verification_batches = SimpleNamespace(batch_id=3)
+    assert frontend._geometry_rejected_in_active_batch(geometry_key)
+    frontend.verification_batches.batch_id = 4
+    assert not frontend._geometry_rejected_in_active_batch(geometry_key)
+
+
 def test_exhausted_verification_batch_waits_without_immediate_retry():
     gate = BoundedVerificationBatchController(
         budget=2, max_batches=3, lifetime_s=100.0)

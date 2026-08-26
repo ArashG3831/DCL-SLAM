@@ -199,7 +199,7 @@ def test_frontend_diagnostic_collision_is_merged_before_write():
     assert 'accepted_metadata.update({' in frontend
     accepted = frontend[
         frontend.index("'CROP_RESPONSE_ACCEPTED'"):
-        frontend.index('result = self._verify_candidate_crop(')]
+        frontend.index('registration_context = (')]
     assert '**accepted_metadata' in accepted
     assert '**request_metadata' not in accepted
 

@@ -124,6 +124,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--slam-tf-publication-mode', default='')
     result.add_argument('--mission-timeout', type=float)
     result.add_argument('--startup-timeout', type=float)
+    result.add_argument(
+        '--prehandoff-dispatch-delay-s', type=float, default=20.0,
+        help='Wall-time hold before local goals may move robots during evidence acquisition.')
     result.add_argument('--ros-domain-id', type=int, default=100)
     result.add_argument('--webots-port', type=int, default=23000)
     result.add_argument('--results-directory', default='results/fast_trials')
@@ -254,8 +257,19 @@ def launch_command(
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         f'fusion_process_nice:={args.fusion_process_nice}',
         'use_sim_time:=true',
-        'nav2_autostart:=false',
+        # Webots' ros2_control simulation is synchronized to the controller
+        # lifecycle.  Leaving local Nav2 stopped prevents the controller
+        # manager from producing odom/TF and consequently stalls /clock at
+        # zero before the unknown-pose evidence gate can begin.  Autostart
+        # local Nav2 here; the readiness probe verifies the active state and
+        # the project allocator still remains the only goal dispatcher.
+        'nav2_autostart:=true',
         'dispatch_enabled:=true',
+        # Preserve the validated close-start evidence window: local frontier
+        # dispatch is held while both peers accumulate overlap evidence.  The
+        # handoff gates are unchanged; this only prevents navigation from
+        # moving the robots out of the shared observation region prematurely.
+        f'prehandoff_dispatch_delay_s:={args.prehandoff_dispatch_delay_s}',
         # This runner is the unknown-pose full-exploration campaign entry
         # point; do not silently fall back to the known-relative launch mode.
         'unknown_initial_pose:=true',
@@ -426,6 +440,28 @@ class ReadyProbe(Node):
             details = {}
             for robot in ('robot1', 'robot2'):
                 manager = manager_clients[robot]
+                if robot not in startup_sent:
+                    # With nav2_autostart enabled the lifecycle manager may
+                    # already have activated every local node.  Treat that
+                    # as a successful startup and avoid issuing a redundant
+                    # STARTUP command to an already-active manager.
+                    active_now = True
+                    for node_name in LOCAL_NAV2_NODES:
+                        client = clients[(robot, node_name)]
+                        if not client.service_is_ready():
+                            client.wait_for_service(timeout_sec=0.0)
+                        if not client.service_is_ready():
+                            active_now = False
+                            break
+                        response = self._wait_future(
+                            client.call_async(GetState.Request()), deadline)
+                        if (response is None or response.current_state.id !=
+                                State.PRIMARY_STATE_ACTIVE):
+                            active_now = False
+                            break
+                    if active_now:
+                        startup_results[robot] = True
+                        startup_sent.add(robot)
                 if (robot not in startup_sent and
                         time.monotonic() >= next_startup_attempt[robot]):
                     if not manager.service_is_ready():

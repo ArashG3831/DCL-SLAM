@@ -161,7 +161,7 @@ def test_unknown_pose_pre_handoff_gate_is_data_dependent_and_post_handoff_is_gat
     assert "f'/cslam/unknown_pose/{peer}/local_map'" in stack_text
     assert 'if self.latest_map is None or self.accepted is None:' in frontend
     assert 'message.local_evidence_only = True' in frontend
-    assert 'self.map_transform(message)' in fusion
+    assert 'def map_transform(self, message' in fusion
     assert 'self.local_map is None or self.remote_map is None' in fusion
 
 

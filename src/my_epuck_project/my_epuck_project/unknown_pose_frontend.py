@@ -289,8 +289,13 @@ class UnknownPoseFrontend(Node):
         self.rejected_physical_evidence_keys = set()
         # Exact physical identities retain epoch/checksum freshness.  This
         # companion set prevents a rejected crop footprint from being retried
-        # under a later map revision when its geometry is unchanged.
+        # repeatedly within the same bounded verification batch.  A geometry
+        # rejection is not permanent: after a batch rolls over, a new map
+        # revision/keyframe may make the same footprint useful evidence again.
+        # Keeping the batch association avoids starving acquisition while
+        # preserving incremental evidence across later batches.
         self.rejected_physical_geometry_keys = set()
+        self.rejected_physical_geometry_batches = {}
         self._diagnosed_physical_candidates = set()
         # Repeated observations of an already-pending physical candidate are
         # represented by the counter below.  Persisting one diagnostic record
@@ -903,6 +908,8 @@ class UnknownPoseFrontend(Node):
                 candidate, request_metadata, error=repr(exc))
             self.rejected_physical_evidence_keys.add(physical_key)
             self.rejected_physical_geometry_keys.add(candidate_geometry_key)
+            self.rejected_physical_geometry_batches[candidate_geometry_key] = (
+                self.verification_batches.batch_id)
             self._request_next_candidate_verification()
             self._start_next_registration_context()
             return
@@ -1523,6 +1530,19 @@ class UnknownPoseFrontend(Node):
         own_crops = {key: value[1] for key, value in self.keyframes.items()}
         return physical_candidate_geometry_identity(candidate, own_crops)
 
+    def _geometry_rejected_in_active_batch(self, geometry_key):
+        """Return whether geometry was rejected in this acquisition batch.
+
+        Geometry-only suppression is deliberately scoped to one bounded
+        verification batch.  Permanent suppression conflated a transient
+        registration failure with a bad physical view and prevented later
+        independent keyframes from restoring a valid three-inlier set.
+        """
+        return (
+            geometry_key in self.rejected_physical_geometry_keys and
+            self.rejected_physical_geometry_batches.get(geometry_key) ==
+            self.verification_batches.batch_id)
+
     def _candidate_is_novel_for_reentry(self, candidate):
         peer_key, own_key, peer, own = self._candidate_fields(candidate)
         own_entry = self.keyframes.get(own_key)
@@ -1540,8 +1560,8 @@ class UnknownPoseFrontend(Node):
             attempted_pairs=self.candidate_verification_attempted,
             rejected_physical=(
                 physical_key in self.rejected_physical_evidence_keys or
-                self._candidate_physical_geometry_key(candidate) in
-                self.rejected_physical_geometry_keys))
+                self._geometry_rejected_in_active_batch(
+                    self._candidate_physical_geometry_key(candidate))))
 
     def _queue_crop_request(self, peer_key, own_key, peer, own,
                             batch_id, correlation_id):
@@ -1725,7 +1745,7 @@ class UnknownPoseFrontend(Node):
                         compact=True),
                     reason='PHYSICAL_GEOMETRY_ALREADY_ACCEPTED')
                 continue
-            if geometry_key in self.rejected_physical_geometry_keys:
+            if self._geometry_rejected_in_active_batch(geometry_key):
                 self.counters['physical_geometry_rejections_suppressed'] += 1
                 self._write_physical_evidence_diagnostic(
                     'CANDIDATE_VERIFICATION_SKIPPED',
@@ -2395,6 +2415,8 @@ class UnknownPoseFrontend(Node):
         if not result.accepted:
             self.rejected_physical_evidence_keys.add(physical_key)
             self.rejected_physical_geometry_keys.add(candidate_geometry_key)
+            self.rejected_physical_geometry_batches[candidate_geometry_key] = (
+                self.verification_batches.batch_id)
             self._write_physical_evidence_diagnostic(
                 'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
                 **(request_metadata or {}),

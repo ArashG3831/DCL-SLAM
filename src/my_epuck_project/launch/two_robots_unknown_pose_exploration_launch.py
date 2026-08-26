@@ -63,6 +63,8 @@ def generate_launch_description():
                 'max_verification_batches'),
             'verification_lifetime_s': LaunchConfiguration(
                 'verification_lifetime_s'),
+            'peer_map_publish_period_s': LaunchConfiguration(
+                'peer_map_publish_period_s'),
             'assignment_strategy': 'burgard',
             'burgard_beta': '1.0',
             'traffic_scheduler_enabled': 'false',
@@ -113,6 +115,7 @@ def generate_launch_description():
         _arg('unknown_pose_diagnostic_output', ''),
         _arg('max_verification_batches', '64'),
         _arg('verification_lifetime_s', '1100.0'),
+        _arg('peer_map_publish_period_s', '5.0'),
         _arg('enable_observer', 'true', ['true', 'false']),
         _arg('run_id', ''),
         _arg('output_root', '/home/arash/webots_ws/results'),

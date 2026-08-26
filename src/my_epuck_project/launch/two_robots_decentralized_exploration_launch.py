@@ -272,6 +272,8 @@ def launch_setup(context):
                     'map_topic': f'/{robot}/map',
                     'peer_map_topic': (
                         f'/cslam/unknown_pose/{robot}/local_map'),
+                    'peer_map_publish_period_s': LaunchConfiguration(
+                        'peer_map_publish_period_s'),
                     'shared_frame': 'shared_map',
                     'diagnostic_output': diagnostic_output,
                     'max_verification_batches': LaunchConfiguration(
@@ -619,6 +621,7 @@ def generate_launch_description():
         DeclareLaunchArgument('fusion_process_nice', default_value='0'),
         DeclareLaunchArgument('fusion_cpu_quota_percent', default_value='30'),
         DeclareLaunchArgument('fusion_rebuild_period_s', default_value='1.0'),
+        DeclareLaunchArgument('peer_map_publish_period_s', default_value='5.0'),
         DeclareLaunchArgument('sensor_profile', default_value='full',
                               choices=['full', 'throughput']),
         DeclareLaunchArgument('scan_input_reliability', default_value='reliable',

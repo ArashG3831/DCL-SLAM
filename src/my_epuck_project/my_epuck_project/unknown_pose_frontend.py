@@ -78,6 +78,11 @@ class UnknownPoseFrontend(Node):
         self.declare_parameter('crop_topic', '/cslam/relative_pose/crops')
         self.declare_parameter('hypothesis_topic', '/cslam/relative_pose/hypotheses')
         self.declare_parameter('peer_map_topic', '/cslam/unknown_pose/local_map')
+        # Peer maps are full OccupancyGrid samples.  Keep the SLAM map update
+        # cadence unchanged, but rate-limit this inter-robot export so a
+        # growing map is not retransmitted on every map callback.  A fresh
+        # export is still sent immediately when the handoff is accepted.
+        self.declare_parameter('peer_map_publish_period_s', 5.0)
         self.declare_parameter('descriptor_period_s', 2.0)
         self.declare_parameter('crop_size_m', 8.0)
         # Descriptor/crop requests can arrive after several descriptor periods
@@ -111,6 +116,8 @@ class UnknownPoseFrontend(Node):
         self.crop_topic = str(self.get_parameter('crop_topic').value)
         self.hypothesis_topic = str(self.get_parameter('hypothesis_topic').value)
         self.peer_map_topic = str(self.get_parameter('peer_map_topic').value)
+        self.peer_map_publish_period_s = max(0.1, float(
+            self.get_parameter('peer_map_publish_period_s').value))
         self.descriptor_period_s = max(0.2, float(
             self.get_parameter('descriptor_period_s').value))
         self.crop_size_m = max(2.0, float(self.get_parameter('crop_size_m').value))
@@ -380,6 +387,8 @@ class UnknownPoseFrontend(Node):
         # one-shot dynamic /tf sample expires from a late listener's buffer.
         self.tf_broadcaster = StaticTransformBroadcaster(self)
         self.latest_map = None
+        self.latest_map_fingerprint = None
+        self.last_export_map_fingerprint = None
         self.map_revision = 0
         self.keyframe_sequence = 0
         self.last_descriptor_wall = 0.0
@@ -703,9 +712,37 @@ class UnknownPoseFrontend(Node):
         if self.first_map_wall is None:
             self.first_map_wall = time.monotonic()
         self.latest_map = message
+        self.latest_map_fingerprint = self._map_fingerprint(message)
         self.map_revision += 1
-        if self.accepted is not None and time.monotonic() - self.last_export_wall > 1.0:
+        if (self.accepted is not None
+                and time.monotonic() - self.last_export_wall
+                >= self.peer_map_publish_period_s
+                and self.latest_map_fingerprint
+                != self.last_export_map_fingerprint):
             self.publish_local_map()
+
+    @staticmethod
+    def _map_fingerprint(message):
+        """Return a compact content/geometry identity for a map export.
+
+        The fingerprint is metadata plus occupancy bytes, not a retained map
+        copy.  It lets the peer-map publisher suppress identical DDS samples
+        while still exporting origin, dimensions, and occupancy changes.
+        """
+        info = message.info
+        origin = info.origin
+        orientation = origin.orientation
+        metadata = (
+            int(info.width), int(info.height), float(info.resolution),
+            float(origin.position.x), float(origin.position.y),
+            float(origin.position.z), float(orientation.x),
+            float(orientation.y), float(orientation.z), float(orientation.w),
+        )
+        values = np.asarray(message.data, dtype=np.int8)
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(repr(metadata).encode('ascii'))
+        digest.update(values.tobytes())
+        return digest.hexdigest()
 
     def _map_crop(self):
         if self.latest_map is None:
@@ -3182,7 +3219,7 @@ class UnknownPoseFrontend(Node):
                 'HYPOTHESIS_TARGET_ACCEPTED',
                 source_keyframe_id=str(message.source_keyframe_id),
                 target_keyframe_id=str(message.target_keyframe_id))
-            self.publish_local_map()
+            self.publish_local_map(force=True)
             return
         proposal = self.pending_proposals.get(
             (message.source_keyframe_id, message.target_keyframe_id))
@@ -3276,7 +3313,7 @@ class UnknownPoseFrontend(Node):
         self.accepted = final
         self.accepted_wall = time.monotonic()
         self.publish_accepted_tf()
-        self.publish_local_map()
+        self.publish_local_map(force=True)
 
     def _ack_message(self, proposal, result, accepted, rejection_reason):
         message = RelativePoseHypothesis()
@@ -3388,9 +3425,15 @@ class UnknownPoseFrontend(Node):
         self.tf_broadcaster.sendTransform(transform)
         self.counters['tf_handoffs'] += 1
 
-    def publish_local_map(self):
+    def publish_local_map(self, force=False):
         if self.latest_map is None or self.accepted is None:
-            return
+            return False
+        now = time.monotonic()
+        if not force:
+            if now - self.last_export_wall < self.peer_map_publish_period_s:
+                return False
+            if self.latest_map_fingerprint == self.last_export_map_fingerprint:
+                return False
         if not self.merge_handoff_logged:
             self.merge_handoff_logged = True
             self.counters['merge_handoff_started'] += 1
@@ -3412,7 +3455,9 @@ class UnknownPoseFrontend(Node):
         message.occupancy_grid = self.latest_map
         self.peer_map_pub.publish(message)
         self.counters['peer_maps_published'] += 1
-        self.last_export_wall = time.monotonic()
+        self.last_export_wall = now
+        self.last_export_map_fingerprint = self.latest_map_fingerprint
+        return True
 
     def finalize(self):
         """Persist bounded diagnostics without affecting navigation behavior."""

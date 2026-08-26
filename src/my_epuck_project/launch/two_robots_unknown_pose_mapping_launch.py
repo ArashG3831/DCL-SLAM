@@ -164,6 +164,7 @@ def launch_setup(context):
                 'robot_id': robot, 'peer_robot_id': peer,
                 'map_topic': f'/{robot}/map',
                 'peer_map_topic': f'/cslam/unknown_pose/{robot}/local_map',
+                'peer_map_publish_period_s': 5.0,
                 'shared_frame': 'shared_map',
                 'diagnostic_output': LaunchConfiguration('diagnostic_output'),
             }]))

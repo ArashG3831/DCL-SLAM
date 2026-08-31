@@ -1,0 +1,22 @@
+{
+  "conclusion": "The production gate is removed and focused integration evidence passes; an exact natural live safe-independent-idle instance was not observed in the short maps.",
+  "expected_semantics": {
+    "busy_peer_goal_kept": true,
+    "busy_peer_preempted": false,
+    "central_coordinator": false,
+    "idle_robot_can_receive_safe_independent_task": true,
+    "traffic_scheduler_bypassed": false
+  },
+  "integration_unit_evidence": {
+    "result": "PASSED in the 153-test focused suite",
+    "source_assertion": "active peer goal is not a global assignment barrier",
+    "symmetric_protocol_tests": "PASSED",
+    "test": "test_peer_activity_is_not_a_global_assignment_barrier",
+    "test_file": "src/my_epuck_project/test/test_distributed_frontier_round_guard.py"
+  },
+  "live_observations": [
+    "validation2 first valid pair assigned robot1 and IDLE to robot2; no feasible independent candidate for robot2 was recorded at that instant.",
+    "validation3 had a traffic-deferred robot2 goal while robot1 remained committed; this is a traffic case, not safe-independent idle work."
+  ],
+  "naturally_exercised_exact_case": false
+}

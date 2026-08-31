@@ -257,13 +257,11 @@ def launch_command(
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
         f'fusion_process_nice:={args.fusion_process_nice}',
         'use_sim_time:=true',
-        # Webots' ros2_control simulation is synchronized to the controller
-        # lifecycle.  Leaving local Nav2 stopped prevents the controller
-        # manager from producing odom/TF and consequently stalls /clock at
-        # zero before the unknown-pose evidence gate can begin.  Autostart
-        # local Nav2 here; the readiness probe verifies the active state and
-        # the project allocator still remains the only goal dispatcher.
-        'nav2_autostart:=true',
+        # Webots' ros2_control simulation requires the controller lifecycle
+        # to be started after interfaces, maps, and local TF are ready.
+        # ReadyProbe owns that single gated startup request; the project
+        # allocator remains the only goal dispatcher.
+        'nav2_autostart:=false',
         'dispatch_enabled:=true',
         # Preserve the validated close-start evidence window: local frontier
         # dispatch is held while both peers accumulate overlap evidence.  The
@@ -441,10 +439,9 @@ class ReadyProbe(Node):
             for robot in ('robot1', 'robot2'):
                 manager = manager_clients[robot]
                 if robot not in startup_sent:
-                    # With nav2_autostart enabled the lifecycle manager may
-                    # already have activated every local node.  Treat that
-                    # as a successful startup and avoid issuing a redundant
-                    # STARTUP command to an already-active manager.
+                    # If the lifecycle manager has already activated every
+                    # local node, treat that as successful startup and avoid
+                    # issuing a redundant STARTUP command.
                     active_now = True
                     for node_name in LOCAL_NAV2_NODES:
                         client = clients[(robot, node_name)]

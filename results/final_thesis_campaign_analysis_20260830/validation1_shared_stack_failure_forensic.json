@@ -1,0 +1,51 @@
+{
+  "artifact": "/home/arash/webots_ws_clean_validation_20260823/results/final_18m_idle_validations/validation1/fast_trial_20260831T012818Z",
+  "classification": "PRESERVED_DIAGNOSTIC_FAILURE_NOT_COUNTED_AS_GENUINE_VALIDATION",
+  "first_causal_divergence": {
+    "classification": "REQUEST_SENT_BUT_NO_COMPLETED_ACTIVATION_RESPONSE",
+    "evidence": [
+      "Shared launch and child processes were present.",
+      "Both lifecycle STARTUP requests were logged.",
+      "No SHARED_NAV2_LIFECYCLE_ACTIVE or costmap barrier event followed.",
+      "Phase managers repeatedly reported shared_nav2_waiting_for_lifecycle_manager=true.",
+      "No shared child process death was recorded before the runner timeout."
+    ],
+    "stage": "lifecycle_startup_response_to_shared_active"
+  },
+  "fix": {
+    "reason": "Prevents automatic lifecycle bringup from racing the explicit readiness probe and duplicate/in-flight transitions.",
+    "shared_controller_safety_boundary_preserved": true,
+    "source_change": "cooperative_trial_fast.py now launches local Nav2 with nav2_autostart:=false; ReadyProbe owns the single gated startup request."
+  },
+  "hypothesis_audit": {
+    "discovery_missing": "NOT_PROVEN",
+    "future_callback_not_consumed": "NOT_PROVEN",
+    "namespace_domain_mismatch": "NOT_SUPPORTED",
+    "phase_gate_never_released": true,
+    "process_alive_but_inactive": true,
+    "process_died": false,
+    "request_never_sent": false,
+    "sent_but_no_response": true,
+    "shared_stack_killed_by_local_teardown": false,
+    "stale_state_wait": "POSSIBLE_BUT_NOT_PROVEN",
+    "wrong_install_or_wrapper": "OLD_VALIDATION_USED_PRE_FIX_INSTALL"
+  },
+  "observed": {
+    "first_cooperative_goal_observed": false,
+    "handoff_locked_sim_s": 55.82,
+    "lifecycle_manager_processes_present": true,
+    "lifecycle_startup_requests_sent": {
+      "robot1": 61.7,
+      "robot2": 64.18
+    },
+    "shared_costmap_ready_observed": false,
+    "shared_lifecycle_active_observed": false,
+    "shared_process_launch_requested": true,
+    "shared_processes_spawned": true,
+    "simulation_continued_until_sim_s": 747.76
+  },
+  "regression_from_assignment_fix": {
+    "conclusion": "No dependency path. The peer-active assignment change is below the handoff/shared-stack launch path and was not rolled back.",
+    "dependency_path_to_unknown_pose_or_shared_launch": false
+  }
+}

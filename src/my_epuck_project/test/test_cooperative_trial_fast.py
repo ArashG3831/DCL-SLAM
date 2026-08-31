@@ -62,7 +62,7 @@ def test_launch_command_reuses_authoritative_campaign_launch(tmp_path):
         'ros2', 'launch', 'my_epuck_project', LAUNCH_FILE]
     assert 'enable_observer:=false' in command
     assert 'enable_forensic_capture:=false' in command
-    assert 'nav2_autostart:=true' in command
+    assert 'nav2_autostart:=false' in command
     assert 'prehandoff_dispatch_delay_s:=20.0' in command
     assert 'unknown_initial_pose:=true' in command
     assert 'controller_variant:=rpp' in command

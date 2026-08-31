@@ -1,0 +1,44 @@
+{
+  "artifacts": {
+    "validation2": "/home/arash/webots_ws_clean_validation_20260823/results/final_18m_idle_validations/validation2/fast_trial_20260831T013358Z",
+    "validation3": "/home/arash/webots_ws_clean_validation_20260823/results/final_18m_idle_validations/validation3/fast_trial_20260831T013707Z"
+  },
+  "common_immediate_cause": "One external Webots ROS controller stalled before completing initialization, so Ros2Supervisor never produced advancing /clock.",
+  "exact_lower_level_cause": "UNAVAILABLE_IN_PRESERVED_ARTIFACTS",
+  "harness_hardening": [
+    "fresh intended package and reliable_slam_toolbox_wrapper underlay sourced",
+    "explicit Webots driver prefix validated",
+    "unique ports and CycloneDDS domains",
+    "stale workspace path filtering and provenance logging",
+    "post-run orphan verification",
+    "local nav2_autostart false to avoid lifecycle startup races"
+  ],
+  "not_supported": [
+    "assignment/MRTSP",
+    "unknown-pose registration",
+    "18 m semantics"
+  ],
+  "production_algorithm_change_required": false,
+  "validation2": {
+    "controller_initialization": {
+      "robot1_lidar_initialized": false,
+      "robot2_lidar_initialized": true
+    },
+    "first_concrete_observed_error": "No /clock before the 120 s readiness timeout; only robot2 printed Ros2Lidar initialized.",
+    "interpretation": "The exit-1 record followed runner SIGINT cleanup; it is not the initiating error.",
+    "port": 23202,
+    "ros_domain_id": 202,
+    "webots_exit_code": 1
+  },
+  "validation3": {
+    "controller_initialization": {
+      "robot1_lidar_initialized": true,
+      "robot2_lidar_initialized": false
+    },
+    "first_concrete_observed_error": "No /clock before the 120 s readiness timeout; only robot1 printed Ros2Lidar initialized.",
+    "interpretation": "The exit-1 record followed runner SIGINT cleanup; it is not the initiating error.",
+    "port": 23203,
+    "ros_domain_id": 203,
+    "webots_exit_code": 1
+  }
+}

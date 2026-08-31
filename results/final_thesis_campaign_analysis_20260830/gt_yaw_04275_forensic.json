@@ -1,0 +1,132 @@
+{
+  "classification": "REGISTRATION_ESTIMATE_VARIATION",
+  "comparisons": [
+    {
+      "anchors": {
+        "robot1": {
+          "heading_rad": 4.9111825717318425e-11,
+          "motion_m": 3.949855662912636e-10,
+          "tf_age_s": 4.940000000000001,
+          "time_s": 13.88
+        },
+        "robot2": {
+          "heading_rad": 1.0894396496041736e-10,
+          "motion_m": 1.8119955068683936e-10,
+          "tf_age_s": 5.280000000000001,
+          "time_s": 15.260000000000002
+        }
+      },
+      "artifact": "/home/arash/webots_ws_clean_validation_20260823/results/final_precampaign_validation_20260831/v3/fast_trial_20260830T231638Z/observer/fast_trial_20260830T231638Z/forensic/physical_gt_evaluation.json",
+      "estimated": {
+        "tx": -0.4974436939194995,
+        "ty": 0.001240400775320187,
+        "yaw_deg": 0.4274527851149359,
+        "yaw_rad": 0.0074604584970754395
+      },
+      "gt": {
+        "tx": -0.5000000005180445,
+        "ty": -5.333381245474502e-11,
+        "yaw_deg": 2.188781398470837e-09,
+        "yaw_rad": 3.8201442009722086e-11
+      },
+      "translation_m": 0.002841354895378301,
+      "yaw_deg": 0.4274527829261545
+    },
+    {
+      "anchors": {
+        "robot1": {
+          "heading_rad": 4.9682924441185605e-11,
+          "motion_m": 3.9498523331307817e-10,
+          "tf_age_s": 0.0,
+          "time_s": 16.92
+        },
+        "robot2": {
+          "heading_rad": 1.0987388776584339e-10,
+          "motion_m": 1.8119956638077623e-10,
+          "tf_age_s": 5.280000000000001,
+          "time_s": 15.260000000000002
+        }
+      },
+      "artifact": "/home/arash/webots_ws_clean_validation_20260823/results/final_precampaign_validation_20260831/v1/fast_trial_20260830T231307Z/observer/fast_trial_20260830T231307Z/forensic/physical_gt_evaluation.json",
+      "estimated": {
+        "tx": -0.5046560722500525,
+        "ty": 0.00019237115398297849,
+        "yaw_deg": 0.001385101138031501,
+        "yaw_rad": 2.4174575331770143e-05
+      },
+      "gt": {
+        "tx": -0.5000000005180445,
+        "ty": -5.2875068300936493e-11,
+        "yaw_deg": 2.1039496440068422e-09,
+        "yaw_rad": 3.672084858408198e-11
+      },
+      "translation_m": 0.0046600440614689405,
+      "yaw_deg": 0.001385099034081857
+    },
+    {
+      "anchors": {
+        "robot1": {
+          "heading_rad": 4.9685588976444706e-11,
+          "motion_m": 3.949860102621778e-10,
+          "tf_age_s": 10.560000000000002,
+          "time_s": 31.6
+        },
+        "robot2": {
+          "heading_rad": 1.0827383434275362e-10,
+          "motion_m": 1.810484036230893e-10,
+          "tf_age_s": 10.600000000000001,
+          "time_s": 26.6
+        }
+      },
+      "artifact": "/home/arash/webots_ws_clean_validation_20260823/results/final_precampaign_validation_20260831/v2/fast_trial_20260830T231504Z/observer/fast_trial_20260830T231504Z-01/forensic/physical_gt_evaluation.json",
+      "estimated": {
+        "tx": -0.5022568564002171,
+        "ty": 0.0023848838798825062,
+        "yaw_deg": 0.002862966786126554,
+        "yaw_rad": 4.996819679314868e-05
+      },
+      "gt": {
+        "tx": -0.5000000005178944,
+        "ty": -5.367842568161374e-11,
+        "yaw_deg": 2.194888063459247e-09,
+        "yaw_rad": 3.83080234200861e-11
+      },
+      "translation_m": 0.003283453951273219,
+      "yaw_deg": 0.0028629645912384904
+    },
+    {
+      "anchors": {
+        "robot1": {
+          "heading_rad": 0.09193592481188118,
+          "motion_m": 7.3021523023805034e-06,
+          "tf_age_s": 10.18,
+          "time_s": 22.14
+        },
+        "robot2": {
+          "heading_rad": 0.004576204147345386,
+          "motion_m": 3.6304815133619513e-07,
+          "tf_age_s": 6.720000000000002,
+          "time_s": 19.720000000000002
+        }
+      },
+      "artifact": "/home/arash/webots_ws_clean_validation_20260823/results/final_runtime_reliability_validations/validation5_final/fast_trial_20260831T031615Z/observer/fast_trial_20260831T031615Z-01/forensic/physical_gt_evaluation.json",
+      "estimated": {
+        "tx": -0.5021942470512318,
+        "ty": 0.001656242040884434,
+        "yaw_deg": 0.13122358609474793,
+        "yaw_rad": 0.002290283633627599
+      },
+      "gt": {
+        "tx": -0.4999994320608267,
+        "ty": 4.453479982604433e-05,
+        "yaw_deg": 0.124667107074975,
+        "yaw_rad": 0.002175851487394631
+      },
+      "translation_m": 0.0027230154375227503,
+      "yaw_deg": 0.006556479019772918
+    }
+  ],
+  "evidence": "The 0.4274528 degree run had valid pre-motion anchors for both robots, negligible anchor motion, low 0.284 cm translation error, and an estimated yaw of 0.4274528 degrees against a near-zero GT yaw. Nearby valid runs had near-zero estimated yaw with the same fixed-anchor evaluator.",
+  "matcher_modified": false,
+  "question": "Was 0.4275 degrees registration variation or evaluator artifact?"
+}

@@ -256,6 +256,7 @@ def launch_setup(context):
                 'controller_name': 'diffdrive_controller',
                 'controller_manager': manager_name,
                 'controller_param_file': robot_control_path,
+                'switch_timeout_s': 10.0,
                 'controller_ros_args': (
                     '--ros-args '
                     f'--remap /{robot_name}/diffdrive_controller/odom:=/{robot_name}/odom '
@@ -274,6 +275,7 @@ def launch_setup(context):
                 'controller_name': 'joint_state_broadcaster',
                 'controller_manager': manager_name,
                 'controller_param_file': robot_control_path,
+                'switch_timeout_s': 10.0,
                 'controller_ros_args': (
                     '--ros-args '
                     f'--remap /joint_states:=/{robot_name}/joint_states '
@@ -311,10 +313,14 @@ def launch_setup(context):
             # Webots fast mode /clock can run at thousands of callbacks per
             # wall second; opting this stateless bridge out prevents it from
             # starving the sensor and command callbacks.
-            parameters=[{'use_sim_time': False}],
+            parameters=[{
+                'use_sim_time': False,
+                'override_cmd_topic': f'/{robot_name}/evidence_cmd_vel',
+            }],
             remappings=[
                 ('/cmd_vel_unstamped', f'/{robot_name}/cmd_vel_unstamped'),
                 ('/cmd_vel', f'/{robot_name}/cmd_vel'),
+                ('/odom', f'/{robot_name}/odom'),
             ],
         )
 

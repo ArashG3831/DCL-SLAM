@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from functools import partial
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -44,8 +45,11 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
 from .cooperative_profiles import (
-    PROFILE_SETTINGS, profile_for_world, profile_summary)
-from .ros_runtime_preflight import ROS_DOMAIN_MIN, ROS_DOMAIN_MAX
+    PROFILE_SETTINGS, manual_rviz_path, profile, profile_for_world,
+    profile_summary)
+from .ros_runtime_preflight import (
+    ROS_DOMAIN_MIN, ROS_DOMAIN_MAX, require_runtime_provenance,
+)
 
 
 _SOURCE_WORKSPACE = Path(__file__).resolve().parents[3]
@@ -72,10 +76,91 @@ LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
 )
 SHUTDOWN_GRACE_S = 20.0
 SHUTDOWN_TERM_S = 10.0
+# The public mission timeout is a hard total wall-clock cap.  Reserve enough
+# time for launch-group escalation, campaign-driver cleanup, and final log
+# flushing so a timeout cannot turn into an over-limit run.
+FINALIZATION_BUDGET_S = 55.0
+
+
+def _stale_workspace_root() -> Path:
+    """Resolve the explicitly excluded sibling workspace for this checkout.
+
+    The old workspace is deployment-specific.  Keep it configurable so the
+    runner does not embed a developer's absolute home path in the package,
+    while retaining the repository-sibling default used by the local setup.
+    """
+    configured = os.environ.get('MY_EPUCK_STALE_WORKSPACE_ROOT')
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (WORKSPACE.parent / 'webots_ws').resolve()
+
+
+STALE_WORKSPACE_ROOT = _stale_workspace_root()
+FILTERED_PATH_VARIABLES = (
+    'AMENT_PREFIX_PATH', 'CMAKE_PREFIX_PATH', 'COLCON_PREFIX_PATH',
+    'LD_LIBRARY_PATH', 'PATH', 'PKG_CONFIG_PATH', 'PYTHONPATH',
+    'ROS_PACKAGE_PATH',
+)
 
 
 class FastTrialError(RuntimeError):
     """A bounded preflight, readiness, or cleanup failure."""
+
+
+def _is_stale_workspace_entry(entry: str) -> bool:
+    """Return true only for entries owned by the unrelated old workspace."""
+    if not entry:
+        return False
+    try:
+        path = Path(entry).expanduser().resolve()
+    except OSError:
+        return False
+    return path == STALE_WORKSPACE_ROOT or STALE_WORKSPACE_ROOT in path.parents
+
+
+def filtered_runtime_environment(source=None) -> tuple[dict[str, str], list[str]]:
+    """Remove old-workspace search paths from the campaign child environment.
+
+    The caller may have sourced the old workspace before the audit overlays.
+    Only path-list entries below the exact unrelated workspace are removed;
+    all other inherited environment values are retained.
+    """
+    environment = dict(os.environ if source is None else source)
+    removed = []
+    for variable in FILTERED_PATH_VARIABLES:
+        value = environment.get(variable)
+        if not value:
+            continue
+        kept = []
+        for entry in value.split(os.pathsep):
+            if _is_stale_workspace_entry(entry):
+                removed.append(f'{variable}={entry}')
+            else:
+                kept.append(entry)
+        environment[variable] = os.pathsep.join(kept)
+    # Isolated project installs can retain a stale Webots-driver underlay in
+    # their generated setup chain.  The explicit driver prefix is the
+    # deployment authority; put it first in every lookup path that matters
+    # before provenance checks or launch subprocesses resolve the package.
+    driver_prefix = environment.get('MY_EPUCK_WEBOTS_DRIVER_PREFIX', '').strip()
+    if driver_prefix:
+        driver = str(Path(driver_prefix).expanduser().resolve())
+        for variable in ('AMENT_PREFIX_PATH', 'CMAKE_PREFIX_PATH',
+                         'COLCON_PREFIX_PATH'):
+            value = environment.get(variable, '')
+            entries = [entry for entry in value.split(os.pathsep)
+                       if entry and Path(entry).resolve() != Path(driver)]
+            environment[variable] = os.pathsep.join([driver, *entries])
+        python_entry = str(Path(driver) / 'lib/python3.12/site-packages')
+        library_entry = str(Path(driver) / 'lib')
+        for variable, entry in (
+                ('PYTHONPATH', python_entry),
+                ('LD_LIBRARY_PATH', library_entry)):
+            value = environment.get(variable, '')
+            entries = [item for item in value.split(os.pathsep)
+                       if item and item != entry]
+            environment[variable] = os.pathsep.join([entry, *entries])
+    return environment, removed
 
 
 def boolean(value: str | bool) -> bool:
@@ -113,6 +198,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--rviz', type=boolean, default=False)
     result.add_argument('--diagnostic-mode', type=boolean, default=False)
     result.add_argument(
+        '--diagnostic-frontier-capture', type=boolean, default=False,
+        help='Enable opt-in per-frontier planner/costmap forensic capture.')
+    result.add_argument(
         '--enable-observer', type=boolean, default=False,
         help='Enable the passive cooperative evidence recorder.')
     result.add_argument(
@@ -127,6 +215,41 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         '--prehandoff-dispatch-delay-s', type=float, default=20.0,
         help='Wall-time hold before local goals may move robots during evidence acquisition.')
+    result.add_argument(
+        '--traffic-scheduler-enabled', type=boolean, default=False,
+        help='Enable the existing decentralized pre-dispatch traffic gate.')
+    result.add_argument(
+        '--assignment-strategy',
+        choices=('frontier_cost_only', 'frontier_mrtsp'),
+        default='frontier_mrtsp',
+        help='Distributed pair scoring mode.')
+    result.add_argument(
+        '--synchronized-traffic-test', type=boolean, default=False,
+        help='Enable the test-only simulated-time synchronized dispatch barrier.')
+    result.add_argument(
+        '--traffic-test-force-conflict-pair', type=boolean, default=False,
+        help='Test-only: select two real bid paths that geometrically conflict.')
+    result.add_argument(
+        '--synchronized-traffic-hold-prehandoff-motion', type=boolean,
+        default=True,
+        help='In synchronized test mode, hold local goals until handoff.')
+    result.add_argument(
+        '--enable-motion-fixture', type=boolean, default=False,
+        help='Test-only odometry-confirmed motion fixture for unknown-pose '
+             'evidence acquisition.')
+    result.add_argument('--motion-fixture-start-delay-s', type=float, default=20.0)
+    result.add_argument('--motion-fixture-turn-duration-s', type=float, default=3.2)
+    result.add_argument('--motion-fixture-drive-duration-s', type=float, default=12.0)
+    result.add_argument('--motion-fixture-cycles', type=int, default=1)
+    result.add_argument('--motion-fixture-mirror-turns', type=boolean, default=True)
+    result.add_argument('--motion-fixture-robot2-static', type=boolean, default=False)
+    result.add_argument(
+        '--motion-fixture-robot2-static-after-first-cycle', type=boolean,
+        default=False)
+    result.add_argument('--motion-fixture-linear-speed', type=float, default=0.10)
+    result.add_argument(
+        '--motion-fixture-robot2-linear-scale', type=float, default=1.0)
+    result.add_argument('--motion-fixture-angular-speed', type=float, default=0.45)
     result.add_argument('--ros-domain-id', type=int, default=100)
     result.add_argument('--webots-port', type=int, default=23000)
     result.add_argument('--results-directory', default='results/fast_trials')
@@ -134,7 +257,7 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def package_prefix() -> str:
+def package_prefix(environment=None) -> str:
     """Return the package prefix through the same ROS lookup users invoke."""
     ros2 = shutil.which('ros2')
     if ros2 is None:
@@ -142,18 +265,55 @@ def package_prefix() -> str:
     result = subprocess.run(
         [ros2, 'pkg', 'prefix', PACKAGE],
         check=False, capture_output=True, text=True, timeout=10,
+        env=environment if environment is not None else None,
     )
     prefix = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ''
     print(prefix or result.stderr.strip(), flush=True)
     if result.returncode != 0 or not prefix:
         raise FastTrialError(
             f'ROS package lookup failed: {result.stderr.strip()}')
-    expected = WORKSPACE / 'install' / PACKAGE
+    expected_prefix = os.environ.get('MY_EPUCK_INSTALL_PREFIX', '')
+    expected = (Path(expected_prefix).expanduser().resolve()
+                if expected_prefix else WORKSPACE / 'install' / PACKAGE)
     if Path(prefix).resolve() != expected.resolve():
         raise FastTrialError(
             f'{PACKAGE} resolves to {prefix}, expected {expected}; '
-            'build/source the intended webots_ws first')
+            'set MY_EPUCK_INSTALL_PREFIX to the intended isolated install')
     return prefix
+
+
+def webots_driver_provenance(environment=None) -> tuple[str, str]:
+    """Resolve and validate the Webots driver used by the campaign launch."""
+    ros2 = shutil.which('ros2')
+    if ros2 is None:
+        raise FastTrialError('ros2 is not available in PATH')
+    result = subprocess.run(
+        [ros2, 'pkg', 'prefix', 'webots_ros2_driver'],
+        check=False, capture_output=True, text=True, timeout=10,
+        env=environment if environment is not None else None,
+    )
+    prefix = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ''
+    if result.returncode != 0 or not prefix:
+        raise FastTrialError(
+            f'Webots driver package lookup failed: {result.stderr.strip()}')
+    lookup_environment = environment if environment is not None else os.environ
+    expected_prefix = lookup_environment.get(
+        'MY_EPUCK_WEBOTS_DRIVER_PREFIX', '')
+    if not expected_prefix:
+        raise FastTrialError(
+            'MY_EPUCK_WEBOTS_DRIVER_PREFIX must identify the intended '
+            'isolated Webots driver install')
+    expected = Path(expected_prefix).expanduser().resolve()
+    resolved = Path(prefix).resolve()
+    if resolved != expected:
+        raise FastTrialError(
+            f'webots_ros2_driver resolves to {prefix}, expected {expected}; '
+            'stale driver overlay refused')
+    executable = resolved / 'lib' / 'webots_ros2_driver' / 'driver'
+    if not executable.is_file():
+        raise FastTrialError(
+            f'Webots driver executable is missing: {executable}')
+    return str(resolved), str(executable.resolve())
 
 
 def port_is_free(port: int) -> bool:
@@ -180,7 +340,10 @@ def is_campaign_webots_driver(command: list[str]) -> bool:
     """Identify only this project's namespaced ros2_control driver processes."""
     text = ' '.join(command)
     return (
-        'webots_ros2_driver/lib/webots_ros2_driver/driver' in text and
+        (
+            'webots_ros2_driver/lib/webots_ros2_driver/driver' in text or
+            '/lib/webots_ros2_driver/driver' in text
+        ) and
         any(
             f'__ns:=/{robot}' in text and
             f'/tmp/my_epuck_project_{robot}_ros2_control.yml' in text
@@ -255,22 +418,52 @@ def launch_command(
         f'sensor_profile:={args.sensor_profile}',
         f'ideal_encoder_sensing:={str(args.ideal_encoder_sensing).lower()}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
+        f'diagnostic_frontier_capture:={str(args.diagnostic_frontier_capture).lower()}',
         f'fusion_process_nice:={args.fusion_process_nice}',
         'use_sim_time:=true',
         # Webots' ros2_control simulation requires the controller lifecycle
         # to be started after interfaces, maps, and local TF are ready.
         # ReadyProbe owns that single gated startup request; the project
         # allocator remains the only goal dispatcher.
+        # Local Nav2 is deliberately started by ReadyProbe only after both
+        # robot interfaces, maps, and local TF are ready.  Leaving the
+        # lifecycle managers on automatic startup races that explicit gate:
+        # they can begin configuring before odom/TF exists and a second
+        # startup request can then collide with the in-flight transition.
         'nav2_autostart:=false',
         'dispatch_enabled:=true',
+        f'traffic_scheduler_enabled:={str(args.traffic_scheduler_enabled).lower()}',
+        f'assignment_strategy:={args.assignment_strategy}',
+        f'synchronized_traffic_test:={str(args.synchronized_traffic_test).lower()}',
+        f'traffic_test_force_conflict_pair:='
+        f'{str(args.traffic_test_force_conflict_pair).lower()}',
+        'synchronized_traffic_hold_prehandoff_motion:='
+        f'{str(args.synchronized_traffic_hold_prehandoff_motion).lower()}',
         # Preserve the validated close-start evidence window: local frontier
         # dispatch is held while both peers accumulate overlap evidence.  The
         # handoff gates are unchanged; this only prevents navigation from
         # moving the robots out of the shared observation region prematurely.
         f'prehandoff_dispatch_delay_s:={args.prehandoff_dispatch_delay_s}',
+        f'enable_motion_fixture:={str(args.enable_motion_fixture).lower()}',
+        f'motion_fixture_start_delay_s:={args.motion_fixture_start_delay_s}',
+        f'motion_fixture_turn_duration_s:={args.motion_fixture_turn_duration_s}',
+        f'motion_fixture_drive_duration_s:={args.motion_fixture_drive_duration_s}',
+        f'motion_fixture_cycles:={args.motion_fixture_cycles}',
+        f'motion_fixture_mirror_turns:={str(args.motion_fixture_mirror_turns).lower()}',
+        f'motion_fixture_robot2_static:={str(args.motion_fixture_robot2_static).lower()}',
+        'motion_fixture_robot2_static_after_first_cycle:='
+        f'{str(args.motion_fixture_robot2_static_after_first_cycle).lower()}',
+        f'motion_fixture_linear_speed:={args.motion_fixture_linear_speed}',
+        f'motion_fixture_robot2_linear_scale:={args.motion_fixture_robot2_linear_scale}',
+        f'motion_fixture_angular_speed:={args.motion_fixture_angular_speed}',
         # This runner is the unknown-pose full-exploration campaign entry
         # point; do not silently fall back to the known-relative launch mode.
         'unknown_initial_pose:=true',
+        # The scan-matching close-start validation exercises the full-map
+        # startup architecture.  Keep the runner explicit so a launch-file
+        # default cannot silently route the experiment through historical
+        # crop/keyframe registration.
+        'full_map_registration:=true',
         # The authoritative unknown-pose wrapper uses the frozen production
         # RPP controller.  Pass this explicitly through the nested launch
         # chain so an inherited/duplicate launch argument cannot select the
@@ -278,7 +471,11 @@ def launch_command(
         'controller_variant:=rpp',
         f'enable_observer:={str(args.enable_observer).lower()}',
         f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
+        # The runner owns the RViz process, while the launch graph owns the
+        # passive map/path/handoff bridge. Start the bridge at simulation
+        # launch so it cannot miss the volatile accepted-handoff message.
         'launch_rviz:=false',
+        f'launch_visualization_overlay:={str(args.rviz).lower()}',
         'enable_mission_timeout:=false',
     ]
     if output_root is not None:
@@ -443,6 +640,7 @@ class ReadyProbe(Node):
                     # local node, treat that as successful startup and avoid
                     # issuing a redundant STARTUP command.
                     active_now = True
+                    lifecycle_transitioning = False
                     for node_name in LOCAL_NAV2_NODES:
                         client = clients[(robot, node_name)]
                         if not client.service_is_ready():
@@ -452,14 +650,28 @@ class ReadyProbe(Node):
                             break
                         response = self._wait_future(
                             client.call_async(GetState.Request()), deadline)
-                        if (response is None or response.current_state.id !=
-                                State.PRIMARY_STATE_ACTIVE):
+                        if response is None:
                             active_now = False
                             break
+                        state_id = response.current_state.id
+                        if state_id != State.PRIMARY_STATE_ACTIVE:
+                            active_now = False
+                        # If the manager has already configured/activated any
+                        # node, it owns an in-progress lifecycle transition.
+                        # Do not inject a second STARTUP request into that
+                        # transition; continue observing until all nodes are
+                        # active.  The explicit STARTUP fallback remains for
+                        # the all-inactive case and preserves the bounded
+                        # readiness retry contract.
+                        if state_id not in (
+                                State.PRIMARY_STATE_UNCONFIGURED,
+                                State.PRIMARY_STATE_INACTIVE):
+                            lifecycle_transitioning = True
                     if active_now:
                         startup_results[robot] = True
                         startup_sent.add(robot)
                 if (robot not in startup_sent and
+                        not lifecycle_transitioning and
                         time.monotonic() >= next_startup_attempt[robot]):
                     if not manager.service_is_ready():
                         manager.wait_for_service(timeout_sec=0.0)
@@ -524,11 +736,24 @@ def stop_process(process: subprocess.Popen, sig: int):
 
 
 def wait_process(process: subprocess.Popen, timeout: float) -> bool:
-    try:
-        process.wait(timeout=timeout)
-        return True
-    except subprocess.TimeoutExpired:
-        return False
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    interrupted = False
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        try:
+            process.wait(timeout=remaining)
+            return True
+        except subprocess.TimeoutExpired:
+            break
+        except KeyboardInterrupt:
+            # SIGINT is also the runner's user-facing stop request.  Do not
+            # abandon process-group cleanup while waiting for launch to exit;
+            # continue to the bounded TERM/KILL escalation below.
+            interrupted = True
+            continue
+    return process.poll() is not None
 
 
 def shutdown_processes(launch, rviz=None) -> dict:
@@ -554,11 +779,27 @@ def shutdown_processes(launch, rviz=None) -> dict:
     }
 
 
-def rviz_command() -> list[str]:
+def rviz_command(world_profile='large') -> list[str]:
+    """Return RViz with the selected profile's correctly scaled camera."""
     share = Path(get_package_share_directory(PACKAGE))
-    config = share / 'resource' / 'cooperative_manual_exploration.rviz'
+    selected = profile(world_profile, share / 'worlds')
+    config = manual_rviz_path(selected, share / 'resource')
     return ['rviz2', '-d', str(config), '--ros-args',
             '-p', 'use_sim_time:=true']
+
+
+def requires_fixed_anchor_forensics(args: argparse.Namespace) -> bool:
+    """Return whether this runner profile must retain passive physical GT.
+
+    The close-start unknown-pose profiles are the thesis validation/campaign
+    harnesses.  Their fixed-anchor Supervisor evidence is evaluation-only,
+    yet omitting it silently turns a normal run into an invalid-GT artifact.
+    Keep the generic parser default lightweight for unrelated quick trials;
+    normal close-start runs are upgraded here before their manifest/launch
+    command is written.
+    """
+    return str(args.world_profile).startswith(
+        'large_unknown_pose_close_start')
 
 
 def run(args: argparse.Namespace) -> int:
@@ -576,6 +817,10 @@ def run(args: argparse.Namespace) -> int:
     exit_reason = 'preflight_failure'
     launch_return_code = None
     prefix = ''
+    webots_driver_prefix = ''
+    webots_driver_executable = ''
+    runtime_provenance = {}
+    removed_stale_environment_entries = []
     world = None
     ready_wall_elapsed = None
     launch_spawn_elapsed = None
@@ -584,6 +829,14 @@ def run(args: argparse.Namespace) -> int:
     probe = None
     executor = None
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
+
+    if (requires_fixed_anchor_forensics(args) and
+            not args.enable_forensic_capture):
+        args.enable_forensic_capture = True
+        print(
+            'FIXED_ANCHOR_GT_FORENSICS auto_enabled=true '
+            'reason=close_start_unknown_pose_validation',
+            flush=True)
 
     def sample_runner_rss():
         nonlocal peak_runner_rss
@@ -596,7 +849,59 @@ def run(args: argparse.Namespace) -> int:
             pass
 
     try:
-        prefix = package_prefix()
+        inherited_environment = os.environ.copy()
+        environment, removed_stale_environment_entries = (
+            filtered_runtime_environment(inherited_environment))
+        # Validate the complete middleware/install contract before Webots is
+        # spawned.  Without this guard, a shell that silently inherited Fast
+        # DDS or an old generated install could start Webots and then wait
+        # forever for /clock, obscuring the real runtime failure.
+        runtime_contract = require_runtime_provenance(
+            WORKSPACE, environment, args.ros_domain_id)
+        # Resolve both package authorities through the cleaned/bound child
+        # environment.  Looking them up in the parent shell first can select
+        # the stale driver underlay before filtering has any effect.
+        prefix = package_prefix(environment)
+        (webots_driver_prefix,
+         webots_driver_executable) = webots_driver_provenance(environment)
+        filtered_stale_entries = [
+            f'{variable}={entry}'
+            for variable in FILTERED_PATH_VARIABLES
+            for entry in environment.get(variable, '').split(os.pathsep)
+            if _is_stale_workspace_entry(entry)
+        ]
+        if filtered_stale_entries:
+            raise FastTrialError(
+                'filtered runtime environment still contains old workspace '
+                f'entries: {filtered_stale_entries}')
+        runtime_provenance = {
+            'project_prefix': prefix,
+            'project_module': str(importlib.util.find_spec(PACKAGE).origin),
+            'webots_driver_prefix': webots_driver_prefix,
+            'webots_driver_executable': webots_driver_executable,
+            'webots_driver_module': str(
+                importlib.util.find_spec('webots_ros2_driver').origin),
+            'ros2_executable': str(Path(shutil.which('ros2')).resolve()),
+            'python_executable': str(Path(sys.executable).resolve()),
+            'ros_domain_id': str(args.ros_domain_id),
+            'inherited_ament_prefix_path': inherited_environment.get(
+                'AMENT_PREFIX_PATH', ''),
+            'inherited_pythonpath': inherited_environment.get('PYTHONPATH', ''),
+            'filtered_ament_prefix_path': environment.get(
+                'AMENT_PREFIX_PATH', ''),
+            'filtered_pythonpath': environment.get('PYTHONPATH', ''),
+            'inherited_path_environment': {
+                variable: inherited_environment.get(variable, '')
+                for variable in FILTERED_PATH_VARIABLES
+            },
+            'filtered_path_environment': {
+                variable: environment.get(variable, '')
+                for variable in FILTERED_PATH_VARIABLES
+            },
+            'removed_stale_environment_entries':
+                removed_stale_environment_entries,
+            'runtime_contract': runtime_contract,
+        }
         world = resolve_world(args)
         stale_drivers = campaign_webots_drivers()
         if stale_drivers:
@@ -612,14 +917,16 @@ def run(args: argparse.Namespace) -> int:
         effective = (
             f'ROS_DOMAIN_ID={args.ros_domain_id} '
             + ' '.join(shlex.quote(item) for item in command)
-            + '\n')
+            + '\n'
+            + json.dumps(runtime_provenance, sort_keys=True) + '\n')
         (attempt / 'effective_command.txt').write_text(effective, encoding='utf-8')
         print(f'launch_file={LAUNCH_FILE}', flush=True)
         print(f'world_path={world}', flush=True)
+        print(f'webots_driver_prefix={webots_driver_prefix}', flush=True)
+        print(f'webots_driver_executable={webots_driver_executable}', flush=True)
         print(f'results_directory={attempt}', flush=True)
         print(f'effective_command={effective.strip()}', flush=True)
 
-        environment = os.environ.copy()
         environment.update({
             'ROS_DOMAIN_ID': str(args.ros_domain_id),
             'PYTHONUNBUFFERED': '1',
@@ -637,7 +944,8 @@ def run(args: argparse.Namespace) -> int:
         output_threads[-1].start()
         if args.rviz:
             rviz = subprocess.Popen(
-                rviz_command(), env=environment, stdout=subprocess.PIPE,
+                rviz_command(args.world_profile), env=environment,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True)
             output_threads.append(threading.Thread(
@@ -653,7 +961,12 @@ def run(args: argparse.Namespace) -> int:
         executor = SingleThreadedExecutor()
         executor.add_node(probe)
         probe.executor = executor
-        readiness_deadline = started + (args.startup_timeout or 300.0)
+        total_wall_limit = args.mission_timeout or 1800.0
+        hard_deadline = started + max(0.0, total_wall_limit)
+        service_deadline = hard_deadline - FINALIZATION_BUDGET_S
+        readiness_deadline = min(
+            started + (args.startup_timeout or 300.0), service_deadline,
+        )
         checks = (
             ('clock_ready', probe.clock_ready),
             ('robot_interfaces_ready', probe.robot_interfaces_ready),
@@ -702,8 +1015,7 @@ def run(args: argparse.Namespace) -> int:
         print(f'total_ready_s={ready_duration:.3f}', flush=True)
         print('FAST_TRIAL_READY', flush=True)
 
-        mission_deadline = None if args.hold_open else (
-            time.monotonic() + (args.mission_timeout or 1800.0))
+        mission_deadline = None if args.hold_open else service_deadline
         while True:
             if launch.poll() is not None:
                 launch_return_code = launch.returncode
@@ -775,6 +1087,9 @@ def run(args: argparse.Namespace) -> int:
             'direct_subprocesses': 1 + int(rviz is not None),
             'peak_runner_rss_bytes': peak_runner_rss,
             'prefix': prefix,
+            'webots_driver_prefix': webots_driver_prefix,
+            'webots_driver_executable': webots_driver_executable,
+            'runtime_provenance': runtime_provenance,
             'nav2': locals().get('nav2_details', {}),
         }
         if attempt is not None:

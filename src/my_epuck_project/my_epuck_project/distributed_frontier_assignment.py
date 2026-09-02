@@ -1,5 +1,6 @@
 """Replicated peer-to-peer two-robot frontier assignment ROS node."""
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
@@ -18,6 +19,7 @@ from my_epuck_interfaces.msg import (
     TaskSnapshot as TaskSnapshotMsg,
     RelativePoseHypothesis,
 )
+from std_msgs.msg import Bool, String
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
@@ -27,6 +29,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from .distributed_assignment.canonical import (
     build_canonical_union,
     canonical_round_id,
+    equivalent_tasks,
     TaskIdentity,
 )
 from .distributed_assignment.failures import (
@@ -38,6 +41,7 @@ from .distributed_assignment.local_nav2 import (
     LocalNav2,
     NavigationOutcome,
     PathEvaluation,
+    path_is_valid_finite,
 )
 from .distributed_assignment.models import (
     Bid,
@@ -71,9 +75,16 @@ from .distributed_assignment.ros_conversion import (
 from .distributed_assignment.scoring import (
     AssignmentWeights,
     choose_pair_assignment,
+    choose_mrtsp_route_assignment,
+    nominal_motion_cost_s,
+    route_overlap,
+    rank_solo_tasks,
 )
-from .distributed_assignment.burgard_assignment import choose_burgard_assignment
-from .distributed_assignment.traffic_scheduler import TrafficDecision, schedule_traffic
+from .distributed_assignment.traffic_scheduler import (
+    TrafficDecision,
+    project_path_progress,
+    schedule_traffic,
+)
 from .round_lifecycle import RoundGeneration
 from .mission_termination import (
     CandidateEvidence,
@@ -81,6 +92,7 @@ from .mission_termination import (
     TerminalReason,
     classify_empty_frontiers,
     summarize_frontier_regions,
+    credible_planner_infrastructure_failure,
     terminal_reason_is_success,
     all_physical_tasks_suppressed,
 )
@@ -95,6 +107,66 @@ def dispatch_delay_elapsed(start_wall_s: float, now_wall_s: float,
     paused Webots startup cannot accidentally release navigation early.
     """
     return delay_s <= 0.0 or now_wall_s - start_wall_s >= delay_s
+
+
+def evidence_hold_active(lease_until_wall_s: float,
+                         now_wall_s: float) -> bool:
+    """Return whether a live evidence-opportunity lease blocks new goals."""
+    return (math.isfinite(float(lease_until_wall_s)) and
+            float(lease_until_wall_s) > float(now_wall_s))
+
+
+def solo_retry_delay_s(retry_count: int) -> float:
+    """Return bounded exponential delay for retryable local failures."""
+    count = max(1, int(retry_count))
+    return min(30.0, 2.0 ** min(count - 1, 5))
+
+
+@dataclass
+class InitialExplorationBarrier:
+    """Replicated mutual-readiness gate for the two-robot local phase.
+
+    This is deliberately a small state machine, independent of ROS transport.
+    Each local allocator owns one instance and observes the same two readiness
+    facts from its own local candidate pipeline and the peer's readiness
+    announcement.  Handoff supersedes the gate while it is still closed.
+    """
+
+    enabled: bool
+    local_ready: bool = False
+    peer_ready: bool = False
+    handoff_complete: bool = False
+    released: bool = False
+
+    def __post_init__(self) -> None:
+        # A single-robot/known-pose instance bypasses the two-peer gate
+        # explicitly; it must not wait for a nonexistent peer.
+        self.released = not bool(self.enabled)
+
+    def observe_local_ready(self) -> None:
+        """Record local readiness idempotently."""
+        self.local_ready = True
+
+    def observe_peer_ready(self) -> None:
+        """Record peer readiness idempotently."""
+        self.peer_ready = True
+
+    def observe_handoff(self) -> None:
+        """Make an accepted canonical handoff supersede local exploration."""
+        self.handoff_complete = True
+
+    def maybe_release(self) -> bool:
+        """Release exactly once when both ready and handoff has not won."""
+        if (self.released or not self.enabled or self.handoff_complete or
+                not (self.local_ready and self.peer_ready)):
+            return False
+        self.released = True
+        return True
+
+    @property
+    def dispatch_allowed(self) -> bool:
+        """Return whether local pre-handoff goal dispatch is permitted."""
+        return self.released and not self.handoff_complete
 
 
 @dataclass
@@ -113,6 +185,38 @@ class RoundWork:
     decision: Optional[PairDecision] = None
     traffic: Optional[TrafficDecision] = None
     decision_published: bool = False
+    mode: str = 'normal'
+    continuation_free_robot_id: str = ''
+    continuation_busy_robot_id: str = ''
+    continuation_commitment_id: str = ''
+
+
+@dataclass(frozen=True)
+class ActiveCommitment:
+    """Replicated immutable description of one dispatched cooperative goal."""
+
+    robot_id: str
+    source_session_id: str
+    source_snapshot_epoch: int
+    canonical_id: str
+    task: CanonicalTask
+    decision_round_id: str
+    decision_hash: str
+    path: tuple[tuple[float, float], ...] = ()
+    path_length_m: float = 0.0
+    heading_cost_rad: float = 0.0
+    commitment_id: str = ''
+
+
+@dataclass(frozen=True)
+class ContinuationContext:
+    """One free robot plus one still-active immutable peer commitment."""
+
+    free_robot_id: str
+    busy_robot_id: str
+    free_snapshot: TaskSnapshot
+    commitment: ActiveCommitment
+    free_tasks: tuple[CanonicalTask, ...]
 
 
 def round_pass_is_current(current_round, expected_round) -> bool:
@@ -129,6 +233,10 @@ class TrafficHold:
     winner_robot_id: str
     snapshot_epochs: tuple[int, int]
     created_steady_s: float
+    winner_path: tuple[tuple[float, float], ...] = ()
+    winner_base_frame: str = ''
+    last_conflict_distance_m: float = 0.0
+    clearance_m: float = 0.05
     winner_observed_active: bool = False
 
 
@@ -144,17 +252,6 @@ STATE_TO_MESSAGE = {
     CoordinatorState.COMPLETE: DistributedExplorationStatus.COMPLETE,
     CoordinatorState.BLOCKED: DistributedExplorationStatus.BLOCKED,
 }
-
-
-def peer_navigation_blocks_dispatch(
-        traffic_scheduler_enabled: bool, peer_active: bool) -> bool:
-    """Return whether a peer's active goal must reserve this dispatcher.
-
-    The reservation is meaningful only when the explicit traffic scheduler is
-    enabled.  The production exploration profile disables that scheduler, in
-    which case independent agreed tasks may be dispatched concurrently.
-    """
-    return bool(traffic_scheduler_enabled and peer_active)
 
 
 FAILURE_TO_MESSAGE = {
@@ -176,18 +273,30 @@ def eligible_solo_tasks(
         completed_signatures: set[str],
         minimum_visible_gain_m: float,
         minimum_ordering_score: float,
-        maximum_path_m: float) -> tuple[PhysicalTask, ...]:
-    """Return locally dispatchable tasks after bounded physical suppression."""
+        selection_policy: str = 'legacy_weighted') -> tuple[PhysicalTask, ...]:
+    """Return locally dispatchable tasks after bounded physical suppression.
+
+    A successful finite Nav2 path is feasible at any distance.  Path length
+    remains available to the local/distributed preference logic and is not a
+    hard eligibility condition.
+    """
     return tuple(
         task for task in tasks
         if task.physical_signature not in hard_failure_signatures
         and task.physical_signature not in completed_signatures
-        and task.visible_reveal_gain >= minimum_visible_gain_m
-        and task.local_ordering_score >= minimum_ordering_score
-        and (
-            task.local_path_length_m <= 0.0 or
-            task.local_path_length_m <= maximum_path_m
-        )
+        and (selection_policy == 'frontier_cost_only' or
+             task.visible_reveal_gain >= minimum_visible_gain_m)
+        and (selection_policy == 'frontier_cost_only' or
+             task.local_ordering_score >= minimum_ordering_score)
+        and task.local_path_valid
+        and math.isfinite(task.local_path_length_m)
+        and task.local_path_length_m >= 0.0
+        and math.isfinite(task.path_heading_cost_rad)
+        and task.path_heading_cost_rad >= 0.0
+        and (selection_policy == 'frontier_cost_only' or
+             math.isfinite(task.local_ordering_score))
+        and (selection_policy == 'frontier_cost_only' or
+             math.isfinite(task.visible_reveal_gain))
     )
 
 
@@ -208,12 +317,34 @@ class DistributedFrontierAssignment(Node):
             'stop_after_handoff', False).value)
         self._phase_gated = bool(self.declare_parameter(
             'phase_gated', False).value)
+        self._shared_nav2_ready_topic = str(self.declare_parameter(
+            'shared_nav2_ready_topic', '').value)
         self._handoff_complete = False
         self._dispatch_enabled = bool(
             self.declare_parameter('dispatch_enabled', False).value,
         )
+        self._initial_peer_readiness_barrier = bool(
+            self.declare_parameter(
+                'initial_peer_readiness_barrier', False,
+            ).value,
+        )
+        self._initial_exploration_barrier = InitialExplorationBarrier(
+            self._initial_peer_readiness_barrier,
+        )
+        self._initial_local_ready_sim_time_s: Optional[float] = None
+        self._initial_local_ready_wall_time_s: Optional[float] = None
+        self._initial_peer_ready_sim_time_s: Optional[float] = None
+        self._initial_peer_ready_wall_time_s: Optional[float] = None
+        self._initial_local_ready_publisher = None
+        self._initial_peer_ready_subscription = None
         self._prehandoff_dispatch_delay_s = max(0.0, float(
             self.declare_parameter('prehandoff_dispatch_delay_s', 0.0).value))
+        self._evidence_hold_timeout_s = max(0.5, float(
+            self.declare_parameter('evidence_hold_timeout_s', 2.0).value))
+        self._evidence_hold_until_wall_s = {
+            'robot1': 0.0,
+            'robot2': 0.0,
+        }
         self._mission_timeout_enabled = bool(
             self.declare_parameter('enable_mission_timeout', False).value,
         )
@@ -255,9 +386,6 @@ class DistributedFrontierAssignment(Node):
         self._minimum_solo_ordering_score = float(
             self.declare_parameter('minimum_solo_ordering_score', 0.0).value,
         )
-        self._maximum_solo_path_m = float(
-            self.declare_parameter('maximum_solo_path_m', 18.0).value,
-        )
         self._post_goal_settle_s = float(
             self.declare_parameter('post_goal_settle_s', 1.0).value,
         )
@@ -275,10 +403,14 @@ class DistributedFrontierAssignment(Node):
         if self._terminal_small_frontier_length_m <= 0.0:
             raise ValueError('terminal_small_frontier_length_m must be positive')
         self._assignment_strategy = str(
-            self.declare_parameter('assignment_strategy', 'burgard').value,
+            self.declare_parameter(
+                'assignment_strategy', 'frontier_mrtsp').value,
         )
-        if self._assignment_strategy not in ('burgard', 'legacy_weighted'):
-            raise ValueError('assignment_strategy must be burgard or legacy_weighted')
+        if self._assignment_strategy not in (
+                'frontier_cost_only', 'frontier_mrtsp'):
+            raise ValueError(
+                'assignment_strategy must be frontier_cost_only or '
+                'frontier_mrtsp')
         self._burgard_beta = float(self.declare_parameter('burgard_beta', 1.0).value)
         self._burgard_sensor_max_range_m = float(self.declare_parameter(
             'burgard_sensor_max_range_m', 11.98,
@@ -292,6 +424,16 @@ class DistributedFrontierAssignment(Node):
         self._traffic_scheduler_enabled = bool(self.declare_parameter(
             'traffic_scheduler_enabled', False,
         ).value)
+        self._synchronized_traffic_test = bool(self.declare_parameter(
+            'synchronized_traffic_test', False,
+        ).value)
+        # Test-only fixture control.  When enabled, the selector below still
+        # uses only real canonical tasks and real Nav2 bid paths; it merely
+        # chooses a conflicting pair so OFF/ON traffic runs exercise the same
+        # adversarial geometry.  It is never enabled by production defaults.
+        self._traffic_test_force_conflict_pair = bool(
+            self.declare_parameter('traffic_test_force_conflict_pair', False).value,
+        )
         self._traffic_robot1_safe_radius_m = float(self.declare_parameter(
             'traffic_robot1_safe_radius_m', 0.08,
         ).value)
@@ -307,12 +449,16 @@ class DistributedFrontierAssignment(Node):
         self._traffic_dispatch_grace_s = float(self.declare_parameter(
             'traffic_dispatch_grace_s', 8.0,
         ).value)
+        self._traffic_conflict_clearance_m = float(self.declare_parameter(
+            'traffic_conflict_clearance_m', 0.05,
+        ).value)
         self._executor_threads = max(1, int(self.declare_parameter(
             'executor_threads', 4).value))
         if (self._burgard_beta < 0.0 or self._burgard_sensor_max_range_m <= 0.0 or
                 self._traffic_robot1_safe_radius_m <= 0.0 or
                 self._traffic_robot2_safe_radius_m <= 0.0 or
-                self._traffic_reference_speed_mps <= 0.0):
+                self._traffic_reference_speed_mps <= 0.0 or
+                self._traffic_conflict_clearance_m < 0.0):
             raise ValueError('Burgard and traffic parameters must be positive')
         self._weights = AssignmentWeights(
             gain=float(self.declare_parameter('weight_gain', 3.0).value),
@@ -332,6 +478,16 @@ class DistributedFrontierAssignment(Node):
             path_cost_scale_m=float(
                 self.declare_parameter('path_cost_scale_m', 12.0).value,
             ),
+            cost_only_reference_linear_speed_mps=float(
+                self.declare_parameter(
+                    'cost_only_reference_linear_speed_mps', 0.13,
+                ).value,
+            ),
+            cost_only_reference_angular_speed_radps=float(
+                self.declare_parameter(
+                    'cost_only_reference_angular_speed_radps', 0.35,
+                ).value,
+            ),
             nearby_goal_distance_m=float(
                 self.declare_parameter('nearby_goal_distance_m', 0.6).value,
             ),
@@ -339,7 +495,12 @@ class DistributedFrontierAssignment(Node):
                 self.declare_parameter('route_corridor_radius_m', 0.16).value,
             ),
             minimum_visible_gain_m=self._minimum_solo_visible_gain_m,
-            maximum_path_length_m=self._maximum_solo_path_m,
+        )
+        self.get_logger().info(
+            'COST_ONLY_MOTION_REFERENCES linear_mps=%.6f angular_radps=%.6f' % (
+                self._weights.cost_only_reference_linear_speed_mps,
+                self._weights.cost_only_reference_angular_speed_radps,
+            )
         )
         self._ledger = SnapshotLedger(self._snapshot_maximum_tasks)
         self._snapshots: dict[str, Received[TaskSnapshot]] = {}
@@ -357,6 +518,19 @@ class DistributedFrontierAssignment(Node):
         # Without this bounded set, resetting the semantic snapshot key after
         # every success can immediately redispatch a tiny residual frontier.
         self._completed_solo_physical_signatures: set[str] = set()
+        # Replicated success state for shared dispatch. The normal success
+        # lifecycle already emits DistributedExplorationEvent, so no new
+        # protocol or permanent spatial ownership is needed. Exact canonical
+        # tasks are suppressed only while they remain in current proposals;
+        # a materially evolved task naturally receives a new identity.
+        self._completed_shared_canonical_ids: set[str] = set()
+        # Successful local routes are bounded history, not a corridor ban.
+        # The solo scorer uses this only when a less-overlapping frontier is
+        # available; necessary transit therefore remains selectable.
+        self._solo_route_history = deque(maxlen=8)
+        self._solo_retry_not_before: dict[str, float] = {}
+        self._solo_retry_counts: dict[str, int] = {}
+        self._active_dispatch_path: tuple[tuple[float, float], ...] = ()
         # Diagnostics-only counters.  These do not alter eligibility or
         # suppression; they separate structural controller failures from
         # transient TF/infrastructure failures for forensic replay.
@@ -372,8 +546,41 @@ class DistributedFrontierAssignment(Node):
         self._last_tick_steady_s = time.monotonic()
         self._last_round_completion_steady_s = 0.0
         self._last_tick_log_key = None
+        # Opt-in allocator attribution for bounded performance experiments.
+        # This is deliberately disabled by default and records aggregate
+        # section timings only; it does not participate in allocation.
+        self._allocator_timing_enabled = os.environ.get(
+            'MY_EPUCK_ALLOCATOR_TIMING', '',
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+        self._allocator_timing_stats = {
+            section: {
+                bucket: {'calls': 0, 'total_wall_s': 0.0,
+                         'max_wall_s': 0.0}
+                for bucket in ('early', 'late')
+            }
+            for section in (
+                'tick_total', 'continue_bidding', 'pair_selection',
+                'traffic_checks', 'consensus_continuation',
+            )
+        }
+        self._allocator_timing_inputs = {
+            bucket: {
+                'candidate_count_total': 0,
+                'candidate_count_calls': 0,
+                'candidate_pairs_input_total': 0,
+                'candidate_pairs_input_calls': 0,
+                'traffic_checks_total': 0,
+            }
+            for bucket in ('early', 'late')
+        }
+        self._allocator_timing_last_log_wall_s = time.monotonic()
         self._coordinator_alive = True
         self._committed = CommittedRound()
+        # Agreed cooperative goals outlive the ephemeral pair round that
+        # selected them.  Each replica retains only the active task/path
+        # needed to protect ownership and evaluate continuation traffic; it
+        # never retains a stale frontier bid vector.
+        self._active_commitments: dict[str, ActiveCommitment] = {}
         self._state = CoordinatorState.WAITING_FOR_INPUTS
         self._state_reason = 'startup'
         self._dispatch_in_progress = False
@@ -382,6 +589,26 @@ class DistributedFrontierAssignment(Node):
         self._active_round_id = ''
         self._active_decision_hash = ''
         self._traffic_hold: Optional[TrafficHold] = None
+        # A conflict-clear event is replicated over the existing event topics.
+        # It permits one fresh pair round while the previous winner is still
+        # travelling, but the winner remains an active reservation if the new
+        # paths conflict again.
+        self._traffic_reallocation_after_clear = False
+        self._released_traffic_winner_robot_id = ''
+        self._last_peer_traffic_clear_key = None
+        self._traffic_test_release_key: Optional[tuple[str, str]] = None
+        self._traffic_test_release_at_sim_s: Optional[float] = None
+        self._traffic_test_release_logged_key: Optional[tuple[str, str]] = None
+        self._traffic_test_ready_key: Optional[tuple[str, str]] = None
+        # Startup evidence is emitted once per allocator process.  These
+        # markers are diagnostics only; the TF gate below is the authority
+        # that prevents an actionable first pair decision from racing Nav2.
+        self._shared_tf_ready_logged = False
+        self._first_nonempty_task_snapshot_logged: set[str] = set()
+        self._first_valid_task_snapshots_logged = False
+        self._first_valid_pair_decision_logged = False
+        self._first_cooperative_goal_logged = False
+        self._last_shared_tf_wait_log_wall_s = 0.0
         # Local-only work is keyed by semantic task content, not heartbeat
         # epoch.  The key is cleared on a terminal result or failure so a
         # fresh path/action attempt still occurs when the previous attempt
@@ -438,10 +665,50 @@ class DistributedFrontierAssignment(Node):
         }
         if not self._phase_gated:
             self._activate_protocol_inputs()
+        elif self._shared_nav2_ready_topic:
+            self._shared_nav2_ready_subscription = self.create_subscription(
+                Bool, self._shared_nav2_ready_topic,
+                self._shared_nav2_ready_callback,
+                QoSProfile(
+                    depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            )
         if self._handoff_gated or self._stop_after_handoff:
             self.create_subscription(
                 RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
                 self._handoff_callback, hypothesis_qos,
+            )
+        if self._local_only and self._initial_peer_readiness_barrier:
+            readiness_qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._initial_local_ready_publisher = self.create_publisher(
+                String,
+                f'/cslam/unknown_pose/{self._robot_id}/initial_local_ready',
+                readiness_qos,
+            )
+            self._initial_peer_ready_subscription = self.create_subscription(
+                String,
+                f'/cslam/unknown_pose/{self._peer_id}/initial_local_ready',
+                self._initial_peer_ready_callback,
+                readiness_qos,
+            )
+            self.get_logger().info(
+                'INITIAL_LOCAL_EXPLORATION_BARRIER robot=%s enabled=true '
+                'peer=%s' % (self._robot_id, self._peer_id))
+        evidence_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        for evidence_robot_id in ('robot1', 'robot2'):
+            self.create_subscription(
+                Bool,
+                f'/cslam/relative_pose/{evidence_robot_id}/'
+                'evidence_acquisition_active',
+                lambda message, robot_id=evidence_robot_id:
+                    self._evidence_status_callback(message, robot_id),
+                evidence_qos,
             )
         self._bid_publisher = self.create_publisher(TaskBidArrayMsg, 'task_bids', qos)
         self._decision_publisher = self.create_publisher(
@@ -456,6 +723,25 @@ class DistributedFrontierAssignment(Node):
         self._event_publisher = self.create_publisher(
             DistributedExplorationEvent, 'distributed_event', 50,
         )
+        if self._synchronized_traffic_test and not self._local_only:
+            traffic_test_qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._traffic_test_ready_publisher = self.create_publisher(
+                String,
+                f'/cslam/traffic_test/dispatch_ready/{self._robot_id}',
+                traffic_test_qos,
+            )
+            self._traffic_test_release_subscription = self.create_subscription(
+                String,
+                '/cslam/traffic_test/dispatch_release',
+                self._traffic_test_release_callback,
+                traffic_test_qos,
+            )
+        else:
+            self._traffic_test_ready_publisher = None
+            self._traffic_test_release_subscription = None
         self._tick_timer = None
         self._status_timer = None
         if not self._phase_gated:
@@ -463,13 +749,13 @@ class DistributedFrontierAssignment(Node):
         interfaces = self._nav2.interface_names()
         self.get_logger().info(
             'DISTRIBUTED_ASSIGNMENT robot=%s peer=%s dispatch=%s strategy=%s '
-            'beta=%.3f path_limit=%.3f sensor_range=%.3f traffic=%s '
+            'beta=%.3f path_cost_scale=%.3f sensor_range=%.3f traffic=%s '
             'terminal_small_frontier_length_m=%.3f '
             'traffic_radii=(%.3f,%.3f) traffic_speed=%.3f compute=%s navigate=%s '
             'local_only=%s no_peer_clients=%s no_cmd_vel=true' % (
                 self._robot_id, self._peer_id, self._dispatch_enabled,
                 self._assignment_strategy, self._burgard_beta,
-                self._maximum_solo_path_m, self._burgard_sensor_max_range_m,
+                self._weights.path_cost_scale_m, self._burgard_sensor_max_range_m,
                 self._traffic_scheduler_enabled,
                 self._terminal_small_frontier_length_m,
                 self._traffic_robot1_safe_radius_m,
@@ -477,6 +763,151 @@ class DistributedFrontierAssignment(Node):
                 interfaces['compute_path'], interfaces['navigate'],
                 self._local_only, self._local_only,
             )
+        )
+
+    def _sim_time_s(self) -> float:
+        """Return current simulation/ROS time for authoritative startup logs."""
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _startup_event(self, event_type: str, **fields) -> None:
+        """Emit one compact startup milestone to ROS logs and the observer."""
+        payload = {
+            'robot_id': self._robot_id,
+            'sim_time_s': self._sim_time_s(),
+            'wall_time_s': time.time(),
+        }
+        payload.update(fields)
+        text = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        self.get_logger().info('%s %s' % (event_type, text))
+        self._emit_event(event_type, text)
+
+    def _publish_initial_local_ready(self, now: float) -> None:
+        """Publish one peer-readable local exploration readiness fact."""
+        barrier = self._initial_exploration_barrier
+        if (not self._initial_peer_readiness_barrier or
+                self._initial_local_ready_publisher is None or
+                barrier.local_ready or barrier.handoff_complete):
+            return
+        sim_time = self._sim_time_s()
+        wall_time = time.time()
+        barrier.observe_local_ready()
+        self._initial_local_ready_sim_time_s = sim_time
+        self._initial_local_ready_wall_time_s = wall_time
+        message = String()
+        message.data = json.dumps({
+            'event': 'INITIAL_LOCAL_READY',
+            'robot_id': self._robot_id,
+            'sim_time_s': sim_time,
+            'wall_time_s': wall_time,
+        }, sort_keys=True, separators=(',', ':'))
+        self._initial_local_ready_publisher.publish(message)
+        self.get_logger().info(
+            'INITIAL_LOCAL_READY robot=%s sim_time_s=%.6f wall_time_s=%.6f' %
+            (self._robot_id, sim_time, wall_time))
+        self._emit_event(
+            'INITIAL_LOCAL_READY', message.data,
+        )
+        self._maybe_release_initial_exploration_barrier()
+
+    def _initial_peer_ready_callback(self, message: String) -> None:
+        """Observe the peer's one-shot readiness announcement idempotently."""
+        if not self._initial_peer_readiness_barrier:
+            return
+        try:
+            payload = json.loads(str(message.data))
+            peer_id = str(payload['robot_id'])
+            if str(payload.get('event', '')) != 'INITIAL_LOCAL_READY':
+                return
+            sim_time = float(payload['sim_time_s'])
+            wall_time = float(payload['wall_time_s'])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.get_logger().warning(
+                'INITIAL_PEER_READY_REJECTED robot=%s reason=malformed_payload' %
+                self._robot_id)
+            return
+        if peer_id != self._peer_id:
+            self.get_logger().warning(
+                'INITIAL_PEER_READY_REJECTED robot=%s peer=%s expected=%s' %
+                (self._robot_id, peer_id, self._peer_id))
+            return
+        if self._initial_exploration_barrier.peer_ready:
+            return
+        self._initial_exploration_barrier.observe_peer_ready()
+        self._initial_peer_ready_sim_time_s = sim_time
+        self._initial_peer_ready_wall_time_s = wall_time
+        self.get_logger().info(
+            'INITIAL_PEER_READY_OBSERVED robot=%s peer_robot_id=%s '
+            'peer_sim_time_s=%.6f peer_wall_time_s=%.6f observed_sim_time_s=%.6f' %
+            (self._robot_id, peer_id, sim_time, wall_time, self._sim_time_s()))
+        self._maybe_release_initial_exploration_barrier()
+
+    def _maybe_release_initial_exploration_barrier(self) -> None:
+        """Release local dispatch only after both replicas are ready."""
+        barrier = self._initial_exploration_barrier
+        if not barrier.maybe_release():
+            return
+        sim_time = self._sim_time_s()
+        wall_time = time.time()
+        self.get_logger().info(
+            'INITIAL_EXPLORATION_BARRIER_RELEASED robot=%s sim_time_s=%.6f '
+            'wall_time_s=%.6f local_ready=%s peer_ready=%s '
+            'local_ready_sim_time_s=%.6f peer_ready_sim_time_s=%.6f' % (
+                self._robot_id, sim_time, wall_time, barrier.local_ready,
+                barrier.peer_ready,
+                self._initial_local_ready_sim_time_s or 0.0,
+                self._initial_peer_ready_sim_time_s or 0.0,
+            ))
+        self._emit_event(
+            'INITIAL_EXPLORATION_BARRIER_RELEASED', json.dumps({
+                'local_ready_sim_time_s': self._initial_local_ready_sim_time_s,
+                'local_ready_wall_time_s': self._initial_local_ready_wall_time_s,
+                'peer_ready_sim_time_s': self._initial_peer_ready_sim_time_s,
+                'peer_ready_wall_time_s': self._initial_peer_ready_wall_time_s,
+                'release_sim_time_s': sim_time,
+                'release_wall_time_s': wall_time,
+            }, sort_keys=True, separators=(',', ':')),
+        )
+
+    def _traffic_test_release_callback(self, message: String) -> None:
+        """Record a per-round simulated dispatch boundary from the test barrier."""
+        try:
+            payload = json.loads(str(message.data))
+            key = (str(payload['round_id']), str(payload['decision_hash']))
+            release_at = float(payload['release_at_sim_time_s'])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return
+        if not key[0] or not key[1]:
+            return
+        self._traffic_test_release_key = key
+        self._traffic_test_release_at_sim_s = release_at
+        sim_time = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(
+            'TRAFFIC_TEST_DISPATCH_RELEASE_RECEIVED robot=%s round=%s '
+            'decision_hash=%s release_at_sim_time_s=%.6f received_sim_time_s=%.6f' %
+            (self._robot_id, key[0], key[1], release_at, sim_time),
+        )
+
+    def _publish_traffic_test_ready(self, round_work: RoundWork) -> None:
+        """Advertise one agreed round to the test-only common barrier."""
+        if self._traffic_test_ready_publisher is None:
+            return
+        if round_work.decision is None:
+            return
+        key = (round_work.round_id, round_work.decision.decision_hash)
+        if key == self._traffic_test_ready_key:
+            return
+        payload = String()
+        payload.data = json.dumps({
+            'robot_id': self._robot_id,
+            'round_id': key[0],
+            'decision_hash': key[1],
+            'sim_time_s': self.get_clock().now().nanoseconds / 1e9,
+        }, sort_keys=True, separators=(',', ':'))
+        self._traffic_test_ready_publisher.publish(payload)
+        self._traffic_test_ready_key = key
+        self.get_logger().info(
+            'TRAFFIC_TEST_DISPATCH_READY robot=%s round=%s decision_hash=%s' %
+            (self._robot_id, key[0], key[1]),
         )
 
     def _activate_protocol_inputs(self) -> None:
@@ -518,6 +949,15 @@ class DistributedFrontierAssignment(Node):
                         f'/{robot_id}/exploration_failure',
                         self._failure_callback, qos),
                 ])
+            # Traffic-clearance is a replicated lifecycle event, not a
+            # central command.  It tells the other allocator to rebuild the
+            # same fresh round while the prior winner may still be navigating.
+            self._phase_subscriptions.append(
+                self.create_subscription(
+                    DistributedExplorationEvent,
+                    f'/{self._peer_id}/distributed_event',
+                    self._peer_event_callback, qos),
+            )
 
     def _activate_assignment_timers(self) -> None:
         """Start assignment work only after the canonical handoff."""
@@ -539,6 +979,14 @@ class DistributedFrontierAssignment(Node):
             'UNKNOWN_POSE_PHASE shared_assignment_active=true '
             'protocol_inputs=true timers=true')
 
+    def _shared_nav2_ready_callback(self, message: Bool) -> None:
+        if not bool(message.data):
+            return
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s shared_nav2_barrier_received=true' %
+            self._robot_id)
+        self._activate_shared_phase()
+
     def _handoff_callback(self, message: RelativePoseHypothesis) -> None:
         """Switch local-only dispatch off only after canonical acceptance."""
         if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
@@ -546,10 +994,27 @@ class DistributedFrontierAssignment(Node):
         if self._handoff_complete:
             return
         self._handoff_complete = True
+        was_waiting_for_initial_barrier = bool(
+            self._local_only and self._initial_peer_readiness_barrier and
+            not self._initial_exploration_barrier.released)
+        self._initial_exploration_barrier.observe_handoff()
         self._activate_shared_phase()
         self._dispatch_enabled = False if self._local_only else True
         if self._local_only and self._nav2.local_goal_active:
             self._nav2.cancel_navigation()
+        if was_waiting_for_initial_barrier:
+            reason = json.dumps({
+                'handoff_sim_time_s': self._sim_time_s(),
+                'handoff_wall_time_s': time.time(),
+                'local_ready': self._initial_exploration_barrier.local_ready,
+                'peer_ready': self._initial_exploration_barrier.peer_ready,
+            }, sort_keys=True, separators=(',', ':'))
+            self.get_logger().info(
+                'INITIAL_LOCAL_EXPLORATION_SKIPPED_DUE_TO_HANDOFF '
+                'robot=%s reason=%s' % (self._robot_id, reason))
+            self._emit_event(
+                'INITIAL_LOCAL_EXPLORATION_SKIPPED_DUE_TO_HANDOFF', reason,
+            )
         if self._local_only and self._stop_after_handoff:
             self._stop_local_phase()
         self.get_logger().info(
@@ -696,6 +1161,17 @@ class DistributedFrontierAssignment(Node):
         self._snapshots[snapshot.source_robot_id] = receive(
             snapshot, snapshot.validity_s, now,
         )
+        if (not self._local_only and snapshot.tasks and
+                snapshot.source_robot_id not in
+                self._first_nonempty_task_snapshot_logged):
+            self._first_nonempty_task_snapshot_logged.add(
+                snapshot.source_robot_id)
+            self._startup_event(
+                'FIRST_NONEMPTY_TASK_SNAPSHOT_%s' %
+                snapshot.source_robot_id.upper(),
+                snapshot_epoch=snapshot.epoch,
+                task_count=len(snapshot.tasks),
+            )
         if snapshot.source_robot_id == self._peer_id:
             previous_session = (
                 '' if previous is None else previous.value.source_session_id
@@ -704,6 +1180,9 @@ class DistributedFrontierAssignment(Node):
                 self._emit_event(
                     'PEER_SESSION_RESTART',
                     'fresh peer session superseded prior session',
+                )
+                self._clear_active_commitment(
+                    self._peer_id, 'peer session restarted; commitment invalidated',
                 )
                 if self._nav2.local_goal_active:
                     self._nav2.cancel_navigation()
@@ -741,6 +1220,7 @@ class DistributedFrontierAssignment(Node):
         if message.source_robot_id != self._peer_id:
             return
         peer_session = uuid_to_text(message.source_session_id)
+        prior_commitment = self._active_commitments.get(self._peer_id)
         if peer_session:
             # Status is the peer liveness heartbeat.  Candidate snapshots are
             # proposals and may legitimately stop while the peer navigates.
@@ -748,6 +1228,18 @@ class DistributedFrontierAssignment(Node):
         self._peer_status = receive(
             message, duration_to_seconds(message.validity), time.monotonic(),
         )
+        if prior_commitment is not None:
+            peer_active = bool(
+                message.local_nav_goal_active or
+                message.state == DistributedExplorationStatus.NAVIGATING
+            )
+            if (not peer_active or
+                    str(message.active_canonical_task_id) !=
+                    prior_commitment.canonical_id or
+                    peer_session != prior_commitment.source_session_id):
+                self._clear_active_commitment(
+                    self._peer_id, 'peer active commitment ended or changed',
+                )
 
     def _failure_callback(self, message: ExplorationFailure) -> None:
         if message.source_robot_id == self._robot_id:
@@ -759,6 +1251,42 @@ class DistributedFrontierAssignment(Node):
                 message.physical_task_signature,
                 duration_to_seconds(message.validity),
             )
+
+    def _peer_event_callback(self, message: DistributedExplorationEvent) -> None:
+        """Replicate event-driven traffic release without a coordinator."""
+        if message.source_robot_id != self._peer_id:
+            return
+        if (message.event_type.startswith('NAVIGATION_') and
+                message.canonical_task_id):
+            commitment = self._active_commitments.get(self._peer_id)
+            if (commitment is not None and
+                    str(message.canonical_task_id) == commitment.canonical_id):
+                self._clear_active_commitment(
+                    self._peer_id, 'peer navigation commitment terminated',
+                )
+        if (message.event_type == 'NAVIGATION_SUCCEEDED' and
+                message.canonical_task_id):
+            self._completed_shared_canonical_ids.add(
+                str(message.canonical_task_id))
+            self.get_logger().info(
+                'COMPLETED_FRONTIER_REPLICATED robot=%s peer=%s task=%s' % (
+                    self._robot_id, self._peer_id,
+                    message.canonical_task_id))
+            return
+        if message.event_type != 'TRAFFIC_CONFLICT_CLEARED':
+            return
+        key = (str(message.round_id), str(message.decision_hash))
+        if key == self._last_peer_traffic_clear_key:
+            return
+        self._last_peer_traffic_clear_key = key
+        self._traffic_reallocation_after_clear = True
+        # The clear event is emitted by the waiting robot, so its peer is the
+        # committed winner.  Keep that identity as an active reservation if a
+        # newly rebuilt pair happens to conflict again.
+        self._released_traffic_winner_robot_id = self._peer_id
+        self._reset_round(
+            'peer traffic conflict cleared; rebuilding from fresh proposals',
+        )
 
     def _record_hard_failure(self, signature: str, requested_ttl_s: float) -> None:
         """Record bounded suppression for directly observed hard evidence."""
@@ -790,6 +1318,281 @@ class DistributedFrontierAssignment(Node):
         return received.value if received is not None and received.fresh(now) else None
 
     @staticmethod
+    def _finite_path_samples(path: tuple[tuple[float, float], ...]) -> bool:
+        """Return whether a retained commitment has usable traffic geometry."""
+        return bool(path) and all(
+            math.isfinite(float(point[0])) and math.isfinite(float(point[1]))
+            for point in path
+        )
+
+    def _remember_active_commitments(self, round_work: RoundWork) -> None:
+        """Retain only the agreed task/path needed by future continuation rounds."""
+        if round_work.decision is None:
+            return
+        batches = {
+            'robot1': self._bid_batches.get('robot1'),
+            'robot2': self._bid_batches.get('robot2'),
+        }
+        tasks = {task.canonical_id: task for task in round_work.union.tasks}
+        for robot_id in ('robot1', 'robot2'):
+            task_id = (
+                round_work.decision.robot1_task_id if robot_id == 'robot1'
+                else round_work.decision.robot2_task_id
+            )
+            if not task_id:
+                continue
+            task = tasks.get(task_id)
+            received = batches[robot_id]
+            if task is None or received is None:
+                continue
+            bid = next(
+                (item for item in received.value.bids
+                 if item.canonical_task_id == task_id), None,
+            )
+            if (bid is None or not bid.path_valid or
+                    not math.isfinite(float(bid.path_length_m)) or
+                    not self._finite_path_samples(tuple(bid.path))):
+                continue
+            # Normal rounds store snapshots in robot order.  A continuation
+            # round deliberately stores the free snapshot beside a synthetic
+            # busy snapshot, so always bind provenance by source identity.
+            source_snapshot = next(
+                (snapshot for snapshot in round_work.snapshots
+                 if snapshot.source_robot_id == robot_id),
+                None,
+            )
+            if source_snapshot is None:
+                continue
+            commitment_id = hashlib.sha256(repr((
+                robot_id, source_snapshot.source_session_id,
+                source_snapshot.epoch, task_id,
+                round_work.round_id, round_work.decision.decision_hash,
+            )).encode('utf-8')).hexdigest()
+            self._active_commitments[robot_id] = ActiveCommitment(
+                robot_id=robot_id,
+                source_session_id=source_snapshot.source_session_id,
+                source_snapshot_epoch=source_snapshot.epoch,
+                canonical_id=task_id,
+                task=task,
+                decision_round_id=round_work.round_id,
+                decision_hash=round_work.decision.decision_hash,
+                path=tuple(bid.path),
+                path_length_m=float(bid.path_length_m),
+                heading_cost_rad=float(bid.heading_cost),
+                commitment_id=commitment_id,
+            )
+
+    def _clear_active_commitment(self, robot_id: str, reason: str) -> None:
+        """Drop one task commitment and invalidate any continuation using it."""
+        if robot_id not in self._active_commitments:
+            return
+        self._active_commitments.pop(robot_id, None)
+        if (self._round is not None and
+                self._round.mode == 'continuation' and
+                (self._round.continuation_busy_robot_id == robot_id or
+                 self._round.continuation_free_robot_id == robot_id)):
+            self._reset_round(reason)
+
+    def _continuation_context(self, now: float) -> Optional[ContinuationContext]:
+        """Return a safe one-free/one-busy context, without using busy proposals."""
+        peer = self._peer_status
+        if peer is None or not peer.fresh(now):
+            return None
+        local_active = bool(
+            self._nav2.local_goal_active or self._state == CoordinatorState.NAVIGATING
+        )
+        peer_active = bool(
+            peer.value.local_nav_goal_active or
+            peer.value.state == DistributedExplorationStatus.NAVIGATING
+        )
+        if local_active == peer_active:
+            return None
+        busy_robot_id = self._robot_id if local_active else self._peer_id
+        free_robot_id = self._peer_id if local_active else self._robot_id
+        commitment = self._active_commitments.get(busy_robot_id)
+        if commitment is None or not self._finite_path_samples(commitment.path):
+            return None
+        if busy_robot_id == self._peer_id:
+            if (str(peer.value.active_canonical_task_id) != commitment.canonical_id or
+                    uuid_to_text(peer.value.source_session_id) !=
+                    commitment.source_session_id):
+                return None
+        elif (self._active_task is not None and
+              self._active_task.canonical_id != commitment.canonical_id):
+            return None
+        free_snapshot = self._fresh_snapshot(free_robot_id, now)
+        if free_snapshot is None:
+            return None
+        if free_robot_id == 'robot1':
+            free_union = build_canonical_union(
+                free_snapshot.tasks, (), self._maximum_union_tasks,
+            )
+        else:
+            free_union = build_canonical_union(
+                (), free_snapshot.tasks, self._maximum_union_tasks,
+            )
+        free_tasks = tuple(
+            task for task in free_union.tasks
+            if task.canonical_id != commitment.canonical_id and not any(
+                equivalent_tasks(member, committed_member)
+                for member in task.members
+                for committed_member in commitment.task.members
+            )
+        )
+        return ContinuationContext(
+            free_robot_id=free_robot_id,
+            busy_robot_id=busy_robot_id,
+            free_snapshot=free_snapshot,
+            commitment=commitment,
+            free_tasks=free_tasks,
+        )
+
+    def _continuation_round_id(
+            self, context: ContinuationContext, content_fingerprint: str) -> str:
+        """Hash only free proposal content and the immutable busy commitment."""
+        return hashlib.sha256(repr((
+            'continuation', context.free_robot_id,
+            context.free_snapshot.source_session_id,
+            context.free_snapshot.epoch,
+            context.commitment.robot_id,
+            context.commitment.commitment_id,
+            content_fingerprint,
+        )).encode('utf-8')).hexdigest()
+
+    def _activate_continuation_round(
+            self, context: ContinuationContext) -> bool:
+        """Install a continuation round or retain its unchanged generation."""
+        if not context.free_tasks:
+            if (self._round is not None and
+                    self._round.mode == 'continuation'):
+                self._reset_round('no independent continuation task remains')
+            self._transition(
+                CoordinatorState.WAITING_FOR_INPUTS,
+                'no independent continuation task remains',
+            )
+            return False
+        commitment = context.commitment
+        busy_snapshot = TaskSnapshot(
+            source_robot_id=commitment.robot_id,
+            source_session_id=commitment.source_session_id,
+            epoch=commitment.source_snapshot_epoch,
+            map_revision=max((member.source_map_revision
+                               for member in commitment.task.members), default=0),
+            map_fingerprint='active-commitment:' + commitment.commitment_id,
+            generation_ros_ns=max((member.generation_ros_ns
+                                   for member in commitment.task.members), default=0),
+            validity_s=self._bid_validity_s,
+            tasks=commitment.task.members,
+        )
+        if context.free_robot_id == 'robot1':
+            snapshots = (context.free_snapshot, busy_snapshot)
+        else:
+            snapshots = (busy_snapshot, context.free_snapshot)
+        union_tasks = tuple(sorted(
+            (commitment.task,) + context.free_tasks,
+            key=lambda task: task.canonical_id,
+        ))
+        union_hash = hashlib.sha256(repr(tuple(
+            task.canonical_id for task in union_tasks
+        )).encode('utf-8')).hexdigest()
+        union = CanonicalUnion(tasks=union_tasks, union_hash=union_hash)
+        content_fingerprint = self._snapshot_content_fingerprint(*snapshots)
+        round_id = self._continuation_round_id(context, content_fingerprint)
+        current = self._round
+        if (current is not None and current.mode == 'continuation' and
+                current.round_id == round_id and
+                current.continuation_commitment_id == commitment.commitment_id):
+            return True
+        new_round = RoundWork(
+            round_id=round_id,
+            union=union,
+            snapshots=snapshots,
+            query_tasks=context.free_tasks,
+            content_fingerprint=content_fingerprint,
+            mode='continuation',
+            continuation_free_robot_id=context.free_robot_id,
+            continuation_busy_robot_id=context.busy_robot_id,
+            continuation_commitment_id=commitment.commitment_id,
+        )
+        generation = self._activate_round(new_round, 'new continuation round')
+        self._bid_batches.clear()
+        self._peer_decision = None
+        self._committed = CommittedRound()
+        self._transition(CoordinatorState.BIDDING, 'new continuation round')
+        self._log_union(new_round)
+        self._emit_event(
+            'CONTINUATION_ROUND_STARTED',
+            json.dumps({
+                'mode': 'continuation',
+                'free_robot': context.free_robot_id,
+                'busy_robot': context.busy_robot_id,
+                'commitment_id': commitment.commitment_id,
+            }, sort_keys=True, separators=(',', ':')),
+        )
+        return bool(generation >= 0)
+
+    def _continuation_busy_batch(
+            self, round_work: RoundWork) -> Optional[BidBatch]:
+        """Create a deterministic one-task bid for the fixed active commitment."""
+        commitment = self._active_commitments.get(
+            round_work.continuation_busy_robot_id,
+        )
+        if commitment is None or commitment.commitment_id != \
+                round_work.continuation_commitment_id:
+            return None
+        source_stamp = max((member.generation_ros_ns
+                            for member in commitment.task.members), default=0)
+        return BidBatch(
+            round_id=round_work.round_id,
+            union_hash=round_work.union.union_hash,
+            source_robot_id=commitment.robot_id,
+            source_session_id=commitment.source_session_id,
+            source_snapshot_epoch=commitment.source_snapshot_epoch,
+            validity_s=self._bid_validity_s,
+            bids=(Bid(
+                canonical_task_id=commitment.canonical_id,
+                path_valid=True,
+                path_length_m=commitment.path_length_m,
+                estimated_travel_cost=commitment.path_length_m,
+                heading_cost=commitment.heading_cost_rad,
+                own_utility_contribution=0.0,
+                task_generation_ros_ns=source_stamp,
+                path_query_ros_ns=source_stamp,
+                path=commitment.path,
+            ),),
+        )
+
+    def _continuation_bid_batches(
+            self, now: float, round_work: RoundWork) -> Optional[
+                tuple[BidBatch, BidBatch]]:
+        """Validate only the free robot's exchanged batch plus fixed peer state."""
+        busy_batch = self._continuation_busy_batch(round_work)
+        if busy_batch is None:
+            return None
+        free_received = self._bid_batches.get(
+            round_work.continuation_free_robot_id,
+        )
+        if free_received is None:
+            return None
+        batches = {
+            busy_batch.source_robot_id: receive(
+                busy_batch, busy_batch.validity_s, now,
+            ),
+            round_work.continuation_free_robot_id: free_received,
+        }
+        output = []
+        for index, robot_id in enumerate(('robot1', 'robot2')):
+            snapshot = round_work.snapshots[index]
+            received = batches.get(robot_id)
+            if received is None or not bid_batch_valid(
+                    received, now, robot_id, snapshot.source_session_id,
+                    snapshot.epoch, round_work.round_id,
+                    round_work.union.union_hash, True):
+                return None
+            output.append(received.value)
+        return output[0], output[1]
+
+    @staticmethod
     def _snapshot_content_fingerprint(
             first: TaskSnapshot, second: TaskSnapshot) -> str:
         """Fingerprint task content while ignoring epoch-only heartbeats."""
@@ -805,8 +1608,12 @@ class DistributedFrontierAssignment(Node):
                     tuple(round(value, 3) for value in task.bounds.maximum),
                     round(task.visible_reveal_gain, 4),
                     round(task.local_ordering_score, 4),
-                    bool(task.local_path_valid),
-                    round(task.local_path_length_m, 3),
+                    int(getattr(task, 'mrtsp_route_rank', 2 ** 32 - 1)),
+                    int(getattr(task, 'mrtsp_route_generation', 0)),
+                    str(getattr(task, 'mrtsp_solver', '')),
+                    bool(getattr(task, 'local_path_valid', False)),
+                    round(getattr(task, 'local_path_length_m', 0.0), 3),
+                    round(getattr(task, 'path_heading_cost_rad', 0.0), 3),
                 ))
             payload.append((snapshot.source_robot_id, tuple(tasks)))
         return hashlib.sha256(repr(tuple(payload)).encode('utf-8')).hexdigest()
@@ -895,7 +1702,118 @@ class DistributedFrontierAssignment(Node):
             ),
         )
 
+    def _evidence_status_callback(self, message: Bool,
+                                  evidence_robot_id: str) -> None:
+        """Refresh or clear the bounded local evidence-opportunity lease."""
+        now = time.monotonic()
+        if bool(message.data):
+            was_active = evidence_hold_active(
+                self._evidence_hold_until_wall_s[evidence_robot_id], now)
+            self._evidence_hold_until_wall_s[evidence_robot_id] = (
+                now + self._evidence_hold_timeout_s)
+            if not was_active:
+                self.get_logger().info(
+                    'EVIDENCE_ACQUISITION_HOLD robot=%s source=%s '
+                    'active=true lease_s=%.2f' %
+                    (self._robot_id, evidence_robot_id,
+                     self._evidence_hold_timeout_s))
+        else:
+            was_active = evidence_hold_active(
+                self._evidence_hold_until_wall_s[evidence_robot_id], now)
+            self._evidence_hold_until_wall_s[evidence_robot_id] = 0.0
+            if was_active:
+                self.get_logger().info(
+                    'EVIDENCE_ACQUISITION_HOLD robot=%s source=%s '
+                    'active=false' % (self._robot_id, evidence_robot_id))
+            # Lease state is refreshed independently for each publisher;
+            # expiry is evaluated by the dispatch tick.
+
+    def _allocator_timing_bucket(self) -> Optional[str]:
+        """Return the requested simulation-time attribution window."""
+        if not self._allocator_timing_enabled:
+            return None
+        sim_time_s = self.get_clock().now().nanoseconds / 1e9
+        if 50.0 <= sim_time_s < 100.0:
+            return 'early'
+        if 280.0 <= sim_time_s <= 330.0:
+            return 'late'
+        return None
+
+    def _allocator_timing_begin(self):
+        """Begin one aggregate diagnostic section measurement."""
+        bucket = self._allocator_timing_bucket()
+        if bucket is None:
+            return None
+        return time.perf_counter(), bucket
+
+    def _allocator_timing_record(self, section: str, token) -> None:
+        """Accumulate one section measurement without per-call logging."""
+        if token is None:
+            return
+        started, bucket = token
+        elapsed = max(0.0, time.perf_counter() - started)
+        entry = self._allocator_timing_stats[section][bucket]
+        entry['calls'] += 1
+        entry['total_wall_s'] += elapsed
+        entry['max_wall_s'] = max(entry['max_wall_s'], elapsed)
+
+    def _allocator_timing_add_inputs(
+            self, bucket: Optional[str], candidate_count: int = 0,
+            candidate_pairs_input: int = 0,
+            traffic_checks: int = 0) -> None:
+        """Record call-site input cardinalities for the same two windows."""
+        if bucket is None:
+            return
+        entry = self._allocator_timing_inputs[bucket]
+        if candidate_count:
+            entry['candidate_count_total'] += int(candidate_count)
+            entry['candidate_count_calls'] += 1
+        if candidate_pairs_input:
+            entry['candidate_pairs_input_total'] += int(candidate_pairs_input)
+            entry['candidate_pairs_input_calls'] += 1
+        if traffic_checks:
+            entry['traffic_checks_total'] += int(traffic_checks)
+
+    def _allocator_timing_timed_call(self, section: str, callback, *args,
+                                     **kwargs):
+        """Time an existing allocator call while preserving its return value."""
+        token = self._allocator_timing_begin()
+        try:
+            return callback(*args, **kwargs)
+        finally:
+            self._allocator_timing_record(section, token)
+
+    def _allocator_timing_maybe_log(self) -> None:
+        """Emit one compact cumulative snapshot periodically when enabled."""
+        if not self._allocator_timing_enabled:
+            return
+        now = time.monotonic()
+        if now - self._allocator_timing_last_log_wall_s < 5.0:
+            return
+        self._allocator_timing_last_log_wall_s = now
+        payload = {
+            'robot': self._robot_id,
+            'sim_time_s': self.get_clock().now().nanoseconds / 1e9,
+            'stats': self._allocator_timing_stats,
+            'inputs': self._allocator_timing_inputs,
+        }
+        self.get_logger().info(
+            'ALLOCATOR_TIMING_SUMMARY %s' % json.dumps(
+                payload, sort_keys=True, separators=(',', ':')),
+        )
+
     def _tick(self) -> None:
+        """Run one allocator tick and optionally attribute its wall time."""
+        if not self._allocator_timing_enabled:
+            return self._tick_impl()
+        token = self._allocator_timing_begin()
+        try:
+            return self._tick_impl()
+        finally:
+            self._allocator_timing_record('tick_total', token)
+            self._allocator_timing_maybe_log()
+
+    def _tick_impl(self) -> None:
         now = time.monotonic()
         self._last_tick_steady_s = now
         tick_round = self._round
@@ -916,6 +1834,13 @@ class DistributedFrontierAssignment(Node):
                 return
             if self._nav2.local_goal_active or self._dispatch_in_progress:
                 return
+            if any(evidence_hold_active(lease, now)
+                   for lease in self._evidence_hold_until_wall_s.values()):
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'unknown-pose evidence acquisition opportunity active',
+                )
+                return
             local = self._fresh_snapshot(self._robot_id, now)
             if local is not None:
                 if (not self._handoff_complete and
@@ -923,6 +1848,14 @@ class DistributedFrontierAssignment(Node):
                             self._dispatch_hold_started_steady_s, now,
                             self._prehandoff_dispatch_delay_s)):
                     return
+                if self._initial_peer_readiness_barrier:
+                    self._publish_initial_local_ready(now)
+                    if not self._initial_exploration_barrier.dispatch_allowed:
+                        self._transition(
+                            CoordinatorState.WAITING_FOR_INPUTS,
+                            'waiting for both robots initial local readiness',
+                        )
+                        return
                 self._continue_degraded_solo(local)
             return
         if self._terminal or self._state == CoordinatorState.COMPLETE:
@@ -956,58 +1889,61 @@ class DistributedFrontierAssignment(Node):
         if self._traffic_hold is not None:
             self._continue_traffic_hold(now)
             return
-        if self._nav2.local_goal_active or self._dispatch_in_progress:
-            return
-        # When traffic scheduling is enabled, a healthy peer goal is an
-        # already-issued local Nav2 commitment, so defer a new dispatch until
-        # its terminal result.  With traffic scheduling disabled (the normal
-        # cooperative-exploration profile), this guard must not serialize the
-        # team: an idle robot is allowed to dispatch an independently agreed
-        # task while its peer is navigating.
+        # An active peer goal is not a global assignment barrier.  The idle
+        # robot may receive an independently agreed task while its peer keeps
+        # its existing commitment.  Any actual path conflict is still handled
+        # by the finalized traffic scheduler after the pair is selected.
         peer_status = self._peer_status
         peer_active = bool(
             peer_status is not None and peer_status.fresh(now) and
             (peer_status.value.local_nav_goal_active or
              peer_status.value.state == DistributedExplorationStatus.NAVIGATING)
         )
-        if peer_navigation_blocks_dispatch(
-                self._traffic_scheduler_enabled, peer_active):
-            self._transition(
-                CoordinatorState.WAITING_FOR_INPUTS,
-                'peer active local NavigateToPose retains traffic priority',
-            )
-            return
+        if (self._traffic_reallocation_after_clear and
+                self._released_traffic_winner_robot_id == self._peer_id and
+                not peer_active):
+            # The old winner has already become terminal.  The temporary
+            # replicated reservation is no longer needed for a new round.
+            self._traffic_reallocation_after_clear = False
+            self._released_traffic_winner_robot_id = ''
         if now < self._settle_until_steady_s:
             return
-        first = self._fresh_snapshot('robot1', now)
-        second = self._fresh_snapshot('robot2', now)
-        if first is None or second is None:
-            peer_status = self._peer_status
-            peer_status_fresh = peer_status is not None and peer_status.fresh(now)
-            peer_navigating = bool(
-                peer_status_fresh and
-                (peer_status.value.local_nav_goal_active or
-                 (peer_status.value.state == DistributedExplorationStatus.NAVIGATING and
-                  bool(peer_status.value.active_canonical_task_id)))
-            )
-            if peer_navigation_blocks_dispatch(
-                    self._traffic_scheduler_enabled, peer_navigating):
-                self._transition(
-                    CoordinatorState.WAITING_FOR_INPUTS,
-                    'peer active assignment heartbeat; awaiting fresh proposal',
-                )
-                return
-            if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
-                self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
-                local = first if self._robot_id == 'robot1' else second
-                if local is not None:
-                    self._continue_degraded_solo(local)
-            else:
-                self._transition(
-                    CoordinatorState.WAITING_FOR_INPUTS,
-                    'fresh task snapshots from both source sessions required',
-                )
+        continuation = self._allocator_timing_timed_call(
+            'consensus_continuation', self._continuation_context, now,
+        )
+        if (continuation is None and self._round is not None and
+                self._round.mode == 'continuation'):
+            self._reset_round('continuation commitment no longer valid')
             return
+        continuation_active = continuation is not None
+        if continuation_active:
+            if not self._allocator_timing_timed_call(
+                    'consensus_continuation',
+                    self._activate_continuation_round, continuation):
+                return
+        if ((self._nav2.local_goal_active and
+             not self._traffic_reallocation_after_clear) or
+                self._dispatch_in_progress) and not continuation_active:
+            return
+        if continuation_active:
+            if self._round is None:
+                return
+            first, second = self._round.snapshots
+        else:
+            first = self._fresh_snapshot('robot1', now)
+            second = self._fresh_snapshot('robot2', now)
+            if first is None or second is None:
+                if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
+                    self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
+                    local = first if self._robot_id == 'robot1' else second
+                    if local is not None:
+                        self._continue_degraded_solo(local)
+                else:
+                    self._transition(
+                        CoordinatorState.WAITING_FOR_INPUTS,
+                        'fresh task snapshots from both source sessions required',
+                    )
+                return
         # Terminal significance is evaluated from the unique physical
         # frontier evidence, not from whether tiny regions happened to become
         # allocator tasks.  This prevents a 0.06--0.18 m residual fragment
@@ -1021,11 +1957,17 @@ class DistributedFrontierAssignment(Node):
                 if self._consider_completion(now):
                     return
                 return
-        round_id = canonical_round_id(
-            TaskIdentity('robot1', first.source_session_id, first.epoch),
-            TaskIdentity('robot2', second.source_session_id, second.epoch),
-        )
-        content_fingerprint = self._snapshot_content_fingerprint(first, second)
+        if continuation_active:
+            if self._round is None:
+                return
+            round_id = self._round.round_id
+            content_fingerprint = self._round.content_fingerprint
+        else:
+            round_id = canonical_round_id(
+                TaskIdentity('robot1', first.source_session_id, first.epoch),
+                TaskIdentity('robot2', second.source_session_id, second.epoch),
+            )
+            content_fingerprint = self._snapshot_content_fingerprint(first, second)
         current_round = self._round
         if (
                 current_round is not None and current_round.decision is not None and
@@ -1060,6 +2002,11 @@ class DistributedFrontierAssignment(Node):
             union = build_canonical_union(
                 first.tasks, second.tasks, self._maximum_union_tasks,
             )
+            live_ids = {task.canonical_id for task in union.tasks}
+            # Completion is semantic rather than timed: retaining only IDs
+            # still proposed blocks residual redispatch; disappearance lets
+            # a later materially different frontier become actionable.
+            self._completed_shared_canonical_ids.intersection_update(live_ids)
             new_round = RoundWork(
                 round_id=round_id,
                 union=union,
@@ -1083,42 +2030,133 @@ class DistributedFrontierAssignment(Node):
             return
         if round_work.union.tasks:
             self._completion_candidate_since_steady_s = None
-        if round_work.local_batch is None:
+        if (round_work.local_batch is None and
+                not (continuation_active and
+                     self._robot_id == continuation.busy_robot_id)):
             self._continue_bidding(round_work, generation)
             return
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'before bid validation')
             return
-        if not self._both_bid_batches_valid(now, round_work):
-            self._transition(CoordinatorState.BIDDING, 'waiting for valid peer bids')
-            return
-        if round_work.decision is None:
-            first_batch = self._bid_batches['robot1'].value
-            second_batch = self._bid_batches['robot2'].value
-            hard_ids = self._hard_failed_task_ids(round_work.union)
-            if self._assignment_strategy == 'burgard':
-                if self._nav2.shared_map is None:
-                    self.get_logger().warning(
-                        'BURGARD_LOS_MAP_UNAVAILABLE round=%s; retaining range '
-                        'utility reduction gate with zero reduction until a map exists'
-                        % round_work.round_id,
-                    )
-                decision = choose_burgard_assignment(
-                    round_work.round_id, round_work.union,
-                    first_batch, second_batch,
-                    beta=self._burgard_beta,
-                    maximum_path_length_m=self._maximum_solo_path_m,
-                    minimum_visible_gain_m=self._minimum_solo_visible_gain_m,
-                    sensor_max_range_m=self._burgard_sensor_max_range_m,
-                    occupied_threshold=self._burgard_occupied_threshold,
-                    shared_map=self._nav2.shared_map,
-                    hard_failed_tasks=hard_ids,
+        if continuation_active:
+            continuation_batches = self._allocator_timing_timed_call(
+                'consensus_continuation', self._continuation_bid_batches,
+                now, round_work,
+            )
+            if continuation_batches is None:
+                self._transition(
+                    CoordinatorState.BIDDING,
+                    'waiting for valid free-robot continuation bid',
                 )
-            else:
-                decision = choose_pair_assignment(
+                return
+            first_batch, second_batch = continuation_batches
+        else:
+            if not self._both_bid_batches_valid(now, round_work):
+                self._transition(CoordinatorState.BIDDING, 'waiting for valid peer bids')
+                return
+        # Do not publish the first actionable pair while the local shared
+        # frame is still extrapolating.  The final dispatch gate remains in
+        # place as a safety recheck, but making TF readiness a prerequisite
+        # here avoids creating a decision that is immediately invalidated by
+        # the same condition.  This is a local replicated readiness fact, not
+        # a coordinator or a pose-estimation fallback.
+        if round_work.union.tasks:
+            tf_ready, tf_age_s, tf_reason = self._nav2.shared_tf_status()
+            if not tf_ready:
+                wait_now = time.monotonic()
+                if wait_now - self._last_shared_tf_wait_log_wall_s >= 2.0:
+                    self._last_shared_tf_wait_log_wall_s = wait_now
+                    self.get_logger().info(
+                        'SHARED_TF_NOT_READY robot=%s round=%s age_s=%s reason=%s' %
+                        (self._robot_id, round_work.round_id, tf_age_s, tf_reason))
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'required shared-frame TF not yet usable for pair decision',
+                )
+                return
+            if not self._shared_tf_ready_logged:
+                self._shared_tf_ready_logged = True
+                self._startup_event(
+                    'SHARED_TF_READY', round_id=round_work.round_id,
+                    transform_age_s=tf_age_s,
+                )
+            if not self._first_valid_task_snapshots_logged:
+                self._first_valid_task_snapshots_logged = True
+                self._startup_event(
+                    'FIRST_VALID_TASK_SNAPSHOTS', round_id=round_work.round_id,
+                    robot1_epoch=round_work.snapshots[0].epoch,
+                    robot2_epoch=round_work.snapshots[1].epoch,
+                    robot1_task_count=len(round_work.snapshots[0].tasks),
+                    robot2_task_count=len(round_work.snapshots[1].tasks),
+                )
+        if round_work.decision is None:
+            if not continuation_active:
+                first_batch = self._bid_batches['robot1'].value
+                second_batch = self._bid_batches['robot2'].value
+            hard_ids = self._hard_failed_task_ids(round_work.union) | frozenset(
+                self._completed_shared_canonical_ids)
+            fixed_kwargs = {}
+            if continuation_active:
+                if continuation.busy_robot_id == 'robot1':
+                    fixed_kwargs['fixed_robot1_task_id'] = (
+                        continuation.commitment.canonical_id)
+                else:
+                    fixed_kwargs['fixed_robot2_task_id'] = (
+                        continuation.commitment.canonical_id)
+            traffic_selection_checks = []
+
+            selection_bucket = self._allocator_timing_bucket()
+            self._allocator_timing_add_inputs(
+                selection_bucket,
+                candidate_count=len(first_batch.bids) + len(second_batch.bids),
+                candidate_pairs_input=len(first_batch.bids) * len(second_batch.bids),
+            )
+
+            def traffic_compatible(first_id, first_bid, second_id, second_bid):
+                """Use the exact dispatch scheduler as a selection gate."""
+                if not first_id or not second_id:
+                    return True
+                traffic_token = self._allocator_timing_begin()
+                try:
+                    traffic_result = self._traffic_for_bid_pair(
+                        first_bid, second_bid, round_work,
+                    )
+                finally:
+                    self._allocator_timing_record(
+                        'traffic_checks', traffic_token,
+                    )
+                self._allocator_timing_add_inputs(
+                    selection_bucket, traffic_checks=1,
+                )
+                traffic_selection_checks.append(
+                    (first_id, second_id, traffic_result),
+                )
+                return not traffic_result.conflict
+
+            selection_kwargs = {
+                'traffic_compatibility': traffic_compatible,
+            }
+            if self._assignment_strategy == 'frontier_mrtsp':
+                decision = self._allocator_timing_timed_call(
+                    'pair_selection', choose_mrtsp_route_assignment,
                     round_work.round_id, round_work.union,
                     first_batch, second_batch, hard_ids, self._weights,
+                    **fixed_kwargs, **selection_kwargs,
                 )
+            else:
+                decision = self._allocator_timing_timed_call(
+                    'pair_selection', choose_pair_assignment,
+                    round_work.round_id, round_work.union,
+                    first_batch, second_batch, hard_ids, self._weights,
+                    scoring_mode='frontier_cost_only',
+                    **fixed_kwargs, **selection_kwargs,
+                )
+            self._log_traffic_aware_selection(
+                decision, round_work, traffic_selection_checks,
+            )
+            decision = self._select_traffic_test_conflict_pair(
+                decision, round_work.union, first_batch, second_batch,
+            )
             traffic = self._traffic_for_decision(decision, first_batch, second_batch)
             # Snapshot cardinalities are transport/provenance facts rather
             # than solver inputs.  Attach them here so the decision telemetry
@@ -1139,7 +2177,10 @@ class DistributedFrontierAssignment(Node):
                 ),
             )
             round_work.traffic = traffic
-            self._publish_decision(round_work, generation)
+            self._allocator_timing_timed_call(
+                'consensus_continuation', self._publish_decision,
+                round_work, generation,
+            )
             if not self._round_is_current(round_work, generation):
                 self._discard_stale_tick(round_work, generation, 'after decision publication')
                 return
@@ -1154,15 +2195,43 @@ class DistributedFrontierAssignment(Node):
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'before peer match')
             return
-        if not self._matching_peer_decision(round_work, generation, now):
+        if not self._allocator_timing_timed_call(
+                'consensus_continuation', self._matching_peer_decision,
+                round_work, generation, now):
             return
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'after peer match')
             return
         if self._committed.decision is None:
             self._committed.commit(round_work.decision)
+            self._allocator_timing_timed_call(
+                'consensus_continuation', self._remember_active_commitments,
+                round_work,
+            )
             self._last_semantic_fingerprint = round_work.content_fingerprint
             self._emit_event('DECISION_AGREED', 'positive replicated decision match')
+            if round_work.mode == 'continuation':
+                self._emit_event(
+                    'CONTINUATION_DECISION_AGREED',
+                    json.dumps({
+                        'mode': 'continuation',
+                        'free_robot': round_work.continuation_free_robot_id,
+                        'busy_robot': round_work.continuation_busy_robot_id,
+                        'commitment_id': round_work.continuation_commitment_id,
+                        'free_task': (
+                            round_work.decision.robot1_task_id
+                            if round_work.continuation_free_robot_id == 'robot1'
+                            else round_work.decision.robot2_task_id),
+                    }, sort_keys=True, separators=(',', ':')),
+                )
+            if not self._first_valid_pair_decision_logged:
+                self._first_valid_pair_decision_logged = True
+                self._startup_event(
+                    'FIRST_VALID_PAIR_DECISION', round_id=round_work.round_id,
+                    decision_hash=round_work.decision.decision_hash,
+                    robot1_task=round_work.decision.robot1_task_id or 'IDLE',
+                    robot2_task=round_work.decision.robot2_task_id or 'IDLE',
+                )
         if (not round_work.decision.robot1_task_id and
                 not round_work.decision.robot2_task_id and
                 self._consider_completion(now)):
@@ -1173,20 +2242,89 @@ class DistributedFrontierAssignment(Node):
                 'decision agreed; dispatch disabled',
             )
             return
+        if self._synchronized_traffic_test:
+            current_key = (round_work.round_id, round_work.decision.decision_hash)
+            sim_time = self.get_clock().now().nanoseconds / 1e9
+            release_ready = (
+                self._traffic_test_release_key == current_key and
+                self._traffic_test_release_at_sim_s is not None and
+                sim_time >= self._traffic_test_release_at_sim_s
+            )
+            if not release_ready:
+                # Do not advertise a round until this replica's shared Nav2
+                # action/lifecycle/map/TF inputs are genuinely usable.  This
+                # keeps the test barrier from releasing a pair into the
+                # startup readiness race that it is intended to measure.
+                if not self._nav2.synchronized_test_inputs_ready():
+                    self._transition(
+                        CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                        'synchronized traffic-test waiting for local Nav2/map readiness',
+                    )
+                    return
+            self._publish_traffic_test_ready(round_work)
+            if not release_ready:
+                self._transition(
+                    CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                    'synchronized traffic-test dispatch barrier pending',
+                )
+                return
+            if self._traffic_test_release_logged_key != current_key:
+                self._traffic_test_release_logged_key = current_key
+                self.get_logger().info(
+                    'TRAFFIC_TEST_DISPATCH_ELIGIBILITY_RELEASED robot=%s '
+                    'round=%s sim_time_s=%.6f' %
+                    (self._robot_id, current_key[0], sim_time),
+                )
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'before local dispatch')
             return
         self._start_local_dispatch(round_work, generation)
+
+    def _traffic_for_bid_pair(
+            self, robot1_bid: Optional[Bid], robot2_bid: Optional[Bid],
+            round_work: Optional[RoundWork] = None) -> TrafficDecision:
+        """Run the one authoritative traffic model for candidate pair paths."""
+        required = self._traffic_robot1_safe_radius_m + self._traffic_robot2_safe_radius_m
+        if not self._traffic_scheduler_enabled:
+            return TrafficDecision(required_separation_m=required, reason='DISABLED')
+        if robot1_bid is None or robot2_bid is None:
+            return TrafficDecision(required_separation_m=required, reason='SINGLE_ACTIVE_OR_IDLE')
+        active_round = self._round if round_work is None else round_work
+        active_robots = frozenset()
+        if (active_round is not None and active_round.mode == 'continuation' and
+                active_round.continuation_busy_robot_id):
+            # The busy side is an already committed active reservation in a
+            # continuation round.  Preserve that commitment's priority in
+            # the existing scheduler; the scheduler itself is unchanged.
+            active_robots = frozenset({active_round.continuation_busy_robot_id})
+        elif (self._traffic_reallocation_after_clear and
+              self._released_traffic_winner_robot_id):
+            active_robots = frozenset({self._released_traffic_winner_robot_id})
+        return schedule_traffic(
+            robot1_bid.path, robot2_bid.path,
+            robot1_safe_radius_m=self._traffic_robot1_safe_radius_m,
+            robot2_safe_radius_m=self._traffic_robot2_safe_radius_m,
+            reference_speed_mps=self._traffic_reference_speed_mps,
+            eta_tie_s=self._traffic_eta_tie_s,
+            # A matched round contains only new undispatched goals.  Normally
+            # status is excluded so both replicas derive identical evidence.
+            # After a replicated conflict-clear event, retain the old winner
+            # as the deterministic active reservation for the one fresh round
+            # that follows; this prevents a later conflict from stealing its
+            # right of way while it is still in transit.
+            active_robots=active_robots,
+        )
 
     def _traffic_for_decision(
             self, decision: PairDecision, robot1_bids: BidBatch,
             robot2_bids: BidBatch) -> TrafficDecision:
         """Derive the same bounded traffic result from agreed bid geometry."""
         required = self._traffic_robot1_safe_radius_m + self._traffic_robot2_safe_radius_m
-        if not self._traffic_scheduler_enabled:
-            return TrafficDecision(required_separation_m=required, reason='DISABLED')
         if not decision.robot1_task_id or not decision.robot2_task_id:
-            return TrafficDecision(required_separation_m=required, reason='SINGLE_ACTIVE_OR_IDLE')
+            return TrafficDecision(
+                required_separation_m=required,
+                reason='SINGLE_ACTIVE_OR_IDLE',
+            )
         first = {bid.canonical_task_id: bid for bid in robot1_bids.bids}.get(
             decision.robot1_task_id,
         )
@@ -1194,25 +2332,172 @@ class DistributedFrontierAssignment(Node):
             decision.robot2_task_id,
         )
         if first is None or second is None:
-            return TrafficDecision(required_separation_m=required, reason='SELECTED_BID_MISSING')
-        return schedule_traffic(
-            first.path, second.path,
-            robot1_safe_radius_m=self._traffic_robot1_safe_radius_m,
-            robot2_safe_radius_m=self._traffic_robot2_safe_radius_m,
-            reference_speed_mps=self._traffic_reference_speed_mps,
-            eta_tie_s=self._traffic_eta_tie_s,
-            # A matched round contains only new undispatched goals.  Keeping
-            # asynchronous status observations out of this calculation makes
-            # traffic evidence bit-for-bit reproducible at both replicas.
-            active_robots=frozenset(),
-        )
+            return TrafficDecision(
+                required_separation_m=required,
+                reason='SELECTED_BID_MISSING',
+            )
+        if not self._traffic_scheduler_enabled:
+            return TrafficDecision(required_separation_m=required, reason='DISABLED')
+        return self._traffic_for_bid_pair(first, second, self._round)
+
+    def _log_traffic_aware_selection(
+            self, decision: PairDecision, round_work: RoundWork,
+            checks: list[tuple[str, str, TrafficDecision]]) -> None:
+        """Log only policy choices skipped by the exact traffic scheduler."""
+        conflicts = [item for item in checks if item[2].conflict]
+        if not conflicts:
+            return
+        first_id, second_id, _ = checks[0]
+        selected = (decision.robot1_task_id, decision.robot2_task_id)
+        for index, (candidate1, candidate2, traffic) in enumerate(conflicts):
+            if round_work.mode == 'continuation':
+                busy_robot = round_work.continuation_busy_robot_id
+                free_robot = round_work.continuation_free_robot_id
+                task_id = candidate1 if free_robot == 'robot1' else candidate2
+                candidate_rank = index
+                event_name = 'TRAFFIC_AWARE_SELECTION_SKIP'
+                reason = 'CONFLICT_WITH_ACTIVE_COMMITMENT'
+            else:
+                busy_robot = traffic.winner_robot_id or 'pair'
+                free_robot = ''
+                task_id = '%s|%s' % (candidate1, candidate2)
+                candidate_rank = index
+                event_name = 'TRAFFIC_AWARE_PAIR_SKIP'
+                reason = 'CONFLICTING_PAIR'
+            commitment = self._active_commitments.get(busy_robot)
+            self.get_logger().info(
+                '%s robot=%s candidate_rank=%d task=%s reason=%s '
+                'busy_robot=%s busy_commitment=%s round=%s' % (
+                    event_name, free_robot or 'pair', candidate_rank, task_id,
+                    reason, busy_robot,
+                    commitment.commitment_id if commitment else '',
+                    round_work.round_id,
+                ),
+            )
+        event_name = ('TRAFFIC_AWARE_SELECTION_FALLBACK' if
+                      round_work.mode == 'continuation' else
+                      'TRAFFIC_AWARE_PAIR_FALLBACK')
+        if selected != (first_id, second_id):
+            self.get_logger().info(
+                '%s original_rank=0 selected_rank=%d round=%s' % (
+                    event_name,
+                    next(
+                        (index for index, item in enumerate(checks)
+                         if (item[0], item[1]) == selected),
+                        -1,
+                    ), round_work.round_id,
+                ),
+            )
+        else:
+            self.get_logger().info(
+                '%s original_rank=0 selected_rank=0 '
+                'reason=ALL_POLICY_OPTIONS_CONFLICT round=%s' % (
+                    event_name, round_work.round_id,
+                ),
+            )
+
+    def _select_traffic_test_conflict_pair(
+            self, decision: PairDecision, union: CanonicalUnion,
+            robot1_bids: BidBatch, robot2_bids: BidBatch) -> PairDecision:
+        """Select a deterministic conflicting pair from real Nav2 bid paths.
+
+        This is strictly a synchronized-test fixture operation.  It does not
+        invent coordinates, use physical truth, or alter production Burgard
+        allocation.  Every candidate is an actually valid bid for the owning
+        robot, and conflict is evaluated by the same continuous scheduler used
+        at dispatch time.  Sorting by strongest measured conflict and then
+        canonical IDs makes both replicas choose the same pair.
+        """
+        if not (self._synchronized_traffic_test and
+                self._traffic_test_force_conflict_pair):
+            return decision
+        tasks = {task.canonical_id for task in union.tasks}
+        first = {
+            bid.canonical_task_id: bid for bid in robot1_bids.bids
+            if bid.canonical_task_id in tasks and bid.path_valid and len(bid.path) >= 1
+        }
+        second = {
+            bid.canonical_task_id: bid for bid in robot2_bids.bids
+            if bid.canonical_task_id in tasks and bid.path_valid and len(bid.path) >= 1
+        }
+        conflicts = []
+        for first_id in sorted(first):
+            for second_id in sorted(second):
+                if first_id == second_id:
+                    continue
+                traffic = schedule_traffic(
+                    first[first_id].path, second[second_id].path,
+                    robot1_safe_radius_m=self._traffic_robot1_safe_radius_m,
+                    robot2_safe_radius_m=self._traffic_robot2_safe_radius_m,
+                    reference_speed_mps=self._traffic_reference_speed_mps,
+                    eta_tie_s=self._traffic_eta_tie_s,
+                    active_robots=frozenset(),
+                )
+                # Reject degenerate overlaps at a route origin and strongly
+                # unbalanced cases where one robot is already in the shared
+                # region.  The stress fixture must exercise two approaches
+                # to the same region, not a post-hoc active-robot case.
+                balanced = (
+                    traffic.robot1_first_conflict_distance_m >= 0.50 and
+                    traffic.robot2_first_conflict_distance_m >= 0.50 and
+                    abs(
+                        traffic.robot1_first_conflict_distance_m -
+                        traffic.robot2_first_conflict_distance_m
+                    ) <= 2.00
+                )
+                if traffic.conflict and balanced:
+                    conflicts.append((
+                        round(traffic.minimum_separation_m, 12),
+                        first_id, second_id, traffic,
+                    ))
+        if not conflicts:
+            self.get_logger().warning(
+                'TRAFFIC_TEST_NO_REAL_CONFLICTING_BID_PAIR round=%s tasks=%d'
+                % (decision.round_id, len(tasks)),
+            )
+            return decision
+        _, first_id, second_id, traffic = min(conflicts)
+        if (decision.robot1_task_id, decision.robot2_task_id) != (first_id, second_id):
+            payload = {
+                'round_id': decision.round_id,
+                'union_hash': decision.union_hash,
+                'robot1_bid_fingerprint': decision.robot1_bid_fingerprint,
+                'robot2_bid_fingerprint': decision.robot2_bid_fingerprint,
+                'robot1_task': first_id,
+                'robot2_task': second_id,
+                'fixture': 'real_bid_path_conflict_pair',
+            }
+            decision_hash = hashlib.sha256(json.dumps(
+                payload, sort_keys=True, separators=(',', ':'),
+            ).encode('utf-8')).hexdigest()
+            decision = replace(
+                decision,
+                robot1_task_id=first_id,
+                robot2_task_id=second_id,
+                decision_hash=decision_hash,
+            )
+            self.get_logger().info(
+                'TRAFFIC_TEST_CONFLICT_PAIR round=%s r1=%s r2=%s '
+                'minimum_separation_m=%.6f first_conflict=(%.6f,%.6f) '
+                'last_conflict=(%.6f,%.6f) '
+                'eta=(%.6f,%.6f)' % (
+                    decision.round_id, first_id, second_id,
+                    traffic.minimum_separation_m,
+                    traffic.robot1_first_conflict_distance_m,
+                    traffic.robot2_first_conflict_distance_m,
+                    traffic.robot1_last_conflict_distance_m,
+                    traffic.robot2_last_conflict_distance_m,
+                    traffic.robot1_eta_s, traffic.robot2_eta_s,
+                ),
+            )
+        return decision
 
     def _traffic_reason(self, traffic: TrafficDecision) -> str:
         """Keep event/status evidence compact, structured, and deterministic."""
         return json.dumps(traffic.as_dict(), sort_keys=True, separators=(',', ':'))
 
     def _continue_traffic_hold(self, now: float) -> None:
-        """Wait for winner terminal evidence, then require newer proposals."""
+        """Release on conflict clearance, or terminal evidence as fallback."""
         hold = self._traffic_hold
         if hold is None:
             return
@@ -1224,6 +2509,38 @@ class DistributedFrontierAssignment(Node):
         )
         if peer_active:
             hold.winner_observed_active = True
+            if hold.winner_path:
+                winner_pose = self._nav2.lookup_pose_in_global(
+                    hold.winner_base_frame,
+                )
+                if winner_pose is not None:
+                    point, stamp_ns, age_s = winner_pose
+                    progress = project_path_progress(hold.winner_path, point)
+                    if (progress is not None and
+                            progress[0] >= hold.last_conflict_distance_m +
+                            hold.clearance_m):
+                        self._emit_event(
+                            'TRAFFIC_CONFLICT_CLEARED',
+                            'winner=%s progress_m=%.6f last_conflict_m=%.6f '
+                            'clearance_m=%.6f tf_stamp_ns=%d tf_age_s=%.6f' % (
+                                hold.winner_robot_id, progress[0],
+                                hold.last_conflict_distance_m, hold.clearance_m,
+                                stamp_ns, age_s,
+                            ),
+                        )
+                        self._traffic_hold = None
+                        self._traffic_reallocation_after_clear = True
+                        self._released_traffic_winner_robot_id = hold.winner_robot_id
+                        self._emit_event(
+                            'TRAFFIC_RELEASED_FRESH_REALLOCATION',
+                            'winner cleared committed path-conflict interval; '
+                            'stale deferred task discarded',
+                            duration=now - hold.created_steady_s,
+                        )
+                        self._reset_round(
+                            'traffic conflict cleared; rebuilding from fresh proposals',
+                        )
+                        return
             self._transition(
                 CoordinatorState.WAITING_FOR_TRAFFIC,
                 'traffic reservation held by active %s' % hold.winner_robot_id,
@@ -1266,6 +2583,35 @@ class DistributedFrontierAssignment(Node):
         if round_work is None or round_work.decision is None:
             return
         if self._traffic_hold is None:
+            winner_batch = self._bid_batches.get(traffic.winner_robot_id)
+            winner_task_id = (
+                round_work.decision.robot1_task_id
+                if traffic.winner_robot_id == 'robot1' else
+                round_work.decision.robot2_task_id
+            )
+            winner_path = ()
+            if winner_batch is not None:
+                winner_path = next(
+                    (tuple(bid.path) for bid in winner_batch.value.bids
+                     if bid.canonical_task_id == winner_task_id),
+                    (),
+                )
+            # A continuation round deliberately does not retain a full bid
+            # vector for the busy peer.  Its immutable active commitment is
+            # nevertheless the authoritative route reservation for traffic.
+            # Reuse that path here so a conflict can clear from geometric
+            # progress instead of being held until the busy goal terminates.
+            if not winner_path:
+                commitment = self._active_commitments.get(traffic.winner_robot_id)
+                if (commitment is not None and
+                        commitment.canonical_id == winner_task_id and
+                        commitment.path):
+                    winner_path = commitment.path
+            last_conflict = (
+                traffic.robot1_last_conflict_distance_m
+                if traffic.winner_robot_id == 'robot1' else
+                traffic.robot2_last_conflict_distance_m
+            )
             self._traffic_hold = TrafficHold(
                 round_id=round_work.round_id,
                 decision_hash=round_work.decision.decision_hash,
@@ -1273,7 +2619,15 @@ class DistributedFrontierAssignment(Node):
                 snapshot_epochs=(round_work.snapshots[0].epoch,
                                  round_work.snapshots[1].epoch),
                 created_steady_s=time.monotonic(),
+                winner_path=winner_path,
+                winner_base_frame=f'{traffic.winner_robot_id}/base_footprint',
+                last_conflict_distance_m=last_conflict,
+                clearance_m=self._traffic_conflict_clearance_m,
             )
+            # This round has become a held reservation.  A later conflict
+            # clear event will explicitly re-enable one fresh round.
+            self._traffic_reallocation_after_clear = False
+            self._released_traffic_winner_robot_id = ''
             self._emit_event('TRAFFIC_WAITING', self._traffic_reason(traffic))
         self._transition(
             CoordinatorState.WAITING_FOR_TRAFFIC,
@@ -1342,8 +2696,11 @@ class DistributedFrontierAssignment(Node):
         ) if peer_fresh else 0
         planner_failure_candidate = bool(
             self._candidate_evidence_seen == {'robot1', 'robot2'} and
-            local_planner_failures > 0 and peer_planner_failures > 0 and
-            all(item.unclassified == 0 for item in self._candidate_evidence.values())
+            all(item.unclassified == 0 for item in self._candidate_evidence.values()) and
+            credible_planner_infrastructure_failure(
+                nav2_healthy, peer_healthy,
+                local_planner_failures, peer_planner_failures,
+            )
         )
         if planner_failure_candidate:
             if self._planner_failure_candidate_since_steady_s is None:
@@ -1445,7 +2802,9 @@ class DistributedFrontierAssignment(Node):
 
     def _continue_degraded_solo(self, snapshot: TaskSnapshot) -> None:
         """Dispatch at most one locally proposed task per epoch without team claims."""
-        if not self._dispatch_enabled or self._dispatch_in_progress:
+        if (not self._dispatch_enabled or self._dispatch_in_progress or
+                (self._initial_peer_readiness_barrier and
+                 not self._initial_exploration_barrier.dispatch_allowed)):
             return
         # Proposal epochs may advance for heartbeats or unchanged reachability
         # metadata.  Reusing the existing semantic fingerprint avoids
@@ -1470,15 +2829,79 @@ class DistributedFrontierAssignment(Node):
             self._completed_solo_physical_signatures,
             self._minimum_solo_visible_gain_m,
             self._minimum_solo_ordering_score,
-            self._maximum_solo_path_m,
+            self._assignment_strategy,
         )
-        self._last_solo_snapshot_key = key
         if not candidates:
+            self._last_solo_snapshot_key = key
             return
-        union = build_canonical_union(
-            candidates, (), min(self._maximum_union_tasks, len(candidates)),
+        now = time.monotonic()
+        ready = tuple(
+            task for task in candidates
+            if self._solo_retry_not_before.get(
+                task.physical_signature, 0.0) <= now
         )
-        task = union.tasks[0]
+        if not ready:
+            self.get_logger().info(
+                'DEGRADED_SOLO_RETRY_BACKOFF robot=%s candidates=%d '
+                'next_s=%s' % (
+                    self._robot_id, len(candidates),
+                    min(self._solo_retry_not_before.get(
+                        task.physical_signature, now) for task in candidates),
+                )
+            )
+            return
+        self._last_solo_snapshot_key = key
+        ranked = rank_solo_tasks(
+            ready, tuple(self._solo_route_history), self._weights,
+            scoring_mode=self._assignment_strategy)
+        selected_member = ranked[0]
+        union = build_canonical_union(
+            ready, (), min(self._maximum_union_tasks, len(ready)),
+        )
+        task = next(
+            (candidate for candidate in union.tasks
+             if any(
+                 member.physical_signature == selected_member.physical_signature
+                 for member in candidate.members)),
+            None,
+        )
+        if task is None:
+            self.get_logger().warning(
+                'DEGRADED_SOLO_SELECTION_LOST_AFTER_CANONICALIZATION '
+                'signature=%s' % selected_member.physical_signature,
+            )
+            return
+        candidate_audit = ';'.join(
+            '%s:score=%.6f,gain=%.6f,stored_path_m=%.3f,overlap=%.3f' % (
+                candidate.physical_signature,
+                candidate.local_ordering_score,
+                candidate.visible_reveal_gain,
+                candidate.local_path_length_m,
+                max((
+                    route_overlap(candidate.local_path, prior,
+                                  self._weights.route_corridor_radius_m)
+                    for prior in self._solo_route_history
+                ), default=0.0),
+            )
+            for candidate in ranked[:self._maximum_path_queries]
+        )
+        self.get_logger().info(
+            'DEGRADED_SOLO_SELECTED robot=%s signature=%s score=%.6f gain=%.6f '
+            'stored_path_m=%.3f route_overlap=%.3f selection_reason=%s '
+            'candidates=%s' % (
+                self._robot_id, selected_member.physical_signature,
+                selected_member.local_ordering_score,
+                selected_member.visible_reveal_gain,
+                selected_member.local_path_length_m,
+                max((
+                    route_overlap(selected_member.local_path, prior,
+                                  self._weights.route_corridor_radius_m)
+                    for prior in self._solo_route_history
+                ), default=0.0),
+                'GENERATOR_SCORE_PRIMARY_ROUTE_NOVELTY_SECONDARY',
+                candidate_audit,
+            ),
+        )
         self._dispatch_in_progress = True
         self._active_task = task
         self._active_round_id = 'degraded:%s:%s:%d' % (
@@ -1511,6 +2934,14 @@ class DistributedFrontierAssignment(Node):
             )
 
     def _continue_bidding(self, round_work: RoundWork, generation: int) -> None:
+        """Continue bounded bidding and attribute the whole call if enabled."""
+        return self._allocator_timing_timed_call(
+            'continue_bidding', self._continue_bidding_impl,
+            round_work, generation,
+        )
+
+    def _continue_bidding_impl(self, round_work: RoundWork,
+                               generation: int) -> None:
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'bid continuation entry')
             return
@@ -1548,6 +2979,7 @@ class DistributedFrontierAssignment(Node):
                 tuple(local_member.local_path),
                 self.get_clock().now().nanoseconds, 0, 'reused local candidate path',
                 FailureClass.UNKNOWN,
+                heading_cost=local_member.path_heading_cost_rad,
             ))
             return
 
@@ -1577,12 +3009,25 @@ class DistributedFrontierAssignment(Node):
             self._discard_stale_tick(round_work, generation, 'append bid')
             return
         source_stamp = max(member.generation_ros_ns for member in task.members)
+        heading_cost = float(result.heading_cost)
+        if not math.isfinite(heading_cost) or heading_cost < 0.0:
+            heading_cost = 0.0
+        own_utility = (
+            -nominal_motion_cost_s(
+                result.length_m, heading_cost,
+                self._weights.cost_only_reference_linear_speed_mps,
+                self._weights.cost_only_reference_angular_speed_radps,
+            )
+            if self._assignment_strategy == 'frontier_cost_only' else
+            task.visible_reveal_gain - result.length_m
+        )
         bid = Bid(
             canonical_task_id=task.canonical_id,
             path_valid=result.valid,
             path_length_m=result.length_m,
             estimated_travel_cost=result.length_m,
-            own_utility_contribution=task.visible_reveal_gain - result.length_m,
+            heading_cost=heading_cost,
+            own_utility_contribution=own_utility,
             task_generation_ros_ns=source_stamp,
             path_query_ros_ns=result.query_ros_ns,
             path=result.samples,
@@ -1600,7 +3045,16 @@ class DistributedFrontierAssignment(Node):
             if not self._round_is_current(round_work, generation):
                 self._discard_stale_tick(round_work, generation, 'finish bids')
             return
-        local_snapshot = round_work.snapshots[0 if self._robot_id == 'robot1' else 1]
+        local_snapshot = next(
+            (snapshot for snapshot in round_work.snapshots
+             if snapshot.source_robot_id == self._robot_id),
+            None,
+        )
+        if local_snapshot is None:
+            self._discard_stale_tick(
+                round_work, generation, 'local source snapshot missing',
+            )
+            return
         batch = BidBatch(
             round_id=round_work.round_id,
             union_hash=round_work.union.union_hash,
@@ -1661,7 +3115,19 @@ class DistributedFrontierAssignment(Node):
         if generation is not None and not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'publish decision')
             return
-        local_snapshot = round_work.snapshots[0 if self._robot_id == 'robot1' else 1]
+        # Continuation rounds intentionally order snapshots by canonical
+        # robot identity while the local robot may be the free peer.  Bind
+        # the message provenance by source identity, never by tuple position.
+        local_snapshot = next(
+            (snapshot for snapshot in round_work.snapshots
+             if snapshot.source_robot_id == self._robot_id),
+            None,
+        )
+        if local_snapshot is None:
+            self._discard_stale_tick(
+                round_work, generation, 'local source snapshot missing',
+            )
+            return
         message = decision_to_msg(
             round_work.decision, self._robot_id, local_snapshot.source_session_id,
             round_work.snapshots[0].epoch, round_work.snapshots[1].epoch,
@@ -1699,6 +3165,72 @@ class DistributedFrontierAssignment(Node):
                 )
             )
             return
+        if diagnostics.strategy == 'frontier_cost_only':
+            motion_cost_s = (
+                score.combined_path_cost /
+                self._weights.cost_only_reference_linear_speed_mps +
+                score.combined_heading_cost /
+                self._weights.cost_only_reference_angular_speed_radps
+            )
+            self.get_logger().info(
+                'FRONTIER_COST_ONLY_DECISION robot=%s round=%s union=%s hash=%s '
+                'r1=%s r2=%s motion_cost_s=%.6f path_m=%.6f heading_rad=%.6f '
+                'nearby=%.6f route=%.6f '
+                'hard=%.6f sensing=%.6f imbalance=%.6f gain_ignored=true '
+                'traffic=%s' % (
+                    self._robot_id, round_work.round_id,
+                    round_work.union.union_hash,
+                    round_work.decision.decision_hash,
+                    round_work.decision.robot1_task_id or 'IDLE',
+                    round_work.decision.robot2_task_id or 'IDLE',
+                    motion_cost_s, score.combined_path_cost,
+                    score.combined_heading_cost,
+                    score.nearby_goal_penalty, score.route_overlap_penalty,
+                    score.hard_failure_penalty, score.sensing_overlap_penalty,
+                    score.workload_imbalance_penalty,
+                    json.dumps(diagnostics.traffic, sort_keys=True,
+                               separators=(',', ':')),
+                )
+            )
+            return
+        if diagnostics.strategy == 'frontier_gain':
+            self.get_logger().info(
+                'FRONTIER_GAIN_DECISION robot=%s round=%s union=%s hash=%s '
+                'r1=%s r2=%s generator_score=%.6f gain=%.6f path=%.6f '
+                'nearby=%.6f route=%.6f hard=%.6f sensing=%.6f '
+                'imbalance=%.6f traffic=%s' % (
+                    self._robot_id, round_work.round_id,
+                    round_work.union.union_hash,
+                    round_work.decision.decision_hash,
+                    round_work.decision.robot1_task_id or 'IDLE',
+                    round_work.decision.robot2_task_id or 'IDLE',
+                    score.team_local_ordering_score,
+                    score.team_visible_gain, score.combined_path_cost,
+                    score.nearby_goal_penalty, score.route_overlap_penalty,
+                    score.hard_failure_penalty, score.sensing_overlap_penalty,
+                    score.workload_imbalance_penalty,
+                    json.dumps(diagnostics.traffic, sort_keys=True,
+                               separators=(',', ':')),
+                )
+            )
+            return
+        if diagnostics.strategy == 'frontier_mrtsp':
+            self.get_logger().info(
+                'FRONTIER_MRTSP_DECISION robot=%s round=%s union=%s hash=%s '
+                'r1=%s r2=%s gain=%.6f path=%.6f route=%s traffic=%s' % (
+                    self._robot_id, round_work.round_id,
+                    round_work.union.union_hash,
+                    round_work.decision.decision_hash,
+                    round_work.decision.robot1_task_id or 'IDLE',
+                    round_work.decision.robot2_task_id or 'IDLE',
+                    score.team_visible_gain, score.combined_path_cost,
+                    json.dumps(diagnostics.burgard_trace, sort_keys=True,
+                               separators=(',', ':')),
+                    json.dumps(diagnostics.traffic, sort_keys=True,
+                               separators=(',', ':')),
+                )
+            )
+            return
         self.get_logger().info(
             'PAIR_DECISION robot=%s round=%s union=%s hash=%s r1=%s r2=%s '
             'total=%.6f gain=%.6f path=%.6f nearby=%.6f route=%.6f hard=%.6f '
@@ -1722,9 +3254,14 @@ class DistributedFrontierAssignment(Node):
             return False
         peer = self._peer_decision.value
         local = round_work.decision
-        expected_session = round_work.snapshots[
-            1 if self._peer_id == 'robot2' else 0
-        ].source_session_id
+        peer_snapshot = next(
+            (snapshot for snapshot in round_work.snapshots
+             if snapshot.source_robot_id == self._peer_id),
+            None,
+        )
+        if peer_snapshot is None:
+            return False
+        expected_session = peer_snapshot.source_session_id
         return (
             uuid_to_text(peer.source_session_id) == expected_session and
             peer.round_id == local.round_id and
@@ -1743,6 +3280,40 @@ class DistributedFrontierAssignment(Node):
             self._discard_stale_tick(round_work, generation, 'start local dispatch')
             return
         if round_work.decision is None:
+            return
+        if (round_work.mode == 'continuation' and
+                self._robot_id == round_work.continuation_busy_robot_id):
+            commitment = self._active_commitments.get(self._robot_id)
+            busy_task_id = (
+                round_work.decision.robot1_task_id
+                if self._robot_id == 'robot1' else
+                round_work.decision.robot2_task_id
+            )
+            if (commitment is not None and
+                    busy_task_id == commitment.canonical_id and
+                    self._nav2.local_goal_active):
+                self._transition(
+                    CoordinatorState.NAVIGATING,
+                    'retaining active goal during continuation agreement',
+                )
+                return
+            self._invalidate_round(
+                FailureClass.EXPLICIT_CANCELLATION,
+                'continuation busy commitment no longer active',
+            )
+            return
+        if (self._traffic_reallocation_after_clear and
+                self._nav2.local_goal_active):
+            # The previous winner participates in the fresh replicated round
+            # so the waiter can obtain matching evidence, but it must retain
+            # its already-issued NavigateToPose goal.  Only the idle waiter
+            # may dispatch from this round.
+            self._traffic_reallocation_after_clear = False
+            self._released_traffic_winner_robot_id = ''
+            self._transition(
+                CoordinatorState.NAVIGATING,
+                'retaining active winner goal during fresh traffic round',
+            )
             return
         traffic = round_work.traffic
         if (self._traffic_scheduler_enabled and traffic is not None and
@@ -1854,6 +3425,39 @@ class DistributedFrontierAssignment(Node):
             failure = classify_dispatch_precondition_failure(checks)
             self._invalidate_round(failure, checks.reason, final_path)
             return
+        if self._local_only and self._active_task is not None:
+            selected = self._active_task.members[0]
+            overlap = max((
+                route_overlap(selected.local_path, prior,
+                              self._weights.route_corridor_radius_m)
+                for prior in self._solo_route_history
+            ), default=0.0)
+            self.get_logger().info(
+                'DEGRADED_SOLO_SELECTION_VALIDATED robot=%s signature=%s '
+                'score=%.6f gain=%.6f stored_path_m=%.3f fresh_path_m=%.6f '
+                'route_overlap=%.3f selection_reason=%s' % (
+                    self._robot_id, selected.physical_signature,
+                    selected.local_ordering_score,
+                    selected.visible_reveal_gain,
+                    selected.local_path_length_m, final_path.length_m, overlap,
+                    'GENERATOR_SCORE_PRIMARY_ROUTE_NOVELTY_SECONDARY',
+                ),
+            )
+        if not path_is_valid_finite(final_path):
+            self.get_logger().warning(
+                'DISPATCH_REJECTED_INVALID_PATH robot=%s round=%s task=%s '
+                'path_length_m=%.6f valid=%s' % (
+                    self._robot_id, self._active_round_id, task.canonical_id,
+                    final_path.length_m,
+                    final_path.valid,
+                ),
+            )
+            self._invalidate_round(
+                FailureClass.HARD_UNREACHABLE,
+                'fresh dispatch path is invalid or non-finite',
+                final_path,
+            )
+            return
         if not self._nav2.send_navigation(
                 task.members[0], self._navigation_finished,
                 diagnostic_path=final_path.samples):
@@ -1862,13 +3466,35 @@ class DistributedFrontierAssignment(Node):
                 'local NavigateToPose send precondition changed', final_path,
             )
             return
+        self._active_dispatch_path = tuple(final_path.samples)
         self._dispatch_count += 1
         self._dispatch_in_progress = False
+        self._traffic_reallocation_after_clear = False
+        self._released_traffic_winner_robot_id = ''
         self._transition(CoordinatorState.NAVIGATING, 'local agreed goal accepted for send')
         self._emit_event(
             'NAV_GOAL_SENT', 'local-only NavigateToPose dispatch',
             path_length=final_path.length_m,
         )
+        if (round_work is not None and
+                round_work.mode == 'continuation'):
+            self._emit_event(
+                'CONTINUATION_GOAL_DISPATCHED',
+                json.dumps({
+                    'mode': 'continuation',
+                    'busy_robot': round_work.continuation_busy_robot_id,
+                    'commitment_id': round_work.continuation_commitment_id,
+                    'canonical_task_id': task.canonical_id,
+                }, sort_keys=True, separators=(',', ':')),
+            )
+        if (not self._local_only and
+                not self._first_cooperative_goal_logged):
+            self._first_cooperative_goal_logged = True
+            self._startup_event(
+                'FIRST_COOPERATIVE_GOAL', round_id=self._active_round_id,
+                canonical_task_id=task.canonical_id,
+                path_length_m=final_path.length_m,
+            )
 
     def _navigation_finished(self, outcome: NavigationOutcome) -> None:
         result = 'SUCCEEDED' if (
@@ -1967,10 +3593,26 @@ class DistributedFrontierAssignment(Node):
                 for member in self._active_task.members
                 if member.physical_signature
             )
+            if not self._local_only:
+                self._completed_shared_canonical_ids.add(
+                    self._active_task.canonical_id)
+                self.get_logger().info(
+                    'COMPLETED_FRONTIER_LOCAL robot=%s task=%s' % (
+                        self._robot_id, self._active_task.canonical_id))
+            if self._local_only and self._active_dispatch_path:
+                self._solo_route_history.append(self._active_dispatch_path)
+            if self._active_task.members[0].physical_signature:
+                signature = self._active_task.members[0].physical_signature
+                self._solo_retry_not_before.pop(signature, None)
+                self._solo_retry_counts.pop(signature, None)
         self._active_task = None
         self._active_round_id = ''
         self._active_decision_hash = ''
         self._dispatch_in_progress = False
+        self._active_dispatch_path = ()
+        self._clear_active_commitment(
+            self._robot_id, 'local navigation commitment terminated',
+        )
         self._settle_until_steady_s = time.monotonic() + self._post_goal_settle_s
         # Robot availability is part of the semantic trigger.  A completed
         # goal must permit a fresh auction even when the task-set fingerprint
@@ -2009,6 +3651,17 @@ class DistributedFrontierAssignment(Node):
             # a stale snapshot must not make the failing robot immediately
             # reselect the same physical task.
             self._record_hard_failure(member.physical_signature, 15.0)
+        elif self._local_only and member.physical_signature:
+            # Infrastructure/TF failures are retryable, but never in a tight
+            # loop while the same stale condition persists.
+            count = self._solo_retry_counts.get(member.physical_signature, 0) + 1
+            self._solo_retry_counts[member.physical_signature] = count
+            delay_s = solo_retry_delay_s(count)
+            self._solo_retry_not_before[member.physical_signature] = (
+                time.monotonic() + delay_s)
+            self.get_logger().info(
+                'SOLO_RETRY_BACKOFF signature=%s count=%d delay_s=%.3f' % (
+                    member.physical_signature, count, delay_s))
         local_snapshot = self._fresh_snapshot(self._robot_id, time.monotonic())
         if local_snapshot is None:
             return

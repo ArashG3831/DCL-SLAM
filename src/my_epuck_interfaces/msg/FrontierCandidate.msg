@@ -12,6 +12,12 @@ float32 euclidean_distance_m
 float32 path_length_m
 float32 heading_change_rad
 float32 score
+# Route context from the upstream MRTSP solver.  ``score`` remains the
+# legacy per-batch diagnostic only; it must not be used as a cross-robot
+# utility by the route-aware distributed mode.
+uint32 mrtsp_route_rank
+uint64 mrtsp_route_generation
+string mrtsp_solver
 uint8 reachability_state
 float32 local_path_length_m
 geometry_msgs/Point[] local_path_samples

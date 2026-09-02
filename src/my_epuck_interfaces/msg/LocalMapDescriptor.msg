@@ -9,6 +9,13 @@ uint8 descriptor_version
 uint8[] descriptor_bytes
 float32 crop_origin_x
 float32 crop_origin_y
+float32 crop_origin_yaw
 uint16 crop_width
 uint16 crop_height
 uint32 checksum
+float32 crop_known_fraction
+uint32 crop_occupied_cells
+bool viewpoint_available
+float64 viewpoint_x
+float64 viewpoint_y
+float64 viewpoint_yaw

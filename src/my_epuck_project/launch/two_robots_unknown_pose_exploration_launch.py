@@ -63,11 +63,17 @@ def generate_launch_description():
                 'max_verification_batches'),
             'verification_lifetime_s': LaunchConfiguration(
                 'verification_lifetime_s'),
+            'evidence_keyframe_translation_threshold_m': LaunchConfiguration(
+                'evidence_keyframe_translation_threshold_m'),
             'peer_map_publish_period_s': LaunchConfiguration(
                 'peer_map_publish_period_s'),
-            'assignment_strategy': 'burgard',
+            'assignment_strategy': LaunchConfiguration('assignment_strategy'),
             'burgard_beta': '1.0',
-            'traffic_scheduler_enabled': 'false',
+            # The dedicated unknown-pose production entrypoint now enables
+            # the validated pre-dispatch traffic gate.  The generic lower-
+            # level launch keeps its conservative false default.
+            'traffic_scheduler_enabled': LaunchConfiguration(
+                'traffic_scheduler_enabled'),
             'enable_observer': LaunchConfiguration('enable_observer'),
             'run_id': LaunchConfiguration('run_id'),
             'output_root': LaunchConfiguration('output_root'),
@@ -98,7 +104,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        _arg('world_profile', 'large_unknown_pose_close_start',
+        _arg('world_profile', 'large_unknown_pose_close_start_20ms_scan_matching',
              ['large_unknown_pose', 'large_unknown_pose_16m',
               'large_unknown_pose_close_start',
               'large_unknown_pose_close_start_20ms',
@@ -115,6 +121,7 @@ def generate_launch_description():
         _arg('unknown_pose_diagnostic_output', ''),
         _arg('max_verification_batches', '64'),
         _arg('verification_lifetime_s', '1100.0'),
+        _arg('evidence_keyframe_translation_threshold_m', '0.80'),
         _arg('peer_map_publish_period_s', '5.0'),
         _arg('enable_observer', 'true', ['true', 'false']),
         _arg('run_id', ''),
@@ -122,6 +129,9 @@ def generate_launch_description():
         _arg('mission_timeout_s', '600.0'),
         _arg('terminal_small_frontier_length_m', '0.20'),
         _arg('enable_mission_timeout', 'false', ['true', 'false']),
+        _arg('traffic_scheduler_enabled', 'true', ['true', 'false']),
+        _arg('assignment_strategy', 'frontier_mrtsp',
+             ['frontier_cost_only', 'frontier_mrtsp']),
         _arg('logger_console_status', 'true', ['true', 'false']),
         _arg('enable_rosout_collection', 'true', ['true', 'false']),
         _arg('enable_coverage_attribution', 'true', ['true', 'false']),
@@ -129,6 +139,6 @@ def generate_launch_description():
         _arg('enable_forensic_capture', 'true', ['true', 'false']),
         _arg('enable_contact_capture', 'false', ['true', 'false']),
         _arg('contact_sampling_period_ms', '20'),
-        _arg('forensic_snapshot_interval_s', '15.0'),
+        _arg('forensic_snapshot_interval_s', '5.0'),
         full_launch,
     ])

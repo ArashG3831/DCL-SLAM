@@ -2,8 +2,12 @@
 
 from my_epuck_project.distributed_assignment.traffic_scheduler import (
     detect_path_conflict,
+    detect_path_conflict_interval,
+    project_path_progress,
     schedule_traffic,
 )
+from my_epuck_project.traffic_test_barrier import ready_key
+from std_msgs.msg import String
 
 
 def _schedule(first, second, **kwargs):
@@ -34,6 +38,27 @@ def test_perpendicular_crossing_conflicts_continuously_between_samples():
     assert first_distance == 2.0 and second_distance == 2.0
 
 
+def test_conflict_interval_retains_last_conflicting_route_location():
+    """Sparse continuous segments expose both ends of a conservative interval."""
+    result = detect_path_conflict_interval(
+        [(0.0, 0.0), (4.0, 0.0), (8.0, 0.0)],
+        [(2.0, -2.0), (2.0, 2.0), (6.0, 2.0), (6.0, -2.0)],
+        0.16,
+    )
+    conflict, minimum, first1, first2, last1, last2 = result
+    assert conflict and minimum == 0.0
+    assert first1 == 2.0 and first2 == 2.0
+    assert last1 >= first1 and last2 >= first2
+
+
+def test_path_progress_projection_is_continuous_between_vertices():
+    """A pose between path samples is usable for event-driven release."""
+    progress = project_path_progress(
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 2.0)], (1.0, 1.25),
+    )
+    assert progress == (2.25, 0.0)
+
+
 def test_lower_eta_wins_and_id_only_breaks_near_tie():
     lower_eta = _schedule(
         [(0.0, 0.0), (4.0, 0.0)],
@@ -42,7 +67,7 @@ def test_lower_eta_wins_and_id_only_breaks_near_tie():
     tie = _schedule([(0.0, 0.0), (2.0, 0.0)], [(1.0, -1.0), (1.0, 1.0)])
     assert lower_eta.winner_robot_id == 'robot1'
     assert lower_eta.reason == 'LOWER_ETA'
-    assert tie.winner_robot_id == 'robot1'
+    assert tie.winner_robot_id == 'robot2'
     assert tie.reason == 'ETA_TIE_ROBOT_ID'
 
 
@@ -75,3 +100,12 @@ def test_allocator_uses_waiting_state_not_cmd_vel_traffic_hack():
     assert "'cmd_vel'" not in source
     assert '_begin_traffic_wait' in source
     assert 'stale deferred task will not dispatch' in source
+
+
+def test_test_barrier_accepts_only_complete_matching_round_identity():
+    valid = String()
+    valid.data = '{"decision_hash":"hash","round_id":"round"}'
+    incomplete = String()
+    incomplete.data = '{"round_id":"round"}'
+    assert ready_key(valid) == ('round', 'hash')
+    assert ready_key(incomplete) is None

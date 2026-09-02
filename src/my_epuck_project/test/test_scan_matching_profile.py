@@ -50,7 +50,7 @@ def test_conservative_scan_matching_values_are_supported_and_symmetric():
         'angle_variance_penalty': 0.05235987755982989,
         'minimum_distance_penalty': 0.15,
         'minimum_angle_penalty': 0.70,
-        'coarse_search_angle_offset': 0.0523596583,
+        'coarse_search_angle_offset': 0.05235987755982989,
         'coarse_angle_resolution': 0.0174532925,
         'fine_search_angle_offset': 0.0034906585,
         'use_response_expansion': False,
@@ -148,8 +148,12 @@ def test_wsl_full_resolution_transport_uses_chunked_single_reader_path():
     assert "choices=['chunked', 'laser_scan']" in launch
     assert "'scan_d500_chunks' if scan_transport == 'chunked'" in launch
     assert "'input_mode': scan_transport" in launch
-    assert "webots_controller_module.controller_ip_address = lambda: '127.0.0.1'" in launch
-    assert "webots_launcher_module.controller_url_prefix = lambda port='1234': f'tcp://127.0.0.1:{port}/'" in launch
+    # The controller endpoint is selected from the runtime WSL network mode;
+    # it must not regress to a hard-coded loopback endpoint in NAT mode.
+    assert 'controller_host = _resolve_controller_host()' in launch
+    assert 'webots_controller_module.controller_ip_address = lambda: controller_host' in launch
+    assert "lambda port='1234': f'tcp://{controller_host}:{port}/'" in launch
+    assert "explicit_mode in ('nat', 'subnet')" in launch
     # Chunked mode removes the stock 720-beam Ros2Lidar device instead of
     # leaving a second raw publisher beside the fragment-safe plugin.
     assert "re.sub(" in launch

@@ -2,7 +2,8 @@
 
 import json
 import math
-from collections import deque
+from collections import Counter, deque
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,14 +23,20 @@ from my_epuck_project.unknown_pose_frontend_core import (
     deduplicate_physical_candidates,
     crop_grid,
     descriptor_checksum,
+    descriptor_match_is_ambiguous,
+    DescriptorMatch,
     evidence_pairs_for_selection,
     evidence_candidates_for_pool,
     evidence_batch_is_spatially_diverse,
     hypothesis_is_acceptable,
     polar_descriptor,
+    prioritize_unambiguous_candidates,
     physical_candidate_geometry_identity,
     register_crops,
     register_crop_set,
+    consensus_admission_quality,
+    consensus_crop_maturity,
+    RegistrationResult,
     rigidify_affine,
     should_accept_hypothesis,
     confirmation_window_for_cadence,
@@ -66,6 +73,256 @@ def test_geometry_rejection_is_scoped_to_verification_batch():
     assert frontend._geometry_rejected_in_active_batch(geometry_key)
     frontend.verification_batches.batch_id = 4
     assert not frontend._geometry_rejected_in_active_batch(geometry_key)
+
+
+def test_consensus_maturity_requires_known_and_occupied_support():
+    sparse = np.full((40, 40), -1, dtype=np.int16)
+    sparse[:10, :10] = 0
+    sparse[:10, :10][0, :100] = 100
+    mature = np.full((40, 40), 0, dtype=np.int16)
+    mature[:20, :20] = 100
+    assert not consensus_crop_maturity(GridCrop(sparse, 0.03, 0.0, 0.0))[0]
+    assert consensus_crop_maturity(GridCrop(mature, 0.03, 0.0, 0.0))[0]
+
+
+def test_mature_consensus_admission_does_not_hard_gate_exact_agreement():
+    result = RegistrationResult(
+        accepted=True, transform=(1.0, 2.0, 0.1), covariance=(0.0,) * 36,
+        inlier_ratio=0.60, residual_m=0.02,
+        occupied_free_agreement=0.48, overlap_fraction=0.40,
+        reason='ACCEPTED', reverse_inlier_ratio=0.55,
+        condition_number=10.0)
+    admitted, reason = consensus_admission_quality(result, True)
+    assert admitted
+    assert reason == 'INDIVIDUAL_GEOMETRY_ADMITTED_TO_CONSENSUS'
+
+
+def test_geometry_attempted_in_active_batch_blocks_inflight_duplicate_only():
+    frontend = object.__new__(UnknownPoseFrontend)
+    geometry_key = ('source-geometry', 'target-geometry')
+    frontend.attempted_physical_geometry_batches = {geometry_key: 3}
+    frontend.verification_batches = SimpleNamespace(batch_id=3)
+    assert frontend._geometry_attempted_in_active_batch(geometry_key)
+    frontend.verification_batches.batch_id = 4
+    assert not frontend._geometry_attempted_in_active_batch(geometry_key)
+
+
+def test_ambiguous_descriptor_candidates_are_deferred_not_deleted():
+    ambiguous = [('score-a', 'peer-a', 'own-a', object(), object())]
+    clear = [('score-b', 'peer-b', 'own-b', object(), object())]
+    selected = prioritize_unambiguous_candidates(
+        ambiguous + clear, {('peer-a', 'own-a')})
+    assert selected == clear
+    assert prioritize_unambiguous_candidates(
+        ambiguous, {('peer-a', 'own-a')}) == ambiguous
+
+
+@pytest.mark.parametrize('robot_id', ('robot1', 'robot2'))
+def test_identical_crop_content_requires_viewpoint_novelty(robot_id):
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.verification_novelty_spacing_m = 0.40
+    frontend.counters = Counter()
+    frontend.keyframe_content_history = {}
+    crop = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    identity = frontend._crop_content_identity(crop)
+    assert frontend._should_publish_keyframe(crop, (0.0, 0.0, 0.0))
+    frontend.keyframe_content_history[identity] = (0.0, 0.0, 0.0)
+    assert not frontend._should_publish_keyframe(crop, (0.10, 0.0, 0.0))
+    assert frontend._should_publish_keyframe(crop, (0.40, 0.0, 0.0))
+    assert frontend.counters['keyframe_motion_novelty_admitted'] == 1
+
+
+def _evidence_admission_fixture(robot_id='robot1'):
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.robot_id = robot_id
+    frontend.evidence_keyframe_translation_threshold_m = 0.80
+    frontend.keyframes = {}
+    frontend.keyframe_content_history = {}
+    frontend._last_evidence_viewpoint = None
+    frontend.counters = Counter()
+    return frontend
+
+
+def test_first_evidence_keyframe_is_retained_without_motion_baseline():
+    frontend = _evidence_admission_fixture()
+    crop = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    assert frontend._should_publish_keyframe(crop, None)
+
+
+def test_rotation_without_translation_is_not_independent_evidence():
+    frontend = _evidence_admission_fixture()
+    first = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    changed = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    frontend.keyframes['first'] = (object(), first)
+    frontend.keyframe_content_history[frontend._crop_content_identity(first)] = (
+        0.0, 0.0, 0.0)
+    frontend._last_evidence_viewpoint = (0.0, 0.0, 0.0)
+    assert not frontend._should_publish_keyframe(changed, (0.0, 0.0, 2.0))
+
+
+@pytest.mark.parametrize('distance', (0.10, 0.79))
+def test_subthreshold_translation_does_not_create_evidence_view(distance):
+    frontend = _evidence_admission_fixture()
+    first = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    changed = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    frontend.keyframes['first'] = (object(), first)
+    frontend.keyframe_content_history[frontend._crop_content_identity(first)] = (
+        0.0, 0.0, 0.0)
+    frontend._last_evidence_viewpoint = (0.0, 0.0, 0.0)
+    assert not frontend._should_publish_keyframe(
+        changed, (distance, 0.0, math.pi))
+
+
+def test_translation_above_threshold_creates_new_evidence_view():
+    frontend = _evidence_admission_fixture()
+    first = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    changed = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    frontend.keyframes['first'] = (object(), first)
+    frontend.keyframe_content_history[frontend._crop_content_identity(first)] = (
+        0.0, 0.0, 0.0)
+    frontend._last_evidence_viewpoint = (0.0, 0.0, 0.0)
+    assert frontend._should_publish_keyframe(changed, (0.81, 0.0, math.pi))
+
+
+def test_pose_less_startup_does_not_poison_later_physical_baseline():
+    frontend = _evidence_admission_fixture()
+    first = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    later = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    assert frontend._should_publish_keyframe(first, None)
+    frontend.keyframes['startup'] = (object(), first)
+    frontend.keyframe_content_history[
+        frontend._crop_content_identity(first)] = None
+    # The first valid local pose establishes the physical baseline even
+    # though the immediately preceding startup crop had no TF pose.
+    assert frontend._should_publish_keyframe(later, (0.0, 0.0, 0.0))
+    frontend._last_evidence_viewpoint = (0.0, 0.0, 0.0)
+    assert not frontend._should_publish_keyframe(
+        GridCrop(np.full((8, 8), 2, dtype=np.int16), 0.03, 1.0, 2.0),
+        (0.79, 0.0, 0.0))
+    assert frontend._should_publish_keyframe(
+        GridCrop(np.full((8, 8), 3, dtype=np.int16), 0.03, 1.0, 2.0),
+        (0.80, 0.0, 0.0))
+
+
+def test_duplicate_content_needs_translation_not_map_revision_or_new_id():
+    frontend = _evidence_admission_fixture()
+    crop = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 1.0, 2.0)
+    identity = frontend._crop_content_identity(crop)
+    frontend.keyframes['first'] = (object(), crop)
+    frontend.keyframe_content_history[identity] = (0.0, 0.0, 0.0)
+    frontend._last_evidence_viewpoint = (0.0, 0.0, 0.0)
+    assert not frontend._should_publish_keyframe(crop, (0.80 - 1e-6, 0.0, 1.0))
+    assert frontend._should_publish_keyframe(crop, (0.80, 0.0, 1.0))
+
+
+def _canonical_pool_fixture():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.robot_id = 'robot1'
+    frontend.peer_robot_id = 'robot2'
+    frontend.canonical_constraint_pool = {}
+    frontend.evidence_keyframe_translation_threshold_m = 0.80
+    frontend.max_evidence_constraints = 5
+    frontend.min_consistent_constraints = 3
+    frontend.keyframes = {}
+    frontend.keyframe_viewpoints = {}
+    frontend.counters = Counter()
+    frontend._record_diagnostic_event = lambda *args, **kwargs: None
+    frontend._write_physical_evidence_diagnostic = (
+        lambda *args, **kwargs: None)
+    return frontend
+
+
+def _test_descriptor(seconds):
+    stamp = SimpleNamespace(sec=seconds, nanosec=0)
+    return SimpleNamespace(header=SimpleNamespace(stamp=stamp))
+
+
+def _test_constraint_result(transform=(-2.77, 0.0, 0.0)):
+    return RegistrationResult(
+        accepted=True, transform=transform, covariance=(0.0,) * 36,
+        inlier_ratio=0.80, reverse_inlier_ratio=0.80,
+        residual_m=0.02, occupied_free_agreement=0.40,
+        overlap_fraction=0.80, reason='ACCEPTED', condition_number=1.0)
+
+
+def test_canonical_union_combines_constraints_from_both_directions():
+    frontend = _canonical_pool_fixture()
+    r1_crops = [GridCrop(np.full((8, 8), value, dtype=np.int16), 0.03,
+                         0.0, 0.0) for value in (1, 2, 3)]
+    r2_crops = [GridCrop(np.full((8, 8), value + 10, dtype=np.int16), 0.03,
+                         0.0, 0.0) for value in (1, 2, 3)]
+    r1_desc = [_test_descriptor(index + 1) for index in range(3)]
+    r2_desc = [_test_descriptor(index + 11) for index in range(3)]
+    for index in (0, 1):
+        key = f'robot1-{index + 1:08d}'
+        frontend.keyframes[key] = (r1_desc[index], r1_crops[index])
+        frontend.keyframe_viewpoints[key] = (float(index), 0.0)
+        candidate = (f'robot2-{index + 1:08d}', key,
+                     r2_desc[index], r1_desc[index])
+        assert frontend._add_canonical_constraint(
+            candidate, _test_constraint_result(), r1_crops[index],
+            r2_crops[index], key, f'robot2-{index + 1:08d}')
+    frontend.robot_id = 'robot2'
+    key = 'robot2-00000003'
+    frontend.keyframes[key] = (r2_desc[2], r2_crops[2])
+    frontend.keyframe_viewpoints[key] = (2.0, 0.0)
+    candidate = ('robot1-00000003', key, r1_desc[2], r2_desc[2])
+    assert frontend._add_canonical_constraint(
+        candidate, _test_constraint_result((2.77, 0.0, 0.0)), r2_crops[2],
+        r1_crops[2], key, 'robot1-00000003')
+    assert set(frontend.canonical_constraint_pool) == {
+        'robot1:robot1-00000001|robot2:robot2-00000001',
+        'robot1:robot1-00000002|robot2:robot2-00000002',
+        'robot1:robot1-00000003|robot2:robot2-00000003'}
+    assert all(record['result'].transform[0] < 0.0
+               for record in frontend.canonical_constraint_pool.values())
+
+
+def test_canonical_union_counts_reciprocal_physical_pair_once():
+    frontend = _canonical_pool_fixture()
+    source = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 0.0, 0.0)
+    target = GridCrop(np.full((8, 8), 2, dtype=np.int16), 0.03, 1.0, 0.0)
+    r1 = _test_descriptor(1)
+    r2 = _test_descriptor(2)
+    frontend.keyframes['robot1-00000001'] = (r1, source)
+    frontend.keyframe_viewpoints['robot1-00000001'] = (0.0, 0.0)
+    candidate = ('robot2-00000001', 'robot1-00000001', r2, r1)
+    assert frontend._add_canonical_constraint(
+        candidate, _test_constraint_result(), source, target,
+        'robot1-00000001', 'robot2-00000001')
+    frontend.robot_id = 'robot2'
+    frontend.keyframes['robot2-00000001'] = (r2, target)
+    frontend.keyframe_viewpoints['robot2-00000001'] = (0.0, 0.0)
+    reciprocal = ('robot1-00000001', 'robot2-00000001', r1, r2)
+    assert not frontend._add_canonical_constraint(
+        reciprocal, _test_constraint_result((2.77, 0.0, 0.0)), target,
+        source, 'robot2-00000001', 'robot1-00000001')
+    assert len(frontend.canonical_constraint_pool) == 1
+
+
+@pytest.mark.parametrize('robot_id', ('robot1', 'robot2'))
+def test_three_separated_evidence_viewpoints_remain_representable(robot_id):
+    frontend = _evidence_admission_fixture(robot_id)
+    for index, x in enumerate((0.0, 0.81, 1.62)):
+        crop = GridCrop(np.full((8, 8), index, dtype=np.int16), 0.03, 1.0, 2.0)
+        pose = (x, 0.0, 0.4 * index)
+        assert frontend._should_publish_keyframe(crop, pose)
+        frontend.keyframes[f'kf-{index}'] = (object(), crop)
+        frontend.keyframe_content_history[
+            frontend._crop_content_identity(crop)] = pose
+        frontend._last_evidence_viewpoint = pose
+
+def test_content_duplicate_evidence_rejects_reciprocal_pair():
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_content_pairs = set()
+    frontend.evidence_source_content = set()
+    frontend.evidence_peer_content = set()
+    source = GridCrop(np.zeros((8, 8), dtype=np.int16), 0.03, 0.0, 0.0)
+    target = GridCrop(np.ones((8, 8), dtype=np.int16), 0.03, 1.0, 0.0)
+    source_id = frontend._crop_content_identity(source)
+    target_id = frontend._crop_content_identity(target)
+    frontend.evidence_content_pairs.add((source_id, target_id))
+    assert frontend._content_pair_reuses_evidence(target, source)
 
 
 def test_late_registration_result_uses_request_batch_for_geometry_suppression():
@@ -418,6 +675,7 @@ def test_expired_descriptor_pair_caches_are_pruned_with_bounded_history():
     frontend.temporal_support_cache = {live: 2, expired: 1}
     frontend.temporal_gate_rejected_pairs = {live, expired}
     frontend.confirmations = {live: {live}, expired: {expired}}
+    frontend.descriptor_ambiguous_pairs = {live, expired}
     frontend.descriptor_gate_survivors = {live, expired}
     frontend.temporal_gate_survivors = {live, expired}
 
@@ -676,15 +934,71 @@ def test_crop_exchange_batch_gate_keeps_registration_requirement_unchanged():
     assert crop_batch_is_ready(3, 3)
 
 
-def descriptor(key, origin_x, origin_y, epoch=7, checksum=1234):
+def descriptor(key, origin_x, origin_y, epoch=7, checksum=1234,
+               known_fraction=None, occupied_cells=None):
     return SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=0, nanosec=0), frame_id='map'),
         keyframe_id=key, map_epoch=epoch, checksum=checksum,
         resolution=0.05, crop_width=20, crop_height=20,
-        crop_origin_x=origin_x, crop_origin_y=origin_y)
+        crop_origin_x=origin_x, crop_origin_y=origin_y,
+        crop_known_fraction=known_fraction,
+        crop_occupied_cells=occupied_cells)
 
 
 def candidate(peer, own, peer_descriptor, own_descriptor):
     return (peer, own, peer_descriptor, own_descriptor)
+
+
+def test_low_margin_repetitive_alias_is_ambiguous_but_isolated_match_survives():
+    weak = DescriptorMatch(0.90, 0.006, 12, 0.50)
+    near_twin = DescriptorMatch(0.895, 0.007, 13, 0.50)
+    assert descriptor_match_is_ambiguous(weak, [near_twin], 0.005)
+    assert not descriptor_match_is_ambiguous(weak, [], 0.005)
+
+
+@pytest.mark.parametrize(('robot_id', 'peer_id'), [
+    ('robot1', 'robot2'), ('robot2', 'robot1')])
+def test_rejected_view_does_not_block_later_view_symmetrically(
+        robot_id, peer_id):
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.evidence_pairs = {('own-anchor', 'peer-anchor'): (None, None)}
+    frontend.verification_novelty_spacing_m = 0.40
+    frontend.candidate_verification_attempted = {('own-old', 'peer-old')}
+    frontend.request_candidate_by_request_key = {}
+    frontend.keyframes = {
+        'own-anchor': (descriptor('own-anchor', 0.0, 0.0),
+                       GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                                0.0, 0.0)),
+        'own-old': (descriptor('own-old', 0.6, 0.0),
+                    GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             0.6, 0.0)),
+        'own-near-old': (descriptor('own-near-old', 0.8, 0.0),
+                     GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                              0.8, 0.0)),
+        'own-far': (descriptor('own-far', 1.0, 0.0),
+                    GridCrop(np.zeros((20, 20), dtype=np.int16), 0.05,
+                             1.0, 0.0)),
+    }
+    frontend.peer_descriptors = {
+        'peer-anchor': descriptor('peer-anchor', 2.0, 0.0),
+        'peer-old': descriptor('peer-old', 2.6, 0.0),
+        'peer-near-old': descriptor('peer-near-old', 2.8, 0.0),
+        'peer-far': descriptor('peer-far', 3.0, 0.0),
+    }
+    frontend._descriptor_geometry = lambda value: {
+        'center': [float(value.crop_origin_x),
+                   float(value.crop_origin_y)]}
+    near_old = candidate('peer-near-old', 'own-near-old',
+                         frontend.peer_descriptors['peer-near-old'],
+                         frontend.keyframes['own-near-old'][0])
+    far = candidate('peer-far', 'own-far',
+                    frontend.peer_descriptors['peer-far'],
+                    frontend.keyframes['own-far'][0])
+    assert frontend._candidate_is_distinct_from_evidence(near_old)
+    assert frontend._candidate_is_distinct_from_evidence(far)
+
+
 
 
 def test_physical_duplicate_descriptors_with_different_ids_count_once():
@@ -741,6 +1055,65 @@ def test_pending_selection_requires_displacement_on_both_sides():
         [1.0, 0.0], [4.0, 0.0], own_prior, peer_prior)
 
 
+def _maturity_filter_fixture(own_maturity, peer_maturity):
+    frontend = object.__new__(UnknownPoseFrontend)
+    frontend.consensus_min_known_fraction = 0.25
+    frontend.consensus_min_occupied_cells = 400
+    frontend.counters = Counter()
+    frontend.matches = {}
+    own_values = np.zeros((40, 40), dtype=np.int16)
+    if own_maturity:
+        own_values[:25, :20] = 100
+    else:
+        own_values[:10, :10] = 100
+        own_values[10:, :] = -1
+    frontend.keyframes = {
+        'own': (descriptor('own', 0.0, 0.0),
+                GridCrop(own_values, 0.05, 0.0, 0.0))}
+    frontend._write_physical_evidence_diagnostic = lambda *args, **kwargs: None
+    peer = descriptor(
+        'peer', 2.0, 0.0,
+        known_fraction=(0.50 if peer_maturity else 0.10),
+        occupied_cells=(800 if peer_maturity else 100))
+    return frontend, candidate('peer', 'own', peer,
+                               frontend.keyframes['own'][0])
+
+
+def test_immature_endpoint_is_not_schedulable_before_crop_request():
+    frontend, item = _maturity_filter_fixture(False, True)
+    assert frontend._candidate_intrinsically_immature(item)
+    assert frontend.counters['immature_candidates_not_scheduled'] == 1
+
+
+def test_mature_endpoint_pair_remains_schedulable():
+    frontend, item = _maturity_filter_fixture(True, True)
+    assert not frontend._candidate_intrinsically_immature(item)
+    assert frontend.counters['immature_candidates_not_scheduled'] == 0
+
+
+def test_early_descriptor_metadata_does_not_delete_or_blacklist_keyframe():
+    frontend, item = _maturity_filter_fixture(True, False)
+    assert frontend._candidate_intrinsically_immature(item)
+    assert 'own' in frontend.keyframes
+    assert frontend.keyframes['own'][0].keyframe_id == 'own'
+
+
+def test_later_mature_descriptor_update_can_be_scheduled():
+    frontend, item = _maturity_filter_fixture(True, False)
+    assert frontend._candidate_intrinsically_immature(item)
+    item[2].crop_known_fraction = 0.50
+    item[2].crop_occupied_cells = 800
+    assert not frontend._candidate_intrinsically_immature(item)
+
+
+def test_scheduler_checks_maturity_before_request_budget():
+    source = Path(UnknownPoseFrontend.__module__.replace('.', '/') + '.py')
+    text = source.read_text() if source.exists() else Path(
+        'src/my_epuck_project/my_epuck_project/unknown_pose_frontend.py').read_text()
+    assert 'if self._candidate_intrinsically_immature(candidate):' in text
+    assert "stage='PRE_CROP_REQUEST'" in text
+
+
 def test_candidate_order_prefers_unattempted_physical_views_over_reused_family():
     """Rejected pair variants must not starve a genuinely new view."""
     frontend = object.__new__(UnknownPoseFrontend)
@@ -780,6 +1153,95 @@ def test_candidate_order_prefers_unattempted_physical_views_over_reused_family()
     assert frontend._candidate_spatial_novelty_key(reused)[0] == 4
     assert frontend._candidate_spatial_novelty_key(fresh) < \
         frontend._candidate_spatial_novelty_key(reused)
+
+
+@pytest.mark.parametrize('robot_id', ('robot1', 'robot2'))
+def test_reentry_without_requestable_candidate_does_not_hold_navigation(robot_id):
+    """A novelty advisory cannot create a lease when no crop can be sent."""
+    class Batch:
+        batch_id = 1
+        waiting_for_novelty = True
+        lifetime_expired = False
+
+        def open(self, *_args, **_kwargs):
+            self.batch_id += 1
+            return self.batch_id
+
+        def exhaust(self, *_args, **_kwargs):
+            self.waiting_for_novelty = True
+
+    node = object.__new__(UnknownPoseFrontend)
+    node.robot_id = robot_id
+    node.evidence_acquisition_started = False
+    node.batch_proposal_published = False
+    node.pending_candidate_pairs = {'novel-but-unrequestable': object()}
+    node.verification_batches = Batch()
+    node.evidence_physical_keys = {}
+    node.min_consistent_constraints = 3
+    node.counters = Counter()
+    node.evidence_acquisition_window_s = 8.0
+    node.evidence_acquisition_deadline_wall = None
+    node._evidence_opportunity_deadline_wall = None
+    statuses = []
+    ended = []
+    node._batch_snapshot = lambda: ({}, {})
+    node._candidate_is_novel_for_reentry = lambda _candidate: True
+    node._request_next_candidate_verification = lambda: False
+    node._verification_worker_busy = lambda: False
+    node._publish_evidence_status = lambda active: statuses.append(active)
+    node._record_diagnostic_event = lambda *_args, **_kwargs: None
+    node._write_physical_evidence_diagnostic = lambda *_args, **_kwargs: None
+
+    original_end = UnknownPoseFrontend._end_evidence_acquisition
+    node._end_evidence_acquisition = lambda reason: (
+        ended.append(reason), original_end(node, reason))[1]
+
+    UnknownPoseFrontend._begin_evidence_acquisition(node)
+
+    assert ended == ['NO_REQUESTABLE_NOVEL_EVIDENCE']
+    assert node.evidence_acquisition_started is False
+    assert statuses == [False]
+
+
+@pytest.mark.parametrize('robot_id', ('robot1', 'robot2'))
+def test_rejected_candidate_without_next_request_releases_evidence_lease(robot_id):
+    """A rejected pair cannot keep an empty verification lease open."""
+    node = object.__new__(UnknownPoseFrontend)
+    node.robot_id = robot_id
+    node.batch_proposal_published = False
+    node.evidence_acquisition_started = True
+    node.pending_requests = set()
+    node._registration_pending_contexts = deque()
+    node._registration_backpressure_depth = 8
+    node._registration_future = None
+    node._registration_shutdown = False
+    node.candidate_verification_batch_attempts = 1
+    node.candidate_verification_attempts = 1
+    node.candidate_verification_budget = 8
+    node.evidence_pairs = {}
+    node._rank_next_verification_candidate = lambda: None
+    node._write_physical_evidence_diagnostic = lambda *_args, **_kwargs: None
+    node._verification_worker_busy = lambda: False
+    ended = []
+    node._end_evidence_acquisition = lambda reason: (
+        ended.append(reason), setattr(node, 'evidence_acquisition_started', False))[1]
+
+    assert UnknownPoseFrontend._request_next_candidate_verification(node) is False
+    assert ended == ['NO_REQUESTABLE_NOVEL_EVIDENCE']
+    assert node.evidence_acquisition_started is False
+
+
+def test_non_actionable_descriptor_survivor_does_not_renew_navigation_lease():
+    """Temporal-ineligible descriptor survivors cannot hold both robots."""
+    # Resolve from the checked-out test tree rather than an installed copy.
+    source = Path(__file__).parents[1] / 'my_epuck_project' / (
+        'unknown_pose_frontend.py')
+    text = source.read_text(encoding='utf-8')
+    branch = text.split('if not eligible:', 1)[1].split(
+        'eligible.sort', 1)[0]
+    assert 'EVIDENCE_OPPORTUNITY_NOT_ACTIONABLE' in branch
+    assert '_evidence_opportunity_deadline_wall' not in branch
+    assert '_publish_evidence_status(True)' not in branch
 
 
 def test_next_verification_rejects_local_view_near_any_accepted_source():

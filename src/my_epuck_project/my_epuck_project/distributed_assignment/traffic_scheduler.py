@@ -20,6 +20,11 @@ class TrafficDecision:
     required_separation_m: float = 0.0
     robot1_first_conflict_distance_m: float = 0.0
     robot2_first_conflict_distance_m: float = 0.0
+    # The complete conservative interval spanned by all conflicting segment
+    # pairs in each route.  The scheduler does not attempt to identify a
+    # semantic doorway; this is purely path geometry.
+    robot1_last_conflict_distance_m: float = 0.0
+    robot2_last_conflict_distance_m: float = 0.0
     robot1_eta_s: float = 0.0
     robot2_eta_s: float = 0.0
     winner_robot_id: str = ''
@@ -103,12 +108,33 @@ def _segments(path: Sequence[Point]) -> tuple[tuple[Point, Point, float], ...]:
 def detect_path_conflict(
         robot1_path: Sequence[Point], robot2_path: Sequence[Point],
         required_separation_m: float) -> tuple[bool, float, float, float]:
-    """Use continuous segment geometry and return first joint conflict evidence."""
+    """Compatibility wrapper returning the first joint conflict evidence."""
+    conflict, minimum, first1, first2, _last1, _last2 = (
+        detect_path_conflict_interval(
+            robot1_path, robot2_path, required_separation_m,
+        )
+    )
+    return conflict, minimum, first1, first2
+
+
+def detect_path_conflict_interval(
+        robot1_path: Sequence[Point], robot2_path: Sequence[Point],
+        required_separation_m: float,
+        ) -> tuple[bool, float, float, float, float, float]:
+    """Return conservative first/last distances for a continuous path conflict.
+
+    Every segment pair whose minimum separation is within the required center
+    separation contributes its closest-point distance along each route.  The
+    returned interval is the deterministic min/max envelope of those points.
+    If separate conflict regions exist, the envelope intentionally covers the
+    gap between them; that is conservative and avoids releasing a waiter while
+    a later conflict on the same committed pair remains ahead.
+    """
     if required_separation_m <= 0.0:
         raise ValueError('required traffic separation must be positive')
     first_segments, second_segments = _segments(robot1_path), _segments(robot2_path)
     if not first_segments or not second_segments:
-        return False, math.inf, 0.0, 0.0
+        return False, math.inf, 0.0, 0.0, 0.0, 0.0
     minimum = math.inf
     conflicts = []
     for first_index, (first_start, first_end, first_prefix) in enumerate(first_segments):
@@ -129,9 +155,43 @@ def detect_path_conflict(
                     first_index, second_index,
                 ))
     if not conflicts:
-        return False, minimum, 0.0, 0.0
-    _, _, first_distance, second_distance, _, _ = min(conflicts)
-    return True, minimum, first_distance, second_distance
+        return False, minimum, 0.0, 0.0, 0.0, 0.0
+    first_distance = min(item[2] for item in conflicts)
+    second_distance = min(item[3] for item in conflicts)
+    last_distance = max(item[2] for item in conflicts)
+    second_last_distance = max(item[3] for item in conflicts)
+    return (
+        True, minimum, first_distance, second_distance,
+        last_distance, second_last_distance,
+    )
+
+
+def project_path_progress(
+        path: Sequence[Point], point: Point) -> tuple[float, float] | None:
+    """Project a point onto a sampled path.
+
+    Returns ``(distance_along_path_m, lateral_distance_m)`` for the nearest
+    point on any finite segment.  It is deliberately small and stateless: the
+    traffic hold owns the committed path and calls this on each timer tick.
+    """
+    segments = _segments(path)
+    if not segments:
+        return None
+    best = None
+    for start, end, prefix in segments:
+        delta = _sub(end, start)
+        length_sq = _dot(delta, delta)
+        if length_sq <= 1e-12:
+            fraction = 0.0
+        else:
+            fraction = max(0.0, min(1.0, _dot(_sub(point, start), delta) / length_sq))
+        projected = _add(start, _scale(delta, fraction))
+        distance = math.dist(point, projected)
+        progress = prefix + fraction * math.sqrt(length_sq)
+        candidate = (round(distance, 12), round(progress, 12))
+        if best is None or candidate < best:
+            best = candidate
+    return best[1], best[0]
 
 
 def schedule_traffic(
@@ -143,7 +203,8 @@ def schedule_traffic(
     if reference_speed_mps <= 0.0:
         raise ValueError('traffic reference speed must be positive')
     required = robot1_safe_radius_m + robot2_safe_radius_m
-    conflict, minimum, first_distance, second_distance = detect_path_conflict(
+    (conflict, minimum, first_distance, second_distance, last_distance,
+     second_last_distance) = detect_path_conflict_interval(
         robot1_path, robot2_path, required,
     )
     if not conflict:
@@ -156,17 +217,32 @@ def schedule_traffic(
         winner, reason = active[0], 'ALREADY_ACTIVE'
     elif len(active) > 1:
         return TrafficDecision(
-            True, minimum, required, first_distance, second_distance, eta1, eta2,
-            '', '', 'BOTH_ALREADY_ACTIVE_MONITOR_ONLY',
+            conflict=True, minimum_separation_m=minimum,
+            required_separation_m=required,
+            robot1_first_conflict_distance_m=first_distance,
+            robot2_first_conflict_distance_m=second_distance,
+            robot1_last_conflict_distance_m=last_distance,
+            robot2_last_conflict_distance_m=second_last_distance,
+            robot1_eta_s=eta1, robot2_eta_s=eta2,
+            reason='BOTH_ALREADY_ACTIVE_MONITOR_ONLY',
         )
     elif abs(eta1 - eta2) <= eta_tie_s:
-        winner, reason = 'robot1', 'ETA_TIE_ROBOT_ID'
+        # Keep the replicated tie policy independent of callback arrival
+        # order.  The project policy gives the higher numeric robot ID the
+        # deterministic right of way, so robot2 wins a genuine ETA tie.
+        winner, reason = 'robot2', 'ETA_TIE_ROBOT_ID'
     elif eta1 < eta2:
         winner, reason = 'robot1', 'LOWER_ETA'
     else:
         winner, reason = 'robot2', 'LOWER_ETA'
     loser = 'robot2' if winner == 'robot1' else 'robot1'
     return TrafficDecision(
-        True, minimum, required, first_distance, second_distance, eta1, eta2,
-        winner, loser, reason,
+        conflict=True, minimum_separation_m=minimum,
+        required_separation_m=required,
+        robot1_first_conflict_distance_m=first_distance,
+        robot2_first_conflict_distance_m=second_distance,
+        robot1_last_conflict_distance_m=last_distance,
+        robot2_last_conflict_distance_m=second_last_distance,
+        robot1_eta_s=eta1, robot2_eta_s=eta2,
+        winner_robot_id=winner, waiting_robot_id=loser, reason=reason,
     )

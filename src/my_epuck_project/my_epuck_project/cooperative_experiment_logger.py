@@ -12,13 +12,15 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action._navigate_to_pose import NavigateToPose_FeedbackMessage
 from rcl_interfaces.msg import Log
 from rclpy.duration import Duration
+from rclpy.clock import ClockType
 from rclpy.context import Context
 from rclpy.signals import SignalHandlerOptions
-from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import JointState, LaserScan
+from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformException, TransformListener
 from my_epuck_interfaces.msg import (
     DistributedExplorationEvent,
@@ -28,12 +30,13 @@ from my_epuck_interfaces.msg import (
     ExplorationFailure,
     ExplorationStatus,
     FrontierCandidateArray,
+    LocalMapDescriptor,
     PairDecision,
     PeerMap,
     TaskBidArray,
     TaskSnapshot,
 )
-from .experiment_metrics import CoverageAttribution, Grid, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
+from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
 from .forensic_evidence import ForensicEvidenceWriter
 
 SCHEMA='1.1.0'; STATES={0:'UNKNOWN',1:'PROPOSING',2:'NAVIGATING',3:'SUCCEEDED',4:'FAILED',5:'RELEASED',6:'CANCELED'}; STATUS_STATES={0:'STARTING',1:'ACTIVE',2:'NAVIGATING',3:'NO_ELIGIBLE_CANDIDATES',4:'COMPLETE',5:'STOPPED',6:'ERROR'}
@@ -65,10 +68,96 @@ def stamp(m):
     s=getattr(getattr(m,'header',None),'stamp',None); return (int(s.sec),int(s.nanosec)) if s else (0,0)
 def default_run_id(): return time.strftime('%Y-%m-%dT%H%M%SZ',time.gmtime())+'_'+uuid.uuid4().hex[:4]
 
+
+def _wrap_planar_yaw(value):
+    """Wrap a planar yaw to [-pi, pi)."""
+    return (float(value) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _compose_planar(first, second):
+    """Compose ``T_A_B * T_B_C = T_A_C`` in the project convention."""
+    tx, ty, heading = (float(value) for value in first)
+    sx, sy, sheading = (float(value) for value in second)
+    cosine, sine = math.cos(heading), math.sin(heading)
+    return (
+        tx + cosine * sx - sine * sy,
+        ty + sine * sx + cosine * sy,
+        _wrap_planar_yaw(heading + sheading),
+    )
+
+
+def _invert_planar(transform):
+    """Invert a planar transform mapping source coordinates to target."""
+    tx, ty, heading = (float(value) for value in transform)
+    cosine, sine = math.cos(heading), math.sin(heading)
+    return (
+        -cosine * tx - sine * ty,
+        sine * tx - cosine * ty,
+        _wrap_planar_yaw(-heading),
+    )
+
+
+def _interpolate_planar(first, second, fraction):
+    """Interpolate two timestamped planar transforms without yaw jumps."""
+    fraction = min(1.0, max(0.0, float(fraction)))
+    first_yaw = float(first[2])
+    delta = _wrap_planar_yaw(float(second[2]) - first_yaw)
+    return (
+        float(first[0]) + fraction * (float(second[0]) - float(first[0])),
+        float(first[1]) + fraction * (float(second[1]) - float(first[1])),
+        _wrap_planar_yaw(first_yaw + fraction * delta),
+    )
+
+
+def webots_controller_host():
+    """Resolve the Webots TCP host using the same WSL network contract.
+
+    The passive forensic Supervisor is an external Webots controller.  It
+    must use the same endpoint family as the robot controllers; hard-coding
+    loopback leaves Webots waiting for the diagnostic controller in WSL NAT
+    mode and consequently prevents /clock from advancing.
+    """
+    mode = os.environ.get('MY_EPUCK_WEBOTS_NETWORK_MODE', '').strip().lower()
+    if mode in ('mirrored', 'loopback'):
+        return '127.0.0.1'
+    if mode in ('nat', 'subnet', 'wsl_nat'):
+        try:
+            result = subprocess.run(
+                ['ip', 'route', 'show', 'default'], check=True,
+                capture_output=True, text=True, timeout=1.0)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError('Unable to resolve the WSL NAT gateway') from exc
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if fields and fields[0] == 'default' and 'via' in fields:
+                return fields[fields.index('via') + 1]
+        raise RuntimeError('No default-route gateway found for Webots')
+    localhost_only = os.environ.get('ROS_LOCALHOST_ONLY', '').strip().lower()
+    discovery = os.environ.get(
+        'ROS_AUTOMATIC_DISCOVERY_RANGE', '').strip().upper()
+    if localhost_only in ('1', 'true', 'yes') or discovery != 'SUBNET':
+        return '127.0.0.1'
+    return webots_controller_host_for_nat()
+
+
+def webots_controller_host_for_nat():
+    """Return the default-route gateway for automatic subnet mode."""
+    try:
+        result = subprocess.run(
+            ['ip', 'route', 'show', 'default'], check=True,
+            capture_output=True, text=True, timeout=1.0)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError('Unable to resolve the Webots NAT gateway') from exc
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if fields and fields[0] == 'default' and 'via' in fields:
+            return fields[fields.index('via') + 1]
+    raise RuntimeError('No default-route gateway found for Webots')
+
 class CooperativeExperimentLogger(Node):
     def __init__(self, **node_kwargs):
         super().__init__('cooperative_experiment_logger', **node_kwargs)
-        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'enable_local_map_capture':True,'forensic_snapshot_interval_s':15.,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
+        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'enable_local_map_capture':True,'diagnostic_frontier_capture':False,'diagnostic_footprint_radius_m':.08,'forensic_snapshot_interval_s':5.,'forensic_sync_rate_hz':50.,'forensic_ground_truth_sample_period_s':0.02,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
         defaults.update({
             'world_profile': 'small',
             'source_world_path': '',
@@ -102,15 +191,23 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        if self.frontier_query_forensics:
+            forensic_root=self.directory/'nav2_frontier_rejection_forensic'
+            for name in ('local_costmap_crops','global_costmap_crops','shared_map_crops'):
+                (forensic_root/name).mkdir(parents=True,exist_ok=True)
+            self.frontier_query_crops={name: forensic_root/name for name in ('local_costmap_crops','global_costmap_crops','shared_map_crops')}
+            self.frontier_query_forensic_file=(forensic_root/'frontier_query_diagnostics.jsonl').open('a',encoding='utf-8',buffering=1)
+            self.frontier_query_tf_file=(forensic_root/'tf_query_provenance.jsonl').open('a',encoding='utf-8',buffering=1)
+            self.files.extend([self.frontier_query_forensic_file,self.frontier_query_tf_file])
         # Protocol counters deliberately separate replicated publications from
         # unique decisions and local navigation outcomes.
-        self.unique_agreed_rounds=set(); self.unique_agreed_decisions=set()
+        self.unique_agreed_rounds=set(); self.unique_agreed_decisions=set(); self.frontier_query_counts={}; self.frontier_query_last_time={}
         self.round_outcomes=Counter(); self.planner_query_counts=Counter()
         self.planner_query_duration_s=Counter()
-        self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0
+        self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0; self.goal_accounting=[]; self._accepted_before_send=set()
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
-        self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.writers={}
+        self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.local_trajectory=LocalTrajectory(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.writers={}
         forensic_enabled = self.p['enable_forensic_capture']
         if isinstance(forensic_enabled, str):
             forensic_enabled = forensic_enabled.lower() == 'true'
@@ -143,6 +240,8 @@ class CooperativeExperimentLogger(Node):
             if (forensic_enabled or self.local_map_capture) else None)
         self.forensic_supervisor_enabled = bool(forensic_enabled or
                                                 self.contact_capture)
+        self.forensic_sync_enabled = bool(self.forensic_supervisor_enabled)
+        self.latest_evidence = {robot: None for robot in self.robots}
         self.ground_truth_process = None
         self.ground_truth_log = None
         self.ground_truth_ready_file = None
@@ -164,6 +263,17 @@ class CooperativeExperimentLogger(Node):
             for r in self.robots}
         self.scan_pipeline_warning_emitted = False
         self.tf_buffer=Buffer(); self.tf_listener=TransformListener(self.tf_buffer,self)
+        # tf2's graph lookup is the preferred path.  Keep a bounded passive
+        # copy of the actual /tf streams as a fallback for exact-time
+        # forensic joins when a composed lookup reports an unconnected tree or
+        # an extrapolation error.  These samples are never published and are
+        # never visible to the estimator.
+        self._direct_tf_samples = {}
+        self._direct_tf_static = {}
+        self._direct_tf_sample_limit = 4096
+        self._odom_samples = {
+            robot: deque(maxlen=self._direct_tf_sample_limit)
+            for robot in self.robots}
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
         self.coverage=self.csv_file('coverage.csv',COVERAGE); self.health=self.csv_file('topic_health.csv',HEALTH)
         (self.directory/'README.txt').write_text('Passive data; schema and formulas: my_epuck_project/docs/cooperative_experiment_logging.md\n',encoding='utf-8')
@@ -184,6 +294,12 @@ class CooperativeExperimentLogger(Node):
                 float(self.p['forensic_snapshot_interval_s']),
                 lambda: self.safe_call('forensic_snapshot',
                                        self.forensic_snapshot)))
+        if self.forensic is not None and self.forensic_sync_enabled:
+            self._observer_timers.append(self.create_timer(
+                1.0 / max(1.0, float(self.p['forensic_sync_rate_hz'])),
+                lambda: self.safe_call(
+                    'forensic_synchronized_map_frame',
+                    self.forensic_synchronized_map_frame)))
 
     def csv_file(self,name,fields):
         f=open(self.directory/name,'w',newline='',encoding='utf-8'); self.files.append(f); w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); return w
@@ -225,12 +341,13 @@ class CooperativeExperimentLogger(Node):
                        severity='WARN', allow_during_shutdown=True)
             return
         environment['WEBOTS_CONTROLLER_URL'] = (
-            f"tcp://127.0.0.1:{self.p['webots_port']}/"
+            f"tcp://{webots_controller_host()}:{self.p['webots_port']}/"
             'ForensicGroundTruthSupervisor')
         command = [sys.executable, '-m',
                    'my_epuck_project.cooperative_ground_truth_observer',
                    '--output', str(output), '--robot-def', 'robot1',
-                   '--robot-def', 'robot2', '--sample-period-s', '0.10',
+                   '--robot-def', 'robot2', '--sample-period-s', str(float(
+                       self.p['forensic_ground_truth_sample_period_s'])),
                    '--ready-file', str(ready_file),
                    '--controller-url', environment['WEBOTS_CONTROLLER_URL'],
                    '--runtime-directory', str(forensic_dir / 'runtime')]
@@ -294,7 +411,11 @@ class CooperativeExperimentLogger(Node):
             return
         if process.poll() is None:
             try:
-                process.terminate()
+                # The Webots controller binding can be inside Supervisor.step
+                # while launch is shutting down.  Give the observer its
+                # normal signal handler first; SIGTERM can tear down the
+                # binding asynchronously and leave a misleading -11 exit.
+                process.send_signal(signal.SIGINT)
                 process.wait(timeout=8.0)
             except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
                 try:
@@ -337,6 +458,733 @@ class CooperativeExperimentLogger(Node):
                     self.forensic.record_transform(
                         now_ros, now_wall, target, source, error=str(exc))
         self.forensic.flush()
+
+    @staticmethod
+    def _normal_frame(frame):
+        return str(frame or '').lstrip('/')
+
+    def _record_direct_tf_message(self, message, static=False):
+        """Cache bounded planar projections of the raw TF channels."""
+        store = self._direct_tf_static if static else self._direct_tf_samples
+        for item in getattr(message, 'transforms', ()):
+            parent = self._normal_frame(item.header.frame_id)
+            child = self._normal_frame(item.child_frame_id)
+            if not parent or not child:
+                continue
+            stamp_value = (int(item.header.stamp.sec) +
+                           int(item.header.stamp.nanosec) * 1.0e-9)
+            translation = item.transform.translation
+            rotation = item.transform.rotation
+            value = (float(translation.x), float(translation.y),
+                     float(yaw(rotation)))
+            if not all(math.isfinite(part) for part in value):
+                continue
+            key = (parent, child)
+            if static:
+                store[key] = (stamp_value, value)
+                continue
+            samples = store.setdefault(
+                key, deque(maxlen=self._direct_tf_sample_limit))
+            samples.append((stamp_value, value))
+
+    def _direct_tf_message(self, message):
+        self._record_direct_tf_message(message, static=False)
+        if self.forensic is not None:
+            self.forensic.record_raw_tf(
+                '/tf', message, self.ros_seconds(),
+                time.monotonic() - self.start, static=False)
+
+    def _direct_tf_static_message(self, message):
+        self._record_direct_tf_message(message, static=True)
+        if self.forensic is not None:
+            self.forensic.record_raw_tf(
+                '/tf_static', message, self.ros_seconds(),
+                time.monotonic() - self.start, static=True)
+
+    def _direct_tf_edge(self, parent, child, query_ros,
+                        allow_latest_before=False):
+        """Return a tightly bracketed raw-TF edge at ``query_ros``."""
+        key = (self._normal_frame(parent), self._normal_frame(child))
+        if key in self._direct_tf_static:
+            stamp_value, transform = self._direct_tf_static[key]
+            return transform, {
+                'sample_age_s': 0.0,
+                'interpolation_used': False,
+                'interpolation_age_s': 0.0,
+                'interpolation_span_s': 0.0,
+                'lookup_mode': 'raw_tf_static',
+            }
+        values = list(self._direct_tf_samples.get(key, ()))
+        if not values:
+            return None
+        values.sort(key=lambda item: item[0])
+        query_ros = float(query_ros)
+        if allow_latest_before:
+            before = [item for item in values if item[0] <= query_ros]
+            if before:
+                latest = before[-1]
+                return latest[1], {
+                    'sample_age_s': max(0.0, query_ros - latest[0]),
+                    'interpolation_used': False,
+                    'interpolation_age_s': max(0.0, query_ros - latest[0]),
+                    'interpolation_span_s': 0.0,
+                    'lookup_mode': 'raw_tf_latest_valid_before_query',
+                }
+        exact = min(values, key=lambda item: abs(item[0] - query_ros))
+        if abs(exact[0] - query_ros) <= 1.0e-9:
+            return exact[1], {
+                'sample_age_s': 0.0,
+                'interpolation_used': False,
+                'interpolation_age_s': 0.0,
+                'interpolation_span_s': 0.0,
+                'lookup_mode': 'raw_tf_exact',
+            }
+        if query_ros < values[0][0] or query_ros > values[-1][0]:
+            if abs(exact[0] - query_ros) > 0.10:
+                return None
+            return exact[1], {
+                'sample_age_s': abs(exact[0] - query_ros),
+                'interpolation_used': False,
+                'interpolation_age_s': abs(exact[0] - query_ros),
+                'interpolation_span_s': 0.0,
+                'lookup_mode': 'raw_tf_bounded_nearest',
+            }
+        right_index = next(
+            index for index, item in enumerate(values)
+            if item[0] > query_ros)
+        left = values[right_index - 1]
+        right = values[right_index]
+        span = float(right[0] - left[0])
+        if span <= 0.0 or span > 0.10:
+            return None
+        fraction = (query_ros - left[0]) / span
+        return _interpolate_planar(left[1], right[1], fraction), {
+            'sample_age_s': max(abs(query_ros - left[0]),
+                                abs(right[0] - query_ros)),
+            'interpolation_used': True,
+            'interpolation_age_s': max(abs(query_ros - left[0]),
+                                       abs(right[0] - query_ros)),
+            'interpolation_span_s': span,
+            'lookup_mode': 'raw_tf_tightly_interpolated',
+        }
+
+    def _direct_sync_tf(self, target, source, query_ros,
+                        allow_latest_before=False):
+        """Compose a local raw-TF path without using latest wall-time data."""
+        target = self._normal_frame(target)
+        source = self._normal_frame(source)
+        if target == source:
+            return (0.0, 0.0, 0.0), {
+                'sample_age_s': 0.0, 'interpolation_used': False,
+                'interpolation_age_s': 0.0, 'interpolation_span_s': 0.0,
+                'lookup_mode': 'raw_tf_identity', 'path': [source],
+            }
+        keys = set(self._direct_tf_samples) | set(self._direct_tf_static)
+        adjacency = {}
+        for parent, child in keys:
+            adjacency.setdefault(child, []).append((parent, False))
+            adjacency.setdefault(parent, []).append((child, True))
+        queue = deque([(source, (0.0, 0.0, 0.0), 0.0, False, 0.0,
+                        [source])])
+        visited = {source}
+        while queue:
+            current, accumulated, max_age, interpolated, max_span, path = (
+                queue.popleft())
+            neighbours = sorted(adjacency.get(current, ()))
+            for neighbour, inverse in neighbours:
+                if neighbour in visited:
+                    continue
+                parent, child = ((neighbour, current) if not inverse else
+                                 (current, neighbour))
+                edge = self._direct_tf_edge(
+                    parent, child, query_ros,
+                    allow_latest_before=allow_latest_before)
+                if edge is None:
+                    continue
+                edge_transform, edge_meta = edge
+                if inverse:
+                    edge_transform = _invert_planar(edge_transform)
+                composed = _compose_planar(edge_transform, accumulated)
+                edge_age = float(edge_meta.get('sample_age_s', 0.0))
+                edge_span = float(edge_meta.get('interpolation_span_s', 0.0))
+                next_path = path + [neighbour]
+                if neighbour == target:
+                    return composed, {
+                        'sample_age_s': max(max_age, edge_age),
+                        'interpolation_used': bool(
+                            interpolated or edge_meta.get(
+                                'interpolation_used', False)),
+                        'interpolation_age_s': max(max_age, edge_age),
+                        'interpolation_span_s': max(max_span, edge_span),
+                        'lookup_mode': 'raw_tf_bounded_composed',
+                        'path': next_path,
+                    }
+                visited.add(neighbour)
+                queue.append((
+                    neighbour, composed, max(max_age, edge_age),
+                    bool(interpolated or edge_meta.get(
+                        'interpolation_used', False)),
+                    max(max_span, edge_span), next_path))
+        return None, {
+            'lookup_mode': 'raw_tf_unavailable',
+            'path': [source],
+            'error': f'no bounded raw TF path {target} <- {source}',
+        }
+
+    @staticmethod
+    def _planar_tf_observation(transform, target, source, query_ros, metadata):
+        heading = float(transform[2])
+        return {
+            'available': True,
+            'transform_stamp_s': float(query_ros),
+            'age_s': float(metadata.get('sample_age_s', 0.0)),
+            'lookup_mode': str(metadata.get('lookup_mode',
+                                            'raw_tf_bounded_composed')),
+            'requested_stamp_s': float(query_ros),
+            'returned_stamp_delta_s': 0.0,
+            'interpolation_used': bool(metadata.get('interpolation_used',
+                                                   False)),
+            'interpolation_age_s': float(metadata.get(
+                'interpolation_age_s', 0.0)),
+            'interpolation_span_s': float(metadata.get(
+                'interpolation_span_s', 0.0)),
+            'translation': {
+                'x': float(transform[0]), 'y': float(transform[1]), 'z': 0.0},
+            'quaternion': {
+                'x': 0.0, 'y': 0.0, 'z': math.sin(heading / 2.0),
+                'w': math.cos(heading / 2.0)},
+            'target_frame': target,
+            'source_frame': source,
+            'path': list(metadata.get('path', ())),
+            'error': '',
+        }
+
+    @staticmethod
+    def _tf_observation(transform, query_ros):
+        if transform is None:
+            return {
+                'available': False,
+                'transform_stamp_s': None,
+                'age_s': None,
+                'lookup_mode': 'exact_ros_time',
+                'requested_stamp_s': float(query_ros),
+                'returned_stamp_delta_s': None,
+                'interpolation_used': False,
+                'translation': None,
+                'quaternion': None,
+                'error': '',
+            }
+        stamp_value = transform.header.stamp.sec + (
+            transform.header.stamp.nanosec * 1e-9)
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        return {
+            'available': True,
+            'transform_stamp_s': float(stamp_value),
+            'age_s': float(query_ros - stamp_value),
+            'lookup_mode': 'exact_ros_time',
+            'requested_stamp_s': float(query_ros),
+            'returned_stamp_delta_s': float(stamp_value - query_ros),
+            'interpolation_used': False,
+            'translation': {
+                'x': float(t.x), 'y': float(t.y), 'z': float(t.z)},
+            'quaternion': {
+                'x': float(q.x), 'y': float(q.y),
+                'z': float(q.z), 'w': float(q.w)},
+            'error': '',
+        }
+
+    def _lookup_odom_pose(self, robot, query_ros):
+        """Return the local ^odom T_base from native odometry samples."""
+        values = list(self._odom_samples.get(robot, ()))
+        if not values:
+            return self._tf_observation(None, query_ros)
+        values.sort(key=lambda item: item[0])
+        query_ros = float(query_ros)
+        if query_ros < values[0][0]:
+            nearest = values[0]
+            if nearest[0] - query_ros > 0.10:
+                return self._tf_observation(None, query_ros)
+            pose = nearest[1]
+            metadata = {
+                'sample_age_s': nearest[0] - query_ros,
+                'interpolation_used': False,
+                'interpolation_age_s': nearest[0] - query_ros,
+                'interpolation_span_s': 0.0,
+                'lookup_mode': 'native_odom_bounded_nearest',
+                'path': [pose[3], pose[4]],
+            }
+        else:
+            right_index = next(
+                (index for index, item in enumerate(values)
+                 if item[0] > query_ros), None)
+            if right_index is None:
+                pose = values[-1][1]
+                age = max(0.0, query_ros - values[-1][0])
+                if age > 0.10:
+                    return self._tf_observation(None, query_ros)
+                metadata = {
+                    'sample_age_s': age, 'interpolation_used': False,
+                    'interpolation_age_s': age, 'interpolation_span_s': 0.0,
+                    'lookup_mode': 'native_odom_latest_before_query',
+                    'path': [pose[3], pose[4]],
+                }
+            else:
+                left = values[right_index - 1]
+                right = values[right_index]
+                span = float(right[0] - left[0])
+                if span <= 0.0 or span > 0.10:
+                    return self._tf_observation(None, query_ros)
+                fraction = (query_ros - left[0]) / span
+                interpolated = _interpolate_planar(
+                    left[1][:3], right[1][:3], fraction)
+                pose = (*interpolated, left[1][3], left[1][4])
+                metadata = {
+                    'sample_age_s': max(query_ros - left[0],
+                                       right[0] - query_ros),
+                    'interpolation_used': True,
+                    'interpolation_age_s': max(query_ros - left[0],
+                                               right[0] - query_ros),
+                    'interpolation_span_s': span,
+                    'lookup_mode': 'native_odom_tightly_interpolated',
+                    'path': [pose[3], pose[4]],
+                }
+        return self._planar_tf_observation(
+            pose[:3], pose[3], pose[4],
+            query_ros, metadata)
+
+    def _lookup_sync_tf(self, target, source, query_ros,
+                        allow_latest_before=False):
+        lookup_error = ''
+        try:
+            lookup_time = Time(
+                seconds=float(query_ros), clock_type=ClockType.ROS_TIME)
+            transform = self.tf_buffer.lookup_transform(
+                target, source, lookup_time, timeout=Duration(seconds=0.01))
+            result = self._tf_observation(transform, query_ros)
+            result['target_frame'] = target
+            result['source_frame'] = source
+            if (result.get('available') and
+                    abs(float(result.get('returned_stamp_delta_s', 0.0)))
+                    <= 0.10):
+                result['synchronization_valid'] = True
+                return result
+            lookup_error = 'tf2 result outside 0.10 s synchronization bound'
+        except TransformException as exc:
+            lookup_error = str(exc)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            lookup_error = str(exc)
+
+        planar, metadata = self._direct_sync_tf(
+            target, source, query_ros,
+            allow_latest_before=allow_latest_before)
+        if planar is not None:
+            result = self._planar_tf_observation(
+                planar, target, source, query_ros, metadata)
+            result['synchronization_valid'] = bool(
+                float(result.get('age_s', 0.0)) <= 0.10)
+            return result
+        result = self._tf_observation(None, query_ros)
+        result['target_frame'] = target
+        result['source_frame'] = source
+        result['synchronization_valid'] = False
+        result['lookup_mode'] = str(metadata.get('lookup_mode',
+                                                'unavailable'))
+        result['path'] = list(metadata.get('path', ()))
+        result['error'] = '; '.join(value for value in (
+            lookup_error, metadata.get('error', '')) if value)
+        return result
+
+    @staticmethod
+    def _supervisor_pose_at(rows, query_ros):
+        """Join a dense Supervisor trajectory at one simulation timestamp."""
+        if not rows:
+            return None
+        query_ros = float(query_ros)
+        values = sorted(rows, key=lambda item: item[0])
+        nearest = min(values, key=lambda item: abs(item[0] - query_ros))
+        if abs(nearest[0] - query_ros) <= 1.0e-9:
+            return {
+                'pose': nearest[1], 'alignment_error_s': 0.0,
+                'interpolation_used': False, 'interpolation_span_s': 0.0,
+            }
+        if query_ros < values[0][0] or query_ros > values[-1][0]:
+            if abs(nearest[0] - query_ros) > 0.10:
+                return None
+            return {
+                'pose': nearest[1],
+                'alignment_error_s': abs(nearest[0] - query_ros),
+                'interpolation_used': False, 'interpolation_span_s': 0.0,
+            }
+        right_index = next(
+            index for index, item in enumerate(values)
+            if item[0] > query_ros)
+        left, right = values[right_index - 1], values[right_index]
+        span = float(right[0] - left[0])
+        if span <= 0.0 or span > 0.10:
+            return None
+        fraction = (query_ros - left[0]) / span
+        pose = _interpolate_planar(left[1], right[1], fraction)
+        return {
+            'pose': pose,
+            'alignment_error_s': max(abs(query_ros - left[0]),
+                                     abs(right[0] - query_ros)),
+            'interpolation_used': True,
+            'interpolation_span_s': span,
+        }
+
+    @staticmethod
+    def _map_base_from_sync_row(row):
+        """Extract M->B from one row, composing the local chain if needed."""
+        def value(observation):
+            if not isinstance(observation, dict) or not observation.get(
+                    'available'):
+                return None
+            translation = observation.get('translation') or {}
+            quaternion = observation.get('quaternion') or {}
+            try:
+                heading = math.atan2(
+                    2.0 * (float(quaternion['w']) * float(quaternion['z']) +
+                           float(quaternion['x']) * float(quaternion['y'])),
+                    1.0 - 2.0 * (float(quaternion['y']) ** 2 +
+                                 float(quaternion['z']) ** 2))
+                transform = (float(translation['x']),
+                             float(translation['y']), heading)
+                if not all(math.isfinite(item) for item in transform):
+                    return None
+                return transform
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        # Prefer the actual local map->odom and odom->base chain.  A direct
+        # composed TF lookup can be a convenience view with different TF
+        # buffering semantics; the local chain is the evaluator's explicit
+        # physical-map gauge and is sufficient before cross-robot handoff.
+        map_to_odom = value(row.get('map_to_odom'))
+        odom_to_base = value(row.get('odom_to_base'))
+        if map_to_odom is not None and odom_to_base is not None:
+            map_to_odom_observation = row.get('map_to_odom') or {}
+            odom_to_base_observation = row.get('odom_to_base') or {}
+            metadata = {
+                'available': True,
+                'lookup_mode': 'row_composed_map_to_odom_odom_to_base',
+                'interpolation_used': bool(
+                    map_to_odom_observation.get('interpolation_used', False) or
+                    odom_to_base_observation.get('interpolation_used', False)),
+                'age_s': max(float(map_to_odom_observation.get('age_s') or 0.0),
+                            float(odom_to_base_observation.get('age_s') or 0.0)),
+                'interpolation_age_s': max(
+                    float(map_to_odom_observation.get(
+                        'interpolation_age_s') or 0.0),
+                    float(odom_to_base_observation.get(
+                        'interpolation_age_s') or 0.0)),
+                'map_to_odom_age_s': float(
+                    map_to_odom_observation.get('age_s') or 0.0),
+                'odom_to_base_age_s': float(
+                    odom_to_base_observation.get('age_s') or 0.0),
+            }
+            return _compose_planar(map_to_odom, odom_to_base), metadata
+        direct = value(row.get('map_to_base'))
+        if direct is not None:
+            direct_metadata = dict(row.get('map_to_base') or {})
+            direct_metadata.setdefault('lookup_mode', 'direct_map_to_base_fallback')
+            return direct, direct_metadata
+        return None, None
+
+    @classmethod
+    def _fixed_map_anchor_from_rows(cls, robot, supervisor_rows, sync_rows):
+        """Derive W<-M from the earliest valid pre-motion gauge row.
+
+        This is evaluation-only.  A late map/odom observation after the
+        robot has rotated can create a misleading physical yaw reference, so
+        prefer an observation still near the initial Supervisor pose.  If a
+        run has no such observation, reject the anchor explicitly rather than
+        silently treating a post-motion pose as initialization.
+        """
+        del robot
+        ordered = sorted(
+            (row for row in sync_rows
+             if isinstance(row.get('query_ros_time_s'), (int, float))),
+            key=lambda row: float(row['query_ros_time_s']))
+        supervisor_values = sorted(
+            (row for row in supervisor_rows
+             if isinstance(row, tuple) and len(row) == 2),
+            key=lambda item: float(item[0]))
+        initial_pose = supervisor_values[0][1] if supervisor_values else None
+        pre_motion_candidates = []
+        for row in ordered:
+            query_ros = float(row['query_ros_time_s'])
+            supervisor = cls._supervisor_pose_at(supervisor_rows, query_ros)
+            if supervisor is None or supervisor['alignment_error_s'] > 0.10:
+                continue
+            map_to_base, observation = cls._map_base_from_sync_row(row)
+            if map_to_base is None:
+                continue
+            # Odometry is interpolated/tightly joined.  map->odom is allowed
+            # to have an old message stamp when it is the latest valid TF
+            # state; it is not a periodically re-published motion sample.
+            motion_age = float((observation or {}).get(
+                'odom_to_base_age_s') or 0.0)
+            if motion_age > 0.10:
+                continue
+            world_map = _compose_planar(
+                supervisor['pose'], _invert_planar(map_to_base))
+            candidate = {
+                'anchor_time_s': query_ros,
+                'supervisor': supervisor,
+                'map_to_base': map_to_base,
+                'map_to_base_observation': observation,
+                'world_to_map': world_map,
+            }
+            if initial_pose is not None:
+                displacement = math.hypot(
+                    float(supervisor['pose'][0]) - float(initial_pose[0]),
+                    float(supervisor['pose'][1]) - float(initial_pose[1]),
+                )
+                heading_delta = abs(_wrap_planar_yaw(
+                    float(supervisor['pose'][2]) - float(initial_pose[2])))
+                candidate['motion_from_initial_m'] = displacement
+                candidate['heading_from_initial_rad'] = heading_delta
+                if displacement <= 0.10 and heading_delta <= 0.50:
+                    pre_motion_candidates.append(candidate)
+            else:
+                pre_motion_candidates.append(candidate)
+        if pre_motion_candidates:
+            return pre_motion_candidates[0]
+        return None
+
+    def _write_physical_gt_evaluation(self):
+        """Write post-run physical map-frame accuracy, never estimator input."""
+        if self.forensic is None:
+            return None
+        output_path = self.directory / 'forensic' / 'physical_gt_evaluation.json'
+        result = {
+            'schema_version': 'physical_map_frame_gt_1.0',
+            'evaluation_only': True,
+            'estimator_input_connection': False,
+            'formula': {
+                'world_map_i': 'W_T_Bi * inverse(Mi_T_Bi)',
+                'map2_map1': 'inverse(W_T_M2) * W_T_M1',
+                'error': 'inverse(T_GT) * T_EST',
+                'convention': 'p_target = R(theta) p_source + t',
+            },
+            'world_planar_convention': (
+                'Supervisor observer world_x/world_y and heading_x/heading_y'),
+            'physical_gt_valid': False,
+            'reason': '',
+        }
+        try:
+            frontend_directory = self.frontend_diagnostic_directory()
+            summaries = []
+            for robot in self.robots:
+                path = frontend_directory / f'{robot}_unknown_pose_frontend.json'
+                if not path.is_file():
+                    continue
+                payload = json.loads(path.read_text(encoding='utf-8'))
+                accepted = payload.get('accepted_hypothesis')
+                if accepted:
+                    summaries.append((robot, payload, accepted))
+            if not summaries:
+                result['reason'] = 'NO_ACCEPTED_CANONICAL_HANDOFF'
+                atomic_json(output_path, result)
+                return result
+            accepted = next((item[2] for item in summaries
+                             if item[2].get('source_robot_id') == 'robot1'),
+                            summaries[0][2])
+            query_ros = accepted.get('accepted_ros_time_s')
+            if query_ros is None:
+                result['reason'] = 'ACCEPTANCE_SIM_TIME_UNAVAILABLE'
+                atomic_json(output_path, result)
+                return result
+            supervisor_path = self.directory / 'forensic' / \
+                'supervisor_ground_truth.csv'
+            synchronized_path = self.directory / 'forensic' / \
+                'synchronized_map_frame.jsonl'
+            if not supervisor_path.is_file() or not synchronized_path.is_file():
+                result['reason'] = 'SUPERVISOR_OR_SYNCHRONIZED_TF_ARTIFACT_MISSING'
+                atomic_json(output_path, result)
+                return result
+            supervisor_rows = {robot: [] for robot in self.robots}
+            with supervisor_path.open(newline='', encoding='utf-8') as stream:
+                for row in csv.DictReader(stream):
+                    robot = str(row.get('robot_id', ''))
+                    if robot not in supervisor_rows:
+                        continue
+                    try:
+                        supervisor_rows[robot].append((
+                            float(row['sim_time_s']),
+                            (float(row['world_x_m']),
+                             float(row['world_y_m']),
+                             float(row['planar_yaw_rad']))))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            sync_rows = {robot: [] for robot in self.robots}
+            with synchronized_path.open(encoding='utf-8') as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    robot = str(row.get('robot_id', ''))
+                    if robot in sync_rows:
+                        sync_rows[robot].append(row)
+
+            # The physical map-frame reference is an initialization gauge,
+            # not a time-varying reconstruction from later SLAM localization.
+            # Freeze one anchor per map at the earliest synchronized local
+            # map/odom/base observation and use it for the whole run.
+            anchors = {}
+            for robot in self.robots:
+                anchor = self._fixed_map_anchor_from_rows(
+                    robot, supervisor_rows[robot], sync_rows[robot])
+                if anchor is None:
+                    result['reason'] = f'{robot.upper()}_INITIALIZATION_ANCHOR_UNAVAILABLE'
+                    atomic_json(output_path, result)
+                    return result
+                anchors[robot] = anchor
+            gt = _compose_planar(
+                _invert_planar(anchors['robot2']['world_to_map']),
+                anchors['robot1']['world_to_map'])
+            joins = {}
+            for robot in self.robots:
+                supervisor = self._supervisor_pose_at(
+                    supervisor_rows[robot], query_ros)
+                joins[robot] = {
+                    'supervisor_at_acceptance': supervisor,
+                    'initialization_anchor': anchors[robot],
+                }
+            estimated = tuple(float(value) for value in
+                              accepted.get('transform_se2', ()))
+            if len(estimated) != 3 or not all(
+                    math.isfinite(value) for value in estimated):
+                result['reason'] = 'ACCEPTED_TRANSFORM_UNAVAILABLE'
+                atomic_json(output_path, result)
+                return result
+            error_transform = _compose_planar(_invert_planar(gt), estimated)
+            result.update({
+                'physical_gt_valid': True,
+                'accepted_robot_summary': summaries[0][0],
+                'accepted_sim_time_s': float(query_ros),
+                'gt_reference': 'FIXED_INITIALIZATION_ANCHOR_PHYSICAL_REFERENCE',
+                'gt_canonical_r1_to_r2': {
+                    'tx': gt[0], 'ty': gt[1],
+                    'yaw_rad': gt[2], 'yaw_deg': math.degrees(gt[2])},
+                'estimated_canonical_r1_to_r2': {
+                    'tx': estimated[0], 'ty': estimated[1],
+                    'yaw_rad': estimated[2],
+                    'yaw_deg': math.degrees(estimated[2])},
+                'error_transform': {
+                    'tx': error_transform[0], 'ty': error_transform[1],
+                    'yaw_rad': error_transform[2],
+                    'yaw_deg': math.degrees(error_transform[2])},
+                'physical_translation_error_m': math.hypot(
+                    error_transform[0], error_transform[1]),
+                'physical_yaw_error_deg': abs(math.degrees(
+                    _wrap_planar_yaw(estimated[2] - gt[2]))),
+                'gt_time_synchronization_error_s': max(
+                    anchors[robot]['supervisor']['alignment_error_s']
+                    for robot in self.robots),
+                'map_tf_age_or_interpolation_s': {
+                    robot: float((anchors[robot]['map_to_base_observation'] or {}).get(
+                        'age_s') or (anchors[robot]['map_to_base_observation'] or {}).get(
+                        'interpolation_age_s') or 0.0)
+                    for robot in self.robots},
+                'initialization_anchors': anchors,
+                'joins': joins,
+            })
+        except (OSError, TypeError, ValueError, KeyError,
+                json.JSONDecodeError) as exc:
+            result['reason'] = f'EVALUATION_EXCEPTION:{type(exc).__name__}:{exc}'
+        atomic_json(output_path, result)
+        return result
+
+    def _synchronized_map_frame_row(self, robot, query_ros, query_wall,
+                                    sample_kind):
+        evidence = self.latest_evidence.get(robot)
+        odom_message = self.latest[robot].get('odom')
+        map_message = self.latest[robot].get('map')
+        map_frame = (str(map_message.header.frame_id)
+                     if map_message is not None and
+                     map_message.header.frame_id else f'{robot}/map')
+        odom_frame = (str(odom_message.header.frame_id)
+                      if odom_message is not None and
+                      odom_message.header.frame_id else f'{robot}/odom')
+        base_frame = (str(getattr(odom_message, 'child_frame_id', ''))
+                      if odom_message is not None else '')
+        base_frame = base_frame or f'{robot}/base_footprint'
+        return {
+            'schema_version': 'synchronized_map_frame_1.0',
+            'sample_kind': sample_kind,
+            'query_ros_time_s': float(query_ros),
+            'query_wall_elapsed_s': float(query_wall),
+            'robot_id': robot,
+            'map_frame': map_frame,
+            'odom_frame': odom_frame,
+            'base_frame': base_frame,
+            'supervisor_join': {
+                'source': 'forensic/supervisor_ground_truth.csv',
+                'join_time_s': float(query_ros),
+                'interpolation_required': True,
+                'interpolation_method': 'offline_linear_pose_join',
+                'interpolation_age_s': None,
+                'interpolation_error_m': None,
+            },
+            # Keep the project's established TF naming convention used by
+            # record_scan_correction_at_map_update: map->base, odom->base,
+            # and map->odom are queried as (target map/odom, source child).
+            # The target/source fields in each nested observation make the
+            # tf2 direction explicit for the offline composition.
+            'map_to_base': self._lookup_sync_tf(
+                map_frame, base_frame, query_ros),
+            'odom_to_base': self._lookup_odom_pose(robot, query_ros),
+            'map_to_odom': self._lookup_sync_tf(
+                map_frame, odom_frame, query_ros,
+                allow_latest_before=True),
+            'evidence': evidence,
+        }
+
+    def forensic_synchronized_map_frame(self, sample_kind='periodic'):
+        """Capture passive ROS/descriptor evidence for offline GT joining."""
+        if self.forensic is None or not self.forensic_sync_enabled:
+            return
+        query_ros = self.ros_seconds()
+        query_wall = time.monotonic() - self.start
+        for robot in self.robots:
+            self.forensic.record_synchronized_map_frame(
+                finite(self._synchronized_map_frame_row(
+                    robot, query_ros, query_wall, sample_kind)))
+
+    def evidence_descriptor(self, message):
+        """Remember descriptor metadata and snapshot TF at its arrival.
+
+        This callback is observer-only.  It stores no descriptor bytes and
+        has no publisher or service client; the metadata is joined to the
+        passive synchronized stream solely for post-run analysis.
+        """
+        robot = str(message.source_robot_id)
+        if robot not in self.latest_evidence:
+            return
+        stamp_value = (int(message.header.stamp.sec) +
+                       int(message.header.stamp.nanosec) * 1e-9)
+        received_ros = self.ros_seconds()
+        self.latest_evidence[robot] = {
+            'keyframe_id': str(message.keyframe_id),
+            'descriptor_stamp_s': stamp_value,
+            'received_ros_time_s': received_ros,
+            'evidence_age_s': received_ros - stamp_value,
+            'map_epoch': int(message.map_epoch),
+            'checksum': int(message.checksum),
+            'resolution': float(message.resolution),
+            'crop_width': int(message.crop_width),
+            'crop_height': int(message.crop_height),
+            'crop_origin_x': float(message.crop_origin_x),
+            'crop_origin_y': float(message.crop_origin_y),
+            'crop_origin_yaw': float(message.crop_origin_yaw),
+            'frame_id': str(message.header.frame_id),
+        }
+        if self.forensic_sync_enabled:
+            self.forensic_synchronized_map_frame('evidence_keyframe')
+
     def subscribe(self):
         for r in self.robots:
             self.observe(Odometry,f'/{r}/odom',lambda m,x=r:self.odom(x,m),qos_profile_sensor_data,f'{r}.odom')
@@ -363,6 +1211,19 @@ class CooperativeExperimentLogger(Node):
             self.observe(NavPath,f'/{r}/plan',lambda m,x=r:self.plan(x,m),self.qos(),f'{r}.plan')
             self.observe(Twist,f'/{r}/cmd_vel_nav',lambda m,x=r:self.command(x,m,'cmd_vel_nav'),self.qos(),f'{r}.cmd_vel_nav')
             self.observe(TwistStamped,f'/{r}/cmd_vel',lambda m,x=r:self.command(x,m.twist,'cmd_vel'),self.qos(),f'{r}.cmd_vel')
+        # Mirror the raw TF channels with their normal ROS QoS.  The listener
+        # remains authoritative; these subscriptions only make the passive
+        # evaluator able to reconstruct a tightly timestamped local chain
+        # when Buffer.lookup_transform cannot compose it during a busy run.
+        self.observe(TFMessage, '/tf', self._direct_tf_message,
+                     self.qos(False, False, 1000), 'forensic.tf')
+        self.observe(TFMessage, '/tf_static', self._direct_tf_static_message,
+                     self.qos(True, True, 100), 'forensic.tf_static')
+        if self.forensic_sync_enabled:
+            self.observe(
+                LocalMapDescriptor, '/cslam/relative_pose/descriptors',
+                self.evidence_descriptor, self.qos(True, False, 100),
+                'relative_pose.descriptor')
         if self.p['enable_rosout_collection']: self.observe(Log,'/rosout',self.rosout,self.qos(True,True,1000),'rosout')
     def ros_seconds(self): return self.get_clock().now().nanoseconds*1e-9
     def ros_now(self): n=self.get_clock().now().nanoseconds; return n//1000000000,n%1000000000
@@ -374,6 +1235,7 @@ class CooperativeExperimentLogger(Node):
         if (self._finalizing or self._closed) and not allow_during_shutdown:return None
         row=self.common(source,robot,source_stamp); row.update(severity=severity,event_type=event_type,message=message); row.update(finite(extra))
         with self._state_lock:self.counts[event_type]+=1
+        self._account_goal_event(row)
         try:
             encoded=json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n'
             with self._io_lock:
@@ -398,6 +1260,88 @@ class CooperativeExperimentLogger(Node):
             elif severity=='WARN':self.get_logger().warning(text)
             else:self.get_logger().info(text)
         return row
+    @staticmethod
+    def _goal_key(row):
+        return (row.get('robot_id'), row.get('physical_task_signature') or '',
+                row.get('canonical_task_id') or '', row.get('round_id') or '')
+    def _account_goal_event(self,row):
+        """Maintain one explicit lifecycle record per dispatched goal."""
+        kind=row.get('event_type'); robot=row.get('robot_id')
+        if kind == 'NAV_GOAL_SENT':
+            self.dispatch_attempts += 1
+            key=self._goal_key(row)
+            self.goal_accounting.append({
+                'dispatch_event_sequence': row['event_sequence'],
+                'robot_id': robot,
+                'round_id': row.get('round_id'),
+                'canonical_task_id': row.get('canonical_task_id'),
+                'physical_task_signature': row.get('physical_task_signature'),
+                'sent_elapsed_s': row.get('elapsed_s'),
+                'accepted': key in self._accepted_before_send,
+                'terminal_category': None,
+                'terminal_event_sequence': None,
+            })
+            self._accepted_before_send.discard(key)
+            return
+        if kind == 'NAV_GOAL_ACCEPTED':
+            candidates=[item for item in reversed(self.goal_accounting)
+                        if item['robot_id']==robot and
+                        item['terminal_category'] is None]
+            if candidates:
+                candidates[0]['accepted']=True
+            else:
+                self._accepted_before_send.add(self._goal_key(row))
+            return
+        terminal={
+            'NAVIGATION_SUCCEEDED':'SUCCEEDED',
+            'NAVIGATION_FAILED':'NAV2_FAILED',
+            'NAVIGATION_TIMEOUT':'CONTROLLER_TIMEOUT',
+            'NAVIGATION_CANCELED':'CANCELLED',
+            'NAVIGATION_CANCELLED':'CANCELLED',
+        }.get(kind)
+        if terminal is None:
+            return
+        candidates=[item for item in reversed(self.goal_accounting)
+                    if item['robot_id']==robot and
+                    item['terminal_category'] is None]
+        if not candidates:
+            return
+        item=candidates[0]
+        item['terminal_category']=terminal
+        item['terminal_event_sequence']=row['event_sequence']
+        item['terminal_elapsed_s']=row.get('elapsed_s')
+        item['failure_class']=row.get('failure_class')
+        self.goals_terminal += 1
+    def goal_accounting_summary(self):
+        records=[dict(item) for item in self.goal_accounting]
+        for item in records:
+            if item['terminal_category'] is None:
+                active=self.latest.get(item['robot_id'],{}).get(
+                    'navigation_active',False)
+                item['terminal_category'] = (
+                    'STILL_ACTIVE_AT_MISSION_END' if active else
+                    'UNKNOWN_OR_UNACCOUNTED')
+        categories=Counter(item['terminal_category'] for item in records)
+        by_robot={}
+        for robot in self.robots:
+            own=[item for item in records if item['robot_id']==robot]
+            by_robot[robot]={
+                'dispatched':len(own),
+                'terminal':sum(item['terminal_category'] not in
+                               ('STILL_ACTIVE_AT_MISSION_END',
+                                'UNKNOWN_OR_UNACCOUNTED') for item in own),
+                'active_at_mission_end':sum(item['terminal_category']==
+                                            'STILL_ACTIVE_AT_MISSION_END'
+                                            for item in own),
+                'unknown_or_unaccounted':sum(item['terminal_category']==
+                                             'UNKNOWN_OR_UNACCOUNTED'
+                                             for item in own),
+                'categories':dict(Counter(item['terminal_category']
+                                           for item in own)),
+            }
+        return {'dispatched':len(records),'terminal':self.goals_terminal,
+                'categories':dict(categories),'by_robot':by_robot,
+                'records':records}
     def safe_call(self,subsystem,operation,*args):
         if self._finalizing or self._closed:
             self.dropped_samples+=1; return None
@@ -459,11 +1403,26 @@ class CooperativeExperimentLogger(Node):
         value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):
         self.mark(r,'odom',msg)
+        p=msg.pose.pose.position
+        local_yaw=yaw(msg.pose.pose.orientation)
+        # Local odometry is the reliable pre-handoff motion source.  The
+        # shared_map transform is intentionally unavailable before handoff;
+        # do not let that optional lookup erase the observer's local pose,
+        # velocity, or travelled-distance accounting.
+        self.latest[r]['pose']=(float(p.x),float(p.y),float(local_yaw))
+        self.latest[r]['pose_frame']=str(msg.header.frame_id)
+        self.latest[r]['speed']=(float(msg.twist.twist.linear.x),
+                                 float(msg.twist.twist.angular.z))
+        stamp_value = stamp(msg)[0] + stamp(msg)[1] * 1e-9
+        self._odom_samples[r].append((
+            stamp_value,
+            (float(p.x), float(p.y), float(local_yaw),
+             str(msg.header.frame_id or f'{r}/odom'),
+             str(getattr(msg, 'child_frame_id', '') or 'base_footprint'))))
+        self.local_trajectory.add(r,float(p.x),float(p.y))
         if self.forensic is not None:
             self.forensic.record_odom(
                 r, msg, self.ros_seconds(), time.monotonic() - self.start)
-        p=msg.pose.pose.position
-        local_yaw=yaw(msg.pose.pose.orientation)
         try:
             transform=self.tf_buffer.lookup_transform(
                 self.p['global_frame'], msg.header.frame_id,
@@ -478,8 +1437,8 @@ class CooperativeExperimentLogger(Node):
         except TransformException:
             # Do not feed local-frame points to cross-robot metrics.
             return
-        self.latest[r]['pose']=(shared_x,shared_y,shared_yaw)
-        self.latest[r]['speed']=(msg.twist.twist.linear.x,msg.twist.twist.angular.z)
+        self.latest[r]['shared_pose']=(shared_x,shared_y,shared_yaw)
+        self.latest[r]['shared_pose_frame']=self.p['global_frame']
         if self.p['enable_trajectory_overlap']: self.trajectory.add(r,shared_x,shared_y)
     def command(self,r,msg,source='cmd_vel'):
         self.mark(r,'cmd_vel',msg)
@@ -524,8 +1483,20 @@ class CooperativeExperimentLogger(Node):
                      'reachability_state':item.reachability_state,
                      'path_length_m':item.path_length_m,
                      'local_path_length_m':item.local_path_length_m,
+                     # FrontierCandidate carries the generator's heading
+                     # primitive as heading_change_rad.  The normalized
+                     # task/bid representation uses path_heading_cost_rad;
+                     # keep this passive observer compatible with both
+                     # message generations without changing scoring.
+                     'path_heading_cost_rad':getattr(
+                         item, 'path_heading_cost_rad',
+                         getattr(item, 'heading_change_rad', 0.0)),
                      'local_path_samples':len(item.local_path_samples)}
                     for item in msg.candidates]
+        self.frontier_metadata[r] = {
+            int(item['frontier_id']): item for item in candidates}
+        self.latest[r]['candidate_frame'] = str(
+            msg.header.frame_id or self.p['global_frame'])
         self.event('CANDIDATE_BATCH_RECEIVED',f'{count} reachable candidates',r,f'/{r}/frontier_candidates',source_stamp=stamp(msg),map_revision=msg.map_revision,candidate_count=count,detected_frontier_count=msg.detected_frontier_count,detected_not_queried_count=getattr(msg,'detected_not_queried_count',msg.unclassified_frontier_count),small_frontier_count=msg.small_frontier_count,out_of_range_frontier_count=msg.out_of_range_frontier_count,unreachable_frontier_count=msg.unreachable_frontier_count,planner_failure_count=msg.planner_failure_count,unclassified_frontier_count=msg.unclassified_frontier_count,candidates=candidates)
         diagnostic_regions = getattr(msg, 'diagnostic_regions_json', '')
         if diagnostic_regions:
@@ -552,7 +1523,7 @@ class CooperativeExperimentLogger(Node):
     def distributed_snapshot(self,r,msg):
         self.mark(r,'task_snapshot',msg)
         if not self.distributed_changed((r,'snapshot'),(self.uuid_text(msg.source_session_id),msg.source_snapshot_epoch,msg.source_map_revision,msg.source_map_fingerprint)):return
-        tasks=[{'physical_signature':task.physical_signature,'local_frontier_id':task.local_frontier_id,'centroid':[task.centroid.x,task.centroid.y],'bounds':[task.bounding_box_min.x,task.bounding_box_min.y,task.bounding_box_max.x,task.bounding_box_max.y],'approach':[task.approach_pose.pose.position.x,task.approach_pose.pose.position.y],'visible_reveal_gain':task.visible_reveal_gain,'local_ordering_score':task.local_ordering_score,'local_path_valid':task.local_path_valid,'local_path_length_m':task.local_path_length_m,'local_path_samples':len(task.local_path_samples),'frontier_geometry_samples':len(task.frontier_geometry),'visible_cell_samples':len(task.visible_cells)} for task in msg.tasks]
+        tasks=[{'physical_signature':task.physical_signature,'local_frontier_id':task.local_frontier_id,'centroid':[task.centroid.x,task.centroid.y],'bounds':[task.bounding_box_min.x,task.bounding_box_min.y,task.bounding_box_max.x,task.bounding_box_max.y],'approach':[task.approach_pose.pose.position.x,task.approach_pose.pose.position.y],'visible_reveal_gain':task.visible_reveal_gain,'local_ordering_score':task.local_ordering_score,'local_path_valid':task.local_path_valid,'local_path_length_m':task.local_path_length_m,'path_heading_cost_rad':task.path_heading_cost_rad,'local_path_samples':len(task.local_path_samples),'frontier_geometry_samples':len(task.frontier_geometry),'visible_cell_samples':len(task.visible_cells)} for task in msg.tasks]
         self.event('DISTRIBUTED_TASK_SNAPSHOT',f'{len(tasks)} bounded physical tasks',r,f'/{r}/task_snapshot',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),snapshot_epoch=msg.source_snapshot_epoch,source_map_revision=msg.source_map_revision,source_map_fingerprint=msg.source_map_fingerprint,tasks=tasks)
     def distributed_bids(self,r,msg):
         self.mark(r,'task_bids',msg)
@@ -631,10 +1602,6 @@ class CooperativeExperimentLogger(Node):
             self.unique_agreed_rounds.add(msg.round_id)
             if msg.decision_hash:
                 self.unique_agreed_decisions.add(msg.decision_hash)
-        elif msg.event_type == 'NAV_GOAL_SENT':
-            self.dispatch_attempts += 1
-        elif msg.event_type in ('NAVIGATION_SUCCEEDED', 'NAVIGATION_FAILED', 'NAVIGATION_CANCELLED'):
-            self.goals_terminal += 1
         fields = dict(source_session_id=self.uuid_text(msg.source_session_id),
                       round_id=msg.round_id, union_hash=msg.union_hash,
                       decision_hash=msg.decision_hash,
@@ -710,19 +1677,508 @@ class CooperativeExperimentLogger(Node):
     def coordinator_event(self,r,msg):
         self.mark(r,'exploration_event',msg); fields={'cycle_number':msg.cycle_number,'claim_id':msg.claim_id,'frontier_id':msg.frontier_id,'candidate_map_revision':msg.candidate_map_revision,'selected_rank':msg.selected_rank,'path_length_m':msg.path_length_m,'information_gain':msg.information_gain,'goal_x':msg.goal_pose.pose.position.x,'goal_y':msg.goal_pose.pose.position.y,'goal_yaw':yaw(msg.goal_pose.pose.orientation),'terminal_result':msg.terminal_result,'duration_s':msg.duration_s,'suppression_reason':msg.reason}
         if msg.event_type=='EXPLORATION_CYCLE_STARTED':
-            self.cycle_starts[(r,msg.claim_id)]=(self.ros_seconds(),self.trajectory.total_distance.get(r,0.)); self.region_attempts[r][msg.frontier_id]+=1
+            self.cycle_starts[(r,msg.claim_id)]=(self.ros_seconds(),self.local_trajectory.total_distance.get(r,0.)); self.region_attempts[r][msg.frontier_id]+=1
         if msg.event_type=='EXPLORATION_CYCLE_ENDED':
             start=self.cycle_starts.pop((r,msg.claim_id),None)
             if start:
-                fields['duration_s']=self.ros_seconds()-start[0]; fields['actual_travelled_distance_m']=self.trajectory.total_distance.get(r,0.)-start[1]; self.cycle_durations[r].append(fields['duration_s'])
+                fields['duration_s']=self.ros_seconds()-start[0]; fields['actual_travelled_distance_m']=self.local_trajectory.total_distance.get(r,0.)-start[1]; self.cycle_durations[r].append(fields['duration_s'])
         self.robot_counts[r][msg.event_type]+=1
         if msg.event_type=='MISSION_COMPLETE' and self.mission_completion_time is None:self.mission_completion_time=self.ros_seconds()-self.start_ros
         self.event(msg.event_type,msg.reason or msg.terminal_result or msg.event_type,r,f'/cslam/{r}/exploration_event',source_stamp=stamp(msg),**fields)
     def feedback(self,r,msg):
         self.mark(r,'navigate_feedback',msg); f=msg.feedback; old=self.latest[r].get('recoveries',0); self.latest[r].update(distance_remaining=float(f.distance_remaining),recoveries=int(f.number_of_recoveries))
         if old!=f.number_of_recoveries:self.event('RECOVERY_COUNT_CHANGED',f'{old} -> {f.number_of_recoveries}',r,f'/{r}/navigate_to_pose/_action/feedback',source_stamp=stamp(f.current_pose),recoveries=f.number_of_recoveries,distance_remaining_m=f.distance_remaining)
+
+    @staticmethod
+    def _query_stamp_seconds(source_stamp):
+        return float(source_stamp[0]) + float(source_stamp[1]) * 1.0e-9
+
+    def _query_event_time(self, message):
+        """Return simulation time for a /rosout query event.
+
+        Some early rosout publishers in this stack leave ``Log.stamp`` at
+        zero even after /clock is live.  The observer receipt clock is the
+        correct simulation-time fallback in that case; retaining a zero
+        timestamp would incorrectly place every diagnostic query at t=0.
+        """
+        stamped = self._query_stamp_seconds(stamp(message))
+        current = float(self.ros_seconds())
+        if stamped <= 0.0 and current > 0.0:
+            return current
+        return stamped
+
+    @staticmethod
+    def _query_apply_tf(transform, x, y):
+        """Apply a planar ``target <- source`` TF observation to a point."""
+        if not transform or not transform.get('available'):
+            return None
+        translation = transform.get('translation') or {}
+        quaternion = transform.get('quaternion') or {}
+        heading = math.atan2(
+            2.0 * (float(quaternion.get('w', 1.0)) *
+                    float(quaternion.get('z', 0.0)) +
+                    float(quaternion.get('x', 0.0)) *
+                    float(quaternion.get('y', 0.0))),
+            1.0 - 2.0 * (float(quaternion.get('y', 0.0)) ** 2 +
+                         float(quaternion.get('z', 0.0)) ** 2),
+        )
+        cosine, sine = math.cos(heading), math.sin(heading)
+        return (
+            float(translation.get('x', 0.0)) + cosine * float(x) - sine * float(y),
+            float(translation.get('y', 0.0)) + sine * float(x) + cosine * float(y),
+        )
+
+    def _query_tf(self, target, source, query_ros):
+        """Capture the exact-time TF used by a diagnostic grid sample.
+
+        The normal Buffer lookup is attempted at the query timestamp.  The
+        observer's already-captured raw /tf stream is only a passive forensic
+        fallback; neither path publishes data or affects the running stack.
+        """
+        target = self._normal_frame(target)
+        source = self._normal_frame(source)
+        if not target or not source:
+            return {
+                'available': False, 'target_frame': target,
+                'source_frame': source, 'lookup_mode': 'invalid_frame',
+                'requested_stamp_s': float(query_ros), 'error': 'empty frame',
+            }
+        if target == source:
+            return {
+                'available': True, 'target_frame': target,
+                'source_frame': source, 'lookup_mode': 'identity',
+                'requested_stamp_s': float(query_ros), 'transform_stamp_s': float(query_ros),
+                'age_s': 0.0, 'returned_stamp_delta_s': 0.0,
+                'interpolation_used': False, 'translation': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                'quaternion': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+                'path': [source], 'error': '',
+            }
+        try:
+            query_time = Time(
+                nanoseconds=max(0, int(round(float(query_ros) * 1.0e9))),
+                clock_type=ClockType.ROS_TIME)
+            transform = self.tf_buffer.lookup_transform(
+                target, source, query_time, timeout=Duration(seconds=0.05))
+            observation = self._tf_observation(transform, query_ros)
+            observation.update({'target_frame': target, 'source_frame': source})
+            return observation
+        except TransformException as exc:
+            fallback, metadata = self._direct_sync_tf(
+                target, source, float(query_ros), allow_latest_before=False)
+            if fallback is not None:
+                observation = self._planar_tf_observation(
+                    fallback, target, source, query_ros, metadata)
+                observation['error'] = str(exc)
+                return observation
+            return {
+                'available': False, 'target_frame': target,
+                'source_frame': source, 'lookup_mode': 'exact_ros_time_failed',
+                'requested_stamp_s': float(query_ros), 'transform_stamp_s': None,
+                'age_s': None, 'returned_stamp_delta_s': None,
+                'interpolation_used': False, 'translation': None,
+                'quaternion': None, 'path': list(metadata.get('path', ())),
+                'error': str(exc), 'fallback_error': metadata.get('error', ''),
+            }
+
+    @staticmethod
+    def _query_grid_cell(message, x, y):
+        """Return the cell containing a point in the OccupancyGrid frame."""
+        info = message.info
+        resolution = float(info.resolution)
+        if resolution <= 0.0 or int(info.width) <= 0 or int(info.height) <= 0:
+            return None
+        heading = yaw(info.origin.orientation)
+        dx, dy = float(x) - float(info.origin.position.x), float(y) - float(info.origin.position.y)
+        cosine, sine = math.cos(heading), math.sin(heading)
+        local_x = cosine * dx + sine * dy
+        local_y = -sine * dx + cosine * dy
+        column, row = math.floor(local_x / resolution), math.floor(local_y / resolution)
+        if column < 0 or row < 0 or column >= int(info.width) or row >= int(info.height):
+            return None
+        index = int(row) * int(info.width) + int(column)
+        if index < 0 or index >= len(message.data):
+            return None
+        return int(column), int(row), index
+
+    @staticmethod
+    def _query_cell_center(message, column, row):
+        info = message.info
+        heading = yaw(info.origin.orientation)
+        cosine, sine = math.cos(heading), math.sin(heading)
+        local_x = (float(column) + 0.5) * float(info.resolution)
+        local_y = (float(row) + 0.5) * float(info.resolution)
+        return (
+            float(info.origin.position.x) + cosine * local_x - sine * local_y,
+            float(info.origin.position.y) + sine * local_x + cosine * local_y,
+        )
+
+    def _query_save_crop(self, kind, robot, query_id, label, message, x, y, cell):
+        if message is None or cell is None:
+            return None
+        info = message.info
+        width, height = int(info.width), int(info.height)
+        values = np.asarray(message.data, dtype=np.int16)
+        if width <= 0 or height <= 0 or values.size != width * height:
+            return None
+        values = values.reshape(height, width)
+        radius_cells = max(1, int(math.ceil(0.5 / max(float(info.resolution), 1.0e-9))))
+        column, row, _ = cell
+        c0, c1 = max(0, column - radius_cells), min(width - 1, column + radius_cells)
+        r0, r1 = max(0, row - radius_cells), min(height - 1, row + radius_cells)
+        crop_directory = self.frontier_query_crops.get(kind)
+        if crop_directory is None:
+            crop_directory = self.frontier_query_crops.get(f'{kind}_crops')
+        if crop_directory is None:
+            return None
+        path = crop_directory / (
+            f'query_{int(query_id):06d}_{robot}_{label}.json')
+        crop = values[r0:r1 + 1, c0:c1 + 1].tolist()
+        payload = {
+            'schema_version': 'nav2_frontier_rejection_crop_1.0',
+            'kind': kind, 'robot_id': robot, 'query_id': int(query_id),
+            'label': label, 'frame_id': str(message.header.frame_id),
+            'header_stamp_s': self._query_stamp_seconds(stamp(message)),
+            'resolution_m': float(info.resolution),
+            'origin_x': float(info.origin.position.x),
+            'origin_y': float(info.origin.position.y),
+            'origin_yaw_rad': yaw(info.origin.orientation),
+            'requested_point_xy': [float(x), float(y)],
+            'cell_column': int(column), 'cell_row': int(row),
+            'column_range': [int(c0), int(c1)], 'row_range': [int(r0), int(r1)],
+            'values': crop,
+        }
+        path.write_text(json.dumps(finite(payload), separators=(',', ':')) + '\n', encoding='utf-8')
+        return str(path)
+
+    def _query_grid_sample(self, kind, robot, query_id, label, message,
+                           point_xy, source_frame, query_ros, save_crop=False):
+        if message is None:
+            return {'available': False, 'reason': 'NO_MESSAGE',
+                    'point_xy': list(point_xy) if point_xy is not None else None}
+        if point_xy is None or len(point_xy) < 2 or not all(
+                value is not None and math.isfinite(float(value))
+                for value in point_xy[:2]):
+            return {'available': False, 'reason': 'NO_POINT', 'point_xy': None}
+        target_frame = str(message.header.frame_id or '')
+        transform = self._query_tf(target_frame, source_frame, query_ros)
+        transformed = self._query_apply_tf(transform, point_xy[0], point_xy[1])
+        sample = {
+            'available': transformed is not None,
+            'kind': kind, 'label': label,
+            'source_frame': str(source_frame), 'target_frame': target_frame,
+            'point_source_xy': [float(point_xy[0]), float(point_xy[1])],
+            'tf': transform,
+            'point_target_xy': list(transformed) if transformed is not None else None,
+            'header_stamp_s': self._query_stamp_seconds(stamp(message)),
+            'sample_age_s': float(query_ros) - self._query_stamp_seconds(stamp(message)),
+            'frame_id': target_frame,
+            'resolution_m': float(message.info.resolution),
+            'origin': {
+                'x': float(message.info.origin.position.x),
+                'y': float(message.info.origin.position.y),
+                'yaw_rad': yaw(message.info.origin.orientation),
+            },
+            'width': int(message.info.width), 'height': int(message.info.height),
+        }
+        if transformed is None:
+            sample.update({'classification': 'TF_FAILURE', 'cell': None})
+            return sample
+        cell = self._query_grid_cell(message, transformed[0], transformed[1])
+        sample['cell'] = list(cell) if cell is not None else None
+        values = np.asarray(message.data, dtype=np.int16)
+        valid_shape = values.size == int(message.info.width) * int(message.info.height)
+        if cell is None or not valid_shape:
+            sample.update({
+                'raw_cost': None,
+                'classification': 'OUTSIDE_MAP' if cell is None else 'INVALID_GRID',
+                'max_cost_within_footprint': None,
+                'max_cost_within_radius': {str(radius): None for radius in (0.05, 0.10, 0.15, 0.25, 0.50)},
+                'nearest_lethal_distance_m': None,
+                'nearest_inflated_distance_m': None,
+                'nearest_unknown_distance_m': None,
+            })
+            return sample
+        values = values.reshape(int(message.info.height), int(message.info.width))
+        column, row, index = cell
+        raw = int(values[row, column])
+        is_shared = kind == 'shared_map'
+        occupied_threshold = 50 if is_shared else 100
+        inflated_threshold = 50 if is_shared else 1
+        if raw < 0:
+            classification = 'UNKNOWN'
+        elif raw >= occupied_threshold:
+            classification = 'LETHAL_OR_OCCUPIED'
+        elif raw >= inflated_threshold:
+            classification = 'INFLATED' if not is_shared else 'FREE_COST_RANGE'
+        else:
+            classification = 'FREE'
+        sample['raw_cost'] = raw
+        sample['classification'] = classification
+        sample['max_cost_within_radius'] = {}
+        for radius in (0.05, 0.10, 0.15, 0.25, 0.50):
+            radius_cells = int(math.ceil(radius / max(float(message.info.resolution), 1.0e-9)))
+            window = values[max(0, row - radius_cells):min(values.shape[0], row + radius_cells + 1),
+                            max(0, column - radius_cells):min(values.shape[1], column + radius_cells + 1)]
+            sample['max_cost_within_radius'][str(radius)] = int(window.max()) if window.size else None
+        footprint_radius = float(self.p.get('diagnostic_footprint_radius_m', 0.08))
+        footprint_cells = int(math.ceil(footprint_radius / max(float(message.info.resolution), 1.0e-9)))
+        footprint = values[max(0, row - footprint_cells):min(values.shape[0], row + footprint_cells + 1),
+                           max(0, column - footprint_cells):min(values.shape[1], column + footprint_cells + 1)]
+        sample['footprint_radius_m'] = footprint_radius
+        sample['max_cost_within_footprint'] = int(footprint.max()) if footprint.size else None
+        # Keep the observer callback bounded.  The previous Python loop over
+        # every cell in every grid made a failed-query capture block on large
+        # global costmaps, causing later /rosout records to be dropped.  The
+        # same nearest-cell calculation is vectorized here without changing
+        # any runtime navigation data.
+        nearest = {'lethal': None, 'inflated': None, 'unknown': None}
+        info = message.info
+        cosine, sine = math.cos(yaw(info.origin.orientation)), math.sin(yaw(info.origin.orientation))
+        for key, mask in (
+                ('lethal', values >= occupied_threshold),
+                ('inflated', values >= inflated_threshold),
+                ('unknown', values < 0)):
+            rows, columns = np.nonzero(mask)
+            if rows.size == 0:
+                continue
+            local_x = (columns.astype(np.float64) + 0.5) * float(info.resolution)
+            local_y = (rows.astype(np.float64) + 0.5) * float(info.resolution)
+            centers_x = float(info.origin.position.x) + cosine * local_x - sine * local_y
+            centers_y = float(info.origin.position.y) + sine * local_x + cosine * local_y
+            nearest[key] = float(np.hypot(
+                centers_x - float(transformed[0]),
+                centers_y - float(transformed[1])).min())
+        sample['nearest_lethal_distance_m'] = nearest['lethal']
+        sample['nearest_inflated_distance_m'] = nearest['inflated']
+        sample['nearest_unknown_distance_m'] = nearest['unknown']
+        if save_crop:
+            sample['crop_path'] = self._query_save_crop(
+                kind, robot, query_id, label, message, transformed[0], transformed[1], cell)
+        return finite(sample)
+
+    def _query_frontier_robot(self, name):
+        normalized = str(name or '').lstrip('/')
+        for robot in self.robots:
+            # rclpy /rosout uses the fully-qualified logger name with either
+            # slash or dot separators depending on the emitting node and
+            # launch composition.  The frontier generators in this runtime
+            # emit e.g. ``robot1.local_frontier_candidate_generator``.
+            if (normalized == robot or normalized.startswith(robot + '/') or
+                    normalized.startswith(robot + '.')):
+                return robot
+        return None
+
+    @staticmethod
+    def _query_number(pattern, text, default=None, cast=float):
+        match = re.search(pattern, text)
+        if not match:
+            return default
+        try:
+            return cast(match.group(1))
+        except (TypeError, ValueError):
+            return default
+
+    def _query_capture_request(self, robot, message):
+        if not self.frontier_query_forensics:
+            return
+        query_id = self._query_number(r'query_id=(\d+)', message.msg, None, int)
+        frontier_id = self._query_number(r'\bid=(\d+)', message.msg, None, int)
+        if query_id is None or frontier_id is None:
+            return
+        query_ros = self._query_event_time(message)
+        global_costmap = self.latest[robot].get('global_costmap/costmap')
+        start = self.latest[robot].get('shared_pose') or self.latest[robot].get('pose')
+        start_frame = self.latest[robot].get('shared_pose_frame') or self.latest[robot].get('pose_frame') or self.p['global_frame']
+        if start is None:
+            start = (None, None, None)
+        prior = int(self.frontier_query_counts.get((robot, frontier_id), 0))
+        self.frontier_query_pending[(robot, query_id)] = {
+            'query_id': int(query_id), 'frontier_id': int(frontier_id),
+            'robot_id': robot, 'query_start_ros_s': query_ros,
+            'map_revision': self._query_number(r'map_revision=(\d+)', message.msg, None, int),
+            'costmap_revision': self._query_number(r'costmap_revision=(\d+)', message.msg, None, int),
+            'query_count_before': prior,
+            'previously_queried': prior > 0,
+            'last_query_ros_s': self.frontier_query_last_time.get((robot, frontier_id)),
+            'start_xy': [start[0], start[1]] if start[0] is not None else None,
+            'start_yaw_rad': start[2] if start[2] is not None else None,
+            'start_frame': str(start_frame),
+            'planner_frame': str(global_costmap.header.frame_id) if global_costmap is not None else self.p['global_frame'],
+            'goal_frame': self.latest[robot].get('candidate_frame') or self.p['global_frame'],
+            'selected_message': message.msg,
+        }
+
+    def _query_capture_result(self, robot, message):
+        if not self.frontier_query_forensics:
+            return
+        query_id = self._query_number(r'query_id=(\d+)', message.msg, None, int)
+        frontier_id = self._query_number(r'\bid=(\d+)', message.msg, None, int)
+        if query_id is None or frontier_id is None:
+            return
+        query_ros = self._query_event_time(message)
+        pending = self.frontier_query_pending.pop((robot, query_id), {})
+        metadata = dict(self.frontier_metadata.get(robot, {}).get(frontier_id, {}))
+        target_x = self._query_number(r'target_x=([-+0-9.eE]+)', message.msg, None)
+        target_y = self._query_number(r'target_y=([-+0-9.eE]+)', message.msg, None)
+        start_xy = pending.get('start_xy')
+        if start_xy is None:
+            pose = self.latest[robot].get('shared_pose') or self.latest[robot].get('pose')
+            start_xy = [pose[0], pose[1]] if pose is not None else None
+        start_frame = pending.get('start_frame') or self.p['global_frame']
+        goal_frame = pending.get('goal_frame') or self.p['global_frame']
+        planner_frame = pending.get('planner_frame') or self.p['global_frame']
+        if target_x is None or target_y is None:
+            approach = metadata.get('approach')
+            target_x, target_y = (approach if approach else (None, None))
+        goal_xy = [target_x, target_y] if target_x is not None and target_y is not None else None
+        error_name = re.search(r'error_name=([^\s]+)', message.msg)
+        error_name = error_name.group(1) if error_name else 'UNKNOWN'
+        action_result = re.search(r'action_result=([^\s]+)', message.msg)
+        action_result = action_result.group(1) if action_result else 'UNKNOWN'
+        status = re.search(r'\bstatus=([^\s]+)', message.msg)
+        status = status.group(1) if status else 'UNKNOWN'
+        failure_class = re.search(r'failure_class=([^\s]+)', message.msg)
+        failure_class = failure_class.group(1) if failure_class else 'UNKNOWN'
+        error_code = self._query_number(r'error_code=(-?\d+)', message.msg, None, int)
+        duration = self._query_number(r'duration_s=([-+0-9.eE]+)', message.msg, None)
+        path_length = self._query_number(r'path_length_m=([-+0-9.eE]+)', message.msg, None)
+        error_message = re.search(r'error_message="(.*?)"', message.msg)
+        error_message = error_message.group(1) if error_message else ''
+        query_count = int(self.frontier_query_counts.get((robot, frontier_id), 0)) + 1
+        self.frontier_query_counts[(robot, frontier_id)] = query_count
+        self.frontier_query_last_time[(robot, frontier_id)] = query_ros
+        if path_length is not None and path_length < 0.0:
+            path_length = None
+        save_crops = status != 'REACHABLE' and action_result != 'SUCCEEDED'
+        grid_sources = {
+            'local_costmap': self.latest[robot].get('local_costmap/costmap'),
+            'global_costmap': self.latest[robot].get('global_costmap/costmap'),
+            'shared_map': self.latest[robot].get('shared_map') or self.latest[robot].get('map'),
+        }
+        grid_samples = {}
+        tf_rows = []
+        for kind, grid in grid_sources.items():
+            if grid is None:
+                grid_samples[kind] = {'available': False, 'reason': 'NO_MESSAGE'}
+                continue
+            start_sample = self._query_grid_sample(
+                kind, robot, query_id, 'start', grid, start_xy, start_frame,
+                query_ros, save_crop=save_crops)
+            goal_sample = self._query_grid_sample(
+                kind, robot, query_id, 'goal', grid, goal_xy, goal_frame,
+                query_ros, save_crop=save_crops) if goal_xy is not None else {
+                    'available': False, 'reason': 'NO_GOAL_POINT'}
+            grid_samples[kind] = {'start': start_sample, 'goal': goal_sample}
+            for label, sample in (('start', start_sample), ('goal', goal_sample)):
+                if sample.get('tf'):
+                    tf_rows.append({
+                        'query_id': query_id, 'robot_id': robot,
+                        'frontier_id': frontier_id, 'sim_time_s': query_ros,
+                        'purpose': f'{kind}_{label}', **sample['tf'],
+                    })
+        peer = 'robot2' if robot == 'robot1' else 'robot1'
+        own_pose = self.latest[robot].get('shared_pose') or self.latest[robot].get('pose')
+        peer_pose = self.latest[peer].get('shared_pose')
+        peer_distance = peer_bearing = None
+        if own_pose is not None and peer_pose is not None:
+            dx, dy = float(peer_pose[0]) - float(own_pose[0]), float(peer_pose[1]) - float(own_pose[1])
+            peer_distance = math.hypot(dx, dy)
+            peer_bearing = math.atan2(dy, dx) - float(own_pose[2])
+            peer_bearing = (peer_bearing + math.pi) % (2.0 * math.pi) - math.pi
+        scan = self.latest[robot].get('scan_d500_nav')
+        nearest_scan = None
+        if scan is not None:
+            finite_ranges = [(float(value), float(scan.angle_min) + index * float(scan.angle_increment))
+                             for index, value in enumerate(scan.ranges)
+                             if math.isfinite(float(value)) and float(scan.range_min) <= float(value) <= float(scan.range_max)]
+            if finite_ranges:
+                nearest_scan = min(finite_ranges, key=lambda item: item[0])
+        local_start = grid_samples.get('local_costmap', {}).get('start', {})
+        global_start = grid_samples.get('global_costmap', {}).get('start', {})
+        if 'START_OCCUPIED' in error_name:
+            primary = 'START_OCCUPIED'
+        elif 'GOAL_OCCUPIED' in error_name:
+            primary = 'GOAL_OCCUPIED'
+        elif 'START_OUTSIDE_MAP' in error_name:
+            primary = 'START_OUTSIDE_MAP'
+        elif 'GOAL_OUTSIDE_MAP' in error_name:
+            primary = 'GOAL_OUTSIDE_MAP'
+        elif 'TF_ERROR' in error_name:
+            primary = 'TF_FAILURE'
+        elif 'TIMEOUT' in error_name or 'TIMEOUT' in failure_class:
+            primary = 'TIMEOUT'
+        elif 'NO_VALID_PATH' in error_name:
+            start_classes = {local_start.get('classification'), global_start.get('classification')}
+            if 'LETHAL_OR_OCCUPIED' in start_classes:
+                primary = 'START_LETHAL'
+            elif 'INFLATED' in start_classes:
+                primary = 'START_INFLATED'
+            elif 'UNKNOWN' in start_classes:
+                primary = 'START_UNKNOWN'
+            else:
+                primary = 'NO_CONNECTED_FREE_PATH'
+        elif status == 'REACHABLE' or action_result == 'SUCCEEDED':
+            primary = 'SUCCESS'
+        else:
+            primary = 'ACTION_ABORT_WITH_OTHER_REASON'
+        record = {
+            'schema_version': 'nav2_frontier_query_forensic_1.0',
+            'sim_time_s': query_ros, 'robot_id': robot,
+            'query_id': int(query_id), 'frontier_id': int(frontier_id),
+            'physical_signature': f'canonical_id:{int(frontier_id):016x}',
+            'physical_signature_source': 'canonical_frontier_id_only',
+            'centroid_xy': metadata.get('centroid'), 'approach_xy': goal_xy,
+            'start_xy': start_xy, 'start_yaw_rad': pending.get('start_yaw_rad'),
+            'planner_frame': planner_frame, 'goal_frame': goal_frame,
+            'start_frame': start_frame, 'map_revision': pending.get('map_revision'),
+            'costmap_revision': pending.get('costmap_revision'),
+            'query_count': query_count, 'query_count_before': pending.get('query_count_before', query_count - 1),
+            'previously_queried': bool(pending.get('previously_queried', query_count > 1)),
+            'last_query_time_s': pending.get('last_query_ros_s'),
+            'planner_action_result': action_result, 'planner_status': status,
+            'planner_failure_class_raw': failure_class, 'error_code': error_code,
+            'error_name': error_name, 'planner_result_text': error_message,
+            'planner_duration_s': duration, 'returned_path_length_m': path_length,
+            'classification': primary, 'costmaps': grid_samples,
+            'scan': {
+                'available': scan is not None,
+                'frame_id': str(scan.header.frame_id) if scan is not None else None,
+                'header_stamp_s': self._query_stamp_seconds(stamp(scan)) if scan is not None else None,
+                'nearest_range_m': nearest_scan[0] if nearest_scan else None,
+                'nearest_angle_rad': nearest_scan[1] if nearest_scan else None,
+                'range_min_m': float(scan.range_min) if scan is not None else None,
+                'range_max_m': float(scan.range_max) if scan is not None else None,
+            },
+            'peer': {'peer_robot_id': peer, 'distance_m': peer_distance,
+                     'bearing_from_robot_heading_rad': peer_bearing},
+            'collision_monitor_state': 'NOT_EXPOSED_TO_EXISTING_OBSERVER',
+            'selected_message': pending.get('selected_message', ''),
+            'result_message': message.msg,
+        }
+        with self._io_lock:
+            if self.frontier_query_forensic_file is not None:
+                self.frontier_query_forensic_file.write(
+                    json.dumps(finite(record), separators=(',', ':'), allow_nan=False) + '\n')
+            if self.frontier_query_tf_file is not None:
+                for row in tf_rows:
+                    self.frontier_query_tf_file.write(
+                        json.dumps(finite(row), separators=(',', ':'), allow_nan=False) + '\n')
+
+    def _capture_frontier_query_rosout(self, message):
+        if not self.frontier_query_forensics:
+            return
+        robot = self._query_frontier_robot(message.name)
+        if robot is None:
+            return
+        text = str(message.msg)
+        if 'FRONTIER_QUERY_LIFECYCLE' in text and 'state=REQUEST_SENT' in text:
+            self._query_capture_request(robot, message)
+        elif 'FRONTIER_QUERY_RESULT' in text:
+            self._query_capture_result(robot, message)
+
     def rosout(self,msg):
         if msg.name.lstrip('/')=='cooperative_experiment_logger':return
+        self._capture_frontier_query_rosout(msg)
         text=msg.name+' '+msg.msg
         lower=text.lower()
         diagnostic_rules=(
@@ -790,14 +2246,14 @@ class CooperativeExperimentLogger(Node):
             self.stack_ready=True
             self.event('STACK_READY','critical robot telemetry is available',console=True)
         for r in self.robots:
-            d=self.latest[r]; pose=d.get('pose',(None,None,None)); speed=d.get('speed',(0.,0.)); command=d.get('command',(0.,0.)); goal=d.get('goal',(None,None,None)); cmd_age=self.age(r,'cmd_vel'); cmd_received=cmd_age is not None and cmd_age<=float(self.p['cmd_vel_no_command_timeout_s']); row=self.row_time(); row.update(robot_id=r,pose_x=pose[0],pose_y=pose[1],pose_yaw=pose[2],linear_speed_mps=speed[0],angular_speed_radps=speed[1],commanded_linear_mps=command[0],commanded_angular_radps=command[1],cmd_vel_received=cmd_received,cmd_vel_age_s=cmd_age,cmd_vel_source=d.get('cmd_vel_source'),distance_travelled_m=self.trajectory.total_distance.get(r,0.),claim_state=d.get('claim_state','UNKNOWN'),claim_id=d.get('claim_id'),frontier_id=d.get('frontier_id'),goal_x=goal[0],goal_y=goal[1],goal_yaw=goal[2],navigation_active=d.get('navigation_active',False),distance_remaining_m=d.get('distance_remaining'),recoveries=d.get('recoveries',0),candidate_count=d.get('candidate_count',0),local_known_cells=self.map_counts(r,'map')[0],shared_known_cells=self.map_counts(r,'shared_map')[0],local_costmap_obstacles=self.map_counts(r,'local_costmap/costmap')[2],global_costmap_known=self.map_counts(r,'global_costmap/costmap')[0],global_costmap_obstacles=self.map_counts(r,'global_costmap/costmap')[2],odom_age_s=self.age(r,'odom'),scan_age_s=self.age(r,'scan_d500_slam'),map_age_s=self.age(r,'map'),shared_map_age_s=self.age(r,'shared_map'),claim_age_s=self.age(r,'exploration_claim'),feedback_age_s=self.age(r,'navigate_feedback')); self.csv_row(self.writers[r],row)
+            d=self.latest[r]; pose=d.get('pose',(None,None,None)); speed=d.get('speed',(0.,0.)); command=d.get('command',(0.,0.)); goal=d.get('goal',(None,None,None)); cmd_age=self.age(r,'cmd_vel'); cmd_received=cmd_age is not None and cmd_age<=float(self.p['cmd_vel_no_command_timeout_s']); row=self.row_time(); row.update(robot_id=r,pose_x=pose[0],pose_y=pose[1],pose_yaw=pose[2],linear_speed_mps=speed[0],angular_speed_radps=speed[1],commanded_linear_mps=command[0],commanded_angular_radps=command[1],cmd_vel_received=cmd_received,cmd_vel_age_s=cmd_age,cmd_vel_source=d.get('cmd_vel_source'),distance_travelled_m=self.local_trajectory.total_distance.get(r,0.),claim_state=d.get('claim_state','UNKNOWN'),claim_id=d.get('claim_id'),frontier_id=d.get('frontier_id'),goal_x=goal[0],goal_y=goal[1],goal_yaw=goal[2],navigation_active=d.get('navigation_active',False),distance_remaining_m=d.get('distance_remaining'),recoveries=d.get('recoveries',0),candidate_count=d.get('candidate_count',0),local_known_cells=self.map_counts(r,'map')[0],shared_known_cells=self.map_counts(r,'shared_map')[0],local_costmap_obstacles=self.map_counts(r,'local_costmap/costmap')[2],global_costmap_known=self.map_counts(r,'global_costmap/costmap')[0],global_costmap_obstacles=self.map_counts(r,'global_costmap/costmap')[2],odom_age_s=self.age(r,'odom'),scan_age_s=self.age(r,'scan_d500_slam'),map_age_s=self.age(r,'map'),shared_map_age_s=self.age(r,'shared_map'),claim_age_s=self.age(r,'exploration_claim'),feedback_age_s=self.age(r,'navigate_feedback')); self.csv_row(self.writers[r],row)
             if pose[0] is not None:
                 sample=MotionSample(row['elapsed_s'],pose[0],pose[1],d.get('distance_remaining'),command[0],command[1]); near=d.get('distance_remaining') is not None and d['distance_remaining']<.08
                 for kind in self.detectors[r].update(sample,d.get('navigation_active',False),near_goal=near):
                     self.event(kind,'windowed passive detector changed state',r,distance_remaining_m=d.get('distance_remaining'),pose_x=pose[0],pose_y=pose[1])
                     if kind in ('STUCK_STARTED','OSCILLATION_STARTED') and self.map_counts(r,'local_costmap/costmap')[2]>0:self.event('CORNER_TRAP_SUSPECTED','motion anomaly with nearby costmap obstacles',r,severity='WARN')
                 if d.get('navigation_active') and row['elapsed_s']-self.last_progress.get(r,-99)>=5:
-                    self.last_progress[r]=row['elapsed_s']; self.event('NAVIGATION_PROGRESS','periodic low-rate progress sample',r,distance_remaining_m=d.get('distance_remaining'),pose_x=pose[0],pose_y=pose[1],distance_travelled_m=self.trajectory.total_distance.get(r,0.),recoveries=d.get('recoveries',0))
+                    self.last_progress[r]=row['elapsed_s']; self.event('NAVIGATION_PROGRESS','periodic low-rate progress sample',r,distance_remaining_m=d.get('distance_remaining'),pose_x=pose[0],pose_y=pose[1],distance_travelled_m=self.local_trajectory.total_distance.get(r,0.),recoveries=d.get('recoveries',0))
     def sample_coverage(self):
         shared=[self.map_snapshot(r,'shared_map') for r in self.robots]; local=[self.map_snapshot(r,'map') for r in self.robots]
         if not all(shared):return
@@ -969,6 +2425,9 @@ class CooperativeExperimentLogger(Node):
             if self.forensic_supervisor_enabled:
                 required.append(
                     self.directory/'forensic'/'supervisor_ground_truth.csv')
+            if self.forensic_sync_enabled:
+                required.append(
+                    self.directory/'forensic'/'synchronized_map_frame.jsonl')
             # Shared-map exports are a post-handoff contract.  A valid
             # no-handoff run must not be marked incomplete merely because
             # those files correctly do not exist.  If either shared-map topic
@@ -1168,15 +2627,32 @@ class CooperativeExperimentLogger(Node):
         }
         atomic_json(self.directory/'run_manifest.json',value)
     def summary(self,clean):
-        elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
+        elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
         except OSError:pass
         cpu=sorted(self._cpu_samples); rss_values=self._rss_samples or [rss]
         percentile=lambda values,fraction: values[min(len(values)-1,max(0,math.ceil(len(values)*fraction)-1))] if values else 0.
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
-        total_distance=sum(motion.get('distance_travelled_m',{}).values()); coverage_gain=(self.previous_known or 0)-(self.initial_known or 0)
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'global_frame','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':{'initial_known_cells':self.initial_known or 0,'final_known_cells':self.previous_known or 0,'coverage_gain_cells':coverage_gain,'coverage_gain_per_metre_travelled':coverage_gain/total_distance if total_distance>0 else 0.,**a},'motion':motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}
+        total_distance=sum(motion.get('distance_travelled_m',{}).values())
+        shared_coverage_available=self.previous_known is not None
+        coverage_gain=(self.previous_known-self.initial_known
+                       if self.initial_known is not None and
+                       self.previous_known is not None else None)
+        mapping={
+            'available': shared_coverage_available,
+            'reason': ('runtime shared-map samples'
+                       if shared_coverage_available else
+                       'no runtime shared-map samples; shared coverage is unavailable'),
+            'initial_known_cells': self.initial_known,
+            'final_known_cells': self.previous_known,
+            'coverage_gain_cells': coverage_gain,
+            'coverage_gain_per_metre_travelled': (
+                coverage_gain/total_distance
+                if coverage_gain is not None and total_distance > 0 else None),
+            **a,
+        }
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'per_robot_odom','shared_trajectory_source_frame':'global_frame (only when transform is available)','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':mapping,'motion':motion,'shared_frame_motion':shared_motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'goal_accounting':self.goal_accounting_summary(),'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}
 
     def write_mission_result(self, clean):
         """Write one compact process-facing terminal result beside summary.json."""
@@ -1226,7 +2702,15 @@ class CooperativeExperimentLogger(Node):
             'accepted_goals': self.counts['NAV_GOAL_ACCEPTED'],
             'successful_goals': self.counts['NAVIGATION_SUCCEEDED'],
             'failed_goals': self.counts['NAVIGATION_FAILED'],
-            'final_known_cells': self.previous_known or 0,
+            'cancelled_goals': self.counts['NAVIGATION_CANCELED'] +
+            self.counts['NAVIGATION_CANCELLED'],
+            'goal_accounting': self.goal_accounting_summary(),
+            'final_known_cells': self.previous_known,
+            'final_known_cells_available': self.previous_known is not None,
+            'mapping_metric_reason': (
+                'runtime shared-map samples'
+                if self.previous_known is not None else
+                'no runtime shared-map samples; shared coverage is unavailable'),
             'semantic_agreement': bool(self.unique_agreed_rounds),
             'terminal_agreement': len(terminal_reasons) == 1,
             'robot1_final_state': robot_states['robot1'],
@@ -1293,6 +2777,10 @@ class CooperativeExperimentLogger(Node):
             # contract; a missing summary is reported, never waited on
             # indefinitely.
             self.wait_for_frontend_diagnostics()
+            if self.forensic is not None:
+                # This is a post-run file join only.  It reads the passive
+                # Supervisor/TF artifacts and never enters the ROS graph.
+                self._write_physical_gt_evaluation()
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]
@@ -1331,8 +2819,17 @@ class CooperativeExperimentLogger(Node):
             with self._lifecycle_lock:self.finalized=True; self._finalizing=False
         return successful
 
-def create_logger_executor(context=None):
-    """Bind the logger executor to its dedicated ROS context."""
+def create_logger_executor(context=None, diagnostic_frontier_capture=False):
+    """Bind the logger executor to its dedicated ROS context.
+
+    The normal observer remains single-threaded.  Opt-in frontier rejection
+    capture uses a small multi-threaded executor so the passive /rosout query
+    stream cannot be starved by serializing large costmap snapshots behind
+    high-rate telemetry.  This branch is diagnostic-only and does not alter
+    any navigation node or allocator behavior.
+    """
+    if diagnostic_frontier_capture:
+        return MultiThreadedExecutor(num_threads=4, context=context)
     return SingleThreadedExecutor(context=context)
 
 
@@ -1354,7 +2851,8 @@ def main(args=None):
 
     try:
         node = CooperativeExperimentLogger(context=context)
-        executor = create_logger_executor(context)
+        executor = create_logger_executor(
+            context, bool(node.p.get('diagnostic_frontier_capture', False)))
         executor.add_node(node)
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, request_shutdown)

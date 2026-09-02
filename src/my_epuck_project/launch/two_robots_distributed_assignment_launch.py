@@ -46,24 +46,34 @@ def _assignment_peer(robot):
             'dispatch_enabled': LaunchConfiguration('dispatch_enabled'),
             'handoff_gated': LaunchConfiguration('handoff_gated'),
             'phase_gated': LaunchConfiguration('phase_gated'),
+            'shared_nav2_ready_topic': LaunchConfiguration(
+                'shared_nav2_ready_topic'),
             'synthetic_bids': False,
             'maximum_tasks_per_source': 5,
             'maximum_union_tasks': 10,
             'maximum_path_queries': 8,
             'minimum_solo_visible_gain_m': 0.05,
             'minimum_solo_ordering_score': 0.0,
-            'maximum_solo_path_m': 18.0,
             # Production default: task-level adaptation of Burgard et al.
-            # Algorithm 1.  The 18 m denominator is the pre-existing path
-            # feasibility ceiling, not a second tuned score scale.
+            # Algorithm 1.  Nav2 path length remains a soft cost; it is never
+            # used as an ordinary feasibility ceiling.
             'assignment_strategy': LaunchConfiguration('assignment_strategy'),
             'burgard_beta': LaunchConfiguration('burgard_beta'),
             'burgard_sensor_max_range_m': 11.98,
             'burgard_occupied_threshold': 50,
+            'path_cost_scale_m': 12.0,
+            # Mirrors the frozen shared RPP profiles.  These are reference
+            # values for nominal motion cost, not RPP controller parameters.
+            'cost_only_reference_linear_speed_mps': 0.13,
+            'cost_only_reference_angular_speed_radps': 0.35,
             # Derived from the frozen production Nav2 profiles: stop circle
             # 0.08 m dominates robot_radius 0.055 m; RPP desired speed 0.13.
             'traffic_scheduler_enabled': LaunchConfiguration(
                 'traffic_scheduler_enabled'),
+            'synchronized_traffic_test': LaunchConfiguration(
+                'synchronized_traffic_test'),
+            'traffic_test_force_conflict_pair': LaunchConfiguration(
+                'traffic_test_force_conflict_pair'),
             'traffic_robot1_safe_radius_m': 0.08,
             'traffic_robot2_safe_radius_m': 0.08,
             'traffic_reference_speed_mps': 0.13,
@@ -127,6 +137,7 @@ def generate_launch_description():
                 'launch_shared_fusion'),
             'phase_already_aligned': LaunchConfiguration(
                 'phase_already_aligned'),
+            'assignment_strategy': LaunchConfiguration('assignment_strategy'),
         }.items(),
     )
     return LaunchDescription([
@@ -179,6 +190,7 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_gated', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('shared_nav2_ready_topic', default_value=''),
         DeclareLaunchArgument('handoff_transform_x', default_value='0.0'),
         DeclareLaunchArgument('handoff_transform_y', default_value='0.0'),
         DeclareLaunchArgument('handoff_transform_yaw', default_value='0.0'),
@@ -188,11 +200,21 @@ def generate_launch_description():
         # Defaults are the production literature-backed allocator.  These
         # switches are deliberately explicit so historical weighted rounds
         # remain reproducible without changing normal launches.
-        DeclareLaunchArgument('assignment_strategy', default_value='burgard',
-                              choices=['burgard', 'legacy_weighted']),
+        DeclareLaunchArgument(
+            'assignment_strategy', default_value='frontier_mrtsp',
+            choices=['frontier_cost_only', 'frontier_mrtsp']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
+        DeclareLaunchArgument(
+            'cost_only_reference_linear_speed_mps', default_value='0.13'),
+        DeclareLaunchArgument(
+            'cost_only_reference_angular_speed_radps', default_value='0.35'),
         DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('synchronized_traffic_test', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'traffic_test_force_conflict_pair', default_value='false',
+            choices=['true', 'false']),
         DeclareLaunchArgument('enable_mission_timeout', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('mission_timeout_s', default_value='1800.0'),

@@ -7,10 +7,14 @@ from builtin_interfaces.msg import Time as TimeMessage
 from my_epuck_project.source_aware_map_fusion import SourceAwareMapFusion
 from my_epuck_project.source_aware_map_fusion import (
     _changed_update_bounds,
+    _snapshot_pose_age_s,
     _same_grid_content,
     _scalar_fused_data,
     _vectorized_fused_data,
 )
+from my_epuck_project.live_map_sanitizer import sanitize_shared_map
+from nav_msgs.msg import OccupancyGrid
+from rclpy.time import Time
 
 
 def quaternion(yaw):
@@ -153,6 +157,68 @@ def test_fusion_snapshot_time_is_independent_of_callback_order():
     left = SourceAwareMapFusion._common_snapshot_time([first, second])
     right = SourceAwareMapFusion._common_snapshot_time([second, first])
     assert left.nanoseconds == right.nanoseconds == 8_000_000_002
+
+
+def _sanitizer_grid():
+    result = OccupancyGrid()
+    result.info.resolution = 0.01
+    result.info.width = 30
+    result.info.height = 30
+    result.info.origin.position.x = -0.15
+    result.info.origin.position.y = -0.15
+    result.info.origin.orientation.w = 1.0
+    result.data = [100] * (30 * 30)
+    return result
+
+
+def _snapshot_footprint_age(snapshot_ns, pose_ns):
+    return _snapshot_pose_age_s(
+        Time(nanoseconds=snapshot_ns),
+        None if pose_ns is None else Time(nanoseconds=pose_ns),
+    )
+
+
+def test_delayed_snapshot_with_temporally_corresponding_pose_clears():
+    """A four-second-old map is valid when TF is at that map timestamp."""
+    age = _snapshot_footprint_age(4_000_000_000, 4_000_000_000)
+    assert age == 0.0
+    sanitized, details = sanitize_shared_map(
+        _sanitizer_grid(),
+        [{'x': 0.0, 'y': 0.0, 'radius_m': 0.037,
+          'pose_age_s': age, 'role': 'peer'}],
+        uncertainty_cells=0,
+    )
+    assert details['stale_pose_count'] == 0
+    assert details['cleared_cell_count'] > 0
+    assert sanitized.data[15 * 30 + 15] == 0
+
+
+def test_pose_materially_mismatched_from_snapshot_is_rejected():
+    age = _snapshot_footprint_age(4_000_000_000, 4_600_000_000)
+    assert age == 0.6
+    sanitized, details = sanitize_shared_map(
+        _sanitizer_grid(),
+        [{'x': 0.0, 'y': 0.0, 'radius_m': 0.037,
+          'pose_age_s': age, 'role': 'peer'}],
+        uncertainty_cells=0,
+    )
+    assert details['stale_pose_count'] == 1
+    assert details['cleared_cell_count'] == 0
+    assert list(sanitized.data) == [100] * (30 * 30)
+
+
+def test_missing_tf_for_snapshot_is_rejected_safely():
+    age = _snapshot_footprint_age(4_000_000_000, None)
+    assert math.isinf(age)
+    sanitized, details = sanitize_shared_map(
+        _sanitizer_grid(),
+        [{'x': 0.0, 'y': 0.0, 'radius_m': 0.037,
+          'pose_age_s': age, 'role': 'peer'}],
+        uncertainty_cells=0,
+    )
+    assert details['stale_pose_count'] == 1
+    assert details['cleared_cell_count'] == 0
+    assert list(sanitized.data) == [100] * (30 * 30)
 
 
 def test_changed_map_content_is_detected_without_list_comparison():

@@ -29,6 +29,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LocalMapCrop.msg"
   "msg/RelativePoseHypothesis.msg"
   "msg/ScanChunk.msg"
+  "msg/FullMapSnapshotRequest.msg"
+  "msg/FullMapSnapshotResponse.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs unique_identifier_msgs
 )
 

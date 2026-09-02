@@ -1,6 +1,9 @@
 """Tests for local-only Nav2 geometry and bounded path telemetry."""
 
 import math
+from types import SimpleNamespace
+
+import pytest
 
 from my_epuck_project.distributed_assignment.local_nav2 import (
     DispatchPreconditions,
@@ -15,10 +18,26 @@ from my_epuck_project.distributed_assignment.local_nav2 import (
     occupancy_value,
     upstream_point_validation,
     path_length,
+    path_is_valid_finite,
+    initial_path_heading_cost,
 )
 from my_epuck_project.distributed_assignment.models import FailureClass
 
 from nav_msgs.msg import OccupancyGrid
+from tf2_ros import TransformException
+
+
+def test_initial_path_heading_uses_first_meaningful_nav2_segment():
+    """Skip repeated samples and measure mismatch from the valid path itself."""
+    assert initial_path_heading_cost(
+        ((0.0, 0.0), (0.01, 0.0), (0.20, 0.0)), 0.0,
+    ) == pytest.approx(0.0)
+    assert initial_path_heading_cost(
+        ((0.0, 0.0), (0.01, 0.0), (0.0, 0.20)), 0.0,
+    ) == pytest.approx(math.pi / 2.0)
+    assert initial_path_heading_cost(
+        ((0.0, 0.0), (0.01, 0.0)), 0.0,
+    ) == pytest.approx(0.0)
 
 
 def grid_with_rotation(yaw):
@@ -173,12 +192,88 @@ def test_path_length_and_samples_are_measured_and_bounded():
     assert path_length(points) == 99.0
 
 
+@pytest.mark.parametrize('length', (17.9, 18.0, 18.1, 25.0, 50.0))
+def test_valid_finite_path_has_no_ordinary_distance_cutoff(length):
+    """Any finite successful Nav2 path remains structurally dispatchable."""
+    evaluation = PathEvaluation(
+        True, length, ((0.0, 0.0), (length, 0.0)), 0, 0, '',
+        failure_class=FailureClass.UNKNOWN)
+    assert path_is_valid_finite(evaluation)
+
+
+def test_finite_path_helper_rejects_invalid_or_malformed_paths():
+    invalid = PathEvaluation(
+        False, 0.0, (), 0, 1, 'planner failure',
+        failure_class=FailureClass.PLANNER_FAILURE)
+    nan_path = PathEvaluation(
+        True, float('nan'), ((0.0, 0.0), (float('nan'), 1.0)),
+        0, 0, '', failure_class=FailureClass.UNKNOWN)
+    inf_path = PathEvaluation(
+        True, float('inf'), ((0.0, 0.0), (float('inf'), 1.0)),
+        0, 0, '', failure_class=FailureClass.UNKNOWN)
+    assert not path_is_valid_finite(invalid)
+    assert not path_is_valid_finite(nan_path)
+    assert not path_is_valid_finite(inf_path)
+
+
 def test_pending_navigation_goal_counts_as_active_before_handle_arrives():
     """Prevent a second dispatch during the NavigateToPose handle race."""
     nav = LocalNav2.__new__(LocalNav2)
     nav._navigation_goal_handle = None
     nav._navigation_send_pending = True
     assert nav.local_goal_active
+
+
+def test_shared_tf_status_requires_available_and_fresh_shared_frame_transform():
+    """The pre-decision TF gate uses the same frame/age contract as dispatch."""
+    class FakeClock:
+        def __init__(self, seconds):
+            self.seconds = seconds
+
+        def now(self):
+            return SimpleNamespace(nanoseconds=int(self.seconds * 1e9))
+
+    class FakeNode:
+        def __init__(self, seconds):
+            self.clock = FakeClock(seconds)
+
+        def get_clock(self):
+            return self.clock
+
+    class FakeBuffer:
+        def __init__(self, stamp_seconds=None):
+            self.stamp_seconds = stamp_seconds
+
+        def lookup_transform(self, *_args, **_kwargs):
+            if self.stamp_seconds is None:
+                raise TransformException('TF not available')
+            seconds = self.stamp_seconds
+            return SimpleNamespace(
+                header=SimpleNamespace(
+                    stamp=SimpleNamespace(
+                        sec=int(seconds),
+                        nanosec=int(round((seconds - int(seconds)) * 1e9)),
+                    ),
+                ),
+            )
+
+    nav = LocalNav2.__new__(LocalNav2)
+    nav._global_frame = 'shared_map'
+    nav._base_frame = 'robot1/base_footprint'
+    nav._maximum_tf_age_s = 1.0
+    nav._node = FakeNode(10.0)
+
+    nav._tf_buffer = FakeBuffer(9.5)
+    ready, age, reason = nav.shared_tf_status()
+    assert ready and age == 0.5 and reason == ''
+
+    nav._tf_buffer = FakeBuffer(8.9)
+    ready, age, reason = nav.shared_tf_status()
+    assert not ready and age == 1.1 and 'stale' in reason
+
+    nav._tf_buffer = FakeBuffer()
+    ready, age, reason = nav.shared_tf_status()
+    assert not ready and age is None and 'unavailable' in reason
 
 
 def test_bid_path_reuse_requires_unchanged_map_and_costmap_stamps():

@@ -95,6 +95,25 @@ python3 src/my_epuck_project/tools/run_cooperative_regression.py \
   --skip-tests
 ```
 
+For a single-trial visual fast-run entry point, use `--rviz true` rather than
+starting `rviz2` and `rviz_map_overlay` separately. The runner starts the
+visualization bridge with the launch graph, so it cannot miss the volatile
+handoff event, and it generates the selected large-world camera preset:
+
+```bash
+python3 src/my_epuck_project/tools/run_cooperative_trial_fast.py \
+  --world-profile large_unknown_pose_close_start_20ms_scan_matching \
+  --webots-mode realtime --rendering true --rviz true \
+  --assignment-strategy frontier_mrtsp \
+  --traffic-scheduler-enabled true \
+  --prehandoff-dispatch-delay-s 0 \
+  --enable-observer true --enable-forensic-capture true \
+  --ros-domain-id 218 --webots-port 23224
+```
+
+Do not point RViz directly at the small template preset for a large world;
+that leaves the camera at a 3 m distance and can make the map appear absent.
+
 The manual RViz preset initially shows Robot 1's replicated shared map and one
 pose Axes display on each robot's namespaced `base_link`; the Grid display is
 off by default to keep the map view uncluttered. Robot

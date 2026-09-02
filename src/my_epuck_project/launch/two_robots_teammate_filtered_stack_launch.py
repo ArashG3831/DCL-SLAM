@@ -367,6 +367,9 @@ def launch_setup(context):
     requested_shared_stack = (
         LaunchConfiguration('launch_shared_stack').perform(context).lower()
         == 'true')
+    prelaunch_shared_nav2 = (
+        LaunchConfiguration('prelaunch_shared_nav2').perform(context).lower()
+        == 'true')
     requested_shared_fusion = (
         LaunchConfiguration('launch_shared_fusion').perform(context).lower()
         == 'true')
@@ -375,14 +378,18 @@ def launch_setup(context):
     # launch default or scope collision cannot instantiate shared Nav2/fusion
     # before the canonical handoff.
     launch_shared_stack = requested_shared_stack and (
-        not unknown_initial_pose or phase_already_aligned)
+        not unknown_initial_pose or phase_already_aligned or
+        prelaunch_shared_nav2)
     # Keep only the fusion processes resident before handoff.  They are
     # explicitly handoff-gated and therefore have no map subscriptions,
     # timer, or TF listener until an accepted hypothesis arrives.  This
     # avoids delaying fusion behind the large post-handoff Nav2 launch.
+    # Fusion remains resident and handoff-gated during unknown-pose startup,
+    # even when inactive shared Nav2 is pre-launched.  The post-handoff
+    # activation requests launch_shared_fusion=false, so no duplicate fusion
+    # nodes are created.
     launch_shared_fusion = requested_shared_fusion and (
-        not unknown_initial_pose or phase_already_aligned or
-        not launch_shared_stack)
+        not unknown_initial_pose or not phase_already_aligned)
     handoff_gated = unknown_initial_pose and not phase_already_aligned
     try:
         quota_enabled = float(fusion_quota) > 0.0
@@ -498,6 +505,14 @@ def launch_setup(context):
                     # footprints in every shared map so that transient peer
                     # evidence cannot make either robot its own obstacle.
                     'sanitize_live_footprints': True,
+                    'historical_cleanup_required': unknown_initial_pose,
+                    'local_prehandoff_path_topic':
+                        f'/cslam/unknown_pose/{robot}/pre_handoff_path',
+                    'remote_prehandoff_path_topic':
+                        f'/cslam/unknown_pose/{peer}/pre_handoff_path',
+                    'historical_cleanup_ready_topic':
+                        f'/cslam/unknown_pose/{robot}/historical_cleanup_ready',
+                    'historical_footprint_radius_m': 0.037,
                 }],
                 prefix=_fusion_process_prefix(
                     fusion_process_nice,
@@ -608,6 +623,9 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('launch_shared_stack', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'prelaunch_shared_nav2', default_value='false',
+            choices=['true', 'false']),
         DeclareLaunchArgument('launch_shared_fusion', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_already_aligned', default_value='false',

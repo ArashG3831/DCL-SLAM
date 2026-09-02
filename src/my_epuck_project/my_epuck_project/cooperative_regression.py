@@ -51,6 +51,7 @@ from .occupancy_map_comparison import (
 from .ros_runtime_preflight import (
     ROS_DOMAIN_MIN, ROS_DOMAIN_MAX, require_runtime_provenance,
 )
+from .cooperative_trial_fast import filtered_runtime_environment
 
 
 CLASSIFICATIONS = (
@@ -200,16 +201,26 @@ def host_metadata():
     }
 
 
-def webots_information():
+def webots_information(port=None):
     root = Path('/mnt/c/Program Files/Webots')
     executable = root / 'msys64/mingw64/bin/webots.exe'
     version_path = root / 'resources/version.txt'
     version = version_path.read_text().strip() if version_path.exists() \
         else 'unknown'
+    # Webots R2025a binds its default external-controller range before
+    # printing help.  In this WSL environment that range is protected, and
+    # R2025a writes the help text to stderr.  Probe the same high port the
+    # campaign will use and inspect both streams; this is capability
+    # detection only and does not open a world.
+    help_command = ['timeout', '20s', str(executable)]
+    if port is not None:
+        help_command.append(f'--port={int(port)}')
+    help_command.append('--help')
     help_result = run(
-        ['timeout', '20s', str(executable), '--help'], timeout=25)
+        help_command, timeout=25)
+    help_text = f'{help_result.stdout}\n{help_result.stderr}'
     supported = {
-        flag: flag in help_result.stdout
+        flag: flag in help_text
         for flag in ('--mode=<mode>', '--no-rendering', '--batch', '--port')
     }
     return {
@@ -470,6 +481,14 @@ def hold_open_artifacts_valid(attempt):
     except (OSError, ValueError, KeyError, TypeError):
         return False
     return True
+
+
+def shared_map_exports_available(attempt):
+    """Return whether both post-handoff map exports are present."""
+    return all(
+        (attempt / f'{robot}_final_shared_map.npz').is_file()
+        for robot in ('robot1', 'robot2')
+    )
 
 
 def mission_timeout_expired(now, deadline, completion_verified=False):
@@ -1619,9 +1638,10 @@ LOCAL_LIVE_PARAMETER_NODES = (
 LIVE_PARAMETER_FEATURE_VERSION = '2.0.0'
 
 
-def navigation_preflight(workspace):
+def navigation_preflight(workspace, environment=None):
     """Verify the installed symlink/build contains current live-snapshot code."""
     workspace = Path(workspace)
+    environment = dict(environment or os.environ)
     code_relative = (
         'my_epuck_project/navigation_live_parameters.py',
         'my_epuck_project/navigation_parameter_parity.py',
@@ -1634,11 +1654,18 @@ def navigation_preflight(workspace):
     source_files = [source_root / item for item in code_relative]
     source_config = [source_root / 'resource/nav2_robot1_shared_map.yaml',
                      source_root / 'resource/nav2_robot2_shared_map.yaml']
-    build_root = workspace / 'build/my_epuck_project'
+    build_base = Path(environment.get(
+        'MY_EPUCK_BUILD_BASE', workspace / 'build')).expanduser().resolve()
+    install_prefix = Path(environment.get(
+        'MY_EPUCK_INSTALL_PREFIX', workspace / 'install')).expanduser().resolve()
+    build_root = build_base / 'my_epuck_project'
     installed_files = [build_root / item for item in code_relative]
-    installed_config = [
-        workspace / 'install/my_epuck_project/share/my_epuck_project/resource'
-        / path.name for path in source_config]
+    merged_config_root = install_prefix / 'share/my_epuck_project/resource'
+    isolated_package_root = (
+        install_prefix / 'my_epuck_project/share/my_epuck_project/resource')
+    config_root = (merged_config_root if merged_config_root.is_dir()
+                   else isolated_package_root)
+    installed_config = [config_root / path.name for path in source_config]
 
     def digest(paths):
         value = hashlib.sha256()
@@ -1668,6 +1695,9 @@ def navigation_preflight(workspace):
         'source_config_hash': source_config_hash,
         'installed_config_hash': installed_config_hash,
         'installed_module_path': str(marker_path),
+        'build_base': str(build_base),
+        'install_prefix': str(install_prefix),
+        'installed_config_root': str(config_root),
         'installed_feature_version': marker,
         'expected_feature_version': LIVE_PARAMETER_FEATURE_VERSION,
     }
@@ -1728,14 +1758,25 @@ def internal_trial(args):
     # Never silently fall back to Fast DDS.  The campaign is validated only
     # with the pinned CycloneDDS loopback profile, and provenance must be
     # checked before creating the attempt directory or any ROS participant.
-    environment = os.environ.copy()
+    environment, removed_runtime_paths = filtered_runtime_environment(
+        os.environ)
     runtime_provenance = require_runtime_provenance(
         args.workspace, environment, args.ros_domain_id)
+    # RViz's profile depends on the passive visualization-only overlay for
+    # the shared-map alias, traveled paths, and handoff marker.  Keep this
+    # derived from either public or internal trial spelling so a manual RViz
+    # run cannot accidentally launch the viewer without its data bridge.
+    visualization_overlay_enabled = bool(
+        getattr(args, 'launch_rviz', False)
+        or getattr(args, 'rviz', False))
     attempt = Path(args.attempt_dir).resolve()
     attempt.mkdir(parents=True, exist_ok=False)
     (attempt / 'observer').mkdir()
     frontend_diagnostic_output = (attempt / 'observer' / 'frontend').resolve()
     frontend_diagnostic_output.mkdir(parents=True, exist_ok=False)
+    registration_capture_output = (
+        frontend_diagnostic_output / 'registration_inputs'
+        if args.capture_registration_inputs else '')
     (attempt / 'ros_logs').mkdir()
     (attempt / 'tmp').mkdir()
     shutdown_events = attempt / 'shutdown_events.jsonl'
@@ -1771,12 +1812,15 @@ def internal_trial(args):
         'process_group_id': os.getpgrp(),
         'utc_start': utc_now(),
         'runtime_provenance': runtime_provenance,
+        'removed_stale_runtime_paths': removed_runtime_paths,
         'launch_arguments': {
             'world_profile': args.world_profile,
             'source_world_path': args.source_world_path,
             'run_id': args.run_id,
             'output_root': str(attempt / 'observer'),
             'unknown_pose_diagnostic_output': str(frontend_diagnostic_output),
+            'unknown_pose_registration_capture_output': str(
+                registration_capture_output),
             'mission_timeout_s': (
                 args.mission_timeout + args.settling_period + 30.0
                 if args.mission_timeout is not None else 600.0),
@@ -1786,7 +1830,7 @@ def internal_trial(args):
             'sensor_profile': args.sensor_profile,
             'diagnostic_mode': args.diagnostic_mode,
             'launch_rviz': 'false',
-            'launch_visualization_overlay': args.launch_rviz,
+            'launch_visualization_overlay': visualization_overlay_enabled,
             # The runner owns the mission budget.  The launch file's
             # TimerAction starts at launch time, before controller and
             # odometry readiness, so enabling it here can shut down a slow
@@ -1796,6 +1840,8 @@ def internal_trial(args):
             'use_scan_matching': args.use_scan_matching,
             'do_loop_closing': args.do_loop_closing,
             'unknown_initial_pose': args.unknown_initial_pose,
+            'assignment_strategy': args.assignment_strategy,
+            'traffic_scheduler_enabled': args.traffic_scheduler_enabled,
             'enable_motion_fixture': args.enable_motion_fixture,
             'motion_fixture_cycles': args.motion_fixture_cycles,
             'motion_fixture_mirror_turns': args.motion_fixture_mirror_turns,
@@ -1812,6 +1858,7 @@ def internal_trial(args):
         'ideal_encoder_sensing': args.ideal_encoder_sensing,
         'encoder_profile': args.profile_metadata['encoder_profile'],
             'logger_console_status': False,
+            'forensic_ground_truth_sample_period_s': 0.10,
             'rmw_implementation': rmw_implementation,
             'cyclonedds_uri': cyclone_uri,
             'rmw_fastdds_use_shm': fastdds_use_shm,
@@ -1836,7 +1883,7 @@ def internal_trial(args):
         'PYTHONUNBUFFERED': '1',
     })
     atomic_json(attempt / 'runner_metadata.json', metadata)
-    preflight = navigation_preflight(args.workspace)
+    preflight = navigation_preflight(args.workspace, environment)
     atomic_json(attempt / 'runner_metadata.json', metadata)
     metadata['preflight'] = preflight
     atomic_json(attempt / 'runner_metadata.json', metadata)
@@ -1860,18 +1907,29 @@ def internal_trial(args):
         f'sensor_profile:={args.sensor_profile}',
         f'scan_input_reliability:={args.scan_input_reliability}',
         f'diagnostic_mode:={str(args.diagnostic_mode).lower()}',
-        f'diagnostic_frontier_capture:={str(args.enable_forensic_capture).lower()}',
+        # Keep the passive forensic capture enabled, but do not enable the
+        # optional frontier-generator debug serialization in the fair MRPT
+        # runtime.  That diagnostic path is independent of navigation and
+        # has been the source of repeatable frontier-process crashes while
+        # maps grow under the heavier registration workload.
+        'diagnostic_frontier_capture:=false',
         # Local Nav2 is started by the readiness gate only after controllers,
         # odom, local maps, and local TF are available.  Shared Nav2 remains
         # phase-gated by the unknown-pose handoff.
         'nav2_autostart:=false',
         'launch_rviz:=false',
-        f'launch_visualization_overlay:={str(args.launch_rviz).lower()}',
+        f'launch_visualization_overlay:={str(visualization_overlay_enabled).lower()}',
         'enable_mission_timeout:=false',
         f'use_sim_time:={str(args.time_mode == "sim").lower()}',
         f'use_scan_matching:={str(args.use_scan_matching).lower()}',
         f'do_loop_closing:={str(args.do_loop_closing).lower()}',
         f'unknown_initial_pose:={str(args.unknown_initial_pose).lower()}',
+        f'assignment_strategy:={args.assignment_strategy}',
+        f'traffic_scheduler_enabled:={str(args.traffic_scheduler_enabled).lower()}',
+        # Full accumulated-map registration is the explicitly selected
+        # unknown-pose experiment.  This bypasses the historical crop path;
+        # the frontend still owns the same canonical handoff boundary.
+        'full_map_registration:=true',
         f'enable_motion_fixture:={str(args.enable_motion_fixture).lower()}',
         f'motion_fixture_cycles:={args.motion_fixture_cycles}',
         f'motion_fixture_mirror_turns:={str(args.motion_fixture_mirror_turns).lower()}',
@@ -1892,10 +1950,15 @@ def internal_trial(args):
         f'enable_trajectory_overlap:={str(args.enable_trajectory_overlap).lower()}',
         f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
         f'forensic_snapshot_interval_s:={args.forensic_snapshot_interval_s}',
+        'forensic_ground_truth_sample_period_s:=0.1',
         f'enable_contact_capture:={str(args.enable_contact_capture).lower()}',
         f'contact_sampling_period_ms:={args.contact_sampling_period_ms}',
         f'controller_variant:={args.controller_variant}',
     ]
+    if registration_capture_output:
+        launch_command.insert(
+            7, f'unknown_pose_registration_capture_output:='
+            f'{registration_capture_output}')
     if not str(frontend_diagnostic_output).startswith(str(attempt.resolve()) + os.sep):
         raise RuntimeError('frontend diagnostic output escaped campaign directory')
     if not frontend_diagnostic_output.is_absolute():
@@ -2540,6 +2603,10 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         use_scan_matching=getattr(args, 'use_scan_matching', False),
         do_loop_closing=getattr(args, 'do_loop_closing', False),
         unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
+        assignment_strategy=getattr(
+            args, 'assignment_strategy', 'frontier_mrtsp'),
+        traffic_scheduler_enabled=getattr(
+            args, 'traffic_scheduler_enabled', True),
         enable_motion_fixture=getattr(args, 'enable_motion_fixture', False),
         motion_fixture_cycles=getattr(args, 'motion_fixture_cycles', 1),
         motion_fixture_mirror_turns=getattr(
@@ -2566,6 +2633,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         enable_coverage_attribution=getattr(args, 'enable_coverage_attribution', True),
         enable_trajectory_overlap=getattr(args, 'enable_trajectory_overlap', True),
         enable_forensic_capture=getattr(args, 'enable_forensic_capture', False),
+        capture_registration_inputs=getattr(
+            args, 'capture_registration_inputs', False),
         enable_high_rate_forensic_diagnostics=getattr(
             args, 'enable_high_rate_forensic_diagnostics', True),
         enable_contact_capture=getattr(args, 'enable_contact_capture', False),
@@ -2573,7 +2642,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
             args, 'contact_sampling_period_ms', 20),
         controller_variant=getattr(args, 'controller_variant', 'rpp'),
         forensic_snapshot_interval_s=getattr(
-            args, 'forensic_snapshot_interval_s', 15.0),
+            args, 'forensic_snapshot_interval_s', 5.0),
         hold_open_after_completion=args.hold_open_after_completion,
         startup_timeout=args.startup_timeout,
         mission_timeout=args.mission_timeout,
@@ -3081,7 +3150,7 @@ def terminate_campaign_owned_processes(campaign, graceful_timeout=5.0,
 
 
 def create_manifest(args, campaign, workspace):
-    webots = webots_information()
+    webots = webots_information(getattr(args, 'webots_port_base', None))
     if not all(webots['supported_options'].values()):
         raise RuntimeError(
             f'installed Webots lacks required options: {webots}')
@@ -3158,6 +3227,8 @@ def create_manifest(args, campaign, workspace):
             'use_scan_matching': args.use_scan_matching,
             'do_loop_closing': args.do_loop_closing,
             'unknown_initial_pose': args.unknown_initial_pose,
+            'assignment_strategy': args.assignment_strategy,
+            'traffic_scheduler_enabled': args.traffic_scheduler_enabled,
             'ideal_encoder_sensing': args.ideal_encoder_sensing,
             'assignment_mode': 'replicated_two_robot_pair',
             'dispatch_enabled': True,
@@ -3220,8 +3291,9 @@ def campaign_main(args):
     # Validate the parent process too.  Checking only the internal child is
     # insufficient: a contaminated parent can import an older runner and
     # create ROS participants before the child ever executes its guard.
+    campaign_environment, _ = filtered_runtime_environment(os.environ)
     require_runtime_provenance(
-        workspace, os.environ, args.ros_domain_base)
+        workspace, campaign_environment, args.ros_domain_base)
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     campaign_id = args.campaign_id or safe_campaign_id()
@@ -3349,9 +3421,22 @@ def campaign_main(args):
             completed.add(number)
             calibration_attempt = campaign / progress['valid_trials'][
                 f'trial_{number:02d}']
-            benchmark = benchmark_map_analysis(
-                calibration_attempt, args.free_threshold,
-                args.occupied_threshold, args.shift_window)
+            if shared_map_exports_available(calibration_attempt):
+                benchmark = benchmark_map_analysis(
+                    calibration_attempt, args.free_threshold,
+                    args.occupied_threshold, args.shift_window)
+            else:
+                # A bounded no-handoff probe is a valid calibration for
+                # process/resource behavior but has no shared maps to
+                # compare.  Preserve that fact instead of turning expected
+                # missing post-handoff artifacts into an infrastructure
+                # exception.
+                benchmark = {
+                    'available': False,
+                    'source': 'no post-handoff shared-map exports',
+                    'reason': 'NO_HANDOFF_SHARED_MAPS_NOT_APPLICABLE',
+                    'attempt': str(calibration_attempt),
+                }
             atomic_json(campaign / 'offline_map_benchmark.json', benchmark)
         else:
             calibration = existing_calibration or {}
@@ -3553,6 +3638,15 @@ def parser():
         '--unknown-initial-pose', type=boolean, default=False, metavar='BOOL',
         help='Run the decentralized unknown-relative-pose phase contract.')
     result.add_argument(
+        '--assignment-strategy',
+        choices=['frontier_cost_only', 'frontier_mrtsp'],
+        default='frontier_mrtsp',
+        help='The sole intentional policy variable for a campaign run.')
+    result.add_argument(
+        '--traffic-scheduler-enabled', type=boolean, default=True,
+        metavar='BOOL',
+        help='Preserve the cooperative traffic scheduler in the campaign.')
+    result.add_argument(
         '--enable-motion-fixture', type=boolean, default=False, metavar='BOOL',
         help=('Validation-only bounded motion fixture for unknown-pose '
               'viewpoint acquisition; production default is disabled.'))
@@ -3672,6 +3766,11 @@ def parser():
         '--enable-forensic-capture', type=boolean, default=False, metavar='BOOL',
         help='Enable passive Supervisor/map forensic capture in the trial.')
     result.add_argument(
+        '--capture-registration-inputs', type=boolean, default=False,
+        metavar='BOOL',
+        help=('Capture bounded lossless source/target crops immediately before '
+              'the existing registration worker. Diagnostic-only.'))
+    result.add_argument(
         '--enable-high-rate-forensic-diagnostics', type=boolean, default=True,
         metavar='BOOL',
         help=('Enable the optional high-rate command/wheel/odom logger. '
@@ -3688,7 +3787,7 @@ def parser():
         help='Optional controller variant; production default is frozen RPP. '
              'Use dwb or rotation_shim_dwb only for explicit diagnostics.')
     result.add_argument(
-        '--forensic-snapshot-interval-s', type=float, default=15.0,
+        '--forensic-snapshot-interval-s', type=float, default=5.0,
         help='Interval for bounded passive forensic map snapshots.')
     return result
 

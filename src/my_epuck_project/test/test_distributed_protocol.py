@@ -120,7 +120,8 @@ def test_useful_partial_assignment_beats_idle_when_peer_has_no_valid_bid():
     selected = choose_pair_assignment(
         'round', union,
         BidBatch('round', union.union_hash, 'robot1', 's1', 1, 5.0, (
-            Bid(union.tasks[0].canonical_id, True, 0.8, 0.8),
+            Bid(union.tasks[0].canonical_id, True, 0.8, 0.8,
+                path=((0.0, 0.0), (0.8, 0.0))),
         )),
         BidBatch('round', union.union_hash, 'robot2', 's2', 1, 5.0, (
             Bid(union.tasks[1].canonical_id, False, 0.0, 0.0),
@@ -139,7 +140,8 @@ def test_idle_diagnostics_identify_no_feasible_task():
         visible_reveal_gain=0.0,
     )
     union = build_canonical_union((first,), ())
-    bid = Bid(union.tasks[0].canonical_id, True, 1.0, 1.0)
+    bid = Bid(union.tasks[0].canonical_id, True, 1.0, 1.0,
+              path=((0.0, 0.0), (1.0, 0.0)))
     selected = choose_pair_assignment(
         'round', union,
         BidBatch('round', union.union_hash, 'robot1', 's1', 1, 5.0, (bid,)),

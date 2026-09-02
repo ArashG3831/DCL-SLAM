@@ -60,7 +60,8 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()
     assert "autostart=False" in stack
     assert "shared_dispatch_enabled = False if unknown_initial_pose" in full
-    assert "'launch_shared_stack': 'false'" in full
+    assert "'launch_shared_stack': LaunchConfiguration(" in full
+    assert "'prelaunch_shared_nav2': LaunchConfiguration(" in full
     assert "'launch_mapping': 'true'" in full
     assert "'handoff_gated': handoff_gated" in stack
     assert "'stop_after_handoff': True" in full
@@ -78,6 +79,7 @@ def test_shared_stack_is_inert_until_accepted_handoff():
     assert "FRONTIER_PHASE post_handoff=true processing_active=true" in generator
     assert "ManageLifecycleNodes.Request.STARTUP" in phase
     assert "ManageLifecycleNodes.Request.SHUTDOWN" in phase
+    assert "ManageLifecycleNodes.Request.PAUSE" in phase
     assert "message.accepted" in phase
 
 
@@ -118,16 +120,53 @@ def test_shared_inputs_are_created_once_after_handoff():
     assert generator.count('processing_active_ = true;') == 3
 
 
-def test_shared_stack_is_started_only_by_one_shot_handoff_activation():
+def test_shared_stack_is_activated_only_by_one_shot_handoff_activation():
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
     activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
     assert "executable='unknown_pose_shared_stack_activation'" in full
     assert "two_robots_distributed_assignment_launch.py" in activation
     assert "'phase_already_aligned': 'true'" in activation
     assert "'launch_mapping': 'false'" in activation
-    assert "'launch_shared_stack': 'true'" in activation
+    assert "'launch_shared_stack': (" in activation
+    assert "'prelaunch_shared_nav2': 'false'" in activation
     assert 'start_new_session=True' in activation
     assert 'shell=True' not in activation
+
+
+def test_phase_gated_shared_stack_process_start_can_overlap_cleanup():
+    """Only inactive process startup overlaps cleanup; lifecycle activation stays gated."""
+    activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    assert "'phase_gated': 'true'" in activation
+    assert "('nav2_autostart', False)" in activation
+    assert 'starting_phase_gated_stack=' in activation
+    function = activation[
+        activation.index('    def _maybe_start_shared_stack'):
+        activation.index('    def _start_shared_stack')]
+    assert 'if (self._activated or self._shutdown_requested or' in function
+    assert 'self._accepted_message is None):' in function
+    assert 'self._activated = True' in function
+
+
+def test_shared_nav2_startup_uses_lifecycle_manager_without_serializing_node_discovery():
+    phase = (PY / 'unknown_pose_phase_manager.py').read_text()
+    assert 'from lifecycle_msgs.srv import GetState' in phase
+    assert 'self._shared_lifecycle_clients' in phase
+    assert 'shared_nav2_waiting_for_lifecycle_manager=true' in phase
+    assert 'if not self._shared_client.service_is_ready()' in phase
+    assert 'all(client.service_is_ready()' not in phase
+
+
+def test_shared_exploration_waits_for_both_nav2_costmaps():
+    activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    assignment = (PY / 'distributed_frontier_assignment.py').read_text()
+    launch = (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text()
+    assert "'/cslam/unknown_pose/shared_nav2_ready'" in activation
+    assert "f'/{robot}/global_costmap/costmap'" in activation
+    assert "f'/{robot}/local_costmap/costmap'" in activation
+    assert "'phase_gated': 'true'" in activation
+    assert 'shared_nav2_ready_topic' in launch
+    assert 'self._shared_nav2_ready_callback' in assignment
+    assert 'TRANSIENT_LOCAL' in assignment
 
 
 def test_shared_activation_omits_empty_optional_launch_arguments():
@@ -184,22 +223,24 @@ def test_unknown_mode_does_not_include_shared_assignment_before_handoff():
     assert "return [profile_log, assignment," in full
     assert "*visualization_overlay_nodes" in full
     assert "observer]" in full
-    assert "'launch_shared_stack': 'false'" in full
+    assert "'prelaunch_shared_nav2'" in full
 
 
 def test_unknown_stack_requires_aligned_phase_before_shared_components():
     stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py').read_text()
     assert 'requested_shared_stack and (' in stack
-    assert 'not unknown_initial_pose or phase_already_aligned' in stack
+    assert 'not unknown_initial_pose or phase_already_aligned or' in stack
+    assert 'prelaunch_shared_nav2' in stack
 
 
 def test_frontend_diagnostic_collision_is_merged_before_write():
     frontend = (PY / 'unknown_pose_frontend.py').read_text()
     assert 'accepted_metadata = dict(request_metadata or {})' in frontend
     assert 'accepted_metadata.update({' in frontend
+    accepted_start = frontend.index("'CROP_RESPONSE_ACCEPTED'")
     accepted = frontend[
-        frontend.index("'CROP_RESPONSE_ACCEPTED'"):
-        frontend.index('registration_context = (')]
+        accepted_start:
+        frontend.index('registration_context = (', accepted_start)]
     assert '**accepted_metadata' in accepted
     assert '**request_metadata' not in accepted
 
@@ -360,7 +401,11 @@ def test_phase_manager_hypothesis_qos_matches_frontend_publisher():
     assert 'durability=DurabilityPolicy.VOLATILE' in phase
     assert 'hypothesis_qos' in assignment
     assert 'self._handoff_callback, hypothesis_qos' in assignment
-    assert 'durability=DurabilityPolicy.TRANSIENT_LOCAL' not in phase
+    # The handoff subscriber still uses the volatile ``qos`` profile; the
+    # readiness publisher/subscriptions intentionally use transient-local
+    # durability as a separate channel.
+    assert 'self._hypothesis_sub = self.create_subscription(' in phase
+    assert 'self._shared_ready_publisher' in phase
 
 
 def test_local_and_shared_goal_owners_are_phase_exclusive():
@@ -515,7 +560,7 @@ def test_phase_manager_backoff_prevents_lifecycle_retry_spin():
     assert 'self._next_retry_at = time.monotonic() + self._retry_interval_s' in phase
 
 
-def test_phase_manager_terminates_only_deactivated_local_processes_before_shared_start():
+def test_phase_manager_terminates_only_deactivated_local_processes_after_control_release():
     phase = (PY / 'unknown_pose_phase_manager.py').read_text()
     assert 'def _local_process_pids' in phase
     assert "argv[index + 1] == '__ns:=/%s' % self.robot_id" in phase
@@ -525,7 +570,9 @@ def test_phase_manager_terminates_only_deactivated_local_processes_before_shared
     assert 'os.kill(pid, signal.SIGTERM)' in phase
     assert 'os.kill(pid, signal.SIGKILL)' in phase
     assert "self._transition == 'SHUTTING_DOWN_LOCAL'" in phase
-    assert 'self._terminate_local_processes()' in phase
+    assert 'self._begin_local_process_teardown()' in phase
+    assert "ManageLifecycleNodes.Request.PAUSE" in phase
+    assert 'threading.Thread(' in phase
 
 
 def test_phase_manager_does_not_use_broad_ros_process_cleanup():

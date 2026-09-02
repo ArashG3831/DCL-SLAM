@@ -71,8 +71,8 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: true
-      Enabled: true
-      Name: Robot1 Overlay Map
+      Enabled: false
+      Name: Robot1 Pre-Handoff Map Overlay
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -91,8 +91,8 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
-      Name: Robot2 Overlay Map
+      Enabled: false
+      Name: Robot2 Pre-Handoff Map Overlay
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -116,7 +116,7 @@ Visualization Manager:
       # Display one copy by default; the second namespaced map remains
       # available in the Displays panel for hosts where the shader is stable.
       Enabled: false
-      Name: Robot2 Shared Map
+      Name: Robot2 Shared Map (raw replica)
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -131,29 +131,47 @@ Visualization Manager:
         Value: /robot2/shared_map_visualization_updates
       Use Timestamp: false
       Value: true
+    - Alpha: 0.9
+      Class: rviz_default_plugins/Map
+      # This is an OccupancyGrid, not a costmap. Keep RViz's normal map
+      # palette so free space is white/light and occupied space is dark.
+      # WSLg shader diagnostics, if present, are a host-rendering issue and
+      # must not be hidden by assigning the wrong semantic palette.
+      Color Scheme: map
+      Draw Behind: true
+      Enabled: true
+      Name: Shared Map (single replica)
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/shared_map
+      Use Timestamp: false
+      Value: true
     - Class: rviz_default_plugins/TF
       Enabled: false
       Frame Timeout: 15
-      Marker Scale: 0.09
+      Marker Scale: 0.14
       Name: TF
       Show Arrows: false
-      Show Axes: true
+      Show Axes: false
       Show Names: false
       Update Interval: 0
-      Value: false
-    - Class: rviz_default_plugins/Axes
-      Enabled: false
-      Length: 0.14
-      Name: Robot1 Pose Axes
-      Radius: 0.01
-      Reference Frame: robot1/base_link
       Value: true
     - Class: rviz_default_plugins/Axes
-      Enabled: false
+      Enabled: true
       Length: 0.14
-      Name: Robot2 Pose Axes
+      Name: Robot1 Pose (visualization)
       Radius: 0.01
-      Reference Frame: robot2/base_link
+      Reference Frame: viz/robot1/base_footprint
+      Value: true
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Length: 0.14
+      Name: Robot2 Pose (visualization)
+      Radius: 0.01
+      Reference Frame: viz/robot2/base_footprint
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -349,7 +367,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot1/robot_description
+      Value: /robot1/robot_description
       Enabled: false
       Links:
         All Links Enabled: true
@@ -375,7 +393,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot2/robot_description
+      Value: /robot2/robot_description
       Enabled: false
       Links:
         All Links Enabled: true
@@ -475,6 +493,72 @@ Visualization Manager:
         Value: /robot2/local_costmap/costmap_updates
       Use Timestamp: false
       Value: false
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Handoff Status
+      Namespaces:
+        {}
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/handoff_status
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 80; 80
+      Enabled: true
+      Head Diameter: 0.15
+      Head Length: 0.1
+      Length: 0.2
+      Line Style: Lines
+      Line Width: 0.05
+      Name: Robot1 Traveled Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0.02
+      Pose Color: 255; 80; 80
+      Pose Style: None
+      Radius: 0.03
+      Shaft Diameter: 0.05
+      Shaft Length: 0.05
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/robot1_traveled_path
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 80; 160; 255
+      Enabled: true
+      Head Diameter: 0.15
+      Head Length: 0.1
+      Length: 0.2
+      Line Style: Lines
+      Line Width: 0.05
+      Name: Robot2 Traveled Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0.02
+      Pose Color: 80; 160; 255
+      Pose Style: None
+      Radius: 0.03
+      Shaft Diameter: 0.05
+      Shaft Length: 0.05
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/robot2_traveled_path
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

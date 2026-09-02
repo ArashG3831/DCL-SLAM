@@ -25,6 +25,48 @@ TEST(StableId,SmallFrontierGrowthPreservesPhysicalIdentity){
   EXPECT_NE(stable_frontier_id(first,map,.05),stable_frontier_id(separate,map,.05));
 }
 TEST(Path,LengthAndValidation){nav_msgs::msg::Path p;geometry_msgs::msg::PoseStamped a,b,c;a.pose.position.x=0;b.pose.position.x=3;b.pose.position.y=4;c.pose.position.x=6;c.pose.position.y=8;p.poses={a,b,c};auto l=path_length(p,0,0,6,8,.01);ASSERT_TRUE(l);EXPECT_DOUBLE_EQ(*l,10);p.poses.clear();EXPECT_FALSE(path_length(p,0,0,0,0,.1));p.poses={a};EXPECT_TRUE(path_length(p,0,0,0,0,.1));EXPECT_FALSE(path_length(p,1,1,0,0,.1));p.poses={a,b};p.poses[1].pose.position.x=std::numeric_limits<double>::quiet_NaN();EXPECT_FALSE(path_length(p,0,0,0,0,.1));}
+TEST(Path,InitialHeadingUsesFirstMeaningfulSegment){
+  nav_msgs::msg::Path p;
+  geometry_msgs::msg::PoseStamped first, duplicate, forward, left;
+  first.pose.position.x = 0.0;
+  first.pose.position.y = 0.0;
+  duplicate.pose.position.x = 0.01;
+  duplicate.pose.position.y = 0.0;
+  forward.pose.position.x = 0.20;
+  forward.pose.position.y = 0.0;
+  left.pose.position.x = 0.0;
+  left.pose.position.y = 0.20;
+  p.poses = {first, duplicate, forward};
+  auto forward_cost = path_initial_heading_cost(p, 0.0, 0.05);
+  ASSERT_TRUE(forward_cost);
+  EXPECT_NEAR(*forward_cost, 0.0, 1e-9);
+  p.poses = {first, duplicate, left};
+  auto left_cost = path_initial_heading_cost(p, 0.0, 0.05);
+  ASSERT_TRUE(left_cost);
+  EXPECT_NEAR(*left_cost, M_PI / 2.0, 1e-9);
+}
+TEST(Path,InitialHeadingRejectsMissingMeaningfulSegment){
+  nav_msgs::msg::Path p;
+  geometry_msgs::msg::PoseStamped point;
+  point.pose.position.x = 1.0;
+  point.pose.position.y = 1.0;
+  p.poses = {point, point};
+  EXPECT_FALSE(path_initial_heading_cost(p, 0.0, 0.05));
+}
+TEST(Path,NominalMotionCostUsesPhysicalReferenceSpeeds){
+  const auto straight = nominal_motion_cost_s(4.0, 0.0, 0.13, 0.35);
+  const auto reverse = nominal_motion_cost_s(4.0, M_PI, 0.13, 0.35);
+  ASSERT_TRUE(straight);
+  ASSERT_TRUE(reverse);
+  EXPECT_NEAR(*straight, 4.0 / 0.13, 1e-12);
+  EXPECT_NEAR(*reverse - *straight, M_PI / 0.35, 1e-12);
+  EXPECT_NEAR(0.13 * M_PI / 0.35, 1.1667, 2e-4);
+}
+TEST(Path,NominalMotionCostRejectsInvalidInputs){
+  EXPECT_FALSE(nominal_motion_cost_s(-1.0, 0.0, 0.13, 0.35));
+  EXPECT_FALSE(nominal_motion_cost_s(1.0, 0.0, 0.0, 0.35));
+  EXPECT_FALSE(nominal_motion_cost_s(1.0, std::numeric_limits<double>::quiet_NaN(), 0.13, 0.35));
+}
 TEST(Revision,IdenticalTimestampDoesNotMatter){auto a=grid();auto b=std::make_shared<nav_msgs::msg::OccupancyGrid>(*a);b->header.stamp.sec=99;EXPECT_EQ(map_checksum(*a),map_checksum(*b));b->data[0]=0;EXPECT_NE(map_checksum(*a),map_checksum(*b));}
 TEST(Architecture,SourceHasNoForbiddenInterfaces){SUCCEED();}
 TEST(AsyncRequests,OldGenerationCannotTouchReplacement){

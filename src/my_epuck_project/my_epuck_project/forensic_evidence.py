@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +101,7 @@ class ForensicEvidenceWriter:
         self.map_snapshot_count = 0
         self.peer_record_count = 0
         self._closed = False
+        self._io_lock = threading.RLock()
         self._odom_files = {}
         self._odom_writers = {}
         odom_fields = [
@@ -134,6 +136,18 @@ class ForensicEvidenceWriter:
             "rotation_x", "rotation_y", "rotation_z", "rotation_w", "error",
         ])
         self.tf_writer.writeheader()
+        self.raw_tf_file = (self.root / "raw_tf.csv").open(
+            "w", newline="", encoding="utf-8")
+        self.raw_tf_writer = csv.DictWriter(self.raw_tf_file, fieldnames=[
+            "topic", "static", "received_ros_time_s", "received_wall_elapsed_s",
+            "transform_stamp", "parent_frame", "child_frame",
+            "translation_x", "translation_y", "translation_z",
+            "rotation_x", "rotation_y", "rotation_z", "rotation_w",
+        ])
+        self.raw_tf_writer.writeheader()
+        self.synchronized_file = (
+            self.root / "synchronized_map_frame.jsonl").open(
+                "w", encoding="utf-8", buffering=1)
         self.scan_matching_enabled = bool(scan_matching_enabled)
         self._scan_files = {}
         self._scan_writers = {}
@@ -310,6 +324,43 @@ class ForensicEvidenceWriter:
                         "rotation_y": q.y, "rotation_z": q.z, "rotation_w": q.w})
         self.tf_writer.writerow(row)
 
+    def record_raw_tf(self, topic, message, received_ros, received_wall,
+                      static=False):
+        """Persist raw TF edges for post-run map-frame evaluation."""
+        if self._closed or message is None:
+            return
+        for item in getattr(message, "transforms", ()):
+            stamp = item.header.stamp
+            t = item.transform.translation
+            q = item.transform.rotation
+            self.raw_tf_writer.writerow({
+                "topic": str(topic), "static": bool(static),
+                "received_ros_time_s": float(received_ros),
+                "received_wall_elapsed_s": float(received_wall),
+                "transform_stamp": _stamp_text(stamp),
+                "parent_frame": str(item.header.frame_id),
+                "child_frame": str(item.child_frame_id),
+                "translation_x": float(t.x), "translation_y": float(t.y),
+                "translation_z": float(t.z), "rotation_x": float(q.x),
+                "rotation_y": float(q.y), "rotation_z": float(q.z),
+                "rotation_w": float(q.w),
+            })
+
+    def record_synchronized_map_frame(self, row):
+        """Write one passive, timestamped map-frame synchronization sample.
+
+        The row intentionally contains observations only.  It is never
+        published or read by the estimator, selector, navigation stack, or
+        handoff protocol.  Supervisor world poses are joined offline using
+        ``query_ros_time_s``; ROS TF samples carry their own stamp and age so
+        any interpolation or temporal mismatch is explicit in the artifact.
+        """
+        if self._closed:
+            return
+        with self._io_lock:
+            self.synchronized_file.write(
+                json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+
     @staticmethod
     def _yaw(quaternion):
         return math.atan2(
@@ -404,6 +455,7 @@ class ForensicEvidenceWriter:
         if self._closed:
             return
         streams = [*self._odom_files.values(), self.peer_file, self.tf_file,
+                   self.raw_tf_file, self.synchronized_file,
                    *self._scan_files.values()]
         for stream in streams:
             stream.flush()
@@ -414,6 +466,7 @@ class ForensicEvidenceWriter:
             return
         self.flush()
         for stream in [*self._odom_files.values(), self.peer_file, self.tf_file,
+                       self.raw_tf_file, self.synchronized_file,
                        *self._scan_files.values()]:
             stream.close()
         self._closed = True

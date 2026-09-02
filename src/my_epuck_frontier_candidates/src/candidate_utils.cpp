@@ -55,6 +55,48 @@ uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate&f
   return h;
 }
 std::optional<double> path_length(const nav_msgs::msg::Path&p,double rx,double ry,double gx,double gy,double tol){if(p.poses.empty())return{};for(auto&s:p.poses)if(!std::isfinite(s.pose.position.x)||!std::isfinite(s.pose.position.y))return{};auto&last=p.poses.back().pose.position;if(std::hypot(last.x-gx,last.y-gy)>tol)return{};if(p.poses.size()==1){if(std::hypot(rx-gx,ry-gy)<=tol)return 0.;return{};}double total=0;for(size_t i=1;i<p.poses.size();i++)total+=std::hypot(p.poses[i].pose.position.x-p.poses[i-1].pose.position.x,p.poses[i].pose.position.y-p.poses[i-1].pose.position.y);return total;}
+std::optional<double> path_initial_heading_cost(
+  const nav_msgs::msg::Path & path, double robot_yaw, double minimum_segment_m)
+{
+  if (path.poses.size() < 2 || !std::isfinite(robot_yaw) ||
+      !std::isfinite(minimum_segment_m) || minimum_segment_m <= 0.0) {
+    return std::nullopt;
+  }
+  const auto & first = path.poses.front().pose.position;
+  if (!std::isfinite(first.x) || !std::isfinite(first.y)) {
+    return std::nullopt;
+  }
+  for (std::size_t index = 1; index < path.poses.size(); ++index) {
+    const auto & second = path.poses[index].pose.position;
+    if (!std::isfinite(second.x) || !std::isfinite(second.y)) {
+      return std::nullopt;
+    }
+    const double dx = second.x - first.x;
+    const double dy = second.y - first.y;
+    if (std::hypot(dx, dy) < minimum_segment_m) {
+      continue;
+    }
+    const double path_yaw = std::atan2(dy, dx);
+    const double delta = std::atan2(
+      std::sin(path_yaw - robot_yaw), std::cos(path_yaw - robot_yaw));
+    return std::abs(delta);
+  }
+  return std::nullopt;
+}
+std::optional<double> nominal_motion_cost_s(
+  double path_length_m, double heading_cost_rad,
+  double reference_linear_speed_mps, double reference_angular_speed_radps)
+{
+  if (!std::isfinite(path_length_m) || path_length_m < 0.0 ||
+      !std::isfinite(heading_cost_rad) || heading_cost_rad < 0.0 ||
+      !std::isfinite(reference_linear_speed_mps) || reference_linear_speed_mps <= 0.0 ||
+      !std::isfinite(reference_angular_speed_radps) || reference_angular_speed_radps <= 0.0) {
+    return std::nullopt;
+  }
+  const double result = path_length_m / reference_linear_speed_mps +
+    heading_cost_rad / reference_angular_speed_radps;
+  return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
+}
 ClearanceEvidence clearance_evidence(const frontier_exploration_ros2::OccupancyGrid2d&m,double wx,double wy,double clear,int threshold,double trace_radius,bool capture_cells){
   ClearanceEvidence out;int cx,cy;if(!m.worldToMapNoThrow(wx,wy,cx,cy))return out;out.in_bounds=true;out.column=cx;out.row=cy;const double resolution=m.map().info.resolution;const int r=int(std::ceil(std::max(clear,trace_radius)/resolution));out.accepted=true;double best=std::numeric_limits<double>::infinity();
   for(int y=cy-r;y<=cy+r;y++)for(int x=cx-r;x<=cx+r;x++){

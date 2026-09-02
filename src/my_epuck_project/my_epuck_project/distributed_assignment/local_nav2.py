@@ -46,6 +46,38 @@ FOLLOW_PATH_CONTROLLER_ERROR_NAMES = {
 }
 
 
+def initial_path_heading_cost(
+        samples: tuple[Point, ...], robot_yaw: float,
+        minimum_segment_m: float = 0.05) -> float:
+    """Measure initial planned-path direction mismatch in radians.
+
+    The path's first meaningful segment is used instead of the approach-pose
+    bearing.  Nav2 commonly repeats the first pose, so nearly coincident
+    samples are skipped.  A path without a meaningful segment has no heading
+    evidence and contributes zero rather than inventing a turn cost.
+    """
+    if not math.isfinite(robot_yaw) or minimum_segment_m <= 0.0:
+        return 0.0
+    if len(samples) < 2:
+        return 0.0
+    first = samples[0]
+    if not all(math.isfinite(float(value)) for value in first):
+        return 0.0
+    for second in samples[1:]:
+        if not all(math.isfinite(float(value)) for value in second):
+            return 0.0
+        dx = second[0] - first[0]
+        dy = second[1] - first[1]
+        if math.hypot(dx, dy) < minimum_segment_m:
+            continue
+        path_yaw = math.atan2(dy, dx)
+        return abs(math.atan2(
+            math.sin(path_yaw - robot_yaw),
+            math.cos(path_yaw - robot_yaw),
+        ))
+    return 0.0
+
+
 def classify_follow_path_controller_error(error_code: int) -> FailureClass:
     """Classify propagated FollowPath failures without hiding TF faults."""
     if int(error_code) in FOLLOW_PATH_TF_FAILURE_CODES:
@@ -105,6 +137,7 @@ class PathEvaluation:
     task_signature: str = ''
     map_stamp_ns: int = 0
     costmap_stamp_ns: int = 0
+    heading_cost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -294,6 +327,23 @@ def execution_geometry_signature(
 def path_length(points: tuple[Point, ...]) -> float:
     """Measure a path polyline in its declared frame."""
     return sum(math.dist(first, second) for first, second in zip(points, points[1:]))
+
+
+def path_is_valid_finite(evaluation: PathEvaluation) -> bool:
+    """Return whether a successful path is structurally safe to consume.
+
+    Path length is deliberately not bounded here.  A finite, otherwise valid
+    Nav2 path remains eligible regardless of distance; distance is a scoring
+    and navigation-cost input, not an artificial reachability gate.
+    """
+    return bool(
+        evaluation.valid and math.isfinite(evaluation.length_m) and
+        evaluation.length_m >= 0.0 and evaluation.samples and
+        all(
+            math.isfinite(float(x)) and math.isfinite(float(y))
+            for x, y in evaluation.samples
+        )
+    )
 
 
 def downsample_path(points: tuple[Point, ...], maximum_samples: int) -> tuple[Point, ...]:
@@ -622,21 +672,82 @@ class LocalNav2:
             self._last_lifecycle_active is True and
             self._map is not None and self._costmap is not None
         )
-        tf_healthy = False
+        tf_healthy = self.shared_tf_status()[0]
+        return nav2_healthy, tf_healthy
+
+    def shared_tf_status(self) -> tuple[bool, Optional[float], str]:
+        """Return the exact shared-map/base TF readiness used by dispatch.
+
+        The distributed allocator uses this as a *pre-decision* gate.  It
+        deliberately applies the same frame pair and freshness limit as the
+        final dispatch health check; it does not synthesize or fall back to a
+        remembered/ground-truth pose.
+        """
         try:
             transform = self._tf_buffer.lookup_transform(
                 self._global_frame, self._base_frame, Time(),
                 timeout=Duration(seconds=0.0),
             )
-            stamp = transform.header.stamp
-            stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
-            age_s = 0.0 if stamp_ns == 0 else max(
-                0.0, (self._node.get_clock().now().nanoseconds - stamp_ns) / 1e9,
+        except TransformException as error:
+            return False, None, 'required transform unavailable: %s' % error
+        stamp = transform.header.stamp
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        age_s = 0.0 if stamp_ns == 0 else max(
+            0.0, (self._node.get_clock().now().nanoseconds - stamp_ns) / 1e9,
+        )
+        if stamp_ns != 0 and age_s > self._maximum_tf_age_s:
+            return False, age_s, 'shared_map to base transform is stale'
+        return True, age_s, ''
+
+    def synchronized_test_inputs_ready(self) -> bool:
+        """Return the local inputs needed before the test barrier advertises a round.
+
+        The shared phase manager has already established lifecycle readiness.
+        This test-only predicate deliberately avoids depending on the
+        asynchronous diagnostic lifecycle cache, while still requiring both
+        action servers and the current map/costmap samples.
+        """
+        self._ensure_compute_client()
+        self._ensure_navigate_client()
+        return bool(
+            self._compute_client.server_is_ready() and
+            self._navigate_client.server_is_ready() and
+            self._map is not None and self._costmap is not None
+        )
+
+    def lookup_pose_in_global(
+            self, target_frame: str) -> Optional[tuple[Point, int, float]]:
+        """Return a fresh target-frame pose expressed in this Nav2 global frame.
+
+        The traffic gate uses this only for an already committed peer path.
+        A zero-time lookup asks tf2 for the newest available transform; the
+        returned age is measured against the node's ROS clock and callers must
+        reject an unavailable/stale result rather than masking a remembered
+        location.
+        """
+        if not target_frame:
+            return None
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._global_frame, str(target_frame), Time(),
+                timeout=Duration(seconds=0.0),
             )
-            tf_healthy = age_s <= self._maximum_tf_age_s
         except TransformException:
-            pass
-        return nav2_healthy, tf_healthy
+            return None
+        stamp = transform.header.stamp
+        stamp_ns = self._stamp_ns(stamp)
+        now_ns = self._node.get_clock().now().nanoseconds
+        age_s = 0.0 if stamp_ns == 0 else max(
+            0.0, (now_ns - stamp_ns) / 1e9,
+        )
+        if stamp_ns != 0 and age_s > self._maximum_tf_age_s:
+            return None
+        return (
+            (float(transform.transform.translation.x),
+             float(transform.transform.translation.y)),
+            stamp_ns,
+            age_s,
+        )
 
     def _on_map(self, message: OccupancyGrid) -> None:
         self._map = message
@@ -1000,10 +1111,36 @@ class LocalNav2:
         ) if result is not None else ()
         valid = (
             wrapped.status == GoalStatus.STATUS_SUCCEEDED and result is not None and
-            result.error_code == ComputePathToPose.Result.NONE and bool(points)
+            result.error_code == ComputePathToPose.Result.NONE and bool(points) and
+            all(
+                math.isfinite(float(x)) and math.isfinite(float(y))
+                for x, y in points
+            )
         )
+        measured_length = path_length(points) if valid else 0.0
+        if valid and (not math.isfinite(measured_length) or measured_length < 0.0):
+            valid = False
         error_code = 0 if result is None else result.error_code
         error_message = 'missing action result' if result is None else result.error_msg
+        heading_cost = 0.0
+        if valid:
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    self._global_frame, self._base_frame, Time(),
+                    timeout=Duration(seconds=0.0),
+                )
+                orientation = transform.transform.rotation
+                robot_yaw = math.atan2(
+                    2.0 * (orientation.w * orientation.z +
+                            orientation.x * orientation.y),
+                    1.0 - 2.0 * (orientation.y * orientation.y +
+                                  orientation.z * orientation.z),
+                )
+                heading_cost = initial_path_heading_cost(points, robot_yaw)
+            except TransformException:
+                # Heading is preference evidence only.  Path validity and the
+                # final dispatch TF gate remain independent safety checks.
+                heading_cost = 0.0
         evidence = FailureEvidence()
         if error_code in (
                 ComputePathToPose.Result.GOAL_OCCUPIED,
@@ -1018,7 +1155,7 @@ class LocalNav2:
             evidence = FailureEvidence(compute_path_error='PLANNER_FAILURE')
         self._finish_path(PathEvaluation(
             valid=valid,
-            length_m=path_length(points) if valid else 0.0,
+            length_m=measured_length if valid else 0.0,
             samples=downsample_path(points, self._maximum_path_samples),
             query_ros_ns=self._node.get_clock().now().nanoseconds,
             error_code=error_code,
@@ -1028,6 +1165,7 @@ class LocalNav2:
             duration_s=max(0.0, time.monotonic() - self._path_started_steady_s),
             caller=self._path_caller,
             task_signature=self._path_task_signature,
+            heading_cost=heading_cost,
         ))
 
     def _finish_path(self, result: PathEvaluation) -> None:

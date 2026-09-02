@@ -71,6 +71,7 @@ class ControllerStartupGuard(Node):
         self.declare_parameter('max_attempts', 6)
         self.declare_parameter('retry_delay_s', 1.0)
         self.declare_parameter('service_timeout_s', 15.0)
+        self.declare_parameter('switch_timeout_s', 10.0)
         self.controller_name = str(self.get_parameter('controller_name').value)
         self.manager = str(self.get_parameter('controller_manager').value)
         self.param_file = str(self.get_parameter('controller_param_file').value)
@@ -80,6 +81,8 @@ class ControllerStartupGuard(Node):
         self.retry_delay_s = max(0.1, float(self.get_parameter('retry_delay_s').value))
         self.service_timeout_s = max(0.2, float(
             self.get_parameter('service_timeout_s').value))
+        self.switch_timeout_s = max(0.2, float(
+            self.get_parameter('switch_timeout_s').value))
         if not self.manager.startswith('/'):
             raise ValueError('controller_manager must be absolute')
         self.list_client = self.create_client(
@@ -107,6 +110,8 @@ class ControllerStartupGuard(Node):
             self.controller_name,
             '--controller-manager', self.manager,
             '--controller-manager-timeout', str(int(self.service_timeout_s)),
+            '--switch-timeout', str(self.switch_timeout_s),
+            '--service-call-timeout', str(self.service_timeout_s),
         ]
         if self.param_file:
             command.extend(['--param-file', self.param_file])
@@ -144,7 +149,10 @@ class ControllerStartupGuard(Node):
             strictness=SwitchController.Request.BEST_EFFORT,
             activate_asap=True,
         )
-        request.timeout.sec = 2
+        whole_seconds = int(self.switch_timeout_s)
+        request.timeout.sec = whole_seconds
+        request.timeout.nanosec = int(
+            (self.switch_timeout_s - whole_seconds) * 1e9)
         response = self.call(self.switch_client, request)
         return response is not None and bool(response.ok)
 

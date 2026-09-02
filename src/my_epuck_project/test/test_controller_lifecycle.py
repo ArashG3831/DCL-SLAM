@@ -19,7 +19,10 @@ def test_startup_guard_uses_bounded_but_startup_tolerant_service_budget():
         / 'my_epuck_project' / 'controller_startup_guard.py'
     ).read_text(encoding='utf-8')
     assert "declare_parameter('service_timeout_s', 15.0)" in source
+    assert "declare_parameter('switch_timeout_s', 10.0)" in source
     assert 'timeout=self.service_timeout_s + 1.0' in source
+    assert "'--switch-timeout', str(self.switch_timeout_s)" in source
+    assert 'request.timeout.nanosec' in source
 
 
 def test_each_robot_requires_both_named_controllers_active():
@@ -48,6 +51,15 @@ def test_controller_spawners_use_independent_campaign_owned_ros_homes():
     assert robot2_home.endswith('robot2_101')
 
 
+def test_controller_activation_timeout_is_symmetric_in_single_robot_fixtures():
+    from pathlib import Path
+    launch_dir = Path(__file__).resolve().parents[1] / 'launch'
+    for robot in ('robot1', 'robot2'):
+        source = (launch_dir /
+                  f'{robot}_in_two_world_namespaced_launch.py').read_text()
+        assert source.count("'switch_timeout_s': 10.0") == 2
+
+
 def test_startup_waits_for_manager_services_before_spawning():
     assert not manager_state_available(None)
     assert manager_state_available({})
@@ -61,6 +73,7 @@ def test_standard_spawner_timeout_returns_to_bounded_retry(monkeypatch):
     guard.param_file = ''
     guard.controller_ros_args = ''
     guard.service_timeout_s = 0.2
+    guard.switch_timeout_s = 0.2
 
     class Logger:
         def info(self, message):

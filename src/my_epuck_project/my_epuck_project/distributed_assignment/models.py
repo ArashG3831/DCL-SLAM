@@ -35,9 +35,16 @@ class PhysicalTask:
     visible_bounds: Optional[Bounds] = None
     visible_reveal_gain: float = 0.0
     local_ordering_score: float = 0.0
+    # Upstream MRTSP route context is ordinal and source-local.  It replaces
+    # the old batch-normalized scalar as the route-aware mode's preference
+    # evidence; UINT32_MAX denotes an item outside the bounded route horizon.
+    mrtsp_route_rank: int = (2 ** 32 - 1)
+    mrtsp_route_generation: int = 0
+    mrtsp_solver: str = ''
     local_path_valid: bool = False
     local_path_length_m: float = 0.0
     local_path: Tuple[Point, ...] = ()
+    path_heading_cost_rad: float = 0.0
     generation_ros_ns: int = 0
 
 
@@ -112,7 +119,13 @@ class AssignmentScore:
     """Bounded, individually auditable pair-score terms."""
 
     team_visible_gain: float = 0.0
+    # Sum of the source frontier generator's already-computed local scores.
+    # This is populated only by the explicit frontier_gain strategy; keeping
+    # it in the transport-independent score makes the mode auditable without
+    # changing the existing PairDecision wire fields.
+    team_local_ordering_score: float = 0.0
     combined_path_cost: float = 0.0
+    combined_heading_cost: float = 0.0
     nearby_goal_penalty: float = 0.0
     route_overlap_penalty: float = 0.0
     hard_failure_penalty: float = 0.0

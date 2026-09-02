@@ -29,7 +29,7 @@ def _peer(robot, origin_x):
             'decision_validity_s': 30.0, 'peer_timeout_s': 30.0,
             # Historical fixed-task scenario: explicitly preserve the old
             # weighted result for regression/reproducibility only.
-            'assignment_strategy': 'legacy_weighted',
+            'assignment_strategy': 'frontier_cost_only',
             'traffic_scheduler_enabled': False,
             'use_sim_time': False,
         }],

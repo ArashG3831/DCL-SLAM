@@ -34,6 +34,14 @@ uint64_t local_context_checksum(
   double world_x, double world_y, double radius_m);
 uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate &f,const frontier_exploration_ros2::OccupancyGrid2d &map,double quantum);
 std::optional<double> path_length(const nav_msgs::msg::Path &path,double robot_x,double robot_y,double goal_x,double goal_y,double tolerance);
+std::optional<double> path_initial_heading_cost(
+  const nav_msgs::msg::Path &path, double robot_yaw, double minimum_segment_m = 0.05);
+// Nominal, physically scaled frontier travel cost.  This is not a Nav2/RPP
+// ETA: it combines translation time and the initial reorientation time using
+// explicit reference motion limits.
+std::optional<double> nominal_motion_cost_s(
+  double path_length_m, double heading_cost_rad,
+  double reference_linear_speed_mps, double reference_angular_speed_radps);
 bool clearance_ok(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold);
 ClearanceEvidence clearance_evidence(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double clearance,int blocked_threshold,double trace_radius=0.18,bool capture_cells=false);
 bool inside_with_margin(const frontier_exploration_ros2::OccupancyGrid2d &map,double wx,double wy,double margin);

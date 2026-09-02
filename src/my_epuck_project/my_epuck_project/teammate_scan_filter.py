@@ -15,12 +15,20 @@ import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
 
 from sensor_msgs.msg import LaserScan
 
 from tf2_ros import Buffer, TransformException, TransformListener
+from my_epuck_interfaces.msg import RelativePoseHypothesis
+from nav_msgs.msg import Odometry, Path
+from geometry_msgs.msg import PoseStamped
 
 
 # Measured from the Webots E-puck v2/Pi-puck/D500 model used by this package.
@@ -202,6 +210,14 @@ class TeammateScanFilter(Node):
             'warning_interval': 2.0,
             'simulation_free_space_completion': True,
             'free_space_cap': FREE_SPACE_CAP,
+            'robot_id': '', 'map_frame': '',
+            'accepted_hypothesis_topic': '/cslam/relative_pose/hypotheses',
+            'active_at_start': False,
+            'require_accepted_handoff': False,
+            'record_prehandoff_path': False,
+            'pre_handoff_path_topic': '',
+            'trajectory_min_spacing_m': 0.03,
+            'trajectory_max_samples': 2048,
         }
         for name, default in defaults.items():
             self.declare_parameter(name, default)
@@ -210,6 +226,8 @@ class TeammateScanFilter(Node):
             return self.get_parameter(name).value
         self.peer_frame = str(value('peer_base_frame'))
         self.expected_frame = str(value('expected_lidar_frame'))
+        self.robot_id = str(value('robot_id')) or self.get_namespace().strip('/')
+        self.map_frame = str(value('map_frame')) or f'{self.robot_id}/map'
         self.own_odom_frame = str(value('own_odom_frame'))
         self.peer_odom_frame = str(value('peer_odom_frame'))
         fixed = list(value('own_odom_to_peer_odom'))
@@ -223,6 +241,18 @@ class TeammateScanFilter(Node):
         self.retry_period = float(value('transform_retry_period'))
         self.warning_interval = float(value('warning_interval'))
         self.free_space_cap = float(value('free_space_cap'))
+        self.active = bool(value('active_at_start'))
+        self.require_accepted_handoff = bool(
+            value('require_accepted_handoff'))
+        self.record_prehandoff_path = bool(value('record_prehandoff_path'))
+        self.trajectory_min_spacing = max(
+            0.005, float(value('trajectory_min_spacing_m')))
+        self.trajectory_max_samples = max(
+            2, int(value('trajectory_max_samples')))
+        self.pre_handoff_path_topic = str(value('pre_handoff_path_topic'))
+        if not self.pre_handoff_path_topic:
+            self.pre_handoff_path_topic = (
+                f'/cslam/unknown_pose/{self.robot_id}/pre_handoff_path')
         if not bool(value('simulation_free_space_completion')):
             raise ValueError(
                 'simulation free-space completion must remain enabled')
@@ -239,11 +269,30 @@ class TeammateScanFilter(Node):
             raise ValueError(
                 'latency must be in (0, 0.20] and retry period positive')
 
+        # Slam Toolbox's corrected-scan subscription is RELIABLE.  Keep the
+        # stable SLAM branch compatible with it; the raw/fixed input remains a
+        # sensor-data subscription.
         self.publisher = self.create_publisher(
-            LaserScan, value('output_topic'), qos_profile_sensor_data)
+            LaserScan, value('output_topic'),
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE))
         self.subscription = self.create_subscription(
             LaserScan, value('input_topic'), self.scan_callback,
             qos_profile_sensor_data)
+        self.odom_subscription = self.create_subscription(
+            Odometry, f'/{self.robot_id}/odom', self._odom_callback,
+            qos_profile_sensor_data)
+        self.handoff_subscription = self.create_subscription(
+            RelativePoseHypothesis,
+            str(value('accepted_hypothesis_topic')),
+            self._accepted_hypothesis_callback,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.VOLATILE),
+        )
+        self.path_publisher = self.create_publisher(
+            Path, self.pre_handoff_path_topic,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.pending = PendingScanQueue(int(value('pending_queue_depth')))
@@ -272,11 +321,21 @@ class TeammateScanFilter(Node):
         self.last_published_stamp = None
         self.last_output_monotonic = None
         self.last_warning_monotonic = 0.0
+        self.handoff_received = self.active and not self.require_accepted_handoff
+        self.trajectory = []
+        self.trajectory_last_stamp = None
+        self.trajectory_frozen = False
+        self.pass_through_tf_unavailable = 0
+        self.pass_through_messages = 0
+        self.active_messages = 0
+        self.path_published = False
         self.get_logger().info(
             f'{self.resolve_topic_name(value("input_topic"))} -> '
             f'{self.resolve_topic_name(value("output_topic"))}; '
-            f'odom-only exact-time pose; radius={self.peer_radius:.3f}m '
-            f'tolerance={self.range_tolerance:.3f}m; zero passthrough')
+            f'mode={"ACTIVE" if self.active else "PASS_THROUGH"}; '
+            f'radius={self.peer_radius:.3f}m '
+            f'tolerance={self.range_tolerance:.3f}m; '
+            f'accepted_handoff_required={self.require_accepted_handoff}')
         self.get_logger().info(
             f'geometry_model={VERIFIED_GEOMETRY_MODEL}; '
             f'visible_radius={self.geometry_radius:.3f}m')
@@ -291,8 +350,92 @@ class TeammateScanFilter(Node):
             self.last_warning_monotonic = now
             self.get_logger().warning(message)
 
+    @staticmethod
+    def _pose_transform(pose):
+        rotation = pose.orientation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        return Transform2D(pose.position.x, pose.position.y, yaw)
+
+    def _odom_callback(self, message):
+        """Record a bounded local-map trajectory until accepted handoff."""
+        if (not self.record_prehandoff_path or self.trajectory_frozen or
+                not message.header.frame_id):
+            return
+        stamp = Time.from_msg(message.header.stamp)
+        try:
+            map_from_odom = transform_message_2d(
+                self._lookup_exact(self.map_frame, message.header.frame_id,
+                                   stamp))
+        except TransformException:
+            return
+        map_from_base = compose_transform(
+            map_from_odom, self._pose_transform(message.pose.pose))
+        sample = (map_from_base.x, map_from_base.y, map_from_base.yaw,
+                  message.header.stamp.sec + message.header.stamp.nanosec * 1e-9)
+        if self.trajectory:
+            previous = self.trajectory[-1]
+            if (math.hypot(sample[0] - previous[0], sample[1] - previous[1])
+                    < self.trajectory_min_spacing and
+                    sample[3] - previous[3] < 0.25):
+                return
+        self.trajectory.append(sample)
+        if len(self.trajectory) > self.trajectory_max_samples:
+            self.trajectory.pop(0)
+
+    def _publish_prehandoff_path(self):
+        if self.path_published:
+            return
+        message = Path()
+        message.header.frame_id = self.map_frame
+        message.header.stamp = self.get_clock().now().to_msg()
+        for x, y, yaw, stamp in self.trajectory:
+            pose = PoseStamped()
+            pose.header.frame_id = self.map_frame
+            pose.header.stamp.sec = int(stamp)
+            pose.header.stamp.nanosec = int(
+                max(0.0, stamp - int(stamp)) * 1.0e9)
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.orientation.z = math.sin(yaw / 2.0)
+            pose.pose.orientation.w = math.cos(yaw / 2.0)
+            message.poses.append(pose)
+        self.path_publisher.publish(message)
+        self.path_published = True
+        self.get_logger().info(
+            f'PRE_HANDOFF_PATH_PUBLISHED robot={self.robot_id} '
+            f'samples={len(message.poses)} topic={self.pre_handoff_path_topic}')
+
+    def _accepted_hypothesis_callback(self, message):
+        if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
+            return
+        if self.handoff_received:
+            return
+        self.handoff_received = True
+        self.active = True
+        self.trajectory_frozen = True
+        self._publish_prehandoff_path()
+        self.get_logger().info(
+            f'SCAN_FILTER_MODE robot={self.robot_id} '
+            'mode=ACTIVE handoff=accepted pose_source=accepted_runtime_tf')
+
+    def _publish_passthrough(self, scan, reason='PRE_HANDOFF'):
+        output = copy.copy(scan)
+        output.ranges = list(scan.ranges)
+        self.publisher.publish(output)
+        self.last_published_stamp = self._stamp_key(scan)
+        self.pass_through_messages += 1
+        if reason != 'PRE_HANDOFF':
+            self.pass_through_tf_unavailable += 1
+            self._warn(
+                f'SCAN_FILTER_MODE robot={self.robot_id} '
+                f'mode=ACTIVE_BUT_PEER_TF_STALE reason={reason}')
+        self.counts['published'] += 1
+
     def scan_callback(self, scan):
-        """Validate and enqueue one fixed scan without passthrough."""
+        """Relay before handoff; mask only with a current runtime peer TF."""
         self.counts['received'] += 1
         if scan.header.frame_id != self.expected_frame:
             self.counts['dropped_invalid_frame'] += 1
@@ -305,6 +448,24 @@ class TeammateScanFilter(Node):
             self.counts['dropped_nonmonotonic'] += 1
             self._warn('Dropped non-monotonic input scan')
             return
+        if not self.active:
+            self._publish_passthrough(scan)
+            return
+        try:
+            if self.require_accepted_handoff:
+                pose = transform_message_2d(self._lookup_exact(
+                    self.expected_frame, self.peer_frame,
+                    Time.from_msg(scan.header.stamp)))
+            else:
+                pose = self._odom_peer_pose(Time.from_msg(scan.header.stamp))
+        except TransformException:
+            # A stale peer pose must never mask an old location, and it must
+            # not stop local SLAM.  Preserve this scan unchanged.
+            self._publish_passthrough(scan, reason='PEER_TF_UNAVAILABLE')
+            return
+        self._publish_filtered(scan, pose)
+        self.active_messages += 1
+        return
         dropped = self.pending.enqueue(scan, time.monotonic())
         if dropped is not None:
             self.counts['dropped_overflow'] += 1
@@ -458,6 +619,14 @@ class TeammateScanFilter(Node):
             'pending_depth': len(self.pending.items),
             'maximum_pending_depth': self.maximum_pending_depth,
             'longest_output_gap_s': round(self.longest_output_gap_s, 6),
+            'mode': 'ACTIVE' if self.active else 'PASS_THROUGH',
+            'handoff_received': self.handoff_received,
+            'pass_through_messages': self.pass_through_messages,
+            'pass_through_tf_unavailable': self.pass_through_tf_unavailable,
+            'active_messages': self.active_messages,
+            'trajectory_samples': len(self.trajectory),
+            'trajectory_frozen': self.trajectory_frozen,
+            'path_published': self.path_published,
         }
 
     def _log_metrics(self):

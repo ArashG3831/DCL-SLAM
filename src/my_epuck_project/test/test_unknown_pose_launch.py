@@ -51,6 +51,15 @@ def test_ground_truth_observer_requires_explicit_controller_url_and_runtime_dir(
     assert "'--runtime-directory'" in source
     assert "'--controller-url', environment['WEBOTS_CONTROLLER_URL']" in logger
     assert "'--runtime-directory', str(forensic_dir / 'runtime')" in logger
+    assert 'webots_controller_host()' in logger
+    assert 'tcp://{webots_controller_host()}' in logger
+
+
+def test_forensic_controller_host_preserves_loopback_and_supports_wsl_nat():
+    source = (LAUNCH.parent / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert "mode in ('nat', 'subnet', 'wsl_nat')" in source
+    assert "mode in ('mirrored', 'loopback')" in source
 
 
 def test_unknown_pose_frontend_persists_bounded_shutdown_diagnostics():
@@ -69,8 +78,10 @@ def test_unknown_pose_frontend_records_each_descriptor_gate_reason():
     source = (LAUNCH.parent / 'my_epuck_project' /
               'unknown_pose_frontend.py').read_text(encoding='utf-8')
     for reason in (
-            'SIMILARITY_BELOW_GATE', 'MARGIN_BELOW_GATE',
-            'KNOWN_FRACTION_BELOW_GATE', 'INSUFFICIENT_CONFIRMATIONS'):
+            'FORWARD_INLIER_BELOW_GATE', 'REVERSE_INLIER_BELOW_GATE',
+            'RESIDUAL_ABOVE_GATE', 'OCCUPIED_FREE_AGREEMENT_BELOW_GATE',
+            'OVERLAP_BELOW_GATE', 'KNOWN_FRACTION_BELOW_GATE',
+            'INSUFFICIENT_CONFIRMATIONS'):
         assert reason in source
 
 
@@ -173,9 +184,33 @@ def test_unknown_pose_mode_gates_known_alignment_and_raw_map_export():
     assert 'alignment = [] if unknown_initial_pose else' in text
     assert 'if not unknown_initial_pose:' in text
     assert "f'/cslam/unknown_pose/{peer}/local_map'" in text
-    assert "f'/{robot}/scan_d500_fixed'" in slam_text
-    assert "if not unknown_initial_pose:" in slam_text
+    assert "'scan_topic': f'/{robot}/scan_d500_slam'" in slam_text
+    assert "'require_accepted_handoff': unknown_initial_pose" in slam_text
+    assert "'record_prehandoff_path': unknown_initial_pose" in slam_text
     assert "'--frame-id', f'{robot}/local_world'" in slam_text
+
+
+def test_unknown_pose_scan_filter_is_started_as_a_stable_slam_relay():
+    source = (LAUNCH / 'two_robots_teammate_filtered_dual_slam_launch.py')
+    text = source.read_text(encoding='utf-8')
+    assert "filters.append(Node(" in text
+    assert "'input_topic': f'/{robot}/scan_d500_fixed'" in text
+    assert "'output_topic': f'/{robot}/scan_d500_slam'" in text
+    assert "'active_at_start': not unknown_initial_pose" in text
+    assert "'require_accepted_handoff': unknown_initial_pose" in text
+
+
+def test_unknown_pose_shared_cleanup_is_gated_by_both_robot_paths():
+    stack = (LAUNCH / 'two_robots_teammate_filtered_stack_launch.py')
+    phase = (LAUNCH.parent / 'my_epuck_project' /
+             'unknown_pose_phase_manager.py')
+    fusion = (LAUNCH.parent / 'my_epuck_project' /
+              'source_aware_map_fusion.py')
+    assert "'historical_cleanup_required': unknown_initial_pose" in \
+        stack.read_text(encoding='utf-8')
+    assert "any(path is None for path in self.historical_paths.values())" in \
+        fusion.read_text(encoding='utf-8')
+    assert '_maybe_start_transition' in phase.read_text(encoding='utf-8')
 
 
 def test_unknown_pose_frontend_handoff_is_the_only_peer_map_enablement():

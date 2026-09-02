@@ -65,6 +65,27 @@ class FrontierRegionEvidence:
     visible_reveal_gain: float | None = None
 
 
+def credible_planner_infrastructure_failure(
+        local_nav2_healthy: bool,
+        peer_nav2_healthy: bool,
+        local_planner_failures: int,
+        peer_planner_failures: int,
+) -> bool:
+    """Require planner-query evidence plus an observed unhealthy stack.
+
+    Candidate-specific NO_VALID_PATH and similar responses are useful
+    evidence that a particular frontier is not executable, but they do not
+    prove that the planner infrastructure is dead.  The replicated abort
+    path therefore requires both peers to have observed query failures and
+    at least one peer to report unhealthy Nav2 infrastructure.
+    """
+    return bool(
+        int(local_planner_failures) > 0 and
+        int(peer_planner_failures) > 0 and
+        (not bool(local_nav2_healthy) or not bool(peer_nav2_healthy))
+    )
+
+
 _BLOCKING_REGION_STATUSES = frozenset({
     'REACHABLE', 'PLANNER_FAILED', 'UNCLASSIFIED',
     'DETECTED', 'DETECTED_NOT_QUERIED',

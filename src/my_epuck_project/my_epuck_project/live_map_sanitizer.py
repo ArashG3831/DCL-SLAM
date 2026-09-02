@@ -43,6 +43,38 @@ def footprint_cell_indices(grid, footprint, *, uncertainty_cells=1):
     return cells
 
 
+def swept_footprint_cell_indices(grid, points, radius_m):
+    """Rasterize a continuous circular footprint along a polyline.
+
+    The sampling interval is half a grid cell, so consecutive samples cannot
+    leave a hole in the swept footprint.  No uncertainty halo is added: the
+    radius is the physical robot footprint supplied by the caller.
+    """
+    radius = float(radius_m)
+    if radius <= 0.0:
+        raise ValueError('radius_m must be positive')
+    points = [(float(x), float(y)) for x, y in points]
+    if not points:
+        return set()
+    cells = set()
+    for start, end in zip(points, points[1:]):
+        distance = math.hypot(end[0] - start[0], end[1] - start[1])
+        steps = max(1, int(math.ceil(distance / max(1e-6, grid.info.resolution * 0.5))))
+        for step in range(steps + 1):
+            fraction = step / steps
+            x = start[0] + fraction * (end[0] - start[0])
+            y = start[1] + fraction * (end[1] - start[1])
+            cells.update(footprint_cell_indices(
+                grid, {'x': x, 'y': y, 'radius_m': radius},
+                uncertainty_cells=0))
+    if len(points) == 1:
+        x, y = points[0]
+        cells.update(footprint_cell_indices(
+            grid, {'x': x, 'y': y, 'radius_m': radius},
+            uncertainty_cells=0))
+    return cells
+
+
 def apply_incremental_patch(base_data, output_data, previous_cells, new_cells):
     """Restore and clear only cells touched by moving live footprints."""
     if len(base_data) != len(output_data):

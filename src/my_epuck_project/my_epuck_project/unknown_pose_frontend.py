@@ -11,11 +11,14 @@ import hashlib
 import math
 from pathlib import Path
 import time
+import zlib
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from my_epuck_interfaces.msg import (
+    FullMapSnapshotRequest,
+    FullMapSnapshotResponse,
     LocalMapCrop,
     LocalMapCropRequest,
     LocalMapDescriptor,
@@ -23,6 +26,7 @@ from my_epuck_interfaces.msg import (
     RelativePoseHypothesis,
 )
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Bool
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -39,6 +43,7 @@ from .unknown_pose_frontend_core import (
     candidate_reuses_accepted_physical_view,
     candidate_views_are_spatially_separated,
     GridCrop,
+    RegistrationResult,
     compare_descriptors,
     compare_descriptor_pairs,
     confirmation_window_for_cadence,
@@ -46,18 +51,25 @@ from .unknown_pose_frontend_core import (
     crop_batch_is_ready,
     accumulate_physical_candidates,
     bounded_candidate_verification_order,
-    deduplicate_physical_candidates,
+    descriptor_match_is_ambiguous,
     descriptor_checksum,
+    deduplicate_physical_candidates_with_reasons,
     evidence_batch_is_spatially_diverse,
     evidence_candidates_for_pool,
     evidence_pairs_for_selection,
     invert_se2,
     polar_descriptor,
+    prioritize_unambiguous_candidates,
     physical_crop_identity,
     physical_candidate_geometry_identity,
     physical_candidate_identity,
     register_crops,
+    refine_registration_locally,
+    register_crop_hypotheses,
     register_crop_set,
+    select_hypothesis_family,
+    consensus_admission_quality,
+    consensus_crop_maturity,
     should_accept_hypothesis,
     temporal_support_count,
     temporal_consistency,
@@ -77,12 +89,17 @@ class UnknownPoseFrontend(Node):
         self.declare_parameter('crop_request_topic', '/cslam/relative_pose/crop_requests')
         self.declare_parameter('crop_topic', '/cslam/relative_pose/crops')
         self.declare_parameter('hypothesis_topic', '/cslam/relative_pose/hypotheses')
+        self.declare_parameter('evidence_status_topic', '')
         self.declare_parameter('peer_map_topic', '/cslam/unknown_pose/local_map')
         # Peer maps are full OccupancyGrid samples.  Keep the SLAM map update
         # cadence unchanged, but rate-limit this inter-robot export so a
         # growing map is not retransmitted on every map callback.  A fresh
         # export is still sent immediately when the handoff is accepted.
         self.declare_parameter('peer_map_publish_period_s', 5.0)
+        self.declare_parameter('full_map_registration', False)
+        # Bounded latest-pair startup cadence; this is not an acceptance gate.
+        self.declare_parameter('full_map_registration_period_s', 1.0)
+        self.declare_parameter('full_map_max_snapshots', 12)
         self.declare_parameter('descriptor_period_s', 2.0)
         self.declare_parameter('crop_size_m', 8.0)
         # Descriptor/crop requests can arrive after several descriptor periods
@@ -100,11 +117,32 @@ class UnknownPoseFrontend(Node):
         self.declare_parameter('max_verification_batches', 4)
         self.declare_parameter('verification_lifetime_s', 600.0)
         self.declare_parameter('verification_novelty_spacing_m', 0.40)
+        # Evidence keyframes use a conservative physical viewpoint spacing.
+        # This is an engineering adaptation for occupancy-map crops; it is
+        # not the final consensus baseline and is not cumulative path length.
+        self.declare_parameter('evidence_keyframe_translation_threshold_m',
+                               0.80)
         self.declare_parameter('evidence_acquisition_window_s', 8.0)
         self.declare_parameter('target_map_radius_m', 40.0)
         self.declare_parameter('max_projected_registration_error_m', 0.20)
         self.declare_parameter('shared_frame', 'shared_map')
         self.declare_parameter('diagnostic_output', '')
+        # Optional bounded capture of the exact arrays passed to the existing
+        # single-pair registration worker.  This is diagnostic-only and is
+        # deliberately disabled unless a run explicitly supplies a directory.
+        self.declare_parameter('registration_input_capture_output', '')
+        self.declare_parameter('registration_input_capture_max_pairs', 64)
+        self.declare_parameter('consensus_min_known_fraction', 0.25)
+        self.declare_parameter('consensus_min_occupied_cells', 400)
+        # MRPT is the bounded production registration backend.  The legacy
+        # matcher remains available only as an explicit compatibility/debug
+        # option; MRPT modes are retained per physical pair and selected
+        # jointly by the existing consensus logic.
+        self.declare_parameter('registration_backend', 'legacy')
+        self.declare_parameter('mrpt_max_kld', 0.05)
+        self.declare_parameter('mrpt_max_modes_per_call', 64)
+        self.declare_parameter('mrpt_repetitions_per_pair', 10)
+        self.declare_parameter('mrpt_max_distinct_modes_per_pair', 10)
 
         self.robot_id = str(self.get_parameter('robot_id').value)
         self.peer_robot_id = str(self.get_parameter('peer_robot_id').value)
@@ -115,9 +153,23 @@ class UnknownPoseFrontend(Node):
         self.crop_request_topic = str(self.get_parameter('crop_request_topic').value)
         self.crop_topic = str(self.get_parameter('crop_topic').value)
         self.hypothesis_topic = str(self.get_parameter('hypothesis_topic').value)
+        self.evidence_status_topic = str(
+            self.get_parameter('evidence_status_topic').value)
+        if not self.evidence_status_topic:
+            self.evidence_status_topic = (
+                f'/cslam/relative_pose/{self.robot_id}/'
+                'evidence_acquisition_active')
         self.peer_map_topic = str(self.get_parameter('peer_map_topic').value)
         self.peer_map_publish_period_s = max(0.1, float(
             self.get_parameter('peer_map_publish_period_s').value))
+        full_map_value = self.get_parameter('full_map_registration').value
+        self.full_map_registration = (
+            full_map_value if isinstance(full_map_value, bool) else
+            str(full_map_value).strip().lower() in ('1', 'true', 'yes', 'on'))
+        self.full_map_registration_period_s = max(1.0, float(
+            self.get_parameter('full_map_registration_period_s').value))
+        self.full_map_max_snapshots = max(3, int(self.get_parameter(
+            'full_map_max_snapshots').value))
         self.descriptor_period_s = max(0.2, float(
             self.get_parameter('descriptor_period_s').value))
         self.crop_size_m = max(2.0, float(self.get_parameter('crop_size_m').value))
@@ -130,7 +182,9 @@ class UnknownPoseFrontend(Node):
         self.confirmation_window_ns = int(max(1.0, float(
             self.get_parameter('confirmation_window_s').value)) * 1.0e9)
         self.confirmation_cadence_factor = 2.5
-        self.min_consistent_constraints = max(2, int(
+        # Three mutually compatible constraints are a non-negotiable safety
+        # gate.  Configuration may not weaken estimator acceptance below it.
+        self.min_consistent_constraints = max(3, int(
             self.get_parameter('min_consistent_constraints').value))
         self.max_evidence_constraints = max(
             self.min_consistent_constraints, int(
@@ -144,6 +198,9 @@ class UnknownPoseFrontend(Node):
             self.get_parameter('verification_lifetime_s').value))
         self.verification_novelty_spacing_m = max(0.01, float(
             self.get_parameter('verification_novelty_spacing_m').value))
+        self.evidence_keyframe_translation_threshold_m = max(
+            0.75, float(self.get_parameter(
+                'evidence_keyframe_translation_threshold_m').value))
         self.evidence_acquisition_window_s = max(0.5, float(
             self.get_parameter('evidence_acquisition_window_s').value))
         self.target_map_radius_m = max(1.0, float(
@@ -152,6 +209,33 @@ class UnknownPoseFrontend(Node):
             self.get_parameter('max_projected_registration_error_m').value))
         self.shared_frame = str(self.get_parameter('shared_frame').value)
         self.diagnostic_output = str(self.get_parameter('diagnostic_output').value)
+        capture_output = str(self.get_parameter(
+            'registration_input_capture_output').value)
+        self.registration_input_capture_output = (
+            Path(capture_output) if capture_output else None)
+        self.registration_input_capture_max_pairs = max(0, int(
+            self.get_parameter('registration_input_capture_max_pairs').value))
+        self.consensus_min_known_fraction = max(
+            0.25, float(self.get_parameter(
+                'consensus_min_known_fraction').value))
+        self.consensus_min_occupied_cells = max(
+            400, int(self.get_parameter(
+                'consensus_min_occupied_cells').value))
+        self.registration_backend = str(self.get_parameter(
+            'registration_backend').value).strip().lower()
+        if self.registration_backend not in ('mrpt', 'legacy'):
+            raise ValueError(
+                f'unsupported registration_backend={self.registration_backend!r}')
+        self.mrpt_max_kld = max(0.0, float(self.get_parameter(
+            'mrpt_max_kld').value))
+        self.mrpt_max_modes_per_call = max(1, int(self.get_parameter(
+            'mrpt_max_modes_per_call').value))
+        self.mrpt_repetitions_per_pair = max(1, int(self.get_parameter(
+            'mrpt_repetitions_per_pair').value))
+        self.mrpt_max_distinct_modes_per_pair = max(1, int(
+            self.get_parameter('mrpt_max_distinct_modes_per_pair').value))
+        self._registration_capture_count = 0
+        self._registration_capture_paths = {}
         self.consensus_diagnostics = None
         if self.diagnostic_output:
             self.consensus_diagnostics = DedicatedDiagnosticJsonl(
@@ -173,6 +257,8 @@ class UnknownPoseFrontend(Node):
             'candidate_comparisons': 0,
             'cheap_candidates': 0,
             'cheap_rejections': 0,
+            'descriptor_ambiguity_rejections': 0,
+            'descriptor_ambiguity_advisories': 0,
             'crop_requests_sent': 0,
             'crop_requests_queued': 0,
             'crop_request_duplicates_suppressed': 0,
@@ -196,6 +282,12 @@ class UnknownPoseFrontend(Node):
             'rejected_hypotheses': 0,
             'tf_handoffs': 0,
             'peer_maps_published': 0,
+            'full_map_evidence_requests': 0,
+            'full_map_evidence_responses': 0,
+            'full_map_evidence_cache_hits': 0,
+            'full_map_evidence_cache_misses': 0,
+            'full_map_verifications_pending': 0,
+            'full_map_verifications_resumed': 0,
             'merge_handoff_started': 0,
             'multi_constraint_attempts': 0,
             'multi_constraint_rejections': 0,
@@ -217,6 +309,7 @@ class UnknownPoseFrontend(Node):
             'candidate_verification_rejected': 0,
             'candidate_verification_budget_exhausted': 0,
             'candidate_verification_budget_waits': 0,
+            'immature_candidates_not_scheduled': 0,
             'verification_batches_opened': 0,
             'verification_batches_exhausted': 0,
             'verification_batch_reentries': 0,
@@ -225,12 +318,18 @@ class UnknownPoseFrontend(Node):
             'stale_verification_batch_responses': 0,
             'diagnostic_write_failures': 0,
             'post_handoff_protocol_ticks_skipped': 0,
+            'keyframe_content_duplicates_suppressed': 0,
+            'keyframe_motion_novelty_admitted': 0,
+            'physical_content_duplicates_suppressed': 0,
+            'strong_consensus_candidates': 0,
+            'weak_consensus_candidates_rejected': 0,
         }
         self.gate_rejection_counts = Counter()
         self.temporal_gate_rejection_counts = Counter()
         self.crop_response_rejection_counts = Counter()
         self.consensus_gate_rejection_counts = Counter()
         self.descriptor_gate_survivors = set()
+        self.descriptor_ambiguous_pairs = set()
         self.temporal_gate_survivors = set()
         self.diagnostic_events = []
         self.diagnostic_event_drops = 0
@@ -240,6 +339,16 @@ class UnknownPoseFrontend(Node):
         # smoke can evict the proposal/ack reason before finalization.
         self.protocol_lifecycle_events = []
         self.protocol_lifecycle_event_drops = 0
+        if self.registration_backend == 'mrpt':
+            self._record_diagnostic_event(
+                'MRPT_CONFIGURATION', method='amModifiedRANSAC',
+                max_kld=float(self.mrpt_max_kld),
+                repetitions_per_physical_pair=int(
+                    self.mrpt_repetitions_per_pair),
+                mode_dedup_translation_m=0.05,
+                mode_dedup_yaw_deg=0.5,
+                max_distinct_modes_per_pair=int(
+                    self.mrpt_max_distinct_modes_per_pair))
         self.callback_stats = {}
         self.callback_started = 0
         self.callback_completed = 0
@@ -274,8 +383,14 @@ class UnknownPoseFrontend(Node):
         self.evidence_candidates = {}
         self.evidence_physical_keys = {}
         self.evidence_physical_geometry_keys = set()
+        self.evidence_content_pairs = set()
+        self.evidence_source_content = set()
+        self.evidence_peer_content = set()
         self.candidate_verification_attempted = set()
         self.candidate_verification_results = {}
+        # Preserve bounded MRPT alternatives for each physical pair.  These
+        # are mutually exclusive modes, not additional independent evidence.
+        self.candidate_verification_hypotheses = {}
         # Acquisition-only history used to keep one repeatedly rejected
         # physical view from monopolising later verification batches.  Exact
         # pair rejection and accepted-evidence deduplication remain separate
@@ -297,6 +412,11 @@ class UnknownPoseFrontend(Node):
         # preserving incremental evidence across later batches.
         self.rejected_physical_geometry_keys = set()
         self.rejected_physical_geometry_batches = {}
+        # Track geometry as soon as a request is admitted, not only after its
+        # asynchronous result arrives.  Otherwise several in-flight keyframe
+        # IDs can represent the same crop footprint and consume one batch's
+        # bounded verification budget before the first rejection is recorded.
+        self.attempted_physical_geometry_batches = {}
         self._diagnosed_physical_candidates = set()
         # Repeated observations of an already-pending physical candidate are
         # represented by the counter below.  Persisting one diagnostic record
@@ -324,6 +444,11 @@ class UnknownPoseFrontend(Node):
         self.pending_peer_evidence_announcements = {}
         self.evidence_announcements_published = set()
         self._peer_evidence_requested = set()
+        # Canonical R1->R2 physical evidence shared by both frontends.  The
+        # key is the canonical physical pair, so reciprocal discovery and
+        # repeated delivery cannot create a second independent constraint.
+        self.canonical_constraint_pool = OrderedDict()
+        self.canonical_union_summary_published = False
         # A summary is an immutable digest of a selected evidence set.  Once
         # this peer has independently verified that digest, repeated DDS
         # deliveries of the same CANDIDATE must not trigger another crop
@@ -363,6 +488,8 @@ class UnknownPoseFrontend(Node):
         self._registration_queue_max_depth = 0
         self.evidence_acquisition_deadline_wall = None
         self.evidence_acquisition_started = False
+        self._last_evidence_status = None
+        self._evidence_opportunity_deadline_wall = None
         self.verification_batches = BoundedVerificationBatchController(
             budget=self.candidate_verification_budget,
             max_batches=self.max_verification_batches,
@@ -382,7 +509,36 @@ class UnknownPoseFrontend(Node):
         self.crop_pub = self.create_publisher(LocalMapCrop, self.crop_topic, qos)
         self.hypothesis_pub = self.create_publisher(
             RelativePoseHypothesis, self.hypothesis_topic, qos)
+        self.evidence_status_pub = self.create_publisher(
+            Bool, self.evidence_status_topic, qos)
         self.peer_map_pub = self.create_publisher(PeerMap, self.peer_map_topic, map_qos)
+        self.peer_full_map_topic = (
+            f'/cslam/unknown_pose/{self.peer_robot_id}/local_map')
+        self.peer_full_map_sub = self.create_subscription(
+            PeerMap, self.peer_full_map_topic,
+            lambda message: self._timed_callback(
+                'peer_full_map_callback', self.peer_full_map_callback, message),
+            map_qos)
+        self.full_map_snapshot_request_topic = (
+            f'/cslam/unknown_pose/{self.peer_robot_id}/full_map_snapshot_request')
+        self.full_map_snapshot_response_topic = (
+            f'/cslam/unknown_pose/{self.peer_robot_id}/full_map_snapshot_response')
+        self.full_map_snapshot_request_pub = self.create_publisher(
+            FullMapSnapshotRequest, self.full_map_snapshot_request_topic, qos)
+        self.full_map_snapshot_response_pub = self.create_publisher(
+            FullMapSnapshotResponse, self.full_map_snapshot_response_topic, qos)
+        self.full_map_snapshot_request_sub = self.create_subscription(
+            FullMapSnapshotRequest,
+            f'/cslam/unknown_pose/{self.robot_id}/full_map_snapshot_request',
+            lambda message: self._timed_callback(
+                'full_map_snapshot_request_callback',
+                self.full_map_snapshot_request_callback, message), qos)
+        self.full_map_snapshot_response_sub = self.create_subscription(
+            FullMapSnapshotResponse,
+            f'/cslam/unknown_pose/{self.robot_id}/full_map_snapshot_response',
+            lambda message: self._timed_callback(
+                'full_map_snapshot_response_callback',
+                self.full_map_snapshot_response_callback, message), qos)
         self.map_sub = self.create_subscription(
             OccupancyGrid, self.map_topic,
             lambda message: self._timed_callback(
@@ -413,11 +569,40 @@ class UnknownPoseFrontend(Node):
         self.tf_broadcaster = StaticTransformBroadcaster(self)
         self.latest_map = None
         self.latest_map_fingerprint = None
+        self.latest_full_map_snapshot = None
+        self.peer_full_map_snapshots = OrderedDict()
+        self.local_full_map_snapshots = OrderedDict()
+        # Evidence pacing is expressed in ROS/simulation seconds.  Using a
+        # wall clock here made a fast Webots run stretch every one-second
+        # registration export and five-second peer-map export by the
+        # real-time factor while the evidence itself was timestamped in ROS
+        # time.  Keep wall clocks for diagnostics/worker bookkeeping only.
+        self._last_full_map_export_ros_s = 0.0
+        self._last_full_map_export_fingerprint = None
+        self._last_full_map_attempt_ros_s = 0.0
+        self._last_full_map_attempt_pair = None
+        self._full_map_registration_future = None
+        self._full_map_registration_context = None
+        self._full_map_registration_sequence = 0
+        self.full_map_confirmation_records = []
+        self.full_map_confirmation_families = []
+        self.full_map_proposal = None
+        self._full_map_proposal_pins = set()
+        self._pending_full_map_verification = None
+        self._requested_full_map_snapshot_ids = set()
+        self._unavailable_full_map_snapshot_ids = set()
         self.last_export_map_fingerprint = None
         self.map_revision = 0
         self.keyframe_sequence = 0
         self.last_descriptor_wall = 0.0
+        self._latest_observation_pose = None
+        self.keyframe_content_history = OrderedDict()
         self.keyframes = OrderedDict()
+        # Local odometry pose at immutable evidence-keyframe creation. This
+        # is selector diversity metadata, not an estimator transform.
+        self.keyframe_viewpoints = OrderedDict()
+        self._last_evidence_viewpoint = None
+        self._evidence_cumulative_travel_m = 0.0
         self.peer_descriptors = OrderedDict()
         self.own_descriptor_stamps_ns = deque(maxlen=16)
         self.peer_descriptor_stamps_ns = deque(maxlen=16)
@@ -455,12 +640,187 @@ class UnknownPoseFrontend(Node):
         self.pending_target_proposal = False
         self.negotiation_started = False
         self.accepted = None
-        self.last_export_wall = 0.0
+        # Once the canonical transform is immutable, retain only the local
+        # map -> PeerMap relay and the accepted static TF publisher.  The
+        # transition is deliberately separate from ``accepted`` so delayed
+        # DDS callbacks can be rejected even after their subscriptions have
+        # been destroyed.
+        self._post_handoff_quiesced = False
+        # Diagnostic provenance only: the local ROS simulation timestamp at
+        # which this frontend accepted the canonical handoff message.  It is
+        # never read by registration, selector, verification, or TF publish.
+        self.accepted_ros_time_s = None
+        self.last_export_ros_s = 0.0
         self.timer = self.create_timer(
             0.2, lambda: self._timed_callback('timer_tick', self.tick))
         self.get_logger().info(
             f'Unknown-pose front end {self.robot_id}<->{self.peer_robot_id}; '
             'no transform is published before mutual acceptance')
+        self._publish_evidence_status(False)
+
+    def _publish_evidence_status(self, active: bool) -> None:
+        """Publish a lease-backed evidence-opportunity status.
+
+        This status contains no pose, map, or acceptance result.  It only lets
+        the local allocator stop issuing a new exploration goal while the
+        existing frontend is collecting/validating a promising set of views.
+        The allocator expires the status if the frontend stops refreshing it.
+        """
+        message = Bool()
+        message.data = bool(active)
+        # Finalization may run after ROS has begun shutting down (for
+        # example, when a bounded runner receives SIGINT).  This advisory
+        # status must never turn teardown into a frontend crash.
+        publisher = getattr(self, 'evidence_status_pub', None)
+        try:
+            if publisher is not None:
+                publisher.publish(message)
+        except Exception as error:  # rclpy.RCLError varies by ROS release
+            if rclpy.ok():
+                self.get_logger().warning(
+                    'EVIDENCE_STATUS_PUBLISH_FAILED active=%s error=%s' %
+                    (bool(active), error))
+        if self._last_evidence_status is None or \
+                bool(active) != self._last_evidence_status:
+            self._last_evidence_status = bool(active)
+            self._record_diagnostic_event(
+                'EVIDENCE_ACQUISITION_STATUS', active=bool(active))
+
+    def _destroy_post_handoff_entity(self, attribute, kind):
+        """Destroy one registration-only ROS entity, tolerating late teardown."""
+        entity = getattr(self, attribute, None)
+        if entity is None:
+            return
+        try:
+            if kind == 'subscription':
+                self.destroy_subscription(entity)
+            elif kind == 'publisher':
+                self.destroy_publisher(entity)
+            elif kind == 'timer':
+                self.destroy_timer(entity)
+        except Exception as error:
+            # A queued callback or an already-started ROS teardown must not
+            # turn an otherwise accepted handoff into a process failure.
+            logger = getattr(self, 'get_logger', lambda: None)()
+            warning = getattr(logger, 'warning', None)
+            if warning is not None:
+                warning('post-handoff %s cleanup failed for %s: %s' %
+                        (kind, attribute, error))
+        finally:
+            setattr(self, attribute, None)
+
+    def _enter_post_handoff_quiescence(self):
+        """Stop registration work while retaining fusion-facing state.
+
+        Acceptance is immutable.  After this transition no descriptor, crop,
+        hypothesis, or full-map registration callback is allowed to create
+        new work.  The local OccupancyGrid subscription and PeerMap publisher
+        remain alive because source-aware fusion consumes the latter for
+        ongoing shared-map updates.  The static TF broadcaster also remains
+        alive for late/reconnected TF consumers.
+        """
+        if getattr(self, '_post_handoff_quiesced', False):
+            return
+        self._post_handoff_quiesced = True
+        self._registration_shutdown = True
+        self.evidence_acquisition_started = False
+        self._evidence_opportunity_deadline_wall = None
+        self.evidence_acquisition_deadline_wall = None
+        self._publish_evidence_status(False)
+
+        self._record_diagnostic_event(
+            'POST_HANDOFF_QUIESCED',
+            retained_local_map_relay=True,
+            retained_static_tf=True,
+            registration_work_disabled=True)
+
+        for attribute in ('_registration_future',
+                          '_full_map_registration_future'):
+            future = getattr(self, attribute, None)
+            if future is not None:
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
+            setattr(self, attribute, None)
+        self._registration_context = None
+        self._full_map_registration_context = None
+        self._clear_pending_registration_contexts('POST_HANDOFF_QUIESCED')
+        for attribute in (
+                'pending_requests', 'completed_request_keys',
+                'request_candidate_by_request_key',
+                'request_metadata_by_request_key', 'pending_descriptor_pair_keys',
+                'pending_descriptor_pair_key_set', 'pending_peer_descriptor_keys',
+                'pending_own_descriptor_keys', 'pending_peer_evidence_announcements',
+                'peer_evidence_announcements', 'received_peer_crops',
+                'peer_descriptors', 'keyframes', 'keyframe_viewpoints',
+                'local_full_map_snapshots', 'peer_full_map_snapshots'):
+            value = getattr(self, attribute, None)
+            if hasattr(value, 'clear'):
+                value.clear()
+        self.latest_full_map_snapshot = None
+        self.full_map_proposal = None
+        self.pending_proposals.clear()
+        self.peer_proposals.clear()
+
+        executor = getattr(self, '_registration_executor', None)
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+
+        self._destroy_post_handoff_entity('timer', 'timer')
+        for attribute in (
+                'peer_full_map_sub', 'full_map_snapshot_request_sub',
+                'full_map_snapshot_response_sub', 'descriptor_sub',
+                'request_sub', 'crop_sub', 'hypothesis_sub'):
+            self._destroy_post_handoff_entity(attribute, 'subscription')
+        for attribute in (
+                'descriptor_pub', 'request_pub', 'crop_pub', 'hypothesis_pub',
+                'evidence_status_pub', 'full_map_snapshot_request_pub',
+                'full_map_snapshot_response_pub'):
+            self._destroy_post_handoff_entity(attribute, 'publisher')
+
+        # This listener belongs only to the pre-handoff registration frontend.
+        # Keep the StaticTransformBroadcaster above it alive; other production
+        # nodes have their own TF listeners.
+        listener = getattr(self, 'tf_listener', None)
+        if listener is not None:
+            try:
+                listener.unregister()
+            except Exception:
+                pass
+            self.tf_listener = None
+
+    def _advertise_evidence_opportunity(self, candidate_count: int) -> None:
+        """Advertise the first bounded, bidirectionally eligible encounter.
+
+        Descriptor similarity is only an advisory trigger.  Once temporal
+        support has made a peer/own pair actionable, publish the existing
+        lease before candidate selection can consume the verification budget
+        or the allocator can issue another goal.  The allocator checks this
+        lease only when it is otherwise ready to dispatch, so an active Nav2
+        goal is left untouched.  The lease expires through the normal frontend
+        tick path if no requestable, genuinely new evidence arrives.
+        """
+        if (self.evidence_acquisition_started or self.batch_proposal_published
+                or self._evidence_opportunity_deadline_wall is not None):
+            return
+        self._evidence_opportunity_deadline_wall = (
+            time.monotonic() + self.evidence_acquisition_window_s)
+        self._publish_evidence_status(True)
+        self._record_diagnostic_event(
+            'EVIDENCE_OPPORTUNITY_ADVERTISED',
+            candidate_count=int(candidate_count),
+            window_s=float(self.evidence_acquisition_window_s),
+            active_goal_untouched=True)
+        self._write_physical_evidence_diagnostic(
+            'EVIDENCE_OPPORTUNITY_ADVERTISED',
+            candidate_count=int(candidate_count),
+            window_s=float(self.evidence_acquisition_window_s),
+            active_goal_untouched=True,
+            action='HOLD_NEW_DISPATCH_ONLY')
 
     def _write_consensus_diagnostic(self, record_type, **fields):
         """Stream consensus records independently of bounded protocol events."""
@@ -527,7 +887,8 @@ class UnknownPoseFrontend(Node):
         width = int(descriptor.crop_width)
         height = int(descriptor.crop_height)
         origin = [float(descriptor.crop_origin_x),
-                  float(descriptor.crop_origin_y), 0.0]
+                  float(descriptor.crop_origin_y),
+                  float(getattr(descriptor, 'crop_origin_yaw', 0.0))]
         center = [origin[0] + 0.5 * width * resolution,
                   origin[1] + 0.5 * height * resolution]
         return {
@@ -542,6 +903,11 @@ class UnknownPoseFrontend(Node):
             'keyframe_id': str(descriptor.keyframe_id),
             'keyframe_creation_timestamp_ns': int(
                 UnknownPoseFrontend._stamp_ns(descriptor)),
+            'viewpoint': (
+                None if not bool(getattr(descriptor, 'viewpoint_available', False))
+                else [float(getattr(descriptor, 'viewpoint_x', 0.0)),
+                      float(getattr(descriptor, 'viewpoint_y', 0.0)),
+                      float(getattr(descriptor, 'viewpoint_yaw', 0.0))]),
         }
 
     @staticmethod
@@ -732,6 +1098,16 @@ class UnknownPoseFrontend(Node):
                 self.confirmation_window_ns, intervals,
                 self.confirmation_cadence_factor))
 
+    def _ros_time_s(self) -> float:
+        """Return the configured ROS clock in seconds for evidence pacing.
+
+        The frontend's map and snapshot messages carry ROS/simulation stamps,
+        so their cadence gates must use this same clock.  Wall monotonic time
+        remains appropriate for process/worker diagnostics, but not for
+        deciding when a new evidence sample is due.
+        """
+        return self.get_clock().now().nanoseconds / 1e9
+
     def map_callback(self, message):
         self.counters['map_messages_received'] += 1
         if self.first_map_wall is None:
@@ -739,12 +1115,303 @@ class UnknownPoseFrontend(Node):
         self.latest_map = message
         self.latest_map_fingerprint = self._map_fingerprint(message)
         self.map_revision += 1
-        if (self.accepted is not None
-                and time.monotonic() - self.last_export_wall
-                >= self.peer_map_publish_period_s
-                and self.latest_map_fingerprint
-                != self.last_export_map_fingerprint):
+        if (self.full_map_registration and
+                not getattr(self, '_post_handoff_quiesced', False)):
+            self._store_local_full_map_snapshot()
+            self._publish_full_map_snapshot_if_due()
+        now_ros = self._ros_time_s()
+        export_due = (
+            self.last_export_ros_s <= 0.0 or
+            now_ros - self.last_export_ros_s >= self.peer_map_publish_period_s
+        )
+        if (self.accepted is not None and export_due and
+                self.latest_map_fingerprint != self.last_export_map_fingerprint):
             self.publish_local_map()
+
+    @staticmethod
+    def _full_map_crop(message):
+        """Make an immutable, metric-preserving GridCrop from an OccupancyGrid."""
+        info = message.info
+        values = np.asarray(message.data, dtype=np.int16).reshape(
+            (int(info.height), int(info.width))).copy()
+        values.setflags(write=False)
+        return GridCrop(
+            values=values,
+            resolution=float(info.resolution),
+            origin_x=float(info.origin.position.x),
+            origin_y=float(info.origin.position.y),
+            origin_yaw=UnknownPoseFrontend._yaw(info.origin.orientation))
+
+    @staticmethod
+    def _full_map_snapshot_id(robot_id, revision, fingerprint):
+        return f'{robot_id}-full-map-{int(revision):08d}-{fingerprint[:12]}'
+
+    def _make_full_map_snapshot(self, message, robot_id, revision, fingerprint):
+        crop = self._full_map_crop(message)
+        known = int(np.count_nonzero(crop.values >= 0))
+        occupied = int(np.count_nonzero(crop.values >= 50))
+        free = int(np.count_nonzero((crop.values >= 0) &
+                                    (crop.values < 50)))
+        snapshot_id = self._full_map_snapshot_id(
+            robot_id, revision, fingerprint)
+        return {
+            'id': snapshot_id,
+            'robot_id': str(robot_id),
+            'revision': int(revision),
+            'timestamp_ns': self._stamp_ns(message),
+            'fingerprint': str(fingerprint),
+            'frame_id': str(message.header.frame_id),
+            'crop': crop,
+            'width': int(crop.values.shape[1]),
+            'height': int(crop.values.shape[0]),
+            'resolution': float(crop.resolution),
+            'origin_x': float(crop.origin_x),
+            'origin_y': float(crop.origin_y),
+            'origin_yaw': float(crop.origin_yaw),
+            'known_cells': known,
+            'occupied_cells': occupied,
+            'free_cells': free,
+        }
+
+    def _store_local_full_map_snapshot(self):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                self.latest_map is None or not self.latest_map_fingerprint):
+            return None
+        snapshot = self._make_full_map_snapshot(
+            self.latest_map, self.robot_id, self.map_revision,
+            self.latest_map_fingerprint)
+        self.latest_full_map_snapshot = snapshot
+        self.local_full_map_snapshots[snapshot['id']] = snapshot
+        self._trim_full_map_cache(self.local_full_map_snapshots)
+        return snapshot
+
+    def _trim_full_map_cache(self, cache):
+        """Evict only unpinned full-map snapshots from a bounded cache."""
+        while len(cache) > self.full_map_max_snapshots:
+            victim = next((key for key in cache
+                           if key not in self._full_map_proposal_pins), None)
+            if victim is None:
+                break
+            cache.pop(victim, None)
+
+    def peer_full_map_callback(self, message):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                not self.full_map_registration or
+                str(message.source_robot_id) != self.peer_robot_id):
+            return
+        grid = message.occupancy_grid
+        fingerprint = self._map_fingerprint(grid)
+        snapshot = self._make_full_map_snapshot(
+            grid, self.peer_robot_id, int(message.revision), fingerprint)
+        self.peer_full_map_snapshots[snapshot['id']] = snapshot
+        self._trim_full_map_cache(self.peer_full_map_snapshots)
+        self._record_diagnostic_event(
+            'FULL_MAP_SNAPSHOT_RECEIVED', snapshot_id=snapshot['id'],
+            revision=snapshot['revision'], timestamp_ns=snapshot['timestamp_ns'],
+            width=snapshot['width'], height=snapshot['height'],
+            known_cells=snapshot['known_cells'],
+            occupied_cells=snapshot['occupied_cells'])
+        self._resume_pending_full_map_verification()
+
+    def _publish_full_map_snapshot_if_due(self, force=False):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                self.latest_full_map_snapshot is None):
+            return False
+        now = self._ros_time_s()
+        snapshot = self.latest_full_map_snapshot
+        if (not force and
+                now - self._last_full_map_export_ros_s <
+                self.full_map_registration_period_s):
+            return False
+        if (not force and
+                getattr(self, '_last_full_map_export_fingerprint', None) ==
+                snapshot['fingerprint']):
+            return False
+        message = PeerMap()
+        message.source_robot_id = self.robot_id
+        message.revision = snapshot['revision']
+        message.export_stamp = self.get_clock().now().to_msg()
+        message.local_evidence_only = True
+        message.occupancy_grid = self.latest_map
+        self.peer_map_pub.publish(message)
+        self._last_full_map_export_ros_s = now
+        self._last_full_map_export_fingerprint = snapshot['fingerprint']
+        self.counters['peer_maps_published'] += 1
+        self._record_diagnostic_event(
+            'FULL_MAP_SNAPSHOT_PUBLISHED', snapshot_id=snapshot['id'],
+            revision=snapshot['revision'], timestamp_ns=snapshot['timestamp_ns'],
+            width=snapshot['width'], height=snapshot['height'],
+            known_cells=snapshot['known_cells'],
+            occupied_cells=snapshot['occupied_cells'])
+        return True
+
+    @staticmethod
+    def _full_map_proposal_snapshot_ids(message):
+        source_ids = [str(value) for value in getattr(
+            message, 'evidence_source_keyframe_ids', [])]
+        target_ids = [str(value) for value in getattr(
+            message, 'evidence_target_keyframe_ids', [])]
+        return source_ids, target_ids
+
+    def _full_map_snapshot_owner(self, snapshot_id):
+        for robot_id in (self.robot_id, self.peer_robot_id):
+            if str(snapshot_id).startswith(f'{robot_id}-full-map-'):
+                return robot_id
+        return ''
+
+    def _find_full_map_snapshot(self, snapshot_id):
+        snapshot_id = str(snapshot_id)
+        snapshot = self.local_full_map_snapshots.get(snapshot_id)
+        if snapshot is not None:
+            return snapshot
+        return self.peer_full_map_snapshots.get(snapshot_id)
+
+    def _full_map_missing_snapshot_ids(self, message):
+        source_ids, target_ids = self._full_map_proposal_snapshot_ids(message)
+        required = list(source_ids) + list(target_ids)
+        missing = []
+        for snapshot_id in dict.fromkeys(required):
+            if self._find_full_map_snapshot(snapshot_id) is None:
+                missing.append(snapshot_id)
+                self.counters['full_map_evidence_cache_misses'] += 1
+                self._record_diagnostic_event(
+                    'FULL_MAP_EVIDENCE_CACHE_MISS', snapshot_id=snapshot_id)
+            else:
+                self.counters['full_map_evidence_cache_hits'] += 1
+        return missing
+
+    def _request_full_map_snapshots(self, snapshot_ids):
+        request_ids = [str(value) for value in dict.fromkeys(snapshot_ids)
+                       if str(value) not in self._requested_full_map_snapshot_ids]
+        if not request_ids:
+            return False
+        owners = {self._full_map_snapshot_owner(value) for value in request_ids}
+        owners.discard(self.robot_id)
+        owners.discard('')
+        if not owners:
+            return False
+        # This frontend has one peer.  Keep the owner field explicit so the
+        # request remains unambiguous if the transport is later extended.
+        owner = self.peer_robot_id
+        request_ids = [value for value in request_ids
+                       if self._full_map_snapshot_owner(value) == owner]
+        if not request_ids:
+            return False
+        request = FullMapSnapshotRequest()
+        request.requester_robot_id = self.robot_id
+        request.owner_robot_id = owner
+        request.snapshot_ids = request_ids
+        self.full_map_snapshot_request_pub.publish(request)
+        self._requested_full_map_snapshot_ids.update(request_ids)
+        self.counters['full_map_evidence_requests'] += len(request_ids)
+        self._record_diagnostic_event(
+            'FULL_MAP_EVIDENCE_REQUEST', owner_robot_id=owner,
+            snapshot_ids=request_ids)
+        return True
+
+    def _snapshot_response(self, snapshot_id):
+        response = FullMapSnapshotResponse()
+        response.owner_robot_id = self.robot_id
+        response.snapshot_id = str(snapshot_id)
+        snapshot = self.local_full_map_snapshots.get(str(snapshot_id))
+        if snapshot is None:
+            response.available = False
+            response.reason = 'SNAPSHOT_NOT_AVAILABLE'
+            return response, 0
+        response.available = True
+        response.timestamp_ns = int(snapshot['timestamp_ns'])
+        response.revision = int(snapshot['revision'])
+        response.frame_id = str(snapshot['frame_id'])
+        response.width = int(snapshot['width'])
+        response.height = int(snapshot['height'])
+        response.resolution = float(snapshot['resolution'])
+        response.origin_x = float(snapshot['origin_x'])
+        response.origin_y = float(snapshot['origin_y'])
+        response.origin_yaw = float(snapshot['origin_yaw'])
+        values = np.asarray(snapshot['crop'].values, dtype=np.int16).reshape(-1)
+        response.occupancy_data = [int(value) for value in values]
+        response.known_cells = int(snapshot['known_cells'])
+        response.occupied_cells = int(snapshot['occupied_cells'])
+        response.free_cells = int(snapshot['free_cells'])
+        viewpoint = snapshot.get('viewpoint')
+        response.viewpoint_available = viewpoint is not None
+        if viewpoint is not None:
+            response.viewpoint_x = float(viewpoint[0])
+            response.viewpoint_y = float(viewpoint[1])
+            response.viewpoint_yaw = float(viewpoint[2])
+        return response, len(response.occupancy_data)
+
+    def full_map_snapshot_request_callback(self, message):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                not self.full_map_registration or
+                str(message.requester_robot_id) != self.peer_robot_id or
+                str(message.owner_robot_id) != self.robot_id):
+            return
+        for snapshot_id in dict.fromkeys(
+                str(value) for value in getattr(message, 'snapshot_ids', [])):
+            response, cell_count = self._snapshot_response(snapshot_id)
+            self.full_map_snapshot_response_pub.publish(response)
+            self.counters['full_map_evidence_responses'] += 1
+            self._record_diagnostic_event(
+                'FULL_MAP_EVIDENCE_RESPONSE', snapshot_id=snapshot_id,
+                available=bool(response.available), cell_count=cell_count,
+                reason=str(response.reason))
+
+    def _cache_full_map_snapshot_response(self, message):
+        snapshot_id = str(message.snapshot_id)
+        if not bool(message.available):
+            self._unavailable_full_map_snapshot_ids.add(snapshot_id)
+            self._requested_full_map_snapshot_ids.discard(snapshot_id)
+            return False
+        values = np.asarray(message.occupancy_data, dtype=np.int16)
+        expected = int(message.width) * int(message.height)
+        if (int(message.width) <= 0 or int(message.height) <= 0 or
+                values.size != expected):
+            self._unavailable_full_map_snapshot_ids.add(snapshot_id)
+            return False
+        values = values.reshape((int(message.height), int(message.width))).copy()
+        values.setflags(write=False)
+        crop = GridCrop(
+            values=values, resolution=float(message.resolution),
+            origin_x=float(message.origin_x), origin_y=float(message.origin_y),
+            origin_yaw=float(message.origin_yaw))
+        snapshot = {
+            'id': snapshot_id,
+            'robot_id': str(message.owner_robot_id),
+            'revision': int(message.revision),
+            'timestamp_ns': int(message.timestamp_ns),
+            'fingerprint': hashlib.sha256(values.tobytes()).hexdigest(),
+            'frame_id': str(message.frame_id),
+            'crop': crop,
+            'width': int(message.width), 'height': int(message.height),
+            'resolution': float(message.resolution),
+            'origin_x': float(message.origin_x),
+            'origin_y': float(message.origin_y),
+            'origin_yaw': float(message.origin_yaw),
+            'known_cells': int(message.known_cells),
+            'occupied_cells': int(message.occupied_cells),
+            'free_cells': int(message.free_cells),
+        }
+        self.peer_full_map_snapshots[snapshot_id] = snapshot
+        self._trim_full_map_cache(self.peer_full_map_snapshots)
+        self._requested_full_map_snapshot_ids.discard(snapshot_id)
+        self._record_diagnostic_event(
+            'FULL_MAP_EVIDENCE_CACHE_HIT', snapshot_id=snapshot_id,
+            owner_robot_id=str(message.owner_robot_id),
+            width=int(message.width), height=int(message.height))
+        return True
+
+    def full_map_snapshot_response_callback(self, message):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                not self.full_map_registration or
+                str(message.owner_robot_id) != self.peer_robot_id):
+            return
+        if bool(message.available):
+            self._cache_full_map_snapshot_response(message)
+        else:
+            self._unavailable_full_map_snapshot_ids.add(str(message.snapshot_id))
+            self._requested_full_map_snapshot_ids.discard(str(message.snapshot_id))
+        self._resume_pending_full_map_verification()
 
     @staticmethod
     def _map_fingerprint(message):
@@ -776,6 +1443,7 @@ class UnknownPoseFrontend(Node):
         values = np.asarray(message.data, dtype=np.int16).reshape(
             (message.info.height, message.info.width))
         center_x = center_y = None
+        self._latest_observation_pose = None
         try:
             transform = self.tf_buffer.lookup_transform(
                 message.header.frame_id,
@@ -783,6 +1451,9 @@ class UnknownPoseFrontend(Node):
                 rclpy.time.Time(), timeout=Duration(seconds=0.02))
             center_x = transform.transform.translation.x
             center_y = transform.transform.translation.y
+            self._latest_observation_pose = (
+                float(center_x), float(center_y),
+                float(self._yaw(transform.transform.rotation)))
         except TransformException:
             pass
         origin_yaw = self._yaw(message.info.origin.orientation)
@@ -803,10 +1474,119 @@ class UnknownPoseFrontend(Node):
         self.keyframe_sequence += 1
         return f'{self.robot_id}-{self.keyframe_sequence:08d}'
 
+    @staticmethod
+    def _crop_content_identity(crop):
+        """Identify exact occupancy content independently of keyframe IDs."""
+        values = np.asarray(crop.values, dtype=np.int16)
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(str(tuple(values.shape)).encode('ascii'))
+        digest.update(repr((float(crop.resolution),
+                            float(crop.origin_yaw))).encode('ascii'))
+        digest.update(np.ascontiguousarray(values).tobytes())
+        return (tuple(values.shape), float(crop.resolution),
+                float(crop.origin_yaw), digest.digest())
+
+    @staticmethod
+    def _pose_has_novelty(current, previous, translation_threshold_m,
+                          rotation_threshold_rad):
+        """Test Euclidean translation between two local-odometry poses.
+
+        The rotation argument is retained for compatibility with the earlier
+        descriptor trigger, but rotation is intentionally not sufficient for
+        an independent evidence viewpoint.
+        """
+        if current is None or previous is None:
+            return False
+        distance = math.hypot(float(current[0]) - float(previous[0]),
+                              float(current[1]) - float(previous[1]))
+        return distance >= float(translation_threshold_m)
+
+    def _evidence_keyframe_admission(self, crop, observation_pose):
+        """Return ``(admit, reason, displacement_m)`` for one crop.
+
+        The first usable crop is retained immediately.  Every subsequent
+        evidence crop must be separated from the last retained evidence
+        viewpoint by the configured Euclidean local-odometry translation.
+        Map revision, elapsed time, checksum novelty, and in-place rotation
+        cannot bypass this physical-spacing rule.
+        """
+        identity = self._crop_content_identity(crop)
+        history = getattr(self, 'keyframe_content_history', {})
+        if not getattr(self, 'keyframes', {}) and not history:
+            return True, 'FIRST_EVIDENCE_KEYFRAME', None
+        previous_viewpoint = getattr(self, '_last_evidence_viewpoint', None)
+        # A bounded-cache restoration/test fixture may retain only the
+        # content-history pose.  It is still the last known physical pose for
+        # that exact crop content.
+        if previous_viewpoint is None and identity in history:
+            previous_viewpoint = history[identity]
+        # Descriptor/crop retention is allowed while TF is temporarily
+        # unavailable.  Such a record is not a physical-spacing baseline,
+        # and must never poison the first later pose-bearing observation.
+        if observation_pose is None:
+            if identity in history:
+                return False, 'DUPLICATE_CONTENT', None
+            return True, 'NO_PHYSICAL_VIEWPOINT_RETAINED', None
+        if previous_viewpoint is None:
+            return True, 'FIRST_POSE_BEARING_EVIDENCE_KEYFRAME', None
+        displacement = math.hypot(
+            float(observation_pose[0]) - float(previous_viewpoint[0]),
+            float(observation_pose[1]) - float(previous_viewpoint[1]))
+        threshold = float(getattr(
+            self, 'evidence_keyframe_translation_threshold_m',
+            getattr(self, 'verification_novelty_spacing_m', 0.80)))
+        if displacement < threshold:
+            reason = ('DUPLICATE_PHYSICAL_VIEW' if identity in history else
+                      'INSUFFICIENT_TRANSLATION')
+            return False, reason, displacement
+        reason = ('TRANSLATION_NOVELTY_DUPLICATE_CONTENT' if identity in history
+                  else 'TRANSLATION_NOVELTY')
+        return True, reason, displacement
+
+    def _should_publish_keyframe(self, crop, observation_pose):
+        """Compatibility boolean for physical evidence-keyframe admission."""
+        admitted, _, _ = self._evidence_keyframe_admission(
+            crop, observation_pose)
+        if admitted and (getattr(self, 'keyframes', {}) or
+                         getattr(self, 'keyframe_content_history', {})):
+            self.counters['keyframe_motion_novelty_admitted'] += 1
+        return admitted
+
     def publish_descriptor(self):
         crop = self._map_crop()
         if crop is None:
             return
+        admitted, admission_reason, displacement = (
+            self._evidence_keyframe_admission(
+                crop, self._latest_observation_pose))
+        if not admitted:
+            self.counters['keyframe_content_duplicates_suppressed'] += 1
+            self._record_diagnostic_event(
+                'EVIDENCE_KEYFRAME_SUPPRESSED',
+                would_be_keyframe_id=(
+                    f'{self.robot_id}-{self.keyframe_sequence + 1:08d}'),
+                timestamp_ns=int(self.get_clock().now().nanoseconds),
+                reason=admission_reason,
+                displacement_from_last_m=displacement,
+                threshold_m=float(getattr(
+                    self, 'evidence_keyframe_translation_threshold_m',
+                    getattr(self, 'verification_novelty_spacing_m', 0.80))))
+            self._record_diagnostic_event(
+                'KEYFRAME_SUPPRESSED_DUPLICATE_CONTENT',
+                content_identity=list(self._crop_content_identity(crop)[:3]))
+            self.last_descriptor_wall = time.monotonic()
+            return
+        if self.keyframes:
+            self.counters['keyframe_motion_novelty_admitted'] += 1
+        # GridCrop is frozen but its ndarray is not.  Store a private copy and
+        # make it read-only so a later map callback cannot mutate an advertised
+        # keyframe's registration input.
+        immutable_values = np.array(crop.values, dtype=np.int16, copy=True)
+        immutable_values.setflags(write=False)
+        crop = GridCrop(
+            values=immutable_values, resolution=float(crop.resolution),
+            origin_x=float(crop.origin_x), origin_y=float(crop.origin_y),
+            origin_yaw=float(crop.origin_yaw))
         descriptor = polar_descriptor(crop)
         self.descriptor_bytes = len(descriptor)
         keyframe_id = self._allocate_keyframe_id()
@@ -827,9 +1607,25 @@ class UnknownPoseFrontend(Node):
         message.descriptor_bytes = list(descriptor)
         message.crop_origin_x = float(crop.origin_x)
         message.crop_origin_y = float(crop.origin_y)
+        message.crop_origin_yaw = float(crop.origin_yaw)
         message.crop_width = int(crop.values.shape[1])
         message.crop_height = int(crop.values.shape[0])
         message.checksum = checksum
+        # Carry only intrinsic crop-quality metadata in the cheap descriptor.
+        # Descriptors remain published and retained immediately; these fields
+        # let the scheduler avoid an expensive crop request when an endpoint
+        # is already known to fail the unchanged consensus maturity policy.
+        known_fraction = float(np.count_nonzero(crop.values >= 0) /
+                               crop.values.size) if crop.values.size else 0.0
+        occupied_cells = int(np.count_nonzero(crop.values >= 50))
+        message.crop_known_fraction = known_fraction
+        message.crop_occupied_cells = occupied_cells
+        viewpoint = self._latest_observation_pose
+        message.viewpoint_available = viewpoint is not None
+        if viewpoint is not None:
+            message.viewpoint_x = float(viewpoint[0])
+            message.viewpoint_y = float(viewpoint[1])
+            message.viewpoint_yaw = float(viewpoint[2])
         self._update_confirmation_cadence(
             self.own_descriptor_stamps_ns, self._stamp_ns(message))
         self.descriptor_pub.publish(message)
@@ -837,16 +1633,660 @@ class UnknownPoseFrontend(Node):
         self._record_diagnostic_event(
             'DESCRIPTOR_PUBLISHED', keyframe_id=keyframe_id,
             map_revision=self.map_revision, descriptor_bytes=len(descriptor))
+        if self._last_evidence_viewpoint is None or displacement is None:
+            self._evidence_cumulative_travel_m = 0.0
+        else:
+            self._evidence_cumulative_travel_m += float(displacement)
+        content_identity = self._crop_content_identity(crop)
+        crop_center = (
+            float(crop.origin_x + 0.5 * crop.values.shape[1] * crop.resolution),
+            float(crop.origin_y + 0.5 * crop.values.shape[0] * crop.resolution))
+        self._record_diagnostic_event(
+            'EVIDENCE_KEYFRAME_RETAINED', keyframe_id=keyframe_id,
+            timestamp_ns=self._stamp_ns(message),
+            local_odom=(None if self._latest_observation_pose is None else
+                        [float(value) for value in self._latest_observation_pose]),
+            displacement_from_last_m=displacement,
+            cumulative_travel_m=float(self._evidence_cumulative_travel_m),
+            crop_center=[float(value) for value in crop_center],
+            content_hash=content_identity[3].hex(),
+            reason_retained=admission_reason)
+        self.keyframe_content_history[
+            content_identity] = self._latest_observation_pose
+        # Only a real local physical pose can establish or advance the
+        # spacing baseline.  A pose-less startup crop remains usable for
+        # descriptor/crop exchange but is not an evidence viewpoint.
+        if self._latest_observation_pose is not None:
+            self._last_evidence_viewpoint = tuple(
+                float(value) for value in self._latest_observation_pose)
+        while len(self.keyframe_content_history) > self.max_keyframes:
+            self.keyframe_content_history.popitem(last=False)
         self.keyframes[keyframe_id] = (message, crop)
+        if self._latest_observation_pose is not None:
+            self.keyframe_viewpoints[keyframe_id] = tuple(
+                float(value) for value in self._latest_observation_pose)
         while len(self.keyframes) > self.max_keyframes:
-            self.keyframes.popitem(last=False)
+            expired_key, _ = self.keyframes.popitem(last=False)
+            self.keyframe_viewpoints.pop(expired_key, None)
         self._prune_expired_descriptor_state()
         self.last_descriptor_wall = time.monotonic()
         self.pending_own_descriptor_keys.append(keyframe_id)
 
+    def _full_map_pair_mature(self, local, peer):
+        local_ok, local_details = consensus_crop_maturity(
+            local['crop'], self.consensus_min_known_fraction,
+            self.consensus_min_occupied_cells)
+        peer_ok, peer_details = consensus_crop_maturity(
+            peer['crop'], self.consensus_min_known_fraction,
+            self.consensus_min_occupied_cells)
+        return bool(local_ok and peer_ok), {
+            'local': local_details, 'peer': peer_details}
+
+    @staticmethod
+    def _full_map_pair_operable(source, target):
+        """Check only the minimum safe input validity for startup matching."""
+        details = {}
+        for name, snapshot in (('source', source), ('target', target)):
+            crop = snapshot.get('crop') if snapshot else None
+            values = None if crop is None else np.asarray(crop.values)
+            occupied = int(snapshot.get('occupied_cells', 0))
+            valid = bool(
+                values is not None and values.ndim == 2 and
+                values.size > 0 and float(crop.resolution) > 0.0 and
+                occupied >= 12)
+            details[name] = {
+                'operable': valid,
+                'known_cells': int(snapshot.get('known_cells', 0)),
+                'occupied_cells': occupied,
+                'width': (int(values.shape[1]) if values is not None and
+                          values.ndim == 2 else 0),
+                'height': (int(values.shape[0]) if values is not None and
+                           values.ndim == 2 else 0),
+            }
+        return bool(details['source']['operable'] and
+                    details['target']['operable']), details
+
+    def _capture_full_map_attempt(self, source, target, sequence):
+        if (self.registration_input_capture_output is None or
+                sequence > self.registration_input_capture_max_pairs):
+            return None
+        try:
+            root = (self.registration_input_capture_output /
+                    'full_maps' / self.robot_id)
+            root.mkdir(parents=True, exist_ok=True)
+            stem = f'{self.robot_id}_full_map_registration_{sequence:04d}'
+            npz_path = root / f'{stem}.npz'
+            json_path = root / f'{stem}.json'
+            np.savez_compressed(
+                npz_path,
+                source_values=np.asarray(source['crop'].values,
+                                         dtype=np.int16).copy(),
+                target_values=np.asarray(target['crop'].values,
+                                         dtype=np.int16).copy())
+            metadata = {
+                'schema_version': 'full_map_registration_capture_1.0',
+                'status': 'SUBMITTED', 'robot_id': self.robot_id,
+                'peer_robot_id': self.peer_robot_id,
+                'source_robot_id': source['robot_id'],
+                'target_robot_id': target['robot_id'],
+                'source_snapshot_id': source['id'],
+                'target_snapshot_id': target['id'],
+                'source_timestamp_ns': int(source['timestamp_ns']),
+                'target_timestamp_ns': int(target['timestamp_ns']),
+                'source_revision': int(source['revision']),
+                'target_revision': int(target['revision']),
+                'source_fingerprint': source['fingerprint'],
+                'target_fingerprint': target['fingerprint'],
+                'source_frame': str(source.get('frame_id',
+                                               source['robot_id'] + '/map')),
+                'target_frame': str(target.get('frame_id',
+                                              target['robot_id'] + '/map')),
+                'source_to_target_convention':
+                    'p_target = R(yaw) * p_source + translation',
+                'source_map': {key: source[key] for key in (
+                    'width', 'height', 'resolution', 'origin_x',
+                    'origin_y', 'origin_yaw', 'known_cells',
+                    'occupied_cells', 'free_cells')},
+                'target_map': {key: target[key] for key in (
+                    'width', 'height', 'resolution', 'origin_x',
+                    'origin_y', 'origin_yaw', 'known_cells',
+                    'occupied_cells', 'free_cells')},
+                'npz_file': npz_path.name,
+            }
+            json_path.write_text(json.dumps(metadata, indent=2,
+                                            sort_keys=True), encoding='utf-8')
+            return json_path
+        except Exception as exc:
+            self.get_logger().warning('full-map capture failed: %s', exc)
+            return None
+
+    def _full_map_mode_result(self, result, local, peer):
+        """Return a result already computed in canonical R1->R2 order."""
+        del local, peer
+        return result
+
+    @staticmethod
+    def _run_full_map_registration(source, target, initial_transform=None):
+        """Global-register once, or locally verify an already proposed basin."""
+        if initial_transform is None:
+            global_result = register_crops(
+                source, target, minimum_agreement=0.0)
+            seed = global_result.transform
+            if not all(math.isfinite(float(value)) for value in seed):
+                return global_result
+        else:
+            global_result = None
+            seed = tuple(float(value) for value in initial_transform)
+        refined = refine_registration_locally(
+            source, target, seed, translation_bound_m=0.18,
+            yaw_bound_rad=math.radians(1.0))
+        diagnostics = tuple(refined.consensus_diagnostics)
+        if global_result is not None:
+            diagnostics += ({
+                'kind': 'full_map_global_seed',
+                'transform': [float(value) for value in global_result.transform],
+                'accepted': bool(global_result.accepted),
+                'residual_m': float(global_result.residual_m),
+            },)
+        return replace(refined, consensus_diagnostics=diagnostics)
+
+    def _full_map_family_result(self):
+        if len(self.full_map_confirmation_records) < 3:
+            return None
+        records = self.full_map_confirmation_records[-8:]
+        pairs = [(record['source']['crop'], record['target']['crop'])
+                 for record in records]
+        hypotheses = [(record['result'],) for record in records]
+        evidence_ids = [record['evidence_id'] for record in records]
+        timestamps = [(int(record['source']['timestamp_ns']),
+                       int(record['target']['timestamp_ns']))
+                      for record in records]
+        return select_hypothesis_family(
+            pairs, hypotheses,
+            target_map_radius_m=self.target_map_radius_m,
+            min_consistent_constraints=3,
+            min_spatial_baseline_m=0.0,
+            max_translation_consistency_m=0.15,
+            max_yaw_consistency_rad=math.radians(1.0),
+            max_projected_registration_error_m=(
+                self.max_projected_registration_error_m),
+            minimum_agreement=0.0,
+            evidence_timestamps=timestamps,
+            evidence_ids=evidence_ids)
+
+    def _record_full_map_result(self, local, peer, result, capture_path=None):
+        canonical = result
+        source, target = local, peer
+        evidence_id = f"{source['id']}|{target['id']}"
+        record = {
+            'evidence_id': evidence_id, 'source': source, 'target': target,
+            'result': canonical,
+        }
+        self.full_map_confirmation_records.append(record)
+        self.full_map_confirmation_records = (
+            self.full_map_confirmation_records[-12:])
+        self._record_diagnostic_event(
+            'FULL_MAP_REGISTRATION_RESULT',
+            evidence_id=evidence_id,
+            source_snapshot_id=source['id'], target_snapshot_id=target['id'],
+            source_timestamp_ns=source['timestamp_ns'],
+            target_timestamp_ns=target['timestamp_ns'],
+            transform=[float(value) for value in canonical.transform],
+            accepted=bool(canonical.accepted),
+            residual_m=float(canonical.residual_m),
+            inlier_ratio=float(canonical.inlier_ratio),
+            reverse_inlier_ratio=float(canonical.reverse_inlier_ratio),
+            occupied_free_agreement=float(canonical.occupied_free_agreement),
+            overlap_fraction=float(canonical.overlap_fraction),
+            confirmation_count=len(self.full_map_confirmation_records))
+        if capture_path is not None:
+            try:
+                metadata = json.loads(capture_path.read_text(encoding='utf-8'))
+                metadata.update({
+                    'status': 'ACCEPTED' if result.accepted else 'REJECTED',
+                    'returned_transform_local': [float(value) for value in
+                                                result.transform],
+                    'returned_transform_canonical': [float(value) for value in
+                                                    canonical.transform],
+                    'residual_m': float(canonical.residual_m),
+                    'forward_inlier_ratio': float(canonical.inlier_ratio),
+                    'reverse_inlier_ratio': float(canonical.reverse_inlier_ratio),
+                    'occupied_free_agreement': float(
+                        canonical.occupied_free_agreement),
+                    'overlap_fraction': float(canonical.overlap_fraction),
+                    'rejection_reason': '' if result.accepted else str(
+                        result.reason),
+                })
+                capture_path.write_text(json.dumps(
+                    metadata, indent=2, sort_keys=True), encoding='utf-8')
+            except (OSError, ValueError):
+                pass
+
+    def _drain_full_map_registration(self):
+        if getattr(self, '_post_handoff_quiesced', False):
+            return
+        future = self._full_map_registration_future
+        if future is None or not future.done():
+            return
+        context = self._full_map_registration_context
+        self._full_map_registration_future = None
+        self._full_map_registration_context = None
+        if context is None:
+            return
+        source, target, capture_path = context
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.counters['registration_callback_exceptions'] += 1
+            self._record_diagnostic_event(
+                'FULL_MAP_REGISTRATION_EXCEPTION', exception=repr(exc),
+                source_snapshot_id=source['id'], target_snapshot_id=target['id'])
+            return
+        self.counters['registrations'] += 1
+        self._record_full_map_result(source, target, result, capture_path)
+        if not result.accepted or self.full_map_proposal is not None:
+            return
+        family = self._full_map_family_result()
+        if family is None or not family.accepted:
+            return
+        self._record_diagnostic_event(
+            'FULL_MAP_FAMILY_ACCEPTED',
+            consistent_constraint_count=int(
+                family.consistent_constraint_count),
+            transform=[float(value) for value in family.transform])
+        # Full-map startup discovery is decentralized: either robot may have
+        # the first valid updated-map family.  The receiver still performs
+        # the existing independent verification before handoff.
+        self._publish_full_map_proposal(family)
+
+    def _maybe_schedule_full_map_registration(self):
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                getattr(self, '_registration_shutdown', False) or
+                self.accepted is not None or
+                self._full_map_registration_future is not None or
+                self.latest_full_map_snapshot is None or
+                not self.peer_full_map_snapshots):
+            return
+        now_ros = self._ros_time_s()
+        if (now_ros - self._last_full_map_attempt_ros_s <
+                self.full_map_registration_period_s):
+            return
+        local = self.latest_full_map_snapshot
+        peer = next(reversed(self.peer_full_map_snapshots.values()))
+        if self.robot_id == 'robot1':
+            source, target = local, peer
+        else:
+            source, target = peer, local
+        operable, input_details = self._full_map_pair_operable(source, target)
+        if not operable:
+            self._record_diagnostic_event(
+                'FULL_MAP_REGISTRATION_SKIPPED',
+                reason='MINIMUM_MAP_INPUT_NOT_OPERABLE',
+                source_snapshot_id=source['id'], target_snapshot_id=target['id'],
+                input_details=input_details)
+            return
+        pair_identity = (source['fingerprint'], target['fingerprint'])
+        if pair_identity == self._last_full_map_attempt_pair:
+            return
+        self._last_full_map_attempt_pair = pair_identity
+        self._last_full_map_attempt_ros_s = now_ros
+        self._full_map_registration_sequence += 1
+        capture_path = self._capture_full_map_attempt(
+            source, target, self._full_map_registration_sequence)
+        self._record_diagnostic_event(
+            'FULL_MAP_REGISTRATION_SUBMITTED',
+            canonical_source_robot='robot1', canonical_target_robot='robot2',
+            source_snapshot_id=source['id'], target_snapshot_id=target['id'],
+            source_timestamp_ns=source['timestamp_ns'],
+            target_timestamp_ns=target['timestamp_ns'],
+            input_details=input_details)
+        self._record_diagnostic_event(
+            'FULL_MAP_CANONICAL_ORDER', canonical_source_robot='robot1',
+            canonical_target_robot='robot2',
+            source_snapshot_id=source['id'], target_snapshot_id=target['id'])
+        self._full_map_registration_context = (source, target, capture_path)
+        self._full_map_registration_future = self._registration_executor.submit(
+            self._run_full_map_registration, source['crop'], target['crop'])
+
+    def _full_map_descriptor(self, snapshot):
+        descriptor = LocalMapDescriptor()
+        descriptor.header = copy.deepcopy(self.latest_map.header)
+        descriptor.header.frame_id = str(snapshot.get(
+            'frame_id', snapshot['robot_id'] + '/map'))
+        descriptor.header.stamp.sec = int(snapshot['timestamp_ns'] // 1_000_000_000)
+        descriptor.header.stamp.nanosec = int(snapshot['timestamp_ns'] %
+                                              1_000_000_000)
+        descriptor.source_robot_id = snapshot['robot_id']
+        descriptor.keyframe_id = snapshot['id']
+        descriptor.map_epoch = int(snapshot['revision'])
+        descriptor.resolution = float(snapshot['resolution'])
+        descriptor.crop_width = int(snapshot['width'])
+        descriptor.crop_height = int(snapshot['height'])
+        descriptor.crop_origin_x = float(snapshot['origin_x'])
+        descriptor.crop_origin_y = float(snapshot['origin_y'])
+        descriptor.crop_origin_yaw = float(snapshot['origin_yaw'])
+        descriptor.checksum = int(snapshot['fingerprint'][:8], 16)
+        return descriptor
+
+    def _full_map_family_records_from_result(self, result):
+        ids = []
+        for diagnostic in reversed(getattr(result, 'consensus_diagnostics', ())):
+            if diagnostic.get('kind') == 'mrpt_selected_family':
+                ids = [str(value) for value in diagnostic.get(
+                    'physical_evidence_ids', ())]
+                break
+        if not ids:
+            ids = [record['evidence_id'] for record in
+                   self.full_map_confirmation_records[-3:]]
+        by_id = {record['evidence_id']: record for record in
+                 self.full_map_confirmation_records}
+        return [by_id[value] for value in ids if value in by_id]
+
+    def _publish_full_map_proposal(self, result):
+        records = self._full_map_family_records_from_result(result)
+        if len(records) < 3 or self.full_map_proposal is not None:
+            return False
+        own = self._full_map_descriptor(records[0]['source'])
+        peer = self._full_map_descriptor(records[0]['target'])
+        proposal = self._hypothesis_message(
+            own, peer, result, status='PROPOSED', accepted=False,
+            rejection_reason='',
+            evidence_source_keyframe_ids=[record['source']['id']
+                                          for record in records],
+            evidence_target_keyframe_ids=[record['target']['id']
+                                          for record in records])
+        self.full_map_proposal = proposal
+        self._full_map_proposal_pins.update(
+            list(proposal.evidence_source_keyframe_ids) +
+            list(proposal.evidence_target_keyframe_ids))
+        self.pending_proposal_messages[('full-map', 'full-map')] = proposal
+        self.hypothesis_pub.publish(proposal)
+        self.counters['proposals_published'] += 1
+        self._record_diagnostic_event(
+            'FULL_MAP_PROPOSAL_PUBLISHED',
+            evidence_set_hash=str(proposal.evidence_set_hash),
+            evidence_source_snapshot_ids=[record['source']['id']
+                                         for record in records],
+            evidence_target_snapshot_ids=[record['target']['id']
+                                         for record in records])
+        return True
+
+    @staticmethod
+    def _is_full_map_hypothesis(message):
+        return ('-full-map-' in str(getattr(message, 'source_keyframe_id', ''))
+                or '-full-map-' in str(getattr(
+                    message, 'target_keyframe_id', '')))
+
+    def _full_map_snapshots_for_proposal(self, message):
+        """Resolve the immutable full-map evidence named by a proposal."""
+        source_ids = [str(value) for value in getattr(
+            message, 'evidence_source_keyframe_ids', [])]
+        target_ids = [str(value) for value in getattr(
+            message, 'evidence_target_keyframe_ids', [])]
+        if len(source_ids) != len(target_ids) or len(source_ids) < 3:
+            return None
+        sources = []
+        targets = []
+        for source_id, target_id in zip(source_ids, target_ids):
+            source = (self.local_full_map_snapshots.get(source_id)
+                      if self.robot_id == 'robot1' else
+                      self.peer_full_map_snapshots.get(source_id))
+            target = (self.peer_full_map_snapshots.get(target_id)
+                      if self.robot_id == 'robot1' else
+                      self.local_full_map_snapshots.get(target_id))
+            if source is None or target is None:
+                return None
+            sources.append(source)
+            targets.append(target)
+        return list(zip(sources, targets))
+
+    def _handle_full_map_proposal(self, message):
+        """Resolve exact evidence, then independently verify the proposal."""
+        proposal = copy.deepcopy(message)
+        source_ids, target_ids = self._full_map_proposal_snapshot_ids(proposal)
+        required_ids = list(dict.fromkeys(source_ids + target_ids))
+        self._full_map_proposal_pins.update(required_ids)
+        missing = self._full_map_missing_snapshot_ids(proposal)
+        unavailable = [snapshot_id for snapshot_id in missing
+                       if (snapshot_id in self._unavailable_full_map_snapshot_ids or
+                           self._full_map_snapshot_owner(snapshot_id) ==
+                           self.robot_id)]
+        if unavailable:
+            self._full_map_proposal_pins.difference_update(required_ids)
+            ack = self._ack_message(
+                proposal, RegistrationResult(
+                    accepted=False, transform=(0.0, 0.0, 0.0),
+                    covariance=(0.0,) * 36, inlier_ratio=0.0,
+                    residual_m=math.inf, occupied_free_agreement=0.0,
+                    overlap_fraction=0.0,
+                    reason='FULL_MAP_EVIDENCE_UNAVAILABLE', constraint_count=0,
+                    consistent_constraint_count=0, projected_error_m=math.inf,
+                    final_confidence=0.0), False,
+                'FULL_MAP_EVIDENCE_UNAVAILABLE')
+            self.hypothesis_pub.publish(ack)
+            self._record_diagnostic_event(
+                'FULL_MAP_PEER_VERIFICATION_REJECTED',
+                reason='FULL_MAP_EVIDENCE_UNAVAILABLE',
+                snapshot_ids=unavailable)
+            return
+        if missing:
+            self._pending_full_map_verification = proposal
+            self.counters['full_map_verifications_pending'] += 1
+            self._record_diagnostic_event(
+                'FULL_MAP_VERIFICATION_PENDING',
+                reason='PENDING_MISSING_EVIDENCE', snapshot_ids=missing)
+            self._request_full_map_snapshots(missing)
+            return
+        self._verify_full_map_proposal(proposal)
+
+    def _resume_pending_full_map_verification(self):
+        proposal = self._pending_full_map_verification
+        if proposal is None:
+            return False
+        missing = self._full_map_missing_snapshot_ids(proposal)
+        unavailable = [snapshot_id for snapshot_id in missing
+                       if (snapshot_id in self._unavailable_full_map_snapshot_ids or
+                           self._full_map_snapshot_owner(snapshot_id) ==
+                           self.robot_id)]
+        if unavailable:
+            self._pending_full_map_verification = None
+            self._full_map_proposal_pins.difference_update(
+                self._full_map_proposal_snapshot_ids(proposal)[0] +
+                self._full_map_proposal_snapshot_ids(proposal)[1])
+            ack = self._ack_message(
+                proposal, RegistrationResult(
+                    accepted=False, transform=(0.0, 0.0, 0.0),
+                    covariance=(0.0,) * 36, inlier_ratio=0.0,
+                    residual_m=math.inf, occupied_free_agreement=0.0,
+                    overlap_fraction=0.0,
+                    reason='FULL_MAP_EVIDENCE_UNAVAILABLE', constraint_count=0,
+                    consistent_constraint_count=0, projected_error_m=math.inf,
+                    final_confidence=0.0), False,
+                'FULL_MAP_EVIDENCE_UNAVAILABLE')
+            self.hypothesis_pub.publish(ack)
+            return False
+        if missing:
+            self._request_full_map_snapshots(missing)
+            return False
+        self._pending_full_map_verification = None
+        self.counters['full_map_verifications_resumed'] += 1
+        self._record_diagnostic_event(
+            'FULL_MAP_VERIFICATION_RESUMED',
+            evidence_set_hash=str(proposal.evidence_set_hash))
+        self._verify_full_map_proposal(proposal)
+        return True
+
+    def _verify_full_map_proposal(self, proposal):
+        """Verify the proposed basin in canonical order, without global search."""
+        pairs = self._full_map_snapshots_for_proposal(proposal)
+        if pairs is None:
+            ack = self._ack_message(
+                proposal, RegistrationResult(
+                    accepted=False, transform=(0.0, 0.0, 0.0),
+                    covariance=(0.0,) * 36, inlier_ratio=0.0,
+                    residual_m=math.inf, occupied_free_agreement=0.0,
+                    overlap_fraction=0.0,
+                    reason='MISSING_FULL_MAP_EVIDENCE', constraint_count=0,
+                    consistent_constraint_count=0, projected_error_m=math.inf,
+                    final_confidence=0.0), False,
+                'MISSING_FULL_MAP_EVIDENCE')
+            self.hypothesis_pub.publish(ack)
+            self._record_diagnostic_event(
+                'FULL_MAP_PEER_VERIFICATION_REJECTED',
+                reason='MISSING_FULL_MAP_EVIDENCE')
+            self._release_full_map_proposal_pins(proposal)
+            return
+        canonical_results = []
+        proposal_seed = self._summary_transform(proposal)
+        for source, target in pairs:
+            try:
+                # The proposer has already done the global discovery.  The
+                # receiver independently checks the exact maps around that
+                # basin with the deterministic symmetric local refinement;
+                # it must not perform a source/target-dependent global search.
+                result = self._run_full_map_registration(
+                    source['crop'], target['crop'],
+                    initial_transform=proposal_seed)
+            except Exception as exc:
+                self._record_diagnostic_event(
+                    'FULL_MAP_PEER_VERIFICATION_EXCEPTION',
+                    exception=repr(exc))
+                result = None
+            if result is None or not result.accepted:
+                reason = ('FULL_MAP_PEER_REGISTRATION_REJECTED' if result is not None
+                           else 'FULL_MAP_PEER_REGISTRATION_EXCEPTION')
+                if result is not None:
+                    reason = str(result.reason)
+                fallback = result or RegistrationResult(
+                    accepted=False, transform=(0.0, 0.0, 0.0),
+                    covariance=(0.0,) * 36, inlier_ratio=0.0,
+                    residual_m=math.inf, occupied_free_agreement=0.0,
+                    overlap_fraction=0.0, reason=reason,
+                    constraint_count=1, consistent_constraint_count=0,
+                    projected_error_m=math.inf, final_confidence=0.0)
+                ack = self._ack_message(proposal, fallback, False, reason)
+                self.hypothesis_pub.publish(ack)
+                self._record_diagnostic_event(
+                    'FULL_MAP_PEER_VERIFICATION_REJECTED', reason=reason)
+                self._release_full_map_proposal_pins(proposal)
+                return
+            canonical_results.append(result)
+        self._record_diagnostic_event(
+            'FULL_MAP_CANONICAL_ORDER', canonical_source_robot='robot1',
+            canonical_target_robot='robot2', verification=True,
+            evidence_set_hash=str(proposal.evidence_set_hash))
+        evidence_ids = [f"{source['id']}|{target['id']}"
+                        for source, target in pairs]
+        family = select_hypothesis_family(
+            [(source['crop'], target['crop']) for source, target in pairs],
+            [(result,) for result in canonical_results],
+            target_map_radius_m=self.target_map_radius_m,
+            min_consistent_constraints=3,
+            min_spatial_baseline_m=0.0,
+            max_translation_consistency_m=0.15,
+            max_yaw_consistency_rad=math.radians(1.0),
+            max_projected_registration_error_m=(
+                self.max_projected_registration_error_m),
+            minimum_agreement=0.0,
+            evidence_timestamps=[(
+                int(source['timestamp_ns']), int(target['timestamp_ns']))
+                for source, target in pairs],
+            evidence_ids=evidence_ids)
+        if not family.accepted:
+            ack = self._ack_message(
+                proposal, family, False, str(family.reason))
+            self.hypothesis_pub.publish(ack)
+            self._record_diagnostic_event(
+                'FULL_MAP_PEER_VERIFICATION_REJECTED',
+                reason=str(family.reason),
+                consistent_constraint_count=int(
+                    family.consistent_constraint_count))
+            self._release_full_map_proposal_pins(proposal)
+            return
+        ack = self._ack_message(proposal, family, True, '')
+        ack.selector_status = 'ACCEPTED_HYPOTHESIS'
+        ack.accepted = True
+        self.hypothesis_pub.publish(ack)
+        self._record_diagnostic_event(
+            'FULL_MAP_PEER_VERIFICATION_ACCEPTED',
+            evidence_set_hash=str(proposal.evidence_set_hash),
+            consistent_constraint_count=int(family.consistent_constraint_count),
+            transform=[float(value) for value in family.transform])
+        self.counters['accepted_hypotheses'] += 1
+        self.accepted = ack
+        self.accepted_ros_time_s = self.get_clock().now().nanoseconds * 1.0e-9
+        self.accepted_wall = time.monotonic()
+        self.publish_accepted_tf()
+        self.publish_local_map(force=True)
+        self._enter_post_handoff_quiescence()
+        self._release_full_map_proposal_pins(proposal)
+
+    def _release_full_map_proposal_pins(self, proposal):
+        source_ids, target_ids = self._full_map_proposal_snapshot_ids(proposal)
+        self._full_map_proposal_pins.difference_update(source_ids + target_ids)
+
+    def _handle_full_map_ack(self, message):
+        proposal = self.full_map_proposal
+        if proposal is None:
+            self._record_diagnostic_event(
+                'FULL_MAP_ACK_IGNORED_NO_PROPOSAL')
+            return
+        if str(message.evidence_set_hash) != str(proposal.evidence_set_hash):
+            self._record_diagnostic_event(
+                'FULL_MAP_ACK_REJECTED_HASH_MISMATCH',
+                proposal_hash=str(proposal.evidence_set_hash),
+                peer_hash=str(message.evidence_set_hash))
+            return
+        if message.status != 'ACCEPTED' or not bool(message.accepted):
+            self._record_diagnostic_event(
+                'FULL_MAP_ACK_REJECTED', reason=str(message.rejection_reason))
+            self.full_map_proposal = None
+            self._release_full_map_proposal_pins(proposal)
+            return
+        final = copy.deepcopy(proposal)
+        final.status = 'ACCEPTED'
+        final.accepted = True
+        final.rejection_reason = ''
+        final.selector_status = 'ACCEPTED_HYPOTHESIS'
+        self.hypothesis_pub.publish(final)
+        self._record_diagnostic_event(
+            'FULL_MAP_CANONICAL_HANDOFF_ACCEPTED',
+            evidence_set_hash=str(final.evidence_set_hash),
+            transform=[float(final.source_to_target.translation.x),
+                       float(final.source_to_target.translation.y),
+                       float(self._yaw(final.source_to_target.rotation))])
+        self.counters['accepted_hypotheses'] += 1
+        self.accepted = final
+        self.accepted_ros_time_s = self.get_clock().now().nanoseconds * 1.0e-9
+        self.accepted_wall = time.monotonic()
+        self.publish_accepted_tf()
+        self.publish_local_map(force=True)
+        self._enter_post_handoff_quiescence()
+        self._release_full_map_proposal_pins(proposal)
+
     def tick(self):
+        if getattr(self, '_post_handoff_quiesced', False):
+            return
         self._sample_cpu()
+        if self.full_map_registration:
+            # This branch is intentionally before the legacy worker drain,
+            # descriptor publication, peer comparison, and crop-request
+            # machinery.  Full-map discovery has exactly one registration
+            # input: the latest immutable full local map and peer map.
+            self._drain_full_map_registration()
+            if self.accepted is None:
+                self._maybe_schedule_full_map_registration()
+            return
         self._drain_candidate_registration()
+        self._drain_full_map_registration()
+        now = time.monotonic()
+        if (self.evidence_acquisition_started or
+                (self._evidence_opportunity_deadline_wall is not None and
+                 now < self._evidence_opportunity_deadline_wall)):
+            self._publish_evidence_status(True)
+        elif self._evidence_opportunity_deadline_wall is not None:
+            self._evidence_opportunity_deadline_wall = None
+            self._publish_evidence_status(False)
         # Once both peers have installed the immutable canonical handoff,
         # descriptor/crop acquisition and hypothesis re-auctioning are no
         # longer valid work.  Continuing them only creates avoidable reliable
@@ -884,6 +2324,8 @@ class UnknownPoseFrontend(Node):
         the only place where counters, evidence, and protocol messages are
         updated from a registration result.
         """
+        if getattr(self, '_post_handoff_quiesced', False):
+            return
         future = self._registration_future
         if future is None or not future.done():
             return
@@ -898,13 +2340,29 @@ class UnknownPoseFrontend(Node):
             received_crop, map_epoch, descriptor_checksum,
         ) = context
         try:
-            result = future.result()
+            raw_result = future.result()
+            if isinstance(raw_result, (tuple, list)):
+                hypotheses = tuple(raw_result)
+            else:
+                hypotheses = (raw_result,)
+            if not hypotheses:
+                raise RuntimeError('registration backend returned no result')
+            # The primary result is only the diagnostic/legacy protocol view;
+            # canonical consensus receives the complete bounded mode set.
+            result = max(
+                hypotheses,
+                key=lambda item: (
+                    bool(item.accepted), int(getattr(item, 'mode_support', 1)),
+                    float(getattr(item, 'mode_log_weight', -math.inf)),
+                    float(item.inlier_ratio), -float(item.residual_m),
+                    -int(getattr(item, 'mode_index', -1))))
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
             self._record_diagnostic_event(
                 'REGISTRATION_WORKER_EXCEPTION', keyframe_id=peer_key,
                 exception=repr(exc))
+            self._finalize_registration_capture(pair_key, error=exc)
             self._record_physical_worker_result(
                 candidate, request_metadata, error=repr(exc))
             self.rejected_physical_evidence_keys.add(physical_key)
@@ -917,7 +2375,8 @@ class UnknownPoseFrontend(Node):
         self._apply_candidate_verification_result(
             pair_key, candidate, result, request_metadata, physical_key,
             candidate_geometry_key, own_key, peer_key, own_crop,
-            received_crop, map_epoch, descriptor_checksum)
+            received_crop, map_epoch, descriptor_checksum,
+            hypotheses=hypotheses)
         self._start_next_registration_context()
 
     def _request_batch_id(self, request_metadata):
@@ -936,22 +2395,42 @@ class UnknownPoseFrontend(Node):
 
     def _start_registration_context(self, context):
         """Submit one immutable crop pair to the serialized worker."""
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                getattr(self, '_registration_shutdown', False)):
+            return False
         (
             request_key, pair_key, candidate, request_metadata, physical_key,
             candidate_geometry_key, own_key, peer_key, own_crop,
             received_crop, map_epoch, descriptor_checksum,
         ) = context
+        mature_evidence, maturity = self._consensus_pair_maturity(
+            own_crop, received_crop)
+        self._capture_registration_inputs(
+            pair_key, candidate, request_metadata, own_crop, received_crop,
+            map_epoch, descriptor_checksum)
         self._registration_context = context
         self._registration_future = self._registration_executor.submit(
-            register_crops, own_crop, received_crop)
+            register_crop_hypotheses, own_crop, received_crop,
+            backend=self.registration_backend,
+            minimum_agreement=(0.0 if mature_evidence else 0.55),
+            mrpt_max_kld=self.mrpt_max_kld,
+            mrpt_max_modes=self.mrpt_max_modes_per_call,
+            mrpt_repetitions=self.mrpt_repetitions_per_pair,
+            max_distinct_modes=self.mrpt_max_distinct_modes_per_pair)
         self._record_diagnostic_event(
             'REGISTRATION_WORKER_SUBMITTED', keyframe_id=peer_key,
             constraint_count=1, queue_depth=len(
                 self._registration_pending_contexts),
+            consensus_evidence_mature=mature_evidence,
+            consensus_maturity=maturity,
             request_key=list(request_key))
+        return True
 
     def _queue_registration_context(self, context):
         """Queue a response while the worker is busy, with a hard bound."""
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                getattr(self, '_registration_shutdown', False)):
+            return False
         request_key = context[0]
         if request_key in self._registration_pending_keys:
             return True
@@ -981,12 +2460,230 @@ class UnknownPoseFrontend(Node):
         """Start the next queued response after the worker completes."""
         if self._registration_future is not None:
             return
-        if self.accepted is not None or not self._registration_pending_contexts:
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                getattr(self, '_registration_shutdown', False) or
+                self.accepted is not None or
+                not self._registration_pending_contexts):
             return
         context = self._registration_pending_contexts.popleft()
         self._registration_pending_keys.discard(context[0])
         self._registration_queue_dequeues += 1
         self._start_registration_context(context)
+
+    @staticmethod
+    def _registration_capture_crop(crop):
+        values = np.asarray(crop.values, dtype=np.int16)
+        unique, counts = np.unique(values, return_counts=True)
+        return {
+            'origin_x': float(crop.origin_x),
+            'origin_y': float(crop.origin_y),
+            'origin_yaw': float(crop.origin_yaw),
+            'resolution': float(crop.resolution),
+            'width': int(values.shape[1]),
+            'height': int(values.shape[0]),
+            'dtype': str(values.dtype),
+            'min_value': int(values.min()) if values.size else None,
+            'max_value': int(values.max()) if values.size else None,
+            'value_counts': {str(int(value)): int(count)
+                             for value, count in zip(unique, counts)},
+            'occupancy_encoding': {
+                'unknown_value': -1,
+                'occupied_threshold': 50,
+                'free_or_unoccupied_range': '0..49',
+            },
+        }
+
+    @staticmethod
+    def _render_registration_capture(values, path):
+        """Render occupancy values without changing the registration array."""
+        from PIL import Image
+        array = np.asarray(values, dtype=np.int16)
+        image = np.full(array.shape, 127, dtype=np.uint8)
+        image[array >= 50] = 0
+        image[(array >= 0) & (array < 50)] = 255
+        Image.fromarray(image, mode='L').save(path)
+
+    def _consensus_pair_maturity(self, source_crop, target_crop):
+        """Return intrinsic maturity for both immutable registration crops."""
+        source_mature, source_details = consensus_crop_maturity(
+            source_crop, self.consensus_min_known_fraction,
+            self.consensus_min_occupied_cells)
+        target_mature, target_details = consensus_crop_maturity(
+            target_crop, self.consensus_min_known_fraction,
+            self.consensus_min_occupied_cells)
+        return bool(source_mature and target_mature), {
+            'source': source_details,
+            'target': target_details,
+        }
+
+    def _capture_registration_inputs(
+            self, pair_key, candidate, request_metadata, source_crop,
+            target_crop, target_map_epoch, target_checksum):
+        """Persist one bounded, lossless registration input pair.
+
+        The capture is placed immediately before the unchanged worker submit,
+        so the arrays in the NPZ are exactly the arrays passed to
+        ``register_crops``.  It is opt-in and has no effect on estimator
+        inputs, scheduling, thresholds, or acceptance.
+        """
+        if (self.registration_input_capture_output is None or
+                self._registration_capture_count >=
+                self.registration_input_capture_max_pairs):
+            return
+        try:
+            peer_key, own_key, peer_descriptor, own_descriptor = (
+                self._candidate_fields(candidate))
+            root = self.registration_input_capture_output / self.robot_id
+            root.mkdir(parents=True, exist_ok=True)
+            sequence = self._registration_capture_count + 1
+            stem = f'{self.robot_id}_registration_{sequence:04d}'
+            npz_path = root / f'{stem}.npz'
+            json_path = root / f'{stem}.json'
+            source_values = np.asarray(source_crop.values, dtype=np.int16).copy()
+            target_values = np.asarray(target_crop.values, dtype=np.int16).copy()
+            source_descriptor = np.frombuffer(
+                bytes(own_descriptor.descriptor_bytes), dtype=np.uint8).copy()
+            target_descriptor = np.frombuffer(
+                bytes(peer_descriptor.descriptor_bytes), dtype=np.uint8).copy()
+            np.savez_compressed(
+                npz_path,
+                source_values=source_values,
+                target_values=target_values,
+                source_descriptor=source_descriptor,
+                target_descriptor=target_descriptor)
+            self._render_registration_capture(
+                source_values, root / f'{stem}_source.png')
+            self._render_registration_capture(
+                target_values, root / f'{stem}_target.png')
+            match = self.matches.get((peer_key, own_key))
+            metadata = {
+                'schema_version': 'registration_input_capture_1.0',
+                'status': 'SUBMITTED',
+                'robot_id': self.robot_id,
+                'peer_robot_id': self.peer_robot_id,
+                'source_robot_id': self.robot_id,
+                'target_robot_id': self.peer_robot_id,
+                'source_keyframe_id': str(own_key),
+                'target_keyframe_id': str(peer_key),
+                'request_id': str((request_metadata or {}).get(
+                    'verification_attempt_id', '')),
+                'evidence_id': str((request_metadata or {}).get(
+                    'candidate_correlation_id', '')),
+                'acquisition_batch_id': int((request_metadata or {}).get(
+                    'acquisition_batch_id', 0)),
+                'source_timestamp_ns': int(self._stamp_ns(own_descriptor)),
+                'target_timestamp_ns': int(self._stamp_ns(peer_descriptor)),
+                'request_timestamp_ns': int((request_metadata or {}).get(
+                    'request_timestamp_ns', 0)),
+                'source_map_epoch': int(own_descriptor.map_epoch),
+                'target_map_epoch': int(target_map_epoch),
+                'source_map_frame': str(own_descriptor.header.frame_id),
+                'target_map_frame': str(peer_descriptor.header.frame_id),
+                'source_to_target_convention':
+                    'p_target = R(yaw) * p_source + translation',
+                'source_crop': self._registration_capture_crop(source_crop),
+                'target_crop': self._registration_capture_crop(target_crop),
+                'source_descriptor': {
+                    'rings': int(own_descriptor.ring_count),
+                    'sectors': int(own_descriptor.sector_count),
+                    'version': int(own_descriptor.descriptor_version),
+                    'checksum': int(own_descriptor.checksum),
+                    'values_shape': [12, 24, 2],
+                    'values': source_descriptor.reshape(12, 24, 2).tolist(),
+                },
+                'target_descriptor': {
+                    'rings': int(peer_descriptor.ring_count),
+                    'sectors': int(peer_descriptor.sector_count),
+                    'version': int(peer_descriptor.descriptor_version),
+                    'checksum': int(peer_descriptor.checksum),
+                    'values_shape': [12, 24, 2],
+                    'values': target_descriptor.reshape(12, 24, 2).tolist(),
+                },
+                'descriptor_similarity': (
+                    None if match is None else float(match.similarity)),
+                'descriptor_margin': (
+                    None if match is None else float(match.margin)),
+                'descriptor_sector_shift': (
+                    None if match is None else int(match.sector_shift)),
+                'descriptor_known_fraction': (
+                    None if match is None else float(match.known_fraction)),
+                'npz_file': npz_path.name,
+                'source_png_file': f'{stem}_source.png',
+                'target_png_file': f'{stem}_target.png',
+            }
+            json_path.write_text(json.dumps(metadata, indent=2, sort_keys=True),
+                                encoding='utf-8')
+            self._registration_capture_paths[pair_key] = json_path
+            self._registration_capture_count = sequence
+        except Exception as exc:
+            self.get_logger().warning(
+                'registration input capture failed: %s', exc)
+
+    def _finalize_registration_capture(self, pair_key, result=None, error=None,
+                                       strong_consensus_eligible=None,
+                                       strong_consensus_reason=''):
+        path = self._registration_capture_paths.get(pair_key)
+        if path is None:
+            return
+        try:
+            metadata = json.loads(path.read_text(encoding='utf-8'))
+            if error is not None:
+                metadata.update({'status': 'EXCEPTION', 'error': repr(error)})
+            else:
+                source_resolution = float(metadata['source_crop']['resolution'])
+                gates = {
+                    'forward_inlier_ratio': (float(result.inlier_ratio), 0.35,
+                                             '>=', 'FORWARD_INLIER_BELOW_GATE'),
+                    'reverse_inlier_ratio': (
+                        float(getattr(result, 'reverse_inlier_ratio',
+                                      result.inlier_ratio)), 0.30, '>=',
+                        'REVERSE_INLIER_BELOW_GATE'),
+                    'residual_m': (float(result.residual_m),
+                                   max(0.12, 3.0 * source_resolution), '<=',
+                                   'RESIDUAL_ABOVE_GATE'),
+                    'occupied_free_agreement': (
+                        float(result.occupied_free_agreement), 0.55, '>=',
+                        'OCCUPIED_FREE_AGREEMENT_BELOW_GATE'),
+                    'overlap_fraction': (float(result.overlap_fraction), 0.15,
+                                         '>=', 'OVERLAP_BELOW_GATE'),
+                }
+                failed = []
+                for name, (value, threshold, relation, reason) in gates.items():
+                    passed = (value >= threshold if relation == '>=' else
+                              value <= threshold)
+                    if not passed:
+                        failed.append(reason)
+                metadata.update({
+                    'status': 'ACCEPTED' if result.accepted else 'REJECTED',
+                    'returned_transform_source_to_target': [
+                        float(value) for value in result.transform],
+                    'residual_m': float(result.residual_m),
+                    'median_residual_m': float(result.median_residual_m),
+                    'p95_residual_m': float(result.p95_residual_m),
+                    'forward_inlier_ratio': float(result.inlier_ratio),
+                    'reverse_inlier_ratio': float(getattr(
+                        result, 'reverse_inlier_ratio', result.inlier_ratio)),
+                    'occupied_free_agreement': float(
+                        result.occupied_free_agreement),
+                    'overlap_fraction': float(result.overlap_fraction),
+                    'translation_uncertainty_m': float(
+                        result.translation_uncertainty_m),
+                    'yaw_uncertainty_rad': float(result.yaw_uncertainty_rad),
+                    'condition_number': float(result.condition_number),
+                    'failed_gates': failed,
+                    'rejection_reason': '' if result.accepted else str(
+                        result.reason),
+                    'strong_consensus_eligible': (
+                        None if strong_consensus_eligible is None else
+                        bool(strong_consensus_eligible)),
+                    'strong_consensus_rejection_reason': str(
+                        strong_consensus_reason or ''),
+                })
+            path.write_text(json.dumps(metadata, indent=2, sort_keys=True),
+                            encoding='utf-8')
+        except Exception as exc:
+            self.get_logger().warning(
+                'registration input capture finalization failed: %s', exc)
 
     def _clear_pending_registration_contexts(self, reason):
         """Release queued crop arrays once no further registration is needed."""
@@ -1000,7 +2697,8 @@ class UnknownPoseFrontend(Node):
             cleared_count=count)
 
     def descriptor_callback(self, message):
-        if message.source_robot_id != self.peer_robot_id:
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                message.source_robot_id != self.peer_robot_id):
             return
         if message.descriptor_version != 1 or not message.descriptor_bytes:
             return
@@ -1043,7 +2741,7 @@ class UnknownPoseFrontend(Node):
         for name in (
                 'matches', 'compared_pairs', 'descriptor_gate_status',
                 'temporal_support_cache', 'temporal_gate_rejected_pairs',
-                'confirmations'):
+                'confirmations', 'descriptor_ambiguous_pairs'):
             values = getattr(self, name)
             if isinstance(values, dict):
                 for pair in tuple(values):
@@ -1089,7 +2787,8 @@ class UnknownPoseFrontend(Node):
         return temporal_support_count(
             (peer_key, own_key), own_stamp, peer_stamp,
             match.sector_shift, observations, self.similarity_gate,
-            self.margin_gate, 0.12, self.effective_confirmation_window_ns)
+            self.margin_gate, 0.12, self.effective_confirmation_window_ns,
+            descriptor_advisory=True)
 
     def _temporal_candidate_affected(self, pair_key, changed_pair_keys):
         """Return whether a newly queued descriptor can change this gate."""
@@ -1151,7 +2850,8 @@ class UnknownPoseFrontend(Node):
             self.temporal_support_cache[pair_key] = temporal_support_count(
                 pair_key, own_stamp, peer_stamp, sector_shift, observations,
                 self.similarity_gate, self.margin_gate, 0.12,
-                self.effective_confirmation_window_ns)
+                self.effective_confirmation_window_ns,
+                descriptor_advisory=True)
 
         existing = []
         for pair_key in self.temporal_support_cache:
@@ -1258,6 +2958,7 @@ class UnknownPoseFrontend(Node):
                             int(own.ring_count), int(own.sector_count)))
                     except ValueError:
                         matches.append(None)
+            gate_candidates = {}
             for (peer_key, own_key, peer, own_entry), match in zip(
                     uncomputed_pairs, matches):
                 if match is None:
@@ -1270,11 +2971,7 @@ class UnknownPoseFrontend(Node):
                 self.best_known_fraction = max(
                     self.best_known_fraction, match.known_fraction)
                 rejection_reason = None
-                if match.similarity < self.similarity_gate:
-                    rejection_reason = 'SIMILARITY_BELOW_GATE'
-                elif match.margin < self.margin_gate:
-                    rejection_reason = 'MARGIN_BELOW_GATE'
-                elif match.known_fraction < 0.12:
+                if match.known_fraction < 0.12:
                     rejection_reason = 'KNOWN_FRACTION_BELOW_GATE'
                 self.descriptor_gate_status[
                     (peer_key, own_key)] = rejection_reason
@@ -1282,13 +2979,48 @@ class UnknownPoseFrontend(Node):
                     self.counters['cheap_rejections'] += 1
                     self.gate_rejection_counts[rejection_reason] += 1
                     continue
+                # Similarity and margin are advisory ranking metadata.  They
+                # are intentionally not allowed to delete a possible native
+                # resolution crop correspondence before geometric checking.
+                gate_candidates[(peer_key, own_key)] = match
+
+            # A weak match is not useful merely because it cleared the
+            # minimum margin by a few thousandths.  If a competing keyframe
+            # for either side has nearly the same similarity, classify the
+            # survivor as ambiguous and keep it out of the bounded crop
+            # budget.  The evidence lease may still be advertised, allowing
+            # later genuinely different views to arrive.
+            for pair_key, match in gate_candidates.items():
+                peer_key, own_key = pair_key
+                alternatives = [other for other_pair, other in
+                                gate_candidates.items()
+                                if other_pair != pair_key and
+                                (other_pair[0] == peer_key or
+                                 other_pair[1] == own_key)]
+                if not descriptor_match_is_ambiguous(
+                        match, alternatives, self.margin_gate):
+                    continue
+                self.descriptor_ambiguous_pairs.add((peer_key, own_key))
+                self.counters['descriptor_ambiguity_advisories'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'DESCRIPTOR_MATCH_AMBIGUOUS',
+                    own_keyframe_id=str(own_key),
+                    peer_keyframe_id=str(peer_key),
+                    descriptor_similarity=float(match.similarity),
+                    descriptor_margin=float(match.margin),
+                    reason='LOW_MARGIN_NEAR_TWIN',
+                    action='DEFER_UNLESS_NO_UNAMBIGUOUS_CANDIDATE')
+            for (peer_key, own_key), match in gate_candidates.items():
+                if self.descriptor_gate_status.get((peer_key, own_key)):
+                    continue
                 self.counters['cheap_candidates'] += 1
                 self.descriptor_gate_survivors.add((peer_key, own_key))
                 self._record_diagnostic_event(
                     'DESCRIPTOR_GATE_SURVIVED', peer_key=peer_key,
                     own_key=own_key, similarity=float(match.similarity),
                     margin=float(match.margin),
-                    known_fraction=float(match.known_fraction))
+                    known_fraction=float(match.known_fraction),
+                    descriptor_advisory=True)
 
         eligible = []
         self._update_temporal_support_cache(changed_pair_keys)
@@ -1326,15 +3058,41 @@ class UnknownPoseFrontend(Node):
             eligible.append((
                 -float(match.similarity), peer_key, own_key, peer, own))
         if not eligible:
+            # A cheap descriptor survivor without temporal eligibility is not
+            # actionable evidence: no crop can be requested yet.  Do not
+            # renew the allocator's navigation lease for this condition,
+            # otherwise repeated descriptor updates can hold both robots
+            # indefinitely while producing no new registration input.
+            # Temporal, geometric, and three-inlier gates remain unchanged.
+            if any(pair_key in changed_pair_keys for pair_key in
+                   self.descriptor_gate_survivors):
+                self._write_physical_evidence_diagnostic(
+                    'EVIDENCE_OPPORTUNITY_NOT_ACTIONABLE',
+                    reason='NO_TEMPORALLY_ELIGIBLE_REQUESTABLE_CANDIDATE')
             return
+        # This is the earliest safe encounter signal: the pair has survived
+        # the existing temporal support gate, but no crop request, candidate
+        # ordering, or verification-budget slot has been consumed yet.
+        self._advertise_evidence_opportunity(len(eligible))
         eligible.sort(key=lambda value: (
             0 if (value[2], value[1]) in self.evidence_pairs else 1,
             value[0], value[1], value[2]))
         own_crops = {key: entry[1] for key, entry in self.keyframes.items()}
-        physical_eligible = deduplicate_physical_candidates(
-            eligible, own_crops)
+        physical_eligible, early_duplicates = (
+            deduplicate_physical_candidates_with_reasons(eligible, own_crops))
         self.counters['physical_candidate_duplicates_suppressed'] += (
-            len(eligible) - len(physical_eligible))
+            len(early_duplicates))
+        for identity, candidate in early_duplicates:
+            self.counters['physical_evidence_duplicates_suppressed'] += 1
+            self._write_physical_evidence_diagnostic(
+                'CANDIDATE_VERIFICATION_SKIPPED',
+                candidate=self._candidate_diagnostic(
+                    candidate, status='SKIPPED',
+                    reason='IDENTICAL_CONTENT_PAIR_ALREADY_ATTEMPTED',
+                    compact=True),
+                physical_identity=list(identity),
+                reason='IDENTICAL_CONTENT_PAIR_ALREADY_ATTEMPTED',
+                stage='PRE_CROP_REQUEST')
         for candidate in physical_eligible:
             physical_key = self._candidate_physical_key(candidate)
             if physical_key in self._diagnosed_physical_candidates:
@@ -1361,7 +3119,10 @@ class UnknownPoseFrontend(Node):
                 identity=list(identity), duplicate_record='first_observation',
                 candidate=self._candidate_diagnostic(
                     candidate, status='DUPLICATE',
-                    reason='IDENTICAL_PHYSICAL_EVIDENCE', compact=True))
+                    reason='IDENTICAL_CONTENT_PAIR_ALREADY_ATTEMPTED',
+                    compact=True),
+                reason='IDENTICAL_CONTENT_PAIR_ALREADY_ATTEMPTED',
+                stage='PENDING_POOL')
         for identity, candidate in list(self.pending_candidate_pairs.items()):
             if len(candidate) == 5:
                 _, peer_key, own_key, _, _ = candidate
@@ -1504,6 +3265,38 @@ class UnknownPoseFrontend(Node):
             peer_key, own_key, peer, own = candidate
         return peer_key, own_key, peer, own
 
+    def _keyframe_viewpoint(self, keyframe_id):
+        """Return the retained local-odometry viewpoint for one keyframe."""
+        viewpoint = getattr(self, 'keyframe_viewpoints', {}).get(keyframe_id)
+        if viewpoint is None:
+            return None
+        return tuple(float(value) for value in viewpoint[:2])
+
+    def _keyframe_pose(self, keyframe_id):
+        """Return the complete retained local-odometry pose, if available."""
+        viewpoint = getattr(self, 'keyframe_viewpoints', {}).get(keyframe_id)
+        if viewpoint is None:
+            return None
+        return tuple(float(value) for value in viewpoint[:3])
+
+    @staticmethod
+    def _descriptor_viewpoint(descriptor):
+        """Read peer-published physical viewpoint metadata without inference."""
+        if descriptor is None or not bool(getattr(
+                descriptor, 'viewpoint_available', False)):
+            return None
+        values = (
+            getattr(descriptor, 'viewpoint_x', None),
+            getattr(descriptor, 'viewpoint_y', None),
+            getattr(descriptor, 'viewpoint_yaw', None),
+        )
+        try:
+            if not all(math.isfinite(float(value)) for value in values):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return tuple(float(value) for value in values)
+
     def _batch_snapshot(self):
         own = {}
         for key, (descriptor, crop) in self.keyframes.items():
@@ -1537,13 +3330,59 @@ class UnknownPoseFrontend(Node):
                                    dtype=np.int16),
                     resolution=float(peer.resolution),
                     origin_x=float(peer.crop_origin_x),
-                    origin_y=float(peer.crop_origin_y)),
+                    origin_y=float(peer.crop_origin_y),
+                    origin_yaw=float(getattr(peer, 'crop_origin_yaw', 0.0))),
                 int(peer.map_epoch), int(peer.checksum)))
 
     def _candidate_physical_geometry_key(self, candidate):
         """Return the revision-independent geometry of one candidate pair."""
         own_crops = {key: value[1] for key, value in self.keyframes.items()}
         return physical_candidate_geometry_identity(candidate, own_crops)
+
+    def _candidate_intrinsically_immature(self, candidate):
+        """Return whether a candidate endpoint is known to be immature.
+
+        Local maturity is computed from the immutable crop already retained.
+        Peer maturity is read from descriptor metadata when available.  A
+        descriptor from an older interface that lacks those fields remains
+        schedulable because its peer maturity is unknown, not known-bad.
+        This is a transient pre-request scheduling filter: it does not add a
+        rejection identity or blacklist either keyframe.
+        """
+        peer_key, own_key, peer, _ = self._candidate_fields(candidate)
+        own_entry = self.keyframes.get(own_key)
+        if own_entry is None:
+            return False
+        own_mature, own_details = consensus_crop_maturity(
+            own_entry[1], self.consensus_min_known_fraction,
+            self.consensus_min_occupied_cells)
+        peer_known = getattr(peer, 'crop_known_fraction', None)
+        peer_occupied = getattr(peer, 'crop_occupied_cells', None)
+        peer_known = (None if peer_known is None else float(peer_known))
+        peer_occupied = (None if peer_occupied is None else int(peer_occupied))
+        peer_mature = None
+        if (peer_known is not None and peer_occupied is not None and
+                math.isfinite(peer_known)):
+            peer_mature = (
+                peer_known >= self.consensus_min_known_fraction and
+                peer_occupied >= self.consensus_min_occupied_cells)
+        if not own_mature or peer_mature is False:
+            self._write_physical_evidence_diagnostic(
+                'CANDIDATE_VERIFICATION_SKIPPED',
+                candidate=self._candidate_diagnostic(
+                    candidate, status='SKIPPED',
+                    reason='IMMATURE_EVIDENCE_MAP', compact=True),
+                reason='IMMATURE_EVIDENCE_MAP', stage='PRE_CROP_REQUEST',
+                own_maturity=own_details,
+                peer_maturity={
+                    'known_fraction': peer_known,
+                    'occupied_cells': peer_occupied,
+                    'minimum_known_fraction': self.consensus_min_known_fraction,
+                    'minimum_occupied_cells': self.consensus_min_occupied_cells,
+                })
+            self.counters['immature_candidates_not_scheduled'] += 1
+            return True
+        return False
 
     def _geometry_rejected_in_active_batch(self, geometry_key):
         """Return whether geometry was rejected in this acquisition batch.
@@ -1557,6 +3396,11 @@ class UnknownPoseFrontend(Node):
             geometry_key in self.rejected_physical_geometry_keys and
             self.rejected_physical_geometry_batches.get(geometry_key) ==
             self.verification_batches.batch_id)
+
+    def _geometry_attempted_in_active_batch(self, geometry_key):
+        """Return whether a crop footprint is already admitted this batch."""
+        return (self.attempted_physical_geometry_batches.get(geometry_key) ==
+                self.verification_batches.batch_id)
 
     def _candidate_is_novel_for_reentry(self, candidate):
         peer_key, own_key, peer, own = self._candidate_fields(candidate)
@@ -1647,17 +3491,39 @@ class UnknownPoseFrontend(Node):
             peer_centers.append(np.asarray(
                 self._descriptor_geometry(evidence_peer)['center'],
                 dtype=np.float64))
+        # A rejected attempt is not accepted evidence and must not become a
+        # permanent spatial exclusion.  Exact rejected physical footprints
+        # remain suppressed by the physical-evidence identities above.  Do
+        # not also block every later keyframe within the acquisition spacing:
+        # that can starve a valid third view when a robot advances through a
+        # narrow environment in sub-spacing keyframe increments.  In-flight
+        # views are still included below so a fast descriptor callback cannot
+        # queue aliases before the admitted registration is processed.
+        for inflight in getattr(
+                self, 'request_candidate_by_request_key', {}).values():
+            inflight_peer_key, inflight_own_key, inflight_peer, _ = (
+                self._candidate_fields(inflight))
+            inflight_own = self.keyframes.get(inflight_own_key)
+            if inflight_own is not None:
+                own_centers.append(np.asarray(self._crop_geometry(
+                    inflight_own[1], inflight_own_key,
+                    inflight_own[0].map_epoch,
+                    inflight_own[0].checksum)['center'], dtype=np.float64))
+            peer_centers.append(np.asarray(
+                self._descriptor_geometry(inflight_peer)['center'],
+                dtype=np.float64))
         # The production spatial-baseline gate is measured from source/own
         # crop centres.  Do not spend verification attempts pairing one local
         # view with many peer keyframes: a local crop that is near any
         # accepted source view cannot increase that baseline.  This is an
         # acquisition-order filter only; registration and consensus gates
         # remain unchanged.
-        if own_centers and any(np.linalg.norm(own_center - prior) < 0.40
+        spacing = float(getattr(self, 'verification_novelty_spacing_m', 0.40))
+        if own_centers and any(np.linalg.norm(own_center - prior) < spacing
                                for prior in own_centers):
             return False
-        if peer_centers and all(np.linalg.norm(peer_center - prior) < 0.40
-                               for prior in peer_centers):
+        if peer_centers and any(np.linalg.norm(peer_center - prior) < spacing
+                                for prior in peer_centers):
             return False
         return True
 
@@ -1728,6 +3594,13 @@ class UnknownPoseFrontend(Node):
                 continue
             if request_key in self.pending_requests:
                 continue
+            # Maturity is an intrinsic endpoint property.  Check it before
+            # any crop request, registration-worker submission, or batch-slot
+            # increment.  The candidate remains in the pending pool and may
+            # become schedulable if a later descriptor carries mature
+            # metadata; no rejection/blacklist state is written here.
+            if self._candidate_intrinsically_immature(candidate):
+                continue
             physical_key = self._candidate_physical_key(candidate)
             if physical_key in self.rejected_physical_evidence_keys:
                 self._write_physical_evidence_diagnostic(
@@ -1770,6 +3643,16 @@ class UnknownPoseFrontend(Node):
                         compact=True),
                     reason='PHYSICAL_GEOMETRY_PREVIOUSLY_REJECTED')
                 continue
+            if self._geometry_attempted_in_active_batch(geometry_key):
+                self.counters['physical_evidence_duplicates_suppressed'] += 1
+                self._write_physical_evidence_diagnostic(
+                    'CANDIDATE_VERIFICATION_SKIPPED',
+                    candidate=self._candidate_diagnostic(
+                        candidate, status='SKIPPED',
+                        reason='PHYSICAL_GEOMETRY_ALREADY_ATTEMPTED_IN_BATCH',
+                        compact=True),
+                    reason='PHYSICAL_GEOMETRY_ALREADY_ATTEMPTED_IN_BATCH')
+                continue
             if not self._candidate_is_distinct_from_evidence(candidate):
                 self._write_physical_evidence_diagnostic(
                     'CANDIDATE_VERIFICATION_SKIPPED',
@@ -1779,9 +3662,15 @@ class UnknownPoseFrontend(Node):
                     reason='TOO_CLOSE_TO_ACCEPTED_EVIDENCE')
                 continue
             candidates.append(candidate)
+        candidates = prioritize_unambiguous_candidates(
+            candidates, self.descriptor_ambiguous_pairs)
+        # Keep the verification budget bounded while ensuring its initial
+        # contents cover distinct local/peer keyframes.  The helper retains
+        # descriptor score as the ordering signal, then applies the existing
+        # spatial-novelty tie-break within that bounded diverse set.
         ranked = bounded_candidate_verification_order(
             candidates, self.candidate_verification_attempted,
-            len(candidates))
+            min(len(candidates), self.candidate_verification_budget))
         ranked.sort(key=self._candidate_spatial_novelty_key)
         return None if not ranked else ranked[0]
 
@@ -1832,6 +3721,15 @@ class UnknownPoseFrontend(Node):
                 'CANDIDATE_VERIFICATION_WAITING',
                 attempts=self.candidate_verification_attempts,
                 accepted_count=len(self.evidence_pairs))
+            # A completed rejection with no pending request and no worker
+            # backlog has no evidence work in flight.  End this lease now so
+            # the allocator can resume navigation and create a genuinely new
+            # paired viewpoint; the next descriptor callback may reopen a
+            # batch when a requestable candidate exists.
+            if (not self.pending_requests and
+                    not self._verification_worker_busy()):
+                self._end_evidence_acquisition(
+                    'NO_REQUESTABLE_NOVEL_EVIDENCE')
             return False
         peer_key, own_key, peer, own = self._candidate_fields(candidate)
         pair_key = (own_key, peer_key)
@@ -1841,6 +3739,8 @@ class UnknownPoseFrontend(Node):
                 self.attempted_physical_view_reuse_counts[view] = (
                     int(self.attempted_physical_view_reuse_counts.get(view, 0))
                     + 1)
+            self.attempted_physical_geometry_batches[geometry_key] = (
+                self.verification_batches.batch_id)
         self.candidate_verification_attempted.add(pair_key)
         self.candidate_verification_attempts += 1
         self.candidate_verification_batch_attempts += 1
@@ -1908,6 +3808,7 @@ class UnknownPoseFrontend(Node):
         self.counters['verification_batches_opened'] += 1
         self.candidate_verification_batch_attempts = 0
         self.evidence_acquisition_started = True
+        self._evidence_opportunity_deadline_wall = None
         self.evidence_acquisition_deadline_wall = (
             time.monotonic() + self.evidence_acquisition_window_s)
         self._record_diagnostic_event(
@@ -1922,13 +3823,32 @@ class UnknownPoseFrontend(Node):
             constraints_accumulated=len(self.evidence_physical_keys),
             window_s=self.evidence_acquisition_window_s,
             deadline_wall=self.evidence_acquisition_deadline_wall)
-        self._request_next_candidate_verification()
+        requested = self._request_next_candidate_verification()
+        # A descriptor/keyframe novelty signal is not itself an evidence
+        # acquisition opportunity.  If the existing request-ranking path
+        # cannot produce a candidate (for example because every pair is too
+        # close to accepted evidence), do not hold local navigation for the
+        # entire batch window.  This lets both robots continue to acquire
+        # genuinely displaced views.  A busy registration worker remains
+        # protected by the normal bounded lease and is not interrupted here.
+        if (not requested and self.evidence_acquisition_started and
+                self.candidate_verification_batch_attempts == 0 and
+                not self._verification_worker_busy()):
+            self._end_evidence_acquisition(
+                'NO_REQUESTABLE_NOVEL_EVIDENCE')
+            return
+        # Announce the lease only after a requestable candidate (or already
+        # admitted worker backlog) exists.  A novelty-only advisory therefore
+        # cannot briefly hold navigation before being discovered unusable.
+        self._publish_evidence_status(True)
 
     def _end_evidence_acquisition(self, reason):
         if not self.evidence_acquisition_started:
             return
         own_snapshot, peer_snapshot = self._batch_snapshot()
         self.evidence_acquisition_started = False
+        self._evidence_opportunity_deadline_wall = None
+        self._publish_evidence_status(False)
         self.evidence_acquisition_deadline_wall = None
         self.verification_batches.exhaust(
             time.monotonic(), own_snapshot, peer_snapshot)
@@ -1961,7 +3881,8 @@ class UnknownPoseFrontend(Node):
             state_transition='FINALIZE')
 
     def request_callback(self, request):
-        if request.source_robot_id != self.robot_id:
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                request.source_robot_id != self.robot_id):
             return
         self.counters['crop_requests_received'] += 1
         self._record_diagnostic_event(
@@ -1991,6 +3912,7 @@ class UnknownPoseFrontend(Node):
         crop_message.keyframe_id = request.keyframe_id
         crop_message.map_epoch = descriptor.map_epoch
         crop_message.descriptor_checksum = descriptor.checksum
+        crop_message.occupancy_checksum = self._occupancy_checksum(crop.values)
         crop_message.occupancy_grid = self._crop_message(crop, descriptor.header)
         self.crop_cells_sent = max(
             self.crop_cells_sent, len(crop_message.occupancy_grid.data))
@@ -2036,7 +3958,21 @@ class UnknownPoseFrontend(Node):
             'REGISTRATION_CALLBACK_ENTRY', source='candidate_verification',
             keyframe_id=peer_key, constraint_count=1)
         try:
-            result = register_crops(own_crop, received_crop)
+            mature_evidence, maturity = self._consensus_pair_maturity(
+                own_crop, received_crop)
+            hypotheses = register_crop_hypotheses(
+                own_crop, received_crop, backend=self.registration_backend,
+                minimum_agreement=(0.0 if mature_evidence else 0.55),
+                mrpt_max_kld=self.mrpt_max_kld,
+                mrpt_max_modes=self.mrpt_max_modes_per_call,
+                mrpt_repetitions=self.mrpt_repetitions_per_pair,
+                max_distinct_modes=self.mrpt_max_distinct_modes_per_pair)
+            result = max(
+                hypotheses,
+                key=lambda item: (
+                    bool(item.accepted), int(getattr(item, 'mode_support', 1)),
+                    float(getattr(item, 'mode_log_weight', -math.inf)),
+                    float(item.inlier_ratio), -float(item.residual_m)))
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
@@ -2049,6 +3985,8 @@ class UnknownPoseFrontend(Node):
             self.registration_callback_depth -= 1
             self.counters['registration_callback_exits'] += 1
         self.candidate_verification_results[pair_key] = result
+        self.candidate_verification_hypotheses[pair_key] = tuple(hypotheses)
+        self._finalize_registration_capture(pair_key, result=result)
         self._record_diagnostic_event(
             'REGISTRATION_CALLBACK_EXIT', source='candidate_verification',
             keyframe_id=peer_key, constraint_count=1,
@@ -2075,12 +4013,20 @@ class UnknownPoseFrontend(Node):
             condition_number=float(result.condition_number),
             projected_error_m=float(result.projected_error_m),
             accepted_geometric=bool(result.accepted),
-            rejection_reason='' if result.accepted else str(result.reason))
+            rejection_reason='' if result.accepted else str(result.reason),
+            )
         if result.accepted:
             self.counters['candidate_verification_accepted'] += 1
         else:
             self.counters['candidate_verification_rejected'] += 1
         return result
+
+    @staticmethod
+    def _occupancy_checksum(values):
+        """Checksum the exact signed occupancy bytes placed on the wire."""
+        array = np.asarray(values, dtype=np.int16)
+        return int(zlib.crc32(array.astype(np.int8, copy=False).tobytes()) &
+                   0xffffffff)
 
     @staticmethod
     def _crop_message(crop, header):
@@ -2097,7 +4043,8 @@ class UnknownPoseFrontend(Node):
         return message
 
     def crop_callback(self, message):
-        if message.source_robot_id != self.peer_robot_id:
+        if (getattr(self, '_post_handoff_quiesced', False) or
+                message.source_robot_id != self.peer_robot_id):
             return
         self.counters['crops_received'] += 1
         self._record_diagnostic_event(
@@ -2106,7 +4053,17 @@ class UnknownPoseFrontend(Node):
             descriptor_checksum=int(message.descriptor_checksum))
         self.crop_cells_received = max(
             self.crop_cells_received, len(message.occupancy_grid.data))
-        received_crop = self._grid_crop_from_message(message.occupancy_grid)
+        try:
+            received_crop = self._grid_crop_from_message(message.occupancy_grid)
+        except (TypeError, ValueError) as exc:
+            self._record_crop_rejection('INVALID_CROP_METADATA', message,
+                                        error=repr(exc))
+            return
+        if (int(getattr(message, 'occupancy_checksum', 0)) and
+                int(message.occupancy_checksum) != self._occupancy_checksum(
+                    received_crop.values)):
+            self._record_crop_rejection('OCCUPANCY_CHECKSUM_MISMATCH', message)
+            return
         expected_peer = self.peer_descriptors.get(message.keyframe_id)
         self._write_physical_evidence_diagnostic(
             'CROP_RESPONSE_RECEIVED',
@@ -2352,6 +4309,11 @@ class UnknownPoseFrontend(Node):
             evidence_pairs, 'target_confirmation',
             proposal.target_keyframe_id,
             evidence_timestamps=evidence_timestamps,
+            source_viewpoints=[self._keyframe_viewpoint(target_key)
+                               for target_key in evidence_targets],
+            target_viewpoints=[self._descriptor_viewpoint(
+                self.peer_descriptors.get(source_key))
+                               for source_key in evidence_sources],
             evidence_ids=[self._canonical_evidence_id(
                 proposal.source_robot_id, proposal.target_robot_id,
                 source_key, target_key)
@@ -2414,11 +4376,351 @@ class UnknownPoseFrontend(Node):
             rejection_reason='REGISTRATION_EXCEPTION',
             worker_exception=error or '')
 
+    def _content_pair_reuses_evidence(self, own_crop, peer_crop):
+        """Reject byte-identical or reciprocal crop content as non-independent."""
+        own_content = self._crop_content_identity(own_crop)
+        peer_content = self._crop_content_identity(peer_crop)
+        return (
+            (own_content, peer_content) in self.evidence_content_pairs or
+            (peer_content, own_content) in self.evidence_content_pairs or
+            own_content in self.evidence_source_content or
+            peer_content in self.evidence_peer_content)
+
+    @staticmethod
+    def _viewpoint_distance(first, second):
+        if first is None or second is None:
+            return None
+        return math.hypot(float(first[0]) - float(second[0]),
+                          float(first[1]) - float(second[1]))
+
+    def _canonical_constraint_duplicate_reason(
+            self, source_key, target_key, source_crop, target_crop,
+            source_viewpoint, target_viewpoint):
+        """Return a physical-identity rejection for the canonical pool.
+
+        Keyframe IDs are only labels.  Content and local physical viewpoints
+        remain the authority for independence, and a reciprocal observation
+        maps to the same canonical ``(R1, R2)`` identity.
+        """
+        canonical_id = self._canonical_evidence_id(
+            'robot1', 'robot2', source_key, target_key)
+        if canonical_id in self.canonical_constraint_pool:
+            return 'RECIPROCAL_OR_REPEATED_PHYSICAL_EVIDENCE'
+        source_content = self._crop_content_identity(source_crop)
+        target_content = self._crop_content_identity(target_crop)
+        for record in self.canonical_constraint_pool.values():
+            if (record.get('source_content') is not None and
+                    source_content == record['source_content']):
+                return 'REUSED_SOURCE_CROP_CONTENT'
+            if (record.get('target_content') is not None and
+                    target_content == record['target_content']):
+                return 'REUSED_TARGET_CROP_CONTENT'
+            if (self._viewpoint_distance(
+                    source_viewpoint, record.get('source_viewpoint')) is not None
+                    and self._viewpoint_distance(
+                        source_viewpoint, record.get('source_viewpoint')) <
+                    float(self.evidence_keyframe_translation_threshold_m)):
+                return 'REUSED_SOURCE_PHYSICAL_VIEWPOINT'
+            if (self._viewpoint_distance(
+                    target_viewpoint, record.get('target_viewpoint')) is not None
+                    and self._viewpoint_distance(
+                        target_viewpoint, record.get('target_viewpoint')) <
+                    float(self.evidence_keyframe_translation_threshold_m)):
+                return 'REUSED_TARGET_PHYSICAL_VIEWPOINT'
+        return ''
+
+    @staticmethod
+    def _canonical_mode_distance(first, second):
+        """Return the bounded same-pair mode distance in SE(2)."""
+        translation = math.hypot(
+            float(first.transform[0]) - float(second.transform[0]),
+            float(first.transform[1]) - float(second.transform[1]))
+        yaw = abs(math.atan2(
+            math.sin(float(first.transform[2]) - float(second.transform[2])),
+            math.cos(float(first.transform[2]) - float(second.transform[2]))))
+        return translation, yaw
+
+    def _merge_canonical_modes(self, existing, incoming):
+        """Merge alternatives for one physical ID without adding evidence."""
+        modes = list(existing or ())
+        for candidate in tuple(incoming or ()):
+            duplicate = None
+            for index, prior in enumerate(modes):
+                distance, yaw = self._canonical_mode_distance(candidate, prior)
+                if distance <= 0.05 and yaw <= math.radians(0.5):
+                    duplicate = index
+                    break
+            if duplicate is None:
+                modes.append(candidate)
+                self._record_diagnostic_event(
+                    'CANONICAL_MODE_ADDED',
+                    mode_index=int(getattr(candidate, 'mode_index', -1)))
+                continue
+            prior = modes[duplicate]
+            prior_support = int(getattr(prior, 'mode_support', 1))
+            candidate_support = int(getattr(candidate, 'mode_support', 1))
+            # Support is evidence about repeatability within this physical
+            # pair only.  It is never used as another independent constraint.
+            preferred = candidate if (
+                candidate_support,
+                float(getattr(candidate, 'mode_log_weight', -math.inf)),
+                float(candidate.inlier_ratio),
+            ) > (
+                prior_support,
+                float(getattr(prior, 'mode_log_weight', -math.inf)),
+                float(prior.inlier_ratio),
+            ) else prior
+            modes[duplicate] = replace(
+                preferred,
+                mode_support=max(prior_support, candidate_support),
+            )
+            self._record_diagnostic_event(
+                'CANONICAL_MODE_DEDUPED',
+                mode_index=int(getattr(candidate, 'mode_index', -1)),
+                mode_support=max(prior_support, candidate_support),
+                translation_distance_m=float(distance),
+                yaw_distance_rad=float(yaw))
+        modes.sort(key=lambda item: (
+            -int(getattr(item, 'mode_support', 1)),
+            -float(getattr(item, 'mode_log_weight', -math.inf)),
+            -float(item.inlier_ratio), float(item.residual_m)))
+        mode_cap = getattr(self, 'mrpt_max_distinct_modes_per_pair', 10)
+        return tuple(modes[:max(1, int(mode_cap))])
+
+    def _add_canonical_constraint(self, candidate, result, own_crop,
+                                  received_crop, own_key, peer_key,
+                                  hypotheses=None):
+        """Insert one strong locally verified constraint in R1->R2 form."""
+        hypotheses = tuple(hypotheses or (result,))
+        _, _, peer_descriptor, _ = self._candidate_fields(candidate)
+        if self.robot_id == 'robot1':
+            source_key, target_key = str(own_key), str(peer_key)
+            source_crop, target_crop = own_crop, received_crop
+            canonical_result = result
+            source_viewpoint = self._keyframe_viewpoint(own_key)
+            target_viewpoint = self._descriptor_viewpoint(peer_descriptor)
+            source_descriptor, target_descriptor = (
+                self.keyframes[own_key][0], peer_descriptor)
+            canonical_hypotheses = hypotheses
+        else:
+            source_key, target_key = str(peer_key), str(own_key)
+            source_crop, target_crop = received_crop, own_crop
+            canonical_result = replace(
+                result,
+                transform=invert_se2(result.transform),
+                inlier_ratio=float(result.reverse_inlier_ratio),
+                reverse_inlier_ratio=float(result.inlier_ratio))
+            source_viewpoint = None
+            source_viewpoint = self._descriptor_viewpoint(peer_descriptor)
+            target_viewpoint = self._keyframe_viewpoint(own_key)
+            source_descriptor, target_descriptor = (
+                peer_descriptor, self.keyframes[own_key][0])
+            canonical_hypotheses = tuple(
+                replace(
+                    hypothesis,
+                    transform=invert_se2(hypothesis.transform),
+                    inlier_ratio=float(hypothesis.reverse_inlier_ratio),
+                    reverse_inlier_ratio=float(hypothesis.inlier_ratio))
+                for hypothesis in hypotheses)
+        canonical_id = self._canonical_evidence_id(
+            'robot1', 'robot2', source_key, target_key)
+        existing = self.canonical_constraint_pool.get(canonical_id)
+        if existing is not None:
+            existing['hypotheses'] = self._merge_canonical_modes(
+                existing.get('hypotheses', ()), canonical_hypotheses)
+            if existing.get('pair') is not None:
+                self._record_diagnostic_event(
+                    'CANONICAL_CONSTRAINT_DUPLICATE',
+                    evidence_id=canonical_id,
+                    reason='RECIPROCAL_OR_REPEATED_PHYSICAL_EVIDENCE')
+                return False
+            existing.update({
+                'source_key': source_key,
+                'target_key': target_key,
+                'pair': (source_crop, target_crop),
+                'result': canonical_result,
+                'source_content': self._crop_content_identity(source_crop),
+                'target_content': self._crop_content_identity(target_crop),
+                'source_viewpoint': source_viewpoint,
+                'target_viewpoint': target_viewpoint,
+                'source_descriptor': source_descriptor,
+                'target_descriptor': target_descriptor,
+                'timestamps': (
+                    self._stamp_ns(source_descriptor),
+                    self._stamp_ns(target_descriptor)),
+            })
+            self._record_diagnostic_event(
+                'CANONICAL_CONSTRAINT_ADDED', evidence_id=canonical_id,
+                source_keyframe_id=source_key, target_keyframe_id=target_key,
+                canonical_pool_size=len(self.canonical_constraint_pool),
+                source_viewpoint_available=source_viewpoint is not None,
+                target_viewpoint_available=target_viewpoint is not None,
+                merged_peer_modes=True)
+            return True
+        duplicate_reason = self._canonical_constraint_duplicate_reason(
+            source_key, target_key, source_crop, target_crop,
+            source_viewpoint, target_viewpoint)
+        if duplicate_reason:
+            self._write_physical_evidence_diagnostic(
+                'CANONICAL_CONSTRAINT_SUPPRESSED',
+                canonical_evidence_id=self._canonical_evidence_id(
+                    'robot1', 'robot2', source_key, target_key),
+                source_keyframe_id=source_key,
+                target_keyframe_id=target_key,
+                reason=duplicate_reason)
+            self.counters['physical_evidence_duplicates_suppressed'] += 1
+            return False
+        timestamp_pair = (
+            self._stamp_ns(source_descriptor),
+            self._stamp_ns(target_descriptor))
+        self.canonical_constraint_pool[canonical_id] = {
+            'evidence_id': canonical_id,
+            'source_key': source_key,
+            'target_key': target_key,
+            'pair': (source_crop, target_crop),
+            'result': canonical_result,
+            'hypotheses': canonical_hypotheses,
+            'source_content': self._crop_content_identity(source_crop),
+            'target_content': self._crop_content_identity(target_crop),
+            'source_viewpoint': source_viewpoint,
+            'target_viewpoint': target_viewpoint,
+            'source_descriptor': source_descriptor,
+            'target_descriptor': target_descriptor,
+            'timestamps': timestamp_pair,
+        }
+        self._record_diagnostic_event(
+            'CANONICAL_MODE_ADDED', evidence_id=canonical_id,
+            mode_count=len(canonical_hypotheses), discovery='local')
+        while len(self.canonical_constraint_pool) > max(
+                self.max_evidence_constraints,
+                self.min_consistent_constraints):
+            self.canonical_constraint_pool.popitem(last=False)
+        self._record_diagnostic_event(
+            'CANONICAL_CONSTRAINT_ADDED',
+            evidence_id=canonical_id,
+            source_keyframe_id=source_key,
+            target_keyframe_id=target_key,
+            canonical_transform=[float(value) for value in
+                                 canonical_result.transform],
+            canonical_pool_size=len(self.canonical_constraint_pool))
+        return True
+
+    def _canonical_union_consensus(self):
+        """Run the unchanged selector over the bounded canonical pool."""
+        records = [record for record in self.canonical_constraint_pool.values()
+                   if record.get('pair') is not None and
+                   record.get('source_viewpoint') is not None and
+                   record.get('target_viewpoint') is not None]
+        if len(records) < self.min_consistent_constraints:
+            self._record_diagnostic_event(
+                'CANONICAL_FAMILY_EVALUATED',
+                canonical_pool_size=len(self.canonical_constraint_pool),
+                complete_physical_records=len(records), accepted=False,
+                reason='INCOMPLETE_PHYSICAL_METADATA')
+            return None
+        self._record_diagnostic_event(
+            'CANONICAL_FAMILY_EVALUATED',
+            canonical_pool_size=len(self.canonical_constraint_pool),
+            complete_physical_records=len(records), accepted=False,
+            reason='EVALUATING')
+        result = self._run_registration(
+            [record['pair'] for record in records], 'canonical_union',
+            records[0]['evidence_id'],
+            individual_results=[record['result'] for record in records],
+            hypothesis_sets=[record.get('hypotheses', (record['result'],))
+                             for record in records],
+            evidence_timestamps=[record['timestamps'] for record in records],
+            evidence_ids=[record['evidence_id'] for record in records],
+            source_viewpoints=[record['source_viewpoint']
+                               for record in records],
+            target_viewpoints=[record['target_viewpoint']
+                               for record in records])
+        self._record_diagnostic_event(
+            'CANONICAL_UNION_CONSENSUS',
+            canonical_pool_size=len(records), accepted=bool(result.accepted),
+            reason=str(result.reason),
+            consistent_constraint_count=int(
+                result.consistent_constraint_count),
+            spatial_baseline_m=float(result.spatial_baseline_m))
+        return result
+
+    def _publish_canonical_union_candidate(self, result):
+        """Publish one canonical candidate for the existing peer protocol."""
+        if (self.canonical_union_summary_published or
+                self.batch_proposal_published or
+                self.robot_id != min(self.robot_id, self.peer_robot_id) or
+                not result.accepted):
+            return False
+        winner_ids = []
+        for diagnostic in reversed(getattr(result, 'consensus_diagnostics', ())):
+            if diagnostic.get('kind') == 'incremental_hypothesis_accumulator':
+                winner_ids = [str(value) for value in diagnostic.get(
+                    'winner_evidence_ids', ())]
+                break
+        if not winner_ids:
+            for diagnostic in getattr(result, 'consensus_diagnostics', ()):
+                if (diagnostic.get('kind') == 'robust_hypothesis' and
+                        int(diagnostic.get('rank', 1)) == 0):
+                    selected = [int(value) for value in diagnostic.get(
+                        'selected_indices', ())]
+                    winner_ids = [list(self.canonical_constraint_pool)[index]
+                                  for index in selected
+                                  if 0 <= index < len(
+                                      self.canonical_constraint_pool)]
+                    break
+        if not winner_ids:
+            winner_ids = list(self.canonical_constraint_pool)
+        records = [self.canonical_constraint_pool[value]
+                   for value in winner_ids
+                   if value in self.canonical_constraint_pool]
+        if len(records) < self.min_consistent_constraints:
+            return False
+        source_ids = [record['source_key'] for record in records]
+        target_ids = [record['target_key'] for record in records]
+        if any('source_descriptor' not in record or
+               'target_descriptor' not in record for record in records):
+            self._record_diagnostic_event(
+                'CANONICAL_UNION_PROPOSAL_DEFERRED',
+                reason='MISSING_DESCRIPTOR_METADATA')
+            return False
+        own_descriptor = records[0]['source_descriptor']
+        peer_descriptor = records[0]['target_descriptor']
+        for record in records:
+            descriptor = record['source_descriptor']
+            crop = record['pair'][0]
+            message = LocalMapCrop()
+            message.header = descriptor.header
+            message.source_robot_id = self.robot_id
+            message.keyframe_id = record['source_key']
+            message.map_epoch = descriptor.map_epoch
+            message.descriptor_checksum = descriptor.checksum
+            message.occupancy_checksum = self._occupancy_checksum(crop.values)
+            message.occupancy_grid = self._crop_message(crop, descriptor.header)
+            self.crop_pub.publish(message)
+            self.counters['crops_sent'] += 1
+        proposal = self._hypothesis_message(
+            own_descriptor, peer_descriptor, result, status='CANDIDATE',
+            accepted=False, rejection_reason='',
+            evidence_source_keyframe_ids=source_ids,
+            evidence_target_keyframe_ids=target_ids)
+        self.hypothesis_pub.publish(proposal)
+        self.canonical_union_summary_published = True
+        self.local_hypothesis_summary = proposal
+        self.local_hypothesis_result = result
+        self.counters['hypothesis_summaries_published'] += 1
+        self._record_diagnostic_event(
+            'CANONICAL_UNION_SUMMARY_PUBLISHED',
+            evidence_set_hash=str(proposal.evidence_set_hash),
+            consistent_constraint_count=int(
+                proposal.consistent_constraint_count))
+        return True
+
     def _apply_candidate_verification_result(
             self, pair_key, candidate, result, request_metadata, physical_key,
             candidate_geometry_key, own_key, peer_key, own_crop,
-            received_crop, map_epoch, descriptor_checksum):
+            received_crop, map_epoch, descriptor_checksum, hypotheses=None):
         """Apply one worker result and continue the existing protocol path."""
+        hypotheses = tuple(hypotheses or (result,))
         self.counters['registrations'] += 1
         self.counters['registration_callback_entries'] += 1
         self.registration_callback_depth += 1
@@ -2426,6 +4728,21 @@ class UnknownPoseFrontend(Node):
             'REGISTRATION_CALLBACK_ENTRY', source='candidate_verification',
             keyframe_id=peer_key, constraint_count=1)
         self.candidate_verification_results[pair_key] = result
+        self.candidate_verification_hypotheses[pair_key] = hypotheses
+        mature_evidence, maturity = self._consensus_pair_maturity(
+            own_crop, received_crop)
+        admitted_hypotheses = tuple(
+            hypothesis for hypothesis in hypotheses
+            if consensus_admission_quality(
+                hypothesis, mature_evidence=mature_evidence)[0])
+        strong_eligible = bool(admitted_hypotheses)
+        strong_reason = ('STRONG_CONSENSUS_ELIGIBLE' if strong_eligible else
+                         (consensus_admission_quality(
+                             result, mature_evidence=mature_evidence)[1]))
+        self._finalize_registration_capture(
+            pair_key, result=result,
+            strong_consensus_eligible=strong_eligible,
+            strong_consensus_reason=strong_reason)
         self._record_diagnostic_event(
             'REGISTRATION_CALLBACK_EXIT', source='candidate_verification',
             keyframe_id=peer_key, constraint_count=1,
@@ -2452,7 +4769,16 @@ class UnknownPoseFrontend(Node):
             condition_number=float(result.condition_number),
             projected_error_m=float(result.projected_error_m),
             accepted_geometric=bool(result.accepted),
-            rejection_reason='' if result.accepted else str(result.reason))
+            rejection_reason='' if result.accepted else str(result.reason),
+            strong_consensus_eligible=bool(strong_eligible),
+            strong_consensus_rejection_reason=str(strong_reason),
+            consensus_evidence_mature=bool(mature_evidence),
+            consensus_maturity=maturity,
+            backend=str(getattr(result, 'backend', self.registration_backend)),
+            hypothesis_count=len(hypotheses),
+            admitted_hypothesis_count=len(admitted_hypotheses),
+            hypothesis_mode_indices=[int(getattr(item, 'mode_index', -1))
+                                     for item in hypotheses])
         if result.accepted:
             self.counters['candidate_verification_accepted'] += 1
         else:
@@ -2472,20 +4798,75 @@ class UnknownPoseFrontend(Node):
                 rejection_reason=str(result.reason))
             self._request_next_candidate_verification()
             return
+        if not strong_eligible:
+            # Keep the finite individual result in diagnostics, but do not
+            # let it consume an evidence/consensus slot.  The bounded request
+            # budget still limits expensive registration work; a later map
+            # revision or displaced viewpoint can produce a new candidate.
+            self.counters['weak_consensus_candidates_rejected'] += 1
+            self._write_physical_evidence_diagnostic(
+                'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
+                **(request_metadata or {}),
+                candidate=self._candidate_diagnostic(
+                    candidate, status='REJECTED', reason=str(strong_reason),
+                    compact=True),
+                rejection_reason=str(strong_reason),
+                accepted_geometric=True,
+                strong_consensus_eligible=False)
+            self.rejected_physical_evidence_keys.add(physical_key)
+            self.rejected_physical_geometry_keys.add(candidate_geometry_key)
+            self.rejected_physical_geometry_batches[candidate_geometry_key] = (
+                self._request_batch_id(request_metadata))
+            self._request_next_candidate_verification()
+            return
+        if self._content_pair_reuses_evidence(own_crop, received_crop):
+            self.counters['physical_content_duplicates_suppressed'] += 1
+            self.counters['physical_evidence_duplicates_suppressed'] += 1
+            self._write_physical_evidence_diagnostic(
+                'CANDIDATE_REJECTED_BEFORE_CONSENSUS',
+                **(request_metadata or {}),
+                candidate=self._candidate_diagnostic(
+                    candidate, status='REJECTED',
+                    reason='IDENTICAL_CROP_CONTENT_ALREADY_ACCEPTED',
+                    compact=True),
+                rejection_reason='IDENTICAL_CROP_CONTENT_ALREADY_ACCEPTED')
+            self._request_next_candidate_verification()
+            return
         self.evidence_pairs[pair_key] = (
             own_crop, received_crop)
         self.evidence_candidates[pair_key] = candidate
         self.evidence_physical_keys[pair_key] = physical_key
         self.evidence_physical_geometry_keys.add(candidate_geometry_key)
+        own_content = self._crop_content_identity(own_crop)
+        peer_content = self._crop_content_identity(received_crop)
+        self.evidence_content_pairs.add((own_content, peer_content))
+        self.evidence_source_content.add(own_content)
+        self.evidence_peer_content.add(peer_content)
         self.counters['constraints_accumulated'] = len(
             self.evidence_physical_keys)
+        self.counters['strong_consensus_candidates'] += 1
         self._record_diagnostic_event(
             'CROP_ACCEPTED', own_key=own_key, peer_key=peer_key,
             map_epoch=int(map_epoch),
             descriptor_checksum=int(descriptor_checksum),
             constraints_accumulated=len(self.evidence_physical_keys))
         self._publish_evidence_announcement(
-            candidate, result, own_crop, received_crop)
+            candidate, result, own_crop, received_crop,
+            hypotheses=admitted_hypotheses)
+        canonical_added = self._add_canonical_constraint(
+            candidate, result, own_crop, received_crop, own_key, peer_key,
+            hypotheses=admitted_hypotheses)
+        if canonical_added:
+            canonical_consensus = self._canonical_union_consensus()
+            if canonical_consensus is not None and canonical_consensus.accepted:
+                self.evidence_acquisition_started = False
+                self._publish_evidence_status(False)
+                self.evidence_acquisition_deadline_wall = None
+                self.verification_batches.mark_completed()
+                self._publish_canonical_union_candidate(canonical_consensus)
+                self._clear_pending_registration_contexts(
+                    'CANONICAL_UNION_CONSENSUS_ACCEPTED')
+                return
         if len(self.evidence_physical_keys) < self.min_consistent_constraints:
             self._record_diagnostic_event(
                 'EVIDENCE_SET_WAITING',
@@ -2501,6 +4882,10 @@ class UnknownPoseFrontend(Node):
         pairs = [evidence for _, evidence in evidence_items]
         cached_results = [
             self.candidate_verification_results.get(pair_key)
+            for pair_key, _ in evidence_items]
+        cached_hypotheses = [
+            self.candidate_verification_hypotheses.get(
+                pair_key, (self.candidate_verification_results.get(pair_key),))
             for pair_key, _ in evidence_items]
         evidence_timestamps = []
         for (evidence_own_key, evidence_peer_key), _ in evidence_items:
@@ -2522,9 +4907,17 @@ class UnknownPoseFrontend(Node):
         consensus = self._run_registration(
             pairs, 'incremental_consensus', peer_key,
             individual_results=cached_results,
-            evidence_timestamps=evidence_timestamps)
+            hypothesis_sets=(cached_hypotheses if
+                             self.registration_backend == 'mrpt' else None),
+            evidence_timestamps=evidence_timestamps,
+            source_viewpoints=[self._keyframe_viewpoint(pair_key[0])
+                               for pair_key, _ in evidence_items],
+            target_viewpoints=[self._descriptor_viewpoint(
+                self.evidence_candidates[pair_key][2])
+                for pair_key, _ in evidence_items])
         if consensus.accepted:
             self.evidence_acquisition_started = False
+            self._publish_evidence_status(False)
             self.evidence_acquisition_deadline_wall = None
             self.verification_batches.mark_completed()
             self._publish_multi_constraint_proposal(result=consensus)
@@ -2538,7 +4931,8 @@ class UnknownPoseFrontend(Node):
 
     def _run_registration(self, evidence_pairs, source, keyframe_id='',
                           individual_results=None, evidence_timestamps=None,
-                          evidence_ids=None):
+                          evidence_ids=None, source_viewpoints=None,
+                          target_viewpoints=None, hypothesis_sets=None):
         self.counters['registrations'] += 1
         self.counters['registration_callback_entries'] += 1
         self.registration_callback_depth += 1
@@ -2553,16 +4947,36 @@ class UnknownPoseFrontend(Node):
                     f'{own_key}|{peer_key}'
                     for (own_key, peer_key) in self.evidence_pairs])
                 accumulator = self.hypothesis_accumulator
-            result = register_crop_set(
-                evidence_pairs,
-                target_map_radius_m=self.target_map_radius_m,
-                min_consistent_constraints=self.min_consistent_constraints,
-                max_projected_registration_error_m=(
-                    self.max_projected_registration_error_m),
-                individual_results=individual_results,
-                evidence_timestamps=evidence_timestamps,
-                evidence_ids=evidence_ids,
-                hypothesis_accumulator=accumulator)
+            mature_evidence = all(
+                self._consensus_pair_maturity(source_crop, target_crop)[0]
+                for source_crop, target_crop in evidence_pairs)
+            if hypothesis_sets is not None:
+                result = select_hypothesis_family(
+                    evidence_pairs, hypothesis_sets,
+                    target_map_radius_m=self.target_map_radius_m,
+                    min_consistent_constraints=(
+                        self.min_consistent_constraints),
+                    max_projected_registration_error_m=(
+                        self.max_projected_registration_error_m),
+                    minimum_agreement=(0.0 if mature_evidence else 0.55),
+                    evidence_timestamps=evidence_timestamps,
+                    evidence_ids=evidence_ids,
+                    source_viewpoints=source_viewpoints,
+                    target_viewpoints=target_viewpoints)
+            else:
+                result = register_crop_set(
+                    evidence_pairs,
+                    target_map_radius_m=self.target_map_radius_m,
+                    min_consistent_constraints=self.min_consistent_constraints,
+                    max_projected_registration_error_m=(
+                        self.max_projected_registration_error_m),
+                    minimum_agreement=(0.0 if mature_evidence else 0.55),
+                    individual_results=individual_results,
+                    evidence_timestamps=evidence_timestamps,
+                    evidence_ids=evidence_ids,
+                    source_viewpoints=source_viewpoints,
+                    target_viewpoints=target_viewpoints,
+                    hypothesis_accumulator=accumulator)
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self.consensus_gate_rejection_counts['REGISTRATION_EXCEPTION'] += 1
@@ -2659,6 +5073,9 @@ class UnknownPoseFrontend(Node):
         pairs = []
         selected_pairs = []
         physical_keys = set()
+        content_pairs = set()
+        source_content = set()
+        peer_content = set()
         # Evidence can arrive over several selection callbacks.  The active
         # selection is only the latest snapshot; use the bounded pending pool
         # so accepted earlier pairs are reconsidered together.  A completed
@@ -2683,7 +5100,19 @@ class UnknownPoseFrontend(Node):
             if physical_key in physical_keys:
                 self.counters['physical_evidence_duplicates_suppressed'] += 1
                 continue
+            own_content = self._crop_content_identity(evidence[0])
+            peer_content_id = self._crop_content_identity(evidence[1])
+            if ((own_content, peer_content_id) in content_pairs or
+                    (peer_content_id, own_content) in content_pairs or
+                    own_content in source_content or
+                    peer_content_id in peer_content):
+                self.counters['physical_content_duplicates_suppressed'] += 1
+                self.counters['physical_evidence_duplicates_suppressed'] += 1
+                continue
             physical_keys.add(physical_key)
+            content_pairs.add((own_content, peer_content_id))
+            source_content.add(own_content)
+            peer_content.add(peer_content_id)
             selected_pairs.append(candidate)
             pairs.append(evidence)
             if len(pairs) >= self.candidate_verification_budget:
@@ -2746,7 +5175,11 @@ class UnknownPoseFrontend(Node):
                 evidence_timestamps=[
                     (self._stamp_ns(candidate[3]),
                      self._stamp_ns(candidate[2]))
-                    for candidate in selected_pairs])
+                    for candidate in selected_pairs],
+                source_viewpoints=[self._keyframe_viewpoint(candidate[1])
+                                   for candidate in selected_pairs],
+                target_viewpoints=[self._descriptor_viewpoint(candidate[2])
+                                   for candidate in selected_pairs])
         if result.accepted:
             # The accumulated selector may reject some geometrically valid
             # observations as outliers.  Exchange/request only its winning
@@ -2912,10 +5345,27 @@ class UnknownPoseFrontend(Node):
         canonical_ids = [self._canonical_evidence_id(
             self.peer_robot_id, self.robot_id, source_id, target_id)
             for source_id, target_id in zip(source_ids, target_ids)]
+        peer_hypothesis_sets = None
+        if self.registration_backend == 'mrpt':
+            peer_hypothesis_sets = [
+                register_crop_hypotheses(
+                    source, target, backend=self.registration_backend,
+                    minimum_agreement=0.0,
+                    mrpt_max_kld=self.mrpt_max_kld,
+                    mrpt_max_modes=self.mrpt_max_modes_per_call,
+                    mrpt_repetitions=self.mrpt_repetitions_per_pair,
+                    max_distinct_modes=self.mrpt_max_distinct_modes_per_pair)
+                for source, target in evidence_pairs]
         result = self._run_registration(
             evidence_pairs, 'peer_summary_verification', source_ids[0],
             evidence_timestamps=evidence_timestamps,
-            evidence_ids=canonical_ids)
+            source_viewpoints=[self._keyframe_viewpoint(target_id)
+                               for target_id in target_ids],
+            target_viewpoints=[self._descriptor_viewpoint(
+                self.peer_descriptors.get(source_id))
+                               for source_id in source_ids],
+            evidence_ids=canonical_ids,
+            hypothesis_sets=peer_hypothesis_sets)
         if not result.accepted:
             self._record_diagnostic_event(
                 'PEER_HYPOTHESIS_SUMMARY_REJECTED',
@@ -2973,8 +5423,8 @@ class UnknownPoseFrontend(Node):
             target_keyframe_id=str(proposal.target_keyframe_id))
 
     def _publish_evidence_announcement(self, candidate, result,
-                                       own_crop, peer_crop):
-        """Advertise one accepted constraint for symmetric accumulation.
+                                       own_crop, peer_crop, hypotheses=None):
+        """Advertise all accepted modes for one physical pair.
 
         This message is deliberately non-accepting.  The recipient requests
         the advertised source crop and runs the same geometric registration
@@ -2986,26 +5436,151 @@ class UnknownPoseFrontend(Node):
             self._candidate_fields(candidate))
         evidence_id = self._canonical_evidence_id(
             self.robot_id, self.peer_robot_id, own_key, peer_key)
-        if evidence_id in self.evidence_announcements_published:
-            return
-        message = self._hypothesis_message(
-            own_descriptor, peer_descriptor, result,
-            status='EVIDENCE', accepted=False, rejection_reason='',
-            evidence_source_keyframe_ids=[own_key],
-            evidence_target_keyframe_ids=[peer_key])
-        message.constraint_count = 1
-        message.consistent_constraint_count = 1
-        message.selector_status = 'INSUFFICIENT_EVIDENCE'
-        message.selector_runner_up_margin = 0.0
-        self.hypothesis_pub.publish(message)
-        self.evidence_announcements_published.add(evidence_id)
-        self.counters['evidence_announcements_published'] += 1
+        modes = tuple(hypotheses or (result,))
+        for mode in modes:
+            mode_signature = (
+                evidence_id,
+                round(float(mode.transform[0]) / 0.05),
+                round(float(mode.transform[1]) / 0.05),
+                round(float(mode.transform[2]) / math.radians(0.5)))
+            if mode_signature in self.evidence_announcements_published:
+                continue
+            message = self._hypothesis_message(
+                own_descriptor, peer_descriptor, mode,
+                status='EVIDENCE', accepted=False, rejection_reason='',
+                evidence_source_keyframe_ids=[own_key],
+                evidence_target_keyframe_ids=[peer_key])
+            message.constraint_count = 1
+            message.consistent_constraint_count = 1
+            message.selector_status = 'INSUFFICIENT_EVIDENCE'
+            message.selector_runner_up_margin = 0.0
+            self.hypothesis_pub.publish(message)
+            self.evidence_announcements_published.add(mode_signature)
+            self.counters['evidence_announcements_published'] += 1
+            self._record_diagnostic_event(
+                'EVIDENCE_ANNOUNCEMENT_PUBLISHED',
+                evidence_id=evidence_id,
+                source_keyframe_id=str(own_key),
+                target_keyframe_id=str(peer_key),
+                mode_index=int(getattr(mode, 'mode_index', -1)),
+                mode_support=int(getattr(mode, 'mode_support', 1)),
+                transform=[float(value) for value in mode.transform])
+
+    def _message_canonical_mode(self, message):
+        """Decode one peer mode into the canonical R1->R2 convention."""
+        raw = self._summary_transform(message)
+        source_robot = str(message.source_robot_id)
+        if source_robot == 'robot1':
+            transform = raw
+            forward = float(getattr(message, 'geometric_inlier_ratio', 0.0))
+            reverse = float(getattr(message, 'reverse_inlier_ratio', forward))
+        else:
+            transform = invert_se2(raw)
+            forward = float(getattr(message, 'reverse_inlier_ratio',
+                                   getattr(message, 'geometric_inlier_ratio', 0.0)))
+            reverse = float(getattr(message, 'geometric_inlier_ratio', 0.0))
+        covariance = tuple(float(value) for value in getattr(
+            message, 'covariance', (0.0,) * 36))
+        if len(covariance) not in (9, 36):
+            covariance = (0.0,) * 36
+        return RegistrationResult(
+            accepted=True, transform=tuple(float(value) for value in transform),
+            covariance=covariance, inlier_ratio=forward,
+            reverse_inlier_ratio=reverse,
+            residual_m=float(getattr(message, 'registration_residual_m',
+                                     math.inf)),
+            occupied_free_agreement=float(getattr(
+                message, 'occupied_free_agreement', 0.0)),
+            overlap_fraction=float(getattr(message, 'overlap_fraction', 0.0)),
+            reason='PEER_ANNOUNCED_MODE',
+            backend='mrpt',
+            mode_index=int(getattr(message, 'mode_index', -1)),
+            mode_log_weight=float(getattr(message, 'mode_log_weight',
+                                          -math.inf)),
+            mode_support=max(1, int(getattr(message, 'mode_support', 1))))
+
+    def _add_peer_canonical_mode(self, message, evidence_id, source_key,
+                                 target_key):
+        """Stage a peer mode; exact local re-registration remains mandatory."""
+        mode = self._message_canonical_mode(message)
+        source_is_robot1 = str(message.source_robot_id) == 'robot1'
+        source_viewpoint = (
+            (float(message.source_viewpoint_x),
+             float(message.source_viewpoint_y),
+             float(message.source_viewpoint_yaw))
+            if source_is_robot1 and bool(getattr(
+                message, 'source_viewpoint_available', False)) else
+            ((float(message.target_viewpoint_x),
+              float(message.target_viewpoint_y),
+              float(message.target_viewpoint_yaw))
+             if not source_is_robot1 and bool(getattr(
+                 message, 'target_viewpoint_available', False)) else None))
+        target_viewpoint = (
+            (float(message.target_viewpoint_x),
+             float(message.target_viewpoint_y),
+             float(message.target_viewpoint_yaw))
+            if source_is_robot1 and bool(getattr(
+                message, 'target_viewpoint_available', False)) else
+            ((float(message.source_viewpoint_x),
+              float(message.source_viewpoint_y),
+              float(message.source_viewpoint_yaw))
+             if not source_is_robot1 and bool(getattr(
+                 message, 'source_viewpoint_available', False)) else None))
+        source_descriptor = self.keyframes.get(source_key, (None,))[0]
+        if source_descriptor is None:
+            source_descriptor = self.peer_descriptors.get(source_key)
+        target_descriptor = self.keyframes.get(target_key, (None,))[0]
+        if target_descriptor is None:
+            target_descriptor = self.peer_descriptors.get(target_key)
+        pair = None
+        if self.robot_id == 'robot1':
+            local = self.keyframes.get(source_key)
+            remote = self.received_peer_crops.get(target_key)
+            if local is not None and remote is not None:
+                pair = (local[1], remote)
+        else:
+            local = self.keyframes.get(target_key)
+            remote = self.received_peer_crops.get(source_key)
+            if local is not None and remote is not None:
+                pair = (remote, local[1])
+        record = self.canonical_constraint_pool.get(evidence_id)
+        if record is None:
+            self.canonical_constraint_pool[evidence_id] = {
+                'evidence_id': evidence_id,
+                'source_key': source_key,
+                'target_key': target_key,
+                'pair': pair,
+                'result': mode,
+                'hypotheses': (mode,),
+                'source_content': None,
+                'target_content': None,
+                'source_viewpoint': source_viewpoint,
+                'target_viewpoint': target_viewpoint,
+                'source_descriptor': source_descriptor,
+                'target_descriptor': target_descriptor,
+                'timestamps': (
+                    None if source_descriptor is None else
+                    self._stamp_ns(source_descriptor),
+                    None if target_descriptor is None else
+                    self._stamp_ns(target_descriptor)),
+            }
+        else:
+            record['hypotheses'] = self._merge_canonical_modes(
+                record.get('hypotheses', ()), (mode,))
+            if record.get('source_viewpoint') is None:
+                record['source_viewpoint'] = source_viewpoint
+            if record.get('target_viewpoint') is None:
+                record['target_viewpoint'] = target_viewpoint
+            if record.get('source_descriptor') is None:
+                record['source_descriptor'] = source_descriptor
+            if record.get('target_descriptor') is None:
+                record['target_descriptor'] = target_descriptor
         self._record_diagnostic_event(
-            'EVIDENCE_ANNOUNCEMENT_PUBLISHED',
-            evidence_id=evidence_id,
-            source_keyframe_id=str(own_key),
-            target_keyframe_id=str(peer_key),
-            transform=[float(value) for value in result.transform])
+            'CANONICAL_PEER_MODE_RECEIVED', evidence_id=evidence_id,
+            source_keyframe_id=source_key, target_keyframe_id=target_key,
+            mode_index=int(getattr(mode, 'mode_index', -1)),
+            mode_support=int(getattr(mode, 'mode_support', 1)),
+            requires_local_reregistration=True)
 
     def _queue_peer_evidence_reverification(self, message):
         """Request and independently re-register one peer-advertised pair."""
@@ -3079,10 +5654,23 @@ class UnknownPoseFrontend(Node):
             return
         evidence_id = self._canonical_evidence_id(
             self.peer_robot_id, self.robot_id, source_ids[0], target_ids[0])
-        if evidence_id in self.peer_evidence_announcements:
+        advertised_id = str(getattr(message, 'physical_evidence_id', ''))
+        if advertised_id and advertised_id != evidence_id:
+            self._record_diagnostic_event(
+                'PEER_EVIDENCE_ANNOUNCEMENT_REJECTED',
+                reason='PHYSICAL_EVIDENCE_ID_MISMATCH',
+                advertised_evidence_id=advertised_id,
+                canonical_evidence_id=evidence_id)
             return
-        self.peer_evidence_announcements[evidence_id] = message
+        if evidence_id not in self.peer_evidence_announcements:
+            self.peer_evidence_announcements[evidence_id] = message
         self.counters['evidence_announcements_received'] += 1
+        self._add_peer_canonical_mode(
+            message, evidence_id,
+            target_ids[0] if str(message.target_robot_id) == 'robot1'
+            else source_ids[0],
+            source_ids[0] if str(message.target_robot_id) == 'robot1'
+            else target_ids[0])
         self._record_diagnostic_event(
             'PEER_EVIDENCE_ANNOUNCEMENT_RECEIVED',
             evidence_id=evidence_id,
@@ -3092,7 +5680,11 @@ class UnknownPoseFrontend(Node):
                 float(message.source_to_target.translation.x),
                 float(message.source_to_target.translation.y),
                 float(self._summary_transform(message)[2])])
-        self._queue_peer_evidence_reverification(message)
+        # One request is sufficient for all alternatives belonging to this
+        # physical pair.  Later mode announcements enrich the bounded pool
+        # without consuming another crop/verification request.
+        if evidence_id not in self._peer_evidence_requested:
+            self._queue_peer_evidence_reverification(message)
 
     def _publish_local_evidence_crops(self, keyframe_ids,
                                       evidence_candidates=None):
@@ -3119,6 +5711,7 @@ class UnknownPoseFrontend(Node):
             message.keyframe_id = keyframe_id
             message.map_epoch = descriptor.map_epoch
             message.descriptor_checksum = descriptor.checksum
+            message.occupancy_checksum = self._occupancy_checksum(crop.values)
             message.occupancy_grid = self._crop_message(crop, descriptor.header)
             self.crop_pub.publish(message)
             self.counters['crops_sent'] += 1
@@ -3134,8 +5727,16 @@ class UnknownPoseFrontend(Node):
 
     @staticmethod
     def _grid_crop_from_message(message):
+        if (int(message.info.width) <= 0 or int(message.info.height) <= 0 or
+                not math.isfinite(float(message.info.resolution)) or
+                float(message.info.resolution) <= 0.0 or
+                len(message.data) != int(message.info.width) *
+                int(message.info.height)):
+            raise ValueError('invalid native occupancy crop metadata')
         values = np.asarray(message.data, dtype=np.int16).reshape(
             (message.info.height, message.info.width))
+        if not np.isfinite(values.astype(np.float64)).all():
+            raise ValueError('nonfinite native occupancy crop values')
         return GridCrop(
             values=values, resolution=float(message.info.resolution),
             origin_x=float(message.info.origin.position.x),
@@ -3176,6 +5777,8 @@ class UnknownPoseFrontend(Node):
         message.descriptor_similarity = float(match.similarity if match else 0.0)
         message.descriptor_margin = float(match.margin if match else 0.0)
         message.geometric_inlier_ratio = float(result.inlier_ratio)
+        message.reverse_inlier_ratio = float(
+            getattr(result, 'reverse_inlier_ratio', result.inlier_ratio))
         message.registration_residual_m = float(result.residual_m)
         message.occupied_free_agreement = float(result.occupied_free_agreement)
         message.overlap_fraction = float(result.overlap_fraction)
@@ -3201,6 +5804,29 @@ class UnknownPoseFrontend(Node):
         target_ids = list(evidence_target_keyframe_ids or [peer.keyframe_id])
         message.evidence_set_hash = self._canonical_evidence_hash(
             self.robot_id, self.peer_robot_id, source_ids, target_ids)
+        message.physical_evidence_id = self._canonical_evidence_id(
+            self.robot_id, self.peer_robot_id, own.keyframe_id,
+            peer.keyframe_id)
+        message.mode_index = int(getattr(result, 'mode_index', -1))
+        message.mode_support = max(1, int(getattr(result, 'mode_support', 1)))
+        message.mode_log_weight = float(getattr(
+            result, 'mode_log_weight', -math.inf))
+        if self.robot_id == 'robot1':
+            source_viewpoint = self._keyframe_pose(own.keyframe_id)
+            target_viewpoint = self._descriptor_viewpoint(peer)
+        else:
+            source_viewpoint = self._descriptor_viewpoint(peer)
+            target_viewpoint = self._keyframe_pose(own.keyframe_id)
+        message.source_viewpoint_available = source_viewpoint is not None
+        message.target_viewpoint_available = target_viewpoint is not None
+        if source_viewpoint is not None:
+            message.source_viewpoint_x = float(source_viewpoint[0])
+            message.source_viewpoint_y = float(source_viewpoint[1])
+            message.source_viewpoint_yaw = float(source_viewpoint[2])
+        if target_viewpoint is not None:
+            message.target_viewpoint_x = float(target_viewpoint[0])
+            message.target_viewpoint_y = float(target_viewpoint[1])
+            message.target_viewpoint_yaw = float(target_viewpoint[2])
         message.evidence_source_keyframe_ids = source_ids
         message.evidence_target_keyframe_ids = target_ids
         message.constraint_count = int(result.constraint_count)
@@ -3233,6 +5859,8 @@ class UnknownPoseFrontend(Node):
         return message
 
     def hypothesis_callback(self, message):
+        if getattr(self, '_post_handoff_quiesced', False):
+            return
         self._record_diagnostic_event(
             'HYPOTHESIS_RECEIVED',
             source_robot_id=str(message.source_robot_id),
@@ -3254,6 +5882,19 @@ class UnknownPoseFrontend(Node):
         if self.accepted is not None:
             self._record_diagnostic_event(
                 'HYPOTHESIS_IGNORED_ALREADY_ACCEPTED',
+                status=str(message.status))
+            return
+        if self._is_full_map_hypothesis(message):
+            if (message.status == 'PROPOSED' and
+                    self.robot_id == message.target_robot_id):
+                self._handle_full_map_proposal(message)
+                return
+            if (message.status in ('ACCEPTED', 'REJECTED') and
+                    self.robot_id == message.source_robot_id):
+                self._handle_full_map_ack(message)
+                return
+            self._record_diagnostic_event(
+                'FULL_MAP_HYPOTHESIS_IGNORED_SCOPE',
                 status=str(message.status))
             return
         if message.status == 'EVIDENCE':
@@ -3381,12 +6022,15 @@ class UnknownPoseFrontend(Node):
             return
         if self.robot_id != message.source_robot_id:
             self.accepted = message
+            self.accepted_ros_time_s = (
+                self.get_clock().now().nanoseconds * 1.0e-9)
             self.accepted_wall = time.monotonic()
             self._record_diagnostic_event(
                 'HYPOTHESIS_TARGET_ACCEPTED',
                 source_keyframe_id=str(message.source_keyframe_id),
                 target_keyframe_id=str(message.target_keyframe_id))
             self.publish_local_map(force=True)
+            self._enter_post_handoff_quiescence()
             return
         proposal = self.pending_proposals.get(
             (message.source_keyframe_id, message.target_keyframe_id))
@@ -3478,9 +6122,11 @@ class UnknownPoseFrontend(Node):
             evidence_set_hash=str(message.evidence_set_hash))
         self.counters['accepted_hypotheses'] += 1
         self.accepted = final
+        self.accepted_ros_time_s = self.get_clock().now().nanoseconds * 1.0e-9
         self.accepted_wall = time.monotonic()
         self.publish_accepted_tf()
         self.publish_local_map(force=True)
+        self._enter_post_handoff_quiescence()
 
     def _ack_message(self, proposal, result, accepted, rejection_reason):
         message = RelativePoseHypothesis()
@@ -3497,6 +6143,8 @@ class UnknownPoseFrontend(Node):
         message.descriptor_similarity = proposal.descriptor_similarity
         message.descriptor_margin = proposal.descriptor_margin
         message.geometric_inlier_ratio = float(result.inlier_ratio)
+        message.reverse_inlier_ratio = float(
+            getattr(result, 'reverse_inlier_ratio', result.inlier_ratio))
         message.registration_residual_m = float(result.residual_m)
         message.occupied_free_agreement = float(result.occupied_free_agreement)
         message.overlap_fraction = float(result.overlap_fraction)
@@ -3507,6 +6155,19 @@ class UnknownPoseFrontend(Node):
         message.rejection_reason = rejection_reason
         message.accepted = bool(accepted)
         message.evidence_set_hash = proposal.evidence_set_hash
+        message.physical_evidence_id = getattr(
+            proposal, 'physical_evidence_id', '')
+        message.mode_index = int(getattr(proposal, 'mode_index', -1))
+        message.mode_support = int(getattr(proposal, 'mode_support', 1))
+        message.mode_log_weight = float(getattr(
+            proposal, 'mode_log_weight', -math.inf))
+        for field in (
+                'source_viewpoint_available', 'source_viewpoint_x',
+                'source_viewpoint_y', 'source_viewpoint_yaw',
+                'target_viewpoint_available', 'target_viewpoint_x',
+                'target_viewpoint_y', 'target_viewpoint_yaw'):
+            setattr(message, field, getattr(proposal, field, False if
+                                            field.endswith('available') else 0.0))
         message.evidence_source_keyframe_ids = list(
             proposal.evidence_source_keyframe_ids)
         message.evidence_target_keyframe_ids = list(
@@ -3595,9 +6256,9 @@ class UnknownPoseFrontend(Node):
     def publish_local_map(self, force=False):
         if self.latest_map is None or self.accepted is None:
             return False
-        now = time.monotonic()
+        now = self._ros_time_s()
         if not force:
-            if now - self.last_export_wall < self.peer_map_publish_period_s:
+            if now - self.last_export_ros_s < self.peer_map_publish_period_s:
                 return False
             if self.latest_map_fingerprint == self.last_export_map_fingerprint:
                 return False
@@ -3622,15 +6283,19 @@ class UnknownPoseFrontend(Node):
         message.occupancy_grid = self.latest_map
         self.peer_map_pub.publish(message)
         self.counters['peer_maps_published'] += 1
-        self.last_export_wall = now
+        self.last_export_ros_s = now
         self.last_export_map_fingerprint = self.latest_map_fingerprint
         return True
 
     def finalize(self):
         """Persist bounded diagnostics without affecting navigation behavior."""
+        self._evidence_opportunity_deadline_wall = None
+        self._publish_evidence_status(False)
         self._registration_shutdown = True
         if self._registration_future is not None:
             self._registration_future.cancel()
+        if self._full_map_registration_future is not None:
+            self._full_map_registration_future.cancel()
         # Never wait for a potentially expensive registration during ROS
         # teardown.  A running worker is intentionally abandoned; it owns
         # only immutable crop arrays and cannot publish or mutate frontend
@@ -3692,6 +6357,7 @@ class UnknownPoseFrontend(Node):
                 'status': str(self.accepted.status),
                 'accepted': bool(self.accepted.accepted),
                 'rejection_reason': str(self.accepted.rejection_reason),
+                'accepted_ros_time_s': self.accepted_ros_time_s,
             }
         candidate_latency = None
         if self.first_candidate_wall is not None and self.accepted_wall is not None:
@@ -3722,6 +6388,7 @@ class UnknownPoseFrontend(Node):
             'keyframes_retained': len(self.keyframes),
             'peer_descriptors_retained': len(self.peer_descriptors),
             'accepted': bool(self.accepted is not None),
+            'accepted_ros_time_s': self.accepted_ros_time_s,
             'best_similarity': self.best_similarity,
             'best_margin': self.best_margin,
             'best_known_fraction': self.best_known_fraction,

@@ -6,6 +6,7 @@ from pathlib import Path
 from my_epuck_project.live_map_sanitizer import (
     apply_incremental_patch,
     footprint_cell_indices,
+    swept_footprint_cell_indices,
     sanitize_shared_map,
 )
 from my_epuck_project.nav2_frontier_diagnostic import classify_start_cell
@@ -259,6 +260,14 @@ def test_footprint_cell_set_is_bounded():
     cells = footprint_cell_indices(grid(), footprint(role='own'),
                                    uncertainty_cells=1)
     assert len(cells) < 100
+
+
+def test_swept_footprint_has_contiguous_cells_between_path_samples():
+    cells = swept_footprint_cell_indices(
+        grid(), [(0.0, 0.0), (0.12, 0.0)], 0.037)
+    columns = {index % grid().info.width for index in cells}
+    assert len(cells) > 0
+    assert max(columns) - min(columns) >= 8
 
 
 def test_start_gate_classifies_free_and_inflated():

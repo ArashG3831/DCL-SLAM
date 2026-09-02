@@ -36,8 +36,13 @@ def _hash(payload: object) -> str:
 
 
 def _bounded(value: float) -> float:
-    """Clamp the project-normalized Nav2 cost to its declared range."""
+    """Clamp a geometric reduction term to its declared range."""
     return max(0.0, min(1.0, value))
+
+
+def _path_cost(value: float, scale_m: float) -> float:
+    """Convert path length to a soft cost without imposing a distance cap."""
+    return max(0.0, value / scale_m)
 
 
 def _grid_yaw(grid) -> float:
@@ -100,22 +105,28 @@ def _bid_map(batch: BidBatch) -> Mapping[str, Bid]:
         if (math.isfinite(bid.path_length_m) and bid.path_length_m >= 0.0 and
                 math.isfinite(bid.estimated_travel_cost) and
                 bid.estimated_travel_cost >= 0.0):
+            if bid.path_valid and (
+                    not bid.path or any(
+                        not (math.isfinite(float(x)) and math.isfinite(float(y)))
+                        for x, y in bid.path
+                    )):
+                continue
             result[bid.canonical_task_id] = bid
     return result
 
 
 def _task_feasible(
         task: CanonicalTask, bid: Optional[Bid], hard_failed_tasks: frozenset[str],
-        minimum_visible_gain_m: float, maximum_path_length_m: float) -> bool:
+        minimum_visible_gain_m: float) -> bool:
     """Keep existing candidate quality, Nav2, and hard-failure gates."""
     return bool(
         bid is not None and bid.path_valid and
         task.canonical_id not in hard_failed_tasks and
         gain_meets_minimum(task.visible_reveal_gain, minimum_visible_gain_m) and
         math.isfinite(bid.path_length_m) and
-        0.0 <= bid.path_length_m <= maximum_path_length_m and
+        bid.path_length_m >= 0.0 and
         math.isfinite(bid.estimated_travel_cost) and
-        0.0 <= bid.estimated_travel_cost <= maximum_path_length_m
+        bid.estimated_travel_cost >= 0.0
     )
 
 
@@ -143,7 +154,7 @@ def _pair_candidate(
         second_robot: str, second_task_id: str,
         tasks: Mapping[str, CanonicalTask], bids: Mapping[str, Mapping[str, Bid]],
         shared_map, sensor_max_range_m: float, occupied_threshold: int,
-        beta: float, maximum_path_length_m: float):
+        beta: float, path_cost_scale_m: float):
     """Score one distinct two-robot pair in one Burgard assignment order.
 
     Burgard's utility reduction is order-dependent.  The production solver
@@ -157,14 +168,14 @@ def _pair_candidate(
     second_task = tasks[second_task_id]
     first_bid = bids[first_robot][first_task_id]
     second_bid = bids[second_robot][second_task_id]
-    first_cost = _bounded(first_bid.path_length_m / maximum_path_length_m)
+    first_cost = _path_cost(first_bid.path_length_m, path_cost_scale_m)
     first_score = 1.0 - beta * first_cost
     distance, clear, reduction = _reduction(
         first_task, second_task, shared_map, sensor_max_range_m,
         occupied_threshold,
     )
     second_utility = 1.0 - reduction
-    second_cost = _bounded(second_bid.path_length_m / maximum_path_length_m)
+    second_cost = _path_cost(second_bid.path_length_m, path_cost_scale_m)
     second_score = second_utility - beta * second_cost
     trace = (
         {
@@ -207,21 +218,25 @@ def _pair_candidate(
 def choose_burgard_assignment(
         round_id: str, union: CanonicalUnion,
         robot1_bids: BidBatch, robot2_bids: BidBatch,
-        *, beta: float = 1.0, maximum_path_length_m: float = 18.0,
+        *, beta: float = 1.0, path_cost_scale_m: float = 12.0,
         minimum_visible_gain_m: float = 0.05, sensor_max_range_m: float = 11.98,
         occupied_threshold: int = 50, shared_map=None,
-        hard_failed_tasks: frozenset[str] = frozenset()) -> PairDecision:
+        hard_failed_tasks: frozenset[str] = frozenset(),
+        fixed_robot1_task_id: str = '',
+        fixed_robot2_task_id: str = '') -> PairDecision:
     """Run the bounded exact two-robot Burgard-inspired assignment.
 
     ``U_t`` starts at one for every eligible canonical task.  ``C_i,t`` is the
-    robot's existing Nav2 path length normalized by the already authoritative
-    feasible-path ceiling.  This is a project adaptation, not a claim that
-    Burgard et al. used Nav2 or this normalization.
+    robot's existing Nav2 path length converted to a soft cost using the
+    configured scale.  The scale is not a feasibility ceiling: valid paths
+    longer than it remain eligible and incur proportionally larger cost. This
+    is a project adaptation, not a claim that Burgard et al. used Nav2 or this
+    normalization.
     """
     if beta < 0.0 or not math.isfinite(beta):
         raise ValueError('beta must be finite and non-negative')
-    if maximum_path_length_m <= 0.0 or sensor_max_range_m <= 0.0:
-        raise ValueError('path limit and sensor range must be positive')
+    if path_cost_scale_m <= 0.0 or sensor_max_range_m <= 0.0:
+        raise ValueError('path cost scale and sensor range must be positive')
     for batch, robot_id in ((robot1_bids, 'robot1'), (robot2_bids, 'robot2')):
         if batch.round_id != round_id or batch.union_hash != union.union_hash:
             raise ValueError('bid batch does not reference the canonical round')
@@ -234,14 +249,31 @@ def choose_burgard_assignment(
         robot_id: sorted(task_id for task_id, task in tasks.items()
                          if _task_feasible(
                              task, bids[robot_id].get(task_id), hard_failed_tasks,
-                             minimum_visible_gain_m, maximum_path_length_m,
+                             minimum_visible_gain_m,
                          ))
         for robot_id in ('robot1', 'robot2')
     }
+    for fixed_id, robot_id in (
+            (fixed_robot1_task_id, 'robot1'),
+            (fixed_robot2_task_id, 'robot2')):
+        if fixed_id and fixed_id not in feasible[robot_id]:
+            raise ValueError(
+                '%s fixed task is not a valid bid in this round: %s' %
+                (robot_id, fixed_id))
     eligible_tasks = sorted(set(feasible['robot1']) | set(feasible['robot2']))
     pair_candidates = []
-    for robot1_task in [IDLE_TASK_ID] + feasible['robot1']:
-        for robot2_task in [IDLE_TASK_ID] + feasible['robot2']:
+    robot1_choices = ([fixed_robot1_task_id] if fixed_robot1_task_id else
+                      ([IDLE_TASK_ID] if fixed_robot2_task_id and
+                       not feasible['robot1'] else feasible['robot1']
+                       if fixed_robot2_task_id else
+                       [IDLE_TASK_ID] + feasible['robot1']))
+    robot2_choices = ([fixed_robot2_task_id] if fixed_robot2_task_id else
+                      ([IDLE_TASK_ID] if fixed_robot1_task_id and
+                       not feasible['robot2'] else feasible['robot2']
+                       if fixed_robot1_task_id else
+                       [IDLE_TASK_ID] + feasible['robot2']))
+    for robot1_task in robot1_choices:
+        for robot2_task in robot2_choices:
             if robot1_task and robot2_task and robot1_task == robot2_task:
                 continue
             if robot1_task and robot2_task:
@@ -253,7 +285,7 @@ def choose_burgard_assignment(
                     _pair_candidate(
                         *order, tasks, bids, shared_map,
                         sensor_max_range_m, occupied_threshold, beta,
-                        maximum_path_length_m,
+                        path_cost_scale_m,
                     )
                     for order in orders
                 ]
@@ -266,31 +298,31 @@ def choose_burgard_assignment(
                 )
             elif robot1_task:
                 bid = bids['robot1'][robot1_task]
-                selected_score = 1.0 - beta * _bounded(
-                    bid.path_length_m / maximum_path_length_m)
+                selected_score = 1.0 - beta * _path_cost(
+                    bid.path_length_m, path_cost_scale_m)
                 trace = ({
                     'step': 1, 'robot_id': 'robot1', 'task_id': robot1_task,
                     'task_centroid': [round(tasks[robot1_task].centroid[0], 6),
                                       round(tasks[robot1_task].centroid[1], 6)],
                     'initial_utility': 1.0, 'utility_before': 1.0,
                     'raw_nav2_path_length_m': round(bid.path_length_m, 12),
-                    'normalized_cost': round(_bounded(
-                        bid.path_length_m / maximum_path_length_m), 12),
+                    'normalized_cost': round(_path_cost(
+                        bid.path_length_m, path_cost_scale_m), 12),
                     'beta': beta, 'score': round(selected_score, 12),
                     'reductions': [],
                 },)
             elif robot2_task:
                 bid = bids['robot2'][robot2_task]
-                selected_score = 1.0 - beta * _bounded(
-                    bid.path_length_m / maximum_path_length_m)
+                selected_score = 1.0 - beta * _path_cost(
+                    bid.path_length_m, path_cost_scale_m)
                 trace = ({
                     'step': 1, 'robot_id': 'robot2', 'task_id': robot2_task,
                     'task_centroid': [round(tasks[robot2_task].centroid[0], 6),
                                       round(tasks[robot2_task].centroid[1], 6)],
                     'initial_utility': 1.0, 'utility_before': 1.0,
                     'raw_nav2_path_length_m': round(bid.path_length_m, 12),
-                    'normalized_cost': round(_bounded(
-                        bid.path_length_m / maximum_path_length_m), 12),
+                    'normalized_cost': round(_path_cost(
+                        bid.path_length_m, path_cost_scale_m), 12),
                     'beta': beta, 'score': round(selected_score, 12),
                     'reductions': [],
                 },)
@@ -357,10 +389,9 @@ def choose_burgard_assignment(
             task.canonical_id in hard_failed_tasks for task in union.tasks),
         rejected_gain_threshold_count=sum(
             task.visible_reveal_gain < minimum_visible_gain_m for task in union.tasks),
-        rejected_path_threshold_count=sum(
-            bid.path_length_m > maximum_path_length_m or
-            bid.estimated_travel_cost > maximum_path_length_m
-            for batch in (robot1_bids, robot2_bids) for bid in batch.bids),
+        # Kept as a compatibility diagnostic field; it no longer represents
+        # a path-length threshold and is therefore always zero.
+        rejected_path_threshold_count=0,
         feasible_useful_robot1_count=len(feasible['robot1']),
         feasible_useful_robot2_count=len(feasible['robot2']),
         valid_one_active_assignment_count=int(bool(assigned['robot1'])) +
@@ -373,7 +404,7 @@ def choose_burgard_assignment(
         best_non_idle_robot2_task_id=assigned['robot2'],
         best_non_idle_score=score,
         strategy='burgard', beta=beta,
-        feasible_path_limit_m=maximum_path_length_m,
+        feasible_path_limit_m=0.0,
         sensor_max_range_m=sensor_max_range_m,
         burgard_trace=tuple(trace),
     )

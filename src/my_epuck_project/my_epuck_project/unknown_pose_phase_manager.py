@@ -6,11 +6,15 @@ import os
 import signal
 import time
 import math
+import json
+import threading
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from lifecycle_msgs.srv import GetState
 from my_epuck_interfaces.msg import RelativePoseHypothesis
 from nav2_msgs.srv import ManageLifecycleNodes
+from std_msgs.msg import Bool
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import StaticTransformBroadcaster
@@ -40,6 +44,8 @@ class UnknownPosePhaseManager(Node):
             'shared_manager_service', '').value)
         self._handoff_marker_path = str(self.declare_parameter(
             'handoff_marker_path', '').value)
+        self._cleanup_required = bool(self.declare_parameter(
+            'historical_cleanup_required', True).value)
         if not self.robot_id or not local_service or not shared_service:
             raise ValueError('robot_id and lifecycle manager services are required')
         qos = QoSProfile(
@@ -53,6 +59,29 @@ class UnknownPosePhaseManager(Node):
             ManageLifecycleNodes, local_service)
         self._shared_client = self.create_client(
             ManageLifecycleNodes, shared_service)
+        # These read-only clients are retained for startup diagnostics.  The
+        # lifecycle manager owns the managed-node ordering and is the only
+        # service required to request STARTUP.  Waiting for every node's
+        # get_state service here needlessly serializes discovery after the
+        # manager is already able to perform its own dependency-aware start.
+        shared_nodes = (
+            'controller_server', 'smoother_server', 'planner_server',
+            'route_server', 'behavior_server', 'velocity_smoother',
+            'collision_monitor', 'bt_navigator', 'waypoint_follower',
+        )
+        self._shared_lifecycle_node_names = shared_nodes
+        # Create the read-only shared lifecycle clients while handoff evidence
+        # is accumulating.  The clients do not issue a transition before the
+        # local SHUTDOWN safety boundary completes, but early creation lets DDS
+        # discovery overlap the unavoidable unknown-pose wait and local
+        # teardown.  This removes a post-handoff service-discovery stall
+        # without allowing two Nav2 stacks to command the same robot.
+        self._shared_lifecycle_clients = {
+            name: self.create_client(
+                GetState, f'/{self.robot_id}/{name}/get_state')
+            for name in self._shared_lifecycle_node_names
+        }
+        self._last_shared_readiness_log = 0.0
         # Keep the mutually accepted alignment alive after the frontend is
         # intentionally torn down before shared Nav2 starts.  This relay only
         # republishes the accepted protocol message; it never reads truth or
@@ -62,6 +91,15 @@ class UnknownPosePhaseManager(Node):
         self._transition = 'WAITING_FOR_HANDOFF'
         self._request_in_flight = False
         self._transition_started = 0.0
+        # ``PAUSE`` is the Nav2 lifecycle operation that removes local
+        # controller authority while retaining the process long enough for a
+        # bounded, scoped teardown.  Shared Nav2 may only start after this
+        # request succeeds.  A conservative SHUTDOWN fallback remains for a
+        # platform that rejects PAUSE; it never starts two active stacks.
+        self._local_control_release_uses_shutdown = False
+        self._local_process_teardown_started = False
+        self._local_process_teardown_complete = False
+        self._local_process_teardown_thread = None
         # A rejected lifecycle request leaves Nav2 in a partially transitioning
         # state for a short period.  Do not hammer the manager at 10 Hz: that
         # creates entity/log churn and can starve the action servers needed by
@@ -69,13 +107,54 @@ class UnknownPosePhaseManager(Node):
         # behavior while allowing lifecycle cleanup/advertisement to settle.
         self._next_retry_at = 0.0
         self._retry_interval_s = 1.0
+        self._cleanup_ready = {'robot1': False, 'robot2': False}
+        self._shared_ready_publisher = self.create_publisher(
+            Bool,
+            f'/cslam/unknown_pose/{self.robot_id}/shared_nav2_ready',
+            QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self._hypothesis_sub = self.create_subscription(
             RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
             self._hypothesis_callback, qos)
+        if self._cleanup_required:
+            for robot in ('robot1', 'robot2'):
+                self.create_subscription(
+                    Bool,
+                    f'/cslam/unknown_pose/{robot}/historical_cleanup_ready',
+                    lambda message, item=robot: self._cleanup_callback(
+                        item, message),
+                    QoSProfile(
+                        depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                        durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                )
         self._timer = self.create_timer(0.1, self._tick)
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE robot=%s phase=PRE_HANDOFF '
             'local_nav2_active=true shared_nav2_waiting=true' % self.robot_id)
+
+    def _sim_time_s(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _timeline(self, event: str, **fields) -> None:
+        """Emit compact, parseable startup timing evidence.
+
+        This is diagnostic-only.  It neither participates in estimation nor
+        changes lifecycle decisions.  Including both clock domains makes
+        accelerated Webots runs auditable without treating wall time as a
+        simulation-time safety condition.
+        """
+        payload = {
+            'event': event,
+            'robot_id': self.robot_id,
+            'sim_time_s': round(self._sim_time_s(), 6),
+            'wall_monotonic_s': round(time.monotonic(), 6),
+            **fields,
+        }
+        self.get_logger().info(
+            'STARTUP_TIMELINE %s' % json.dumps(
+                payload, sort_keys=True, separators=(',', ':')))
 
     def _write_handoff_marker(self) -> None:
         """Record that local-child termination is an expected phase switch.
@@ -153,11 +232,15 @@ class UnknownPosePhaseManager(Node):
 
     def _terminate_local_processes(self) -> None:
         """Terminate this robot's deactivated pre-handoff process set."""
+        self._timeline('LOCAL_NAV2_PROCESSES_TEARDOWN_STARTED')
         pids = self._local_process_pids()
         if not pids:
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=none' %
                 self.robot_id)
+            self._local_process_teardown_complete = True
+            self._timeline('LOCAL_NAV2_PROCESSES_TEARDOWN_COMPLETE',
+                           remaining=0)
             return
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=term pids=%s' %
@@ -199,6 +282,27 @@ class UnknownPosePhaseManager(Node):
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE robot=%s local_process_teardown=complete '
             'remaining=%s' % (self.robot_id, len(remaining)))
+        self._local_process_teardown_complete = True
+        self._timeline('LOCAL_NAV2_PROCESSES_TEARDOWN_COMPLETE',
+                       remaining=len(remaining))
+
+    def _begin_local_process_teardown(self) -> None:
+        """Retire inactive local processes without blocking shared startup.
+
+        The caller has already received a successful lifecycle PAUSE (or the
+        conservative SHUTDOWN fallback), so this thread cannot overlap two
+        control authorities.  It only waits on this robot's exact local
+        process set; shared lifecycle startup remains on the executor thread.
+        """
+        if self._local_process_teardown_started:
+            return
+        self._local_process_teardown_started = True
+        self._local_process_teardown_thread = threading.Thread(
+            target=self._terminate_local_processes,
+            name='%s-local-nav2-teardown' % self.robot_id,
+            daemon=True,
+        )
+        self._local_process_teardown_thread.start()
 
     def _hypothesis_callback(self, message: RelativePoseHypothesis) -> None:
         if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
@@ -207,10 +311,32 @@ class UnknownPosePhaseManager(Node):
             self._accepted = True
             self._publish_accepted_tf(message)
             self._write_handoff_marker()
-            self._transition = 'SHUTTING_DOWN_LOCAL'
+            self._timeline('HANDOFF_LOCKED')
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s accepted_handoff=true '
-                'transition=SHUTTING_DOWN_LOCAL' % self.robot_id)
+                'cleanup_wait=%s' % (self.robot_id, self._cleanup_required))
+            self._maybe_start_transition()
+
+    def _cleanup_callback(self, robot, message):
+        if not bool(message.data):
+            return
+        self._cleanup_ready[robot] = True
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s historical_cleanup_ready=%s' %
+            (self.robot_id, robot))
+        self._maybe_start_transition()
+
+    def _maybe_start_transition(self):
+        if not self._accepted or self._transition != 'WAITING_FOR_HANDOFF':
+            return
+        if self._cleanup_required and not all(self._cleanup_ready.values()):
+            return
+        self._transition = 'SHUTTING_DOWN_LOCAL'
+        self._timeline('LOCAL_NAV_GOAL_CANCEL_REQUESTED',
+                       reason='accepted_handoff_cleanup_complete')
+        self.get_logger().info(
+            'UNKNOWN_POSE_PHASE robot=%s transition=SHUTTING_DOWN_LOCAL' %
+            self.robot_id)
 
     @staticmethod
     def _yaw_from_quaternion(rotation) -> float:
@@ -255,13 +381,21 @@ class UnknownPosePhaseManager(Node):
                 self.robot_id, self.shared_frame, target.child_frame_id,
                 str(getattr(message, 'evidence_set_hash', ''))))
 
-    def _send(self, client, command, next_state: str) -> None:
+    def _send(self, client, command, next_state: str, operation: str) -> None:
         if (self._request_in_flight or
                 time.monotonic() < self._next_retry_at or
                 not client.service_is_ready()):
             return
         request = ManageLifecycleNodes.Request()
         request.command = command
+        if operation == 'LOCAL_CONTROL_RELEASE':
+            self._timeline(
+                'LOCAL_NAV2_LIFECYCLE_SHUTDOWN_REQUESTED',
+                command=('SHUTDOWN' if self._local_control_release_uses_shutdown
+                         else 'PAUSE'),
+            )
+        elif operation == 'SHARED_NAV2_STARTUP':
+            self._timeline('SHARED_NAV2_LIFECYCLE_STARTUP_REQUESTED')
         self._request_in_flight = True
         self._transition_started = time.monotonic()
         future = client.call_async(request)
@@ -271,36 +405,122 @@ class UnknownPosePhaseManager(Node):
             try:
                 response = result.result()
             except Exception as error:  # noqa: B902
+                if (operation == 'LOCAL_CONTROL_RELEASE' and
+                        not self._local_control_release_uses_shutdown):
+                    self._local_control_release_uses_shutdown = True
+                    self._timeline(
+                        'LOCAL_NAV2_PAUSE_FALLBACK_TO_SHUTDOWN',
+                        reason='service_exception', error=str(error))
                 self._next_retry_at = time.monotonic() + self._retry_interval_s
                 self.get_logger().error(
                     'UNKNOWN_POSE_PHASE robot=%s transition=%s exception=%s' %
                     (self.robot_id, self._transition, error))
                 return
             if not bool(response.success):
+                if (operation == 'LOCAL_CONTROL_RELEASE' and
+                        not self._local_control_release_uses_shutdown):
+                    self._local_control_release_uses_shutdown = True
+                    self._timeline(
+                        'LOCAL_NAV2_PAUSE_FALLBACK_TO_SHUTDOWN',
+                        reason='request_rejected')
                 self._next_retry_at = time.monotonic() + self._retry_interval_s
                 self.get_logger().error(
                     'UNKNOWN_POSE_PHASE robot=%s transition=%s rejected' %
                     (self.robot_id, self._transition))
                 return
-            if (self._transition == 'SHUTTING_DOWN_LOCAL' and
-                    next_state == 'STARTING_SHARED'):
-                self._terminate_local_processes()
+            if operation == 'LOCAL_CONTROL_RELEASE':
+                release_command = (
+                    'SHUTDOWN' if self._local_control_release_uses_shutdown
+                    else 'PAUSE')
+                self._timeline('LOCAL_NAV2_LIFECYCLE_INACTIVE',
+                               command=release_command)
+                # PAUSE completes only after local controller_server and the
+                # action stack have deactivated.  It is the control-safety
+                # boundary; process exit below is bookkeeping, not a reason
+                # to delay inactive shared-stack activation.
+                self._timeline('LOCAL_NAV_GOAL_TERMINAL',
+                               terminal_by_lifecycle_release=True,
+                               command=release_command)
+                self._begin_local_process_teardown()
             self._transition = next_state
+            if next_state == 'POST_HANDOFF_SHARED':
+                ready = Bool()
+                ready.data = True
+                self._shared_ready_publisher.publish(ready)
+                self.get_logger().info(
+                    'UNKNOWN_POSE_PHASE robot=%s shared_nav2_ready=true' %
+                    self.robot_id)
+                self._timeline('SHARED_NAV2_LIFECYCLE_ACTIVE')
+                self._log_shared_lifecycle_states()
             self.get_logger().info(
                 'UNKNOWN_POSE_PHASE robot=%s transition_complete=%s' %
                 (self.robot_id, next_state))
 
         future.add_done_callback(done)
 
+    def _log_shared_lifecycle_states(self) -> None:
+        """Record the critical shared nodes' reported lifecycle state."""
+        for node_name, event in (
+                ('planner_server', 'SHARED_PLANNER_ACTIVE'),
+                ('controller_server', 'SHARED_CONTROLLER_ACTIVE')):
+            client = self._shared_lifecycle_clients.get(node_name)
+            if client is None or not client.service_is_ready():
+                continue
+            future = client.call_async(GetState.Request())
+
+            def done(result, item=node_name, event_name=event):
+                try:
+                    response = result.result()
+                    state = response.current_state
+                    self._timeline(
+                        event_name,
+                        lifecycle_id=int(state.id),
+                        lifecycle_label=str(state.label),
+                        node=item,
+                    )
+                except Exception as error:  # noqa: B902
+                    self._timeline(
+                        'SHARED_LIFECYCLE_STATE_QUERY_FAILED', node=item,
+                        error=str(error))
+
+            future.add_done_callback(done)
+
+    def _ensure_shared_lifecycle_clients(self) -> None:
+        if self._shared_lifecycle_clients:
+            return
+        self._shared_lifecycle_clients = {
+            name: self.create_client(
+                GetState, f'/{self.robot_id}/{name}/get_state')
+            for name in self._shared_lifecycle_node_names
+        }
+
     def _tick(self) -> None:
         if self._transition == 'SHUTTING_DOWN_LOCAL':
             self._send(
-                self._local_client, ManageLifecycleNodes.Request.SHUTDOWN,
-                'STARTING_SHARED')
+                # PAUSE is the narrow safety boundary: it deactivates the
+                # local controller and action stack before shared Nav2 can be
+                # activated.  Full process retirement continues in parallel
+                # afterward.  If PAUSE is rejected, the explicit SHUTDOWN
+                # fallback preserves the former conservative behavior.
+                self._local_client,
+                (ManageLifecycleNodes.Request.SHUTDOWN
+                 if self._local_control_release_uses_shutdown
+                 else ManageLifecycleNodes.Request.PAUSE),
+                'STARTING_SHARED', 'LOCAL_CONTROL_RELEASE')
         elif self._transition == 'STARTING_SHARED':
+            self._ensure_shared_lifecycle_clients()
+            if not self._shared_client.service_is_ready():
+                now = time.monotonic()
+                if now - self._last_shared_readiness_log >= 2.0:
+                    self._last_shared_readiness_log = now
+                    self.get_logger().info(
+                        'UNKNOWN_POSE_PHASE robot=%s '
+                        'shared_nav2_waiting_for_lifecycle_manager=true' %
+                        self.robot_id)
+                return
             self._send(
                 self._shared_client, ManageLifecycleNodes.Request.STARTUP,
-                'POST_HANDOFF_SHARED')
+                'POST_HANDOFF_SHARED', 'SHARED_NAV2_STARTUP')
         elif self._transition == 'POST_HANDOFF_SHARED':
             return
 

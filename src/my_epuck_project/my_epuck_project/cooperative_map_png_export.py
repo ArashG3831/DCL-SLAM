@@ -1,6 +1,7 @@
 """Export cooperative occupancy-map artifacts as portable PNG files."""
 
 import argparse
+import bisect
 import csv
 import json
 import math
@@ -197,24 +198,43 @@ def load_final_shared_poses(attempt):
 
 
 def load_shared_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
-    """Load bounded robot trajectories already expressed in shared_map.
+    """Load bounded robot trajectories in the final ``shared_map`` frame.
 
-    The observer ``robot*_timeseries.csv`` pose columns are the same
-    shared-map pose used by the cross-robot metrics.  This deliberately does
-    not reinterpret Supervisor world coordinates as map coordinates: doing so
-    without a captured world-to-shared transform would apply an incorrect
-    transform to the path.  Large time gaps and implausible jumps are split
-    into separate segments so a dropped capture interval cannot draw a line
-    across the map.
+    The observer ``robot*_timeseries.csv`` pose columns are native odometry
+    poses in ``robotN/odom``; they are not shared-map coordinates.  Rendering
+    those values directly makes paths spill away from the OccupancyGrid when
+    the accepted map/odom relation is non-identity.  The forensic transform
+    capture contains the time-varying ``shared_map<-robotN/odom`` relation,
+    so it is applied to every recorded odometry pose here.
+
+    Large time gaps and implausible jumps are split into separate segments so
+    a dropped capture interval or a discrete scan-matching correction cannot
+    draw a misleading line across the map.
     """
     attempt = Path(attempt)
+    transforms = _forensic_transforms(attempt)
     result = {}
     for robot in ('robot1', 'robot2'):
-        candidates = sorted((attempt / 'observer').glob(
-            f'*/{robot}_timeseries.csv'))
+        relation = sorted(
+            (
+                float(row['query_ros_time_s']),
+                (
+                    float(row['translation_x']),
+                    float(row['translation_y']),
+                    _yaw_from_quaternion(row),
+                ),
+            )
+            for row in transforms
+            if row.get('target_frame') == 'shared_map'
+            and row.get('source_frame') == f'{robot}/odom'
+            and row.get('available') == 'True'
+            and row.get('query_ros_time_s') not in (None, '')
+        )
+        candidates = sorted((attempt / 'forensic').glob(
+            f'{robot}_odom.csv'))
         if not candidates:
-            candidates = sorted(attempt.glob(f'**/{robot}_timeseries.csv'))
-        if not candidates:
+            candidates = sorted(attempt.glob(f'**/forensic/{robot}_odom.csv'))
+        if not candidates or not relation:
             continue
         path = candidates[-1]
         try:
@@ -223,18 +243,38 @@ def load_shared_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
         except OSError:
             continue
 
+        relation_times = [item[0] for item in relation]
         segments = []
         current = []
         previous_time = None
         previous_point = None
         for row in rows:
             try:
-                point = (float(row['pose_x']), float(row['pose_y']))
-                timestamp = float(row.get('elapsed_s') or row['ros_time_sec'])
-                if not all(math.isfinite(value) for value in point):
+                timestamp = float(row['header_stamp'])
+                odom_point = (float(row['pose_x']), float(row['pose_y']))
+                if not all(math.isfinite(value) for value in odom_point):
                     raise ValueError
             except (KeyError, TypeError, ValueError):
                 continue
+
+            relation_index = bisect.bisect_right(
+                relation_times, timestamp) - 1
+            # The accepted shared frame is created after the first local
+            # odometry samples, but its locked relation is valid for the
+            # complete recorded trajectory.  Use the earliest captured
+            # relation for those initial samples.
+            relation_index = max(0, relation_index)
+            transform = relation[relation_index][1]
+            cosine, sine = math.cos(transform[2]), math.sin(transform[2])
+            point = (
+                transform[0] + cosine * odom_point[0]
+                - sine * odom_point[1],
+                transform[1] + sine * odom_point[0]
+                + cosine * odom_point[1],
+            )
+            if not all(math.isfinite(value) for value in point):
+                continue
+
             gap = (timestamp - previous_time) if previous_time is not None else 0.0
             jump = (
                 math.hypot(point[0] - previous_point[0],
@@ -251,7 +291,9 @@ def load_shared_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
             segments.append(current)
         if segments:
             result[robot] = {
-                'source': str(path),
+                'source': (
+                    f'{path} + forensic transforms.csv '
+                    f'(shared_map<-{robot}/odom)'),
                 'segments': segments,
                 'point_count': sum(len(segment) for segment in segments),
             }
@@ -272,6 +314,69 @@ def _forensic_transforms(attempt):
             return list(csv.DictReader(stream))
     except OSError:
         return []
+
+
+def _scan_matching_map_to_odom(attempt, robot):
+    """Load recorded time-varying local ``map<-odom`` corrections.
+
+    Some observer runs captured scan-matching corrections but did not include
+    ``robotN/map<-robotN/odom`` in ``transforms.csv``.  Those corrections are
+    still authoritative for projecting the odometry path; using raw odometry
+    directly on a map silently draws a geometrically wrong path.
+    """
+    candidates = [Path(attempt) / 'forensic' / 'scan_matching' /
+                  f'{robot}_corrections.jsonl']
+    candidates.extend(sorted(Path(attempt).glob(
+        f'**/forensic/scan_matching/{robot}_corrections.jsonl')))
+    path = next((candidate for candidate in candidates if candidate.is_file()),
+                None)
+    if path is None:
+        return []
+    result = []
+    try:
+        with path.open(encoding='utf-8') as stream:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                    if (not value.get('available')
+                            or value.get('map_to_odom_x') is None):
+                        continue
+                    result.append((
+                        float(value.get('map_to_odom_stamp')
+                              or value['query_ros_time_s']),
+                        float(value['map_to_odom_x']),
+                        float(value['map_to_odom_y']),
+                        float(value['map_to_odom_yaw'])))
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+    except OSError:
+        return []
+    return sorted(result, key=lambda item: item[0])
+
+
+def _map_to_odom_at(corrections, timestamp):
+    """Return the latest recorded map<-odom correction at ``timestamp``."""
+    selected = None
+    for correction in corrections:
+        if correction[0] > timestamp:
+            break
+        selected = correction
+    return selected or (0.0, 0.0, 0.0, 0.0)
+
+
+def _project_odom_row(row, correction):
+    """Project one odometry row through a planar map<-odom correction."""
+    timestamp, translation_x, translation_y, correction_yaw = correction
+    odom_x, odom_y = float(row['pose_x']), float(row['pose_y'])
+    cosine, sine = math.cos(correction_yaw), math.sin(correction_yaw)
+    return (
+        translation_x + cosine * odom_x - sine * odom_y,
+        translation_y + sine * odom_x + cosine * odom_y,
+        correction_yaw + math.atan2(
+            2.0 * float(row['orientation_w']) * float(row['orientation_z']),
+            1.0 - 2.0 * float(row['orientation_z']) ** 2),
+        timestamp,
+    )
 
 
 def _apply_transform(row, point):
@@ -295,10 +400,12 @@ def load_local_map_poses(attempt):
     result = {}
     for robot in ('robot1', 'robot2'):
         tf_row = _transform_row(transforms, f'{robot}/map', f'{robot}/odom')
+        corrections = ([] if tf_row is not None else
+                       _scan_matching_map_to_odom(attempt, robot))
         paths = sorted((attempt / 'forensic').glob(f'{robot}_odom.csv'))
         if not paths:
             paths = sorted(attempt.glob(f'**/{robot}_odom.csv'))
-        if not paths or tf_row is None:
+        if not paths or (tf_row is None and not corrections):
             continue
         try:
             with paths[-1].open(newline='', encoding='utf-8') as stream:
@@ -307,14 +414,25 @@ def load_local_map_poses(attempt):
             continue
         for row in reversed(rows):
             try:
-                point = _apply_transform(tf_row, (
-                    float(row['pose_x']), float(row['pose_y'])))
+                if tf_row is not None:
+                    point = _apply_transform(tf_row, (
+                        float(row['pose_x']), float(row['pose_y'])))
+                    yaw = float(row.get('pose_yaw') or 0.0)
+                    source = (f'{paths[-1]} + captured '
+                              f'{robot}/map<-{robot}/odom')
+                else:
+                    timestamp = float(row['header_stamp'])
+                    x, y, yaw, _ = _project_odom_row(
+                        row, _map_to_odom_at(corrections, timestamp))
+                    point = (x, y)
+                    source = (f'{paths[-1]} + recorded scan-matching '
+                              f'{robot}/map<-{robot}/odom')
                 result[robot] = {
                     'x_m': point[0], 'y_m': point[1],
-                    'yaw_rad': float(row.get('pose_yaw') or 0.0),
+                    'yaw_rad': yaw,
                     'query_ros_time_s': float(
                         row.get('received_ros_time_s') or 0.0),
-                    'source': f'{paths[-1]} + captured {robot}/map<-{robot}/odom',
+                    'source': source,
                 }
                 break
             except (KeyError, TypeError, ValueError):
@@ -329,10 +447,12 @@ def load_local_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
     result = {}
     for robot in ('robot1', 'robot2'):
         tf_row = _transform_row(transforms, f'{robot}/map', f'{robot}/odom')
+        corrections = ([] if tf_row is not None else
+                       _scan_matching_map_to_odom(attempt, robot))
         paths = sorted((attempt / 'forensic').glob(f'{robot}_odom.csv'))
         if not paths:
             paths = sorted(attempt.glob(f'**/{robot}_odom.csv'))
-        if not paths or tf_row is None:
+        if not paths or (tf_row is None and not corrections):
             continue
         try:
             with paths[-1].open(newline='', encoding='utf-8') as stream:
@@ -343,9 +463,15 @@ def load_local_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
         previous_time, previous_point = None, None
         for row in rows:
             try:
-                point = _apply_transform(tf_row, (
-                    float(row['pose_x']), float(row['pose_y'])))
-                timestamp = float(row.get('received_ros_time_s') or 0.0)
+                if tf_row is not None:
+                    point = _apply_transform(tf_row, (
+                        float(row['pose_x']), float(row['pose_y'])))
+                    timestamp = float(row.get('received_ros_time_s') or 0.0)
+                else:
+                    timestamp = float(row['header_stamp'])
+                    x, y, _, _ = _project_odom_row(
+                        row, _map_to_odom_at(corrections, timestamp))
+                    point = (x, y)
             except (KeyError, TypeError, ValueError):
                 continue
             gap = timestamp - previous_time if previous_time is not None else 0.0
@@ -362,8 +488,12 @@ def load_local_map_paths(attempt, max_gap_s=5.0, max_jump_m=1.0):
             segments.append(current)
         if segments:
             result[robot] = {
-                'source': f'{paths[-1]} projected with captured '
-                          f'{robot}/map<-{robot}/odom',
+                'source': (
+                    f'{paths[-1]} projected with captured '
+                    f'{robot}/map<-{robot}/odom'
+                    if tf_row is not None else
+                    f'{paths[-1]} projected with recorded scan-matching '
+                    f'{robot}/map<-{robot}/odom'),
                 'segments': segments,
                 'point_count': sum(len(segment) for segment in segments),
             }
@@ -783,13 +913,24 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
         if records:
             pose_records[name] = records
 
+    # Before handoff the two local maps are independent coordinate frames;
+    # never draw robot2's local pose/path on robot1's map.  The canonical
+    # image is robot1's local map in this mode, while each robot's own image
+    # below receives its own trajectory.
+    canonical_poses = (poses if shared_available else
+                       {'robot1': poses['robot1']}
+                       if 'robot1' in poses else {})
+    canonical_paths = (paths if shared_available else
+                       {'robot1': paths['robot1']}
+                       if 'robot1' in paths else {})
     image, records = render_map_with_poses(
-        canonical.data, canonical.geometry, poses, scale=scale,
+        canonical.data, canonical.geometry, canonical_poses, scale=scale,
         margin_cells=margin_cells)
     save('final_merged_map.png', image, records)
     if draw_paths:
         image, records, path_records = render_map_with_paths(
-            canonical.data, canonical.geometry, poses, paths, scale=scale,
+            canonical.data, canonical.geometry, canonical_poses,
+            canonical_paths, scale=scale,
             margin_cells=margin_cells)
         save('final_merged_map_with_paths.png', image, records)
     else:

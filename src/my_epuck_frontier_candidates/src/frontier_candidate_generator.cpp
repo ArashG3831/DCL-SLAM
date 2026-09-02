@@ -1,8 +1,11 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fcntl.h>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -37,6 +40,65 @@ class Generator : public rclcpp::Node {
   using Action = nav2_msgs::action::ComputePathToPose;
   using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
 
+  enum class TimingSection {
+    START_CYCLE,
+    CORE_FRONTIER_SNAPSHOT,
+    MAKE_WORK,
+    FRONTIER_FILTERING,
+    QUERY_RESULT_PROCESSING,
+    PUBLISH_BATCH,
+    COUNT
+  };
+
+  struct TimingStats {
+    uint64_t calls{0};
+    double total_wall_s{0.0};
+    double max_wall_s{0.0};
+
+    void add(double duration_s)
+    {
+      ++calls;
+      total_wall_s += duration_s;
+      max_wall_s = std::max(max_wall_s, duration_s);
+    }
+  };
+
+  struct CycleStats {
+    uint64_t cycles{0};
+    uint64_t map_cells_total{0};
+    uint64_t raw_frontiers_total{0};
+    uint64_t final_candidates_total{0};
+
+    void add(std::size_t map_cells, uint32_t raw_frontiers, std::size_t final_candidates)
+    {
+      ++cycles;
+      map_cells_total += static_cast<uint64_t>(map_cells);
+      raw_frontiers_total += raw_frontiers;
+      final_candidates_total += static_cast<uint64_t>(final_candidates);
+    }
+  };
+
+  struct TimingScope {
+    Generator * owner;
+    TimingSection section;
+    double sim_time_s;
+    std::chrono::steady_clock::time_point started;
+
+    TimingScope(Generator * node, TimingSection value, double sim_time)
+    : owner(node), section(value), sim_time_s(sim_time),
+      started(std::chrono::steady_clock::now()) {}
+
+    ~TimingScope()
+    {
+      if (owner) {
+        owner->record_timing(
+          section, sim_time_s,
+          std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count());
+      }
+    }
+  };
+
   enum class State {WAITING_FOR_INPUTS, IDLE, EXTRACTING, PATH_CHECKING, PUBLISHING};
 
   struct Work {
@@ -50,6 +112,8 @@ class Generator : public rclcpp::Node {
     geometry_msgs::msg::PoseStamped pose;
     double path{0.0};
     double score{0.0};
+    uint32_t mrtsp_route_rank{std::numeric_limits<uint32_t>::max()};
+    uint64_t mrtsp_route_generation{0};
     std::vector<geometry_msgs::msg::Point> path_samples;
     uint64_t map_context{0};
     uint64_t cost_context{0};
@@ -134,12 +198,22 @@ public:
     P(int, maximum_candidates_before_path_check, 8);
     P(int, maximum_path_queries_per_cycle, 5);
     P(double, path_query_timeout_s, 1.0);
-    P(double, maximum_feasible_path_m, 18.0);
     P(std::string, planner_id, "GridBased");
+    P(std::string, selection_policy, "frontier_mrtsp");
     P(double, gain_weight, 1.0);
     P(double, distance_weight, 1.0);
     P(double, path_weight, 1.0);
     P(double, heading_weight, .2);
+    // These are the frozen production RPP reference limits.  They scale the
+    // cost-only policy physically; they are not an ETA or an RPP simulator.
+    P(double, cost_only_reference_linear_speed_mps, .13);
+    P(double, cost_only_reference_angular_speed_radps, .35);
+    // The upstream core remains a route/preference engine only.  The
+    // distributed coordinator is still the sole owner of NavigateToPose.
+    P(bool, upstream_route_ordering_enabled, false);
+    P(std::string, upstream_mrtsp_solver, "dp");
+    P(int, upstream_mrtsp_candidate_limit, 8);
+    P(int, upstream_mrtsp_planning_horizon, 5);
     P(double, unreachable_suppression_s, 7.0);
     P(int, maximum_suppression_records, 128);
     P(double, goal_tolerance_m, .03);
@@ -152,6 +226,7 @@ public:
     P(double, path_context_radius_m, .75);
     P(bool, forensic_clearance_cells, false);
     P(bool, diagnostic_frontier_capture, false);
+    diagnostic_timing_ = std::getenv("MY_EPUCK_FRONTIER_CANDIDATE_TIMING") != nullptr;
     // Compatibility marker: GENERATOR_APPROACH_CLEARANCE_CELLS and
     // P(bool,forensic_clearance_cells,false) document the opt-in evidence path.
     // The upstream core owns frontier discovery; this cache is only for the
@@ -160,6 +235,18 @@ public:
 #undef P
     if (robot_id_.empty()) {
       throw std::runtime_error("robot_id must be configured");
+    }
+    if (selection_policy_ != "frontier_cost_only" &&
+        selection_policy_ != "frontier_mrtsp") {
+      throw std::runtime_error(
+        "selection_policy must be frontier_cost_only or frontier_mrtsp");
+    }
+    if (!std::isfinite(cost_only_reference_linear_speed_mps_) ||
+        cost_only_reference_linear_speed_mps_ <= 0.0 ||
+        !std::isfinite(cost_only_reference_angular_speed_radps_) ||
+        cost_only_reference_angular_speed_radps_ <= 0.0) {
+      throw std::runtime_error(
+        "cost-only reference speeds must be finite and positive");
     }
     if (path_query_lock_path_.empty()) {
       path_query_lock_path_ = "/tmp/my_epuck_" + robot_id_ + "_compute_path.lock";
@@ -253,9 +340,14 @@ public:
     }
     RCLCPP_INFO(
       get_logger(),
-      "candidate generator: persistent fair frontier evaluation map=%s costmap=%s planner=%s budget=%d handoff_gated=%s",
+      "candidate generator: persistent fair frontier evaluation policy=%s map=%s costmap=%s planner=%s budget=%d handoff_gated=%s",
+      selection_policy_.c_str(),
       map_topic_.c_str(), global_costmap_topic_.c_str(), compute_path_action_.c_str(),
       maximum_path_queries_per_cycle_, handoff_gated_ ? "true" : "false");
+    RCLCPP_INFO(
+      get_logger(),
+      "COST_ONLY_MOTION_REFERENCES linear_mps=%.6f angular_radps=%.6f",
+      cost_only_reference_linear_speed_mps_, cost_only_reference_angular_speed_radps_);
     RCLCPP_INFO(
       get_logger(), "GENERATOR_GRID_QOS reliability=%s durability=%s depth=1",
       grid_subscription_reliability_.c_str(), grid_subscription_durability_.c_str());
@@ -263,6 +355,7 @@ public:
 
   ~Generator() override
   {
+    emit_timing_summary();
     request_generation_++;
     active_request_ = 0;
     if (timeout_timer_) {timeout_timer_->cancel();}
@@ -272,6 +365,134 @@ public:
   }
 
 private:
+  static const char * timing_section_name(TimingSection section)
+  {
+    switch (section) {
+      case TimingSection::START_CYCLE: return "start_cycle";
+      case TimingSection::CORE_FRONTIER_SNAPSHOT: return "get_frontier_snapshot";
+      case TimingSection::MAKE_WORK: return "make_work";
+      case TimingSection::FRONTIER_FILTERING: return "frontier_filtering";
+      case TimingSection::QUERY_RESULT_PROCESSING: return "query_result_processing";
+      case TimingSection::PUBLISH_BATCH: return "publish_batch";
+      default: return "unknown";
+    }
+  }
+
+  static int timing_window(double sim_time_s)
+  {
+    if (sim_time_s >= 50.0 && sim_time_s < 100.0) {return 0;}
+    if (sim_time_s >= 280.0 && sim_time_s <= 330.0) {return 1;}
+    return -1;
+  }
+
+  void record_timing(TimingSection section, double sim_time_s, double duration_s)
+  {
+    if (!diagnostic_timing_) {return;}
+    const int window = timing_window(sim_time_s);
+    if (window < 0) {return;}
+    timing_stats_[static_cast<std::size_t>(section)][static_cast<std::size_t>(window)].add(
+      duration_s);
+  }
+
+  void record_cycle(std::size_t map_cells, uint32_t raw_frontiers, std::size_t final_candidates)
+  {
+    if (!diagnostic_timing_) {return;}
+    const double sim_time_s = now().seconds();
+    const int window = timing_window(sim_time_s);
+    if (window >= 0) {
+      cycle_stats_[static_cast<std::size_t>(window)].add(
+        map_cells, raw_frontiers, final_candidates);
+    }
+  }
+
+  void emit_timing_summary()
+  {
+    if (!diagnostic_timing_ || timing_summary_emitted_) {return;}
+    timing_summary_emitted_ = true;
+    constexpr const char * windows[] = {"early", "late"};
+    for (std::size_t window = 0; window < 2; ++window) {
+      RCLCPP_WARN(
+        get_logger(),
+        "FRONTIER_GENERATOR_CYCLE_SUMMARY robot=%s window=%s cycles=%lu map_cells_total=%lu raw_frontiers_total=%lu final_candidates_total=%lu",
+        robot_id_.c_str(), windows[window], cycle_stats_[window].cycles,
+        cycle_stats_[window].map_cells_total, cycle_stats_[window].raw_frontiers_total,
+        cycle_stats_[window].final_candidates_total);
+      for (std::size_t section = 0;
+        section < static_cast<std::size_t>(TimingSection::COUNT); ++section)
+      {
+        const auto & stats = timing_stats_[section][window];
+        const double mean = stats.calls == 0 ? 0.0 : stats.total_wall_s / stats.calls;
+        RCLCPP_WARN(
+          get_logger(),
+          "FRONTIER_GENERATOR_TIMING robot=%s window=%s section=%s calls=%lu total_wall_s=%.9f mean_wall_s=%.9f max_wall_s=%.9f",
+          robot_id_.c_str(), windows[window],
+          timing_section_name(static_cast<TimingSection>(section)), stats.calls,
+          stats.total_wall_s, mean, stats.max_wall_s);
+      }
+    }
+  }
+
+  static const char * action_result_name(rclcpp_action::ResultCode code)
+  {
+    switch (code) {
+      case rclcpp_action::ResultCode::SUCCEEDED: return "SUCCEEDED";
+      case rclcpp_action::ResultCode::CANCELED: return "CANCELED";
+      case rclcpp_action::ResultCode::ABORTED: return "ABORTED";
+      default: return "UNKNOWN";
+    }
+  }
+
+  static const char * nav2_error_name(int error_code)
+  {
+    switch (error_code) {
+      case Action::Result::NONE: return "NONE";
+      case Action::Result::UNKNOWN: return "UNKNOWN";
+      case Action::Result::INVALID_PLANNER: return "INVALID_PLANNER";
+      case Action::Result::TF_ERROR: return "TF_ERROR";
+      case Action::Result::START_OUTSIDE_MAP: return "START_OUTSIDE_MAP";
+      case Action::Result::GOAL_OUTSIDE_MAP: return "GOAL_OUTSIDE_MAP";
+      case Action::Result::START_OCCUPIED: return "START_OCCUPIED";
+      case Action::Result::GOAL_OCCUPIED: return "GOAL_OCCUPIED";
+      case Action::Result::TIMEOUT: return "TIMEOUT";
+      case Action::Result::NO_VALID_PATH: return "NO_VALID_PATH";
+      default: return "UNRECOGNIZED";
+    }
+  }
+
+  static const char * query_failure_class(
+    rclcpp_action::ResultCode action_result, int error_code, bool timed_out = false)
+  {
+    if (timed_out || error_code == Action::Result::TIMEOUT) {
+      return "PLANNER_QUERY_TIMEOUT";
+    }
+    if (error_code == Action::Result::START_OUTSIDE_MAP ||
+      error_code == Action::Result::GOAL_OUTSIDE_MAP ||
+      error_code == Action::Result::START_OCCUPIED ||
+      error_code == Action::Result::GOAL_OCCUPIED ||
+      error_code == Action::Result::NO_VALID_PATH)
+    {
+      return "CANDIDATE_UNREACHABLE";
+    }
+    if (error_code == Action::Result::INVALID_PLANNER) {
+      return "PLANNER_LIFECYCLE_UNAVAILABLE";
+    }
+    if (error_code == Action::Result::TF_ERROR) {
+      return "TRANSIENT_PLANNER_QUERY_FAILURE";
+    }
+    if (action_result != rclcpp_action::ResultCode::SUCCEEDED) {
+      return "TRANSIENT_PLANNER_QUERY_FAILURE";
+    }
+    return "TRANSIENT_PLANNER_QUERY_FAILURE";
+  }
+
+  static std::string log_safe(std::string value)
+  {
+    std::replace(value.begin(), value.end(), '\n', ' ');
+    std::replace(value.begin(), value.end(), '\r', ' ');
+    std::replace(value.begin(), value.end(), '"', '\'');
+    return value;
+  }
+
   void initialize_upstream_core()
   {
     frontier_exploration_ros2::FrontierExplorerCoreParams params;
@@ -283,7 +504,13 @@ private:
     params.robot_base_frame = robot_base_frame_;
     params.frontier_marker_topic = marker_topic_;
     params.frontier_map_optimization_enabled = false;
-    params.mrtsp_solver = "greedy";
+    const std::string configured_mrtsp_solver =
+      upstream_route_ordering_enabled_ ? upstream_mrtsp_solver_ : "greedy";
+    params.mrtsp_solver = configured_mrtsp_solver;
+    params.dp_solver_candidate_limit = static_cast<std::size_t>(
+      std::max(1, upstream_mrtsp_candidate_limit_));
+    params.dp_planning_horizon = static_cast<std::size_t>(
+      std::max(1, upstream_mrtsp_planning_horizon_));
     params.occ_threshold = occupied_threshold_;
     params.min_frontier_size_cells = minimum_frontier_cells_;
     params.frontier_candidate_min_goal_distance_m = minimum_robot_distance_m_;
@@ -327,6 +554,12 @@ private:
       get_logger(),
       "UPSTREAM_FRONTIER_CORE_ACTIVE backend=frontier_exploration_ros2::FrontierExplorerCore dispatch=false map=%s costmap=%s",
       map_topic_.c_str(), global_costmap_topic_.c_str());
+    RCLCPP_INFO(
+      get_logger(),
+      "UPSTREAM_ROUTE_CONTEXT enabled=%s solver=%s candidate_limit=%d horizon=%d",
+      upstream_route_ordering_enabled_ ? "true" : "false",
+      configured_mrtsp_solver.c_str(), upstream_mrtsp_candidate_limit_,
+      upstream_mrtsp_planning_horizon_);
   }
 
   void map_cb(nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
@@ -555,6 +788,7 @@ private:
     uint64_t map_revision, uint64_t costmap_revision,
     double rx, double ry, double yaw)
   {
+    TimingScope timing(this, TimingSection::START_CYCLE, now().seconds());
     state_ = State::EXTRACTING;
     const auto started = now();
     cycle_map_ = map;
@@ -563,6 +797,7 @@ private:
     cycle_cost_revision_ = costmap_revision;
     rx_ = rx;
     ry_ = ry;
+    yaw_ = yaw;
     works_.clear();
     reachable_.clear();
     region_diagnostics_.clear();
@@ -589,8 +824,16 @@ private:
       state_ = State::IDLE;
       return;
     }
+    const auto snapshot_started = std::chrono::steady_clock::now();
+    const double snapshot_sim_time_s = now().seconds();
     const auto snapshot = core_->get_frontier_snapshot(robot_pose, minimum_robot_distance_m_);
     const auto & regions = snapshot.frontiers;
+    record_timing(
+      TimingSection::CORE_FRONTIER_SNAPSHOT, snapshot_sim_time_s,
+      std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - snapshot_started).count());
+    const auto filtering_started = std::chrono::steady_clock::now();
+    const double filtering_sim_time_s = now().seconds();
     detected_frontier_count_ = static_cast<uint32_t>(regions.size());
     region_diagnostics_.reserve(regions.size());
     std::vector<FrontierEvaluationRecord> schedule_records;
@@ -641,6 +884,7 @@ private:
         count_classification("UNREACHABLE");
         continue;
       }
+      TimingScope make_work_timing(this, TimingSection::MAKE_WORK, now().seconds());
       Work work = make_work(
         region, id, grid, cost_grid, rx, ry, yaw,
         cache.last_query_ns, cache.cycles_not_queried);
@@ -740,6 +984,11 @@ private:
                                   cache.last_query_ns});
     }
 
+    record_timing(
+      TimingSection::FRONTIER_FILTERING, filtering_sim_time_s,
+      std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - filtering_started).count());
+
     normalize_coarse(pending_work);
     const auto selected_indices = fair_frontier_query_order(
       schedule_records, static_cast<std::size_t>(maximum_candidates_before_path_check_),
@@ -763,6 +1012,15 @@ private:
   void normalize_coarse(std::vector<Work> & work_items)
   {
     if (work_items.empty()) {return;}
+    if (selection_policy_ == "frontier_cost_only") {
+      // The bounded pre-query scheduler is deliberately policy-neutral.  A
+      // real Nav2 path length is unavailable until ComputePathToPose returns,
+      // so no provisional normalized path/heading tradeoff is allowed here.
+      // fair_frontier_query_order() uses only bounded freshness/starvation
+      // records, not Work::score.
+      for (auto & work : work_items) {work.score = 0.0;}
+      return;
+    }
     auto range = [](const auto & values, auto getter) {
         const auto result = std::minmax_element(
           values.begin(), values.end(), [&getter](const auto & first, const auto & second) {
@@ -782,6 +1040,7 @@ private:
 
   void send_next()
   {
+    TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
     if (query_index_ >= works_.size() || queries_ >= static_cast<std::size_t>(maximum_path_queries_per_cycle_)) {
       finish();
       return;
@@ -793,8 +1052,14 @@ private:
         evaluation_cache_[works_[i].id].classification = "PLANNER_FAILED";
         RCLCPP_INFO(
           get_logger(),
-          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=ACTION_SERVER_UNAVAILABLE",
-          works_[i].query_event_id, works_[i].id);
+          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=ACTION_SERVER_UNAVAILABLE failure_class=ACTION_SERVER_UNAVAILABLE target_x=%.3f target_y=%.3f",
+          works_[i].query_event_id, works_[i].id,
+          works_[i].pose.pose.position.x, works_[i].pose.pose.position.y);
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=UNKNOWN failure_class=ACTION_SERVER_UNAVAILABLE target_x=%.3f target_y=%.3f error_code=-1 error_name=ACTION_SERVER_UNAVAILABLE duration_s=0.000",
+          works_[i].query_event_id, works_[i].id, works_[i].id,
+          works_[i].pose.pose.position.x, works_[i].pose.pose.position.y);
       }
       finish();
       return;
@@ -860,9 +1125,15 @@ private:
           ++planner_failure_count_;
           RCLCPP_INFO(
             get_logger(),
-            "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=GOAL_REJECTED",
-            candidate.query_event_id, candidate.id);
-          RCLCPP_WARN(get_logger(), "FRONTIER_QUERY_RESULT id=%lu status=PLANNER_FAILED reason=GOAL_REJECTED", candidate.id);
+            "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=GOAL_REJECTED failure_class=TRANSIENT_PLANNER_QUERY_FAILURE target_x=%.3f target_y=%.3f",
+            candidate.query_event_id, candidate.id,
+            candidate.pose.pose.position.x, candidate.pose.pose.position.y);
+          RCLCPP_INFO(
+            get_logger(),
+            "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=UNKNOWN failure_class=TRANSIENT_PLANNER_QUERY_FAILURE target_x=%.3f target_y=%.3f error_code=-1 error_name=GOAL_REJECTED duration_s=%.3f",
+            candidate.query_event_id, candidate.id, candidate.id,
+            candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
           release_path_lock();
           send_next();
           return;
@@ -882,17 +1153,23 @@ private:
             ++planner_failure_count_;
             RCLCPP_INFO(
               get_logger(),
-              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=TIMEOUT",
-              candidate.query_event_id, candidate.id);
-            RCLCPP_WARN(
-              get_logger(), "FRONTIER_QUERY_RESULT id=%lu status=PLANNER_FAILED reason=TIMEOUT duration_s=%.3f",
-              candidate.id, std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
+              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT target_x=%.3f target_y=%.3f",
+              candidate.query_event_id, candidate.id,
+              candidate.pose.pose.position.x, candidate.pose.pose.position.y);
+            RCLCPP_INFO(
+              get_logger(),
+              "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT target_x=%.3f target_y=%.3f error_code=%d error_name=TIMEOUT duration_s=%.3f",
+              candidate.query_event_id, candidate.id, candidate.id,
+              candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+              Action::Result::TIMEOUT,
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
             timeout_timer_->cancel();
             release_path_lock();
             send_next();
           });
       };
     options.result_callback = [this, candidate, revision, request, request_started](const GoalHandle::WrappedResult & result) {
+        TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
         if (!async_request_is_current(request, active_request_, revision, cycle_revision_, state_ == State::PATH_CHECKING)) {
           RCLCPP_INFO(
             get_logger(),
@@ -915,6 +1192,13 @@ private:
         }
         const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
           result.result->error_code == Action::Result::NONE;
+        const int error_code = result.result ? result.result->error_code : -1;
+        const bool hard = result.result && (
+          error_code == Action::Result::START_OUTSIDE_MAP ||
+          error_code == Action::Result::GOAL_OCCUPIED ||
+          error_code == Action::Result::GOAL_OUTSIDE_MAP ||
+          error_code == Action::Result::START_OCCUPIED ||
+          error_code == Action::Result::NO_VALID_PATH);
         auto & cache = evaluation_cache_[candidate.id];
         ++cache.query_count;
         const auto duration = std::chrono::duration<double>(
@@ -925,6 +1209,13 @@ private:
         if (length) {
           auto reachable = candidate;
           reachable.path = *length;
+          if (selection_policy_ == "frontier_cost_only") {
+            // Cost-only heading is the initial direction of the actual valid
+            // Nav2 path, measured against the robot heading at query time.
+            // Keep the existing approach-pose heading for MRTSP diagnostics.
+            reachable.heading = path_initial_heading_cost(
+              result.result->path, yaw_).value_or(0.0);
+          }
           const auto & poses = result.result->path.poses;
           const std::size_t count = std::min<std::size_t>(32, poses.size());
           reachable.path_samples.reserve(count);
@@ -944,20 +1235,13 @@ private:
           cache.path_cost_context = candidate.path_cost_context;
           cache.last_query_ns = now().nanoseconds();
           cache.cycles_not_queried = 0;
-          if (*length > maximum_feasible_path_m_) {
-            cache.classification = "OUT_OF_RANGE";
-            set_region_status(candidate.id, "OUT_OF_RANGE");
-            count_classification("OUT_OF_RANGE");
-          } else {
-            cache.classification = "REACHABLE";
-            set_region_status(candidate.id, "REACHABLE");
-            reachable_.push_back(reachable);
-          }
+          // A successful finite Nav2 path is reachable regardless of its
+          // length.  Distance remains in the candidate/bid cost and route
+          // preference; it is not an ordinary feasibility cutoff.
+          cache.classification = "REACHABLE";
+          set_region_status(candidate.id, "REACHABLE");
+          reachable_.push_back(reachable);
         } else {
-          const bool hard = result.result && (
-            result.result->error_code == Action::Result::GOAL_OCCUPIED ||
-            result.result->error_code == Action::Result::GOAL_OUTSIDE_MAP ||
-            result.result->error_code == Action::Result::NO_VALID_PATH);
           cache.has_work = false;
           cache.map_context = candidate.map_context;
           cache.cost_context = candidate.cost_context;
@@ -977,14 +1261,23 @@ private:
           }
         }
         RCLCPP_INFO(
-          get_logger(), "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=%s error_code=%d duration_s=%.3f",
+          get_logger(), "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=%s action_result=%s failure_class=%s target_x=%.3f target_y=%.3f error_code=%d error_name=%s error_message=\"%s\" duration_s=%.3f path_length_m=%.6f",
           candidate.query_event_id, candidate.id, candidate.id, cache.classification.c_str(),
-          result.result ? result.result->error_code : -1, duration);
+          action_result_name(result.code),
+          ok ? "PATH_SUCCESS" : (hard ? "CANDIDATE_UNREACHABLE" :
+          query_failure_class(result.code, error_code)),
+          candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+          error_code, nav2_error_name(error_code),
+          result.result ? log_safe(result.result->error_msg).c_str() : "NO_RESULT",
+          duration, length.value_or(-1.0));
         RCLCPP_INFO(
           get_logger(),
-          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=%s error_code=%d duration_s=%.3f",
+          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=%s action_result=%s failure_class=%s error_code=%d error_name=%s duration_s=%.3f",
           candidate.query_event_id, candidate.id, cache.classification.c_str(),
-          result.result ? result.result->error_code : -1, duration);
+          action_result_name(result.code),
+          ok ? "PATH_SUCCESS" : (hard ? "CANDIDATE_UNREACHABLE" :
+          query_failure_class(result.code, error_code)),
+          error_code, nav2_error_name(error_code), duration);
         release_path_lock();
         send_next();
       };
@@ -1079,16 +1372,78 @@ private:
       h0 = std::min(h0, work.heading); h1 = std::max(h1, work.heading);
     }
     for (auto & work : reachable_) {
-      work.score = gain_weight_ * normalized_value(work.gain, g0, g1) -
-        path_weight_ * normalized_value(work.path, p0, p1) -
-        heading_weight_ * normalized_value(work.heading, h0, h1);
+      if (selection_policy_ == "frontier_cost_only") {
+        const auto motion_cost = nominal_motion_cost_s(
+          work.path, work.heading, cost_only_reference_linear_speed_mps_,
+          cost_only_reference_angular_speed_radps_);
+        work.score = motion_cost ? -*motion_cost : 0.0;
+      } else {
+        work.score = gain_weight_ * normalized_value(work.gain, g0, g1) -
+          path_weight_ * normalized_value(work.path, p0, p1) -
+          heading_weight_ * normalized_value(work.heading, h0, h1);
+      }
     }
-    std::sort(reachable_.begin(), reachable_.end(), [](const Work & first, const Work & second) {
+    std::sort(reachable_.begin(), reachable_.end(), [this](const Work & first, const Work & second) {
       if (first.score != second.score) {return first.score > second.score;}
-      if (first.gain != second.gain) {return first.gain > second.gain;}
       if (first.path != second.path) {return first.path < second.path;}
+      if (first.heading != second.heading) {return first.heading < second.heading;}
+      if (selection_policy_ != "frontier_cost_only" && first.gain != second.gain) {
+        return first.gain > second.gain;
+      }
       return first.id < second.id;
     });
+  }
+
+  void apply_upstream_route_ordering()
+  {
+    if (!upstream_route_ordering_enabled_ || reachable_.empty() || !core_ ||
+        !cycle_map_) {
+      return;
+    }
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = rx_;
+    pose.position.y = ry_;
+    pose.orientation.z = std::sin(yaw_ / 2.0);
+    pose.orientation.w = std::cos(yaw_ / 2.0);
+    frontier_exploration_ros2::FrontierSequence candidates;
+    candidates.reserve(reachable_.size());
+    for (const auto & work : reachable_) {
+      candidates.push_back(work.region);
+    }
+    const auto ordered = core_->build_mrtsp_frontier_sequence(candidates, pose);
+    frontier_exploration_ros2::OccupancyGrid2d grid(cycle_map_);
+    std::unordered_map<uint64_t, uint32_t> ranks;
+    for (std::size_t rank = 0; rank < ordered.size(); ++rank) {
+      const uint64_t id = stable_frontier_id(
+        ordered[rank], grid, stable_id_quantization_m_);
+      // The solver selects every frontier at most once.  Retaining the first
+      // rank also gives a deterministic answer if two transient IDs happen
+      // to quantize together in the adapter identity layer.
+      ranks.emplace(id, static_cast<uint32_t>(rank));
+    }
+    ++mrtsp_route_generation_;
+    for (auto & work : reachable_) {
+      const auto found = ranks.find(work.id);
+      work.mrtsp_route_rank = found == ranks.end() ?
+        std::numeric_limits<uint32_t>::max() : found->second;
+      work.mrtsp_route_generation = mrtsp_route_generation_;
+    }
+    std::stable_sort(
+      reachable_.begin(), reachable_.end(), [](const Work & first, const Work & second) {
+        if (first.mrtsp_route_rank != second.mrtsp_route_rank) {
+          return first.mrtsp_route_rank < second.mrtsp_route_rank;
+        }
+        // This preserves a useful publication order outside the bounded DP
+        // horizon.  The scalar remains local diagnostic data, never a team
+        // utility in the corrected distributed mode.
+        if (first.score != second.score) {return first.score > second.score;}
+        return first.id < second.id;
+      });
+    RCLCPP_INFO(
+      get_logger(),
+      "UPSTREAM_ROUTE_PLAN robot=%s generation=%lu solver=%s reachable=%zu ordered=%zu",
+      robot_id_.c_str(), mrtsp_route_generation_, upstream_mrtsp_solver_.c_str(),
+      reachable_.size(), ordered.size());
   }
 
   std::string diagnostic_regions_json() const
@@ -1176,10 +1531,12 @@ private:
 
   void publish_batch()
   {
+    TimingScope timing(this, TimingSection::PUBLISH_BATCH, now().seconds());
     // Planner callbacks complete asynchronously. Recompute the aggregate
     // evidence from the final per-region states so a queried region cannot
     // remain counted as DETECTED_NOT_QUERIED after it became reachable.
     recount_region_statuses();
+    apply_upstream_route_ordering();
     previous_identity_references_.clear();
     if (cycle_map_) {
       frontier_exploration_ros2::OccupancyGrid2d grid(cycle_map_);
@@ -1225,6 +1582,10 @@ private:
       candidate.path_length_m = work.path;
       candidate.heading_change_rad = work.heading;
       candidate.score = work.score;
+      candidate.mrtsp_route_rank = work.mrtsp_route_rank;
+      candidate.mrtsp_route_generation = work.mrtsp_route_generation;
+      candidate.mrtsp_solver = upstream_route_ordering_enabled_ ?
+        upstream_mrtsp_solver_ : "";
       candidate.reachability_state = candidate.REACHABLE;
       candidate.local_path_length_m = work.path;
       candidate.local_path_samples = work.path_samples;
@@ -1244,6 +1605,8 @@ private:
     }
     pub_->publish(message);
     marker_pub_->publish(markers);
+    record_cycle(
+      cycle_map_ ? cycle_map_->data.size() : 0, detected_frontier_count_, reachable_.size());
     RCLCPP_INFO(
       get_logger(),
       "CANDIDATE_METRICS source=FRONTIER_REACHABILITY revision=%lu costmap_revision=%lu detected=%u reachable=%zu queries=%zu cache_hits=%lu cache_misses=%lu detected_not_queried=%u small=%u out_of_range=%u unreachable=%u planner_failures=%u",
@@ -1292,7 +1655,7 @@ private:
   uint64_t classification_cache_misses_{0}, path_cache_invalidations_{0};
   int64_t last_map_receipt_ns_{0}, last_cost_receipt_ns_{0};
   bool pending_{false};
-  double rx_{0.0}, ry_{0.0}, extract_ms_{0.0};
+  double rx_{0.0}, ry_{0.0}, yaw_{0.0}, extract_ms_{0.0};
   std::vector<Work> works_, reachable_;
   std::vector<RegionDiagnostic> region_diagnostics_;
   std::vector<IdentityReference> previous_identity_references_;
@@ -1318,13 +1681,20 @@ private:
   std::string compute_path_action_, candidate_topic_, marker_topic_, path_query_lock_path_;
   std::string grid_subscription_reliability_, grid_subscription_durability_;
   std::string planner_id_;
+  std::string selection_policy_;
   double processing_rate_hz_, minimum_frontier_length_m_, stable_id_quantization_m_;
   bool handoff_gated_{false};
   bool stop_after_handoff_{false};
   bool processing_active_{false};
   double approach_clearance_m_, planner_tolerance_m_, minimum_robot_distance_m_;
-  double path_query_timeout_s_, maximum_feasible_path_m_, gain_weight_, distance_weight_;
+  double path_query_timeout_s_, gain_weight_, distance_weight_;
   double path_weight_, heading_weight_, unreachable_suppression_s_, goal_tolerance_m_;
+  double cost_only_reference_linear_speed_mps_, cost_only_reference_angular_speed_radps_;
+  bool upstream_route_ordering_enabled_{false};
+  std::string upstream_mrtsp_solver_;
+  int upstream_mrtsp_candidate_limit_{8};
+  int upstream_mrtsp_planning_horizon_{5};
+  uint64_t mrtsp_route_generation_{0};
   double visible_gain_range_m_, visible_gain_fov_deg_, visible_gain_ray_step_deg_;
   double classification_context_radius_m_, path_context_radius_m_;
   int occupied_threshold_, costmap_blocked_threshold_, minimum_frontier_cells_;
@@ -1332,6 +1702,10 @@ private:
   int maximum_suppression_records_;
   int maximum_evaluation_records_;
   bool forensic_clearance_cells_{false}, diagnostic_frontier_capture_{false};
+  bool diagnostic_timing_{false}, timing_summary_emitted_{false};
+  std::array<std::array<TimingStats, 2>, static_cast<std::size_t>(TimingSection::COUNT)>
+    timing_stats_{};
+  std::array<CycleStats, 2> cycle_stats_{};
 };
 
 }  // namespace my_epuck_frontier_candidates

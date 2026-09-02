@@ -17,6 +17,35 @@ import sys
 import time
 
 
+def _effective_step_period_ms(
+        basic_time_step_ms, sample_period_s, contact_sampling_period_ms=0):
+    """Return a Webots step period aligned to the world's basic timestep.
+
+    The Supervisor is a read-only forensic recorder.  It does not need to
+    call ``step`` at every physics tick when its requested output rate is
+    lower.  Batching those ticks is particularly important for 4 ms worlds:
+    the external-controller IPC call itself is expensive even when the
+    resulting pose is discarded.  Contact capture remains at its requested
+    rate because contact events can be shorter-lived than pose samples.
+    """
+    basic = max(1, int(basic_time_step_ms))
+    requested = max(basic, int(math.ceil(max(0.0, float(sample_period_s))
+                                      * 1000.0)))
+    contact_period = int(contact_sampling_period_ms)
+    if contact_period > 0:
+        requested = min(requested, max(basic, contact_period))
+    return max(basic, int(math.ceil(requested / basic)) * basic)
+
+
+def _write_runtime_metrics(path, metrics):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f'{path}.tmp'
+    with open(temporary, 'w', encoding='utf-8') as stream:
+        json.dump(metrics, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    os.replace(temporary, path)
+
+
 def _find_named_node(supervisor, name):
     requested = str(name).casefold()
     node = supervisor.getFromDef(name)
@@ -130,6 +159,9 @@ def main(argv=None):
         print(f'SUPERVISOR_READY path={ready_path}', flush=True)
 
     timestep = max(1, int(supervisor.getBasicTimeStep()))
+    effective_step_period_ms = _effective_step_period_ms(
+        timestep, args.sample_period_s,
+        args.contact_sampling_period_ms if args.contact_output else 0)
     contact_stream = None
     contact_writer = None
     if args.contact_output:
@@ -165,24 +197,61 @@ def main(argv=None):
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
-    sample_steps = max(1, int(round(
-        max(args.sample_period_s, timestep / 1000.0) /
-        (timestep / 1000.0))))
-    row_number = 0
+    step_calls = 0
+    sample_rows = 0
+    rows_since_flush = 0
     observer_start_wall = time.monotonic()
+    observer_start_sim = supervisor.getTime()
+    last_sim_time = observer_start_sim
+    exit_reason = 'completed'
+    metrics_path = os.path.join(
+        os.path.abspath(args.runtime_directory)
+        if args.runtime_directory else os.path.dirname(output),
+        'runtime_metrics.json')
+
+    def save_metrics(reason, end_sim, end_wall, finalized=False):
+        wall_elapsed = max(0.0, end_wall - observer_start_wall)
+        sim_elapsed = max(0.0, end_sim - observer_start_sim)
+        _write_runtime_metrics(metrics_path, {
+            'observer': 'cooperative_ground_truth_observer',
+            'basic_time_step_ms': timestep,
+            'requested_sample_period_s': float(args.sample_period_s),
+            'contact_sampling_period_ms': (
+                int(args.contact_sampling_period_ms)
+                if args.contact_output else None),
+            'effective_step_period_ms': effective_step_period_ms,
+            'step_calls': step_calls,
+            'sample_rows': sample_rows,
+            'sim_start_s': observer_start_sim,
+            'sim_end_s': end_sim,
+            'sim_elapsed_s': sim_elapsed,
+            'monotonic_wall_start_s': observer_start_wall,
+            'monotonic_wall_end_s': end_wall,
+            'monotonic_wall_elapsed_s': wall_elapsed,
+            'simulation_seconds_per_wall_second': (
+                sim_elapsed / wall_elapsed if wall_elapsed > 0.0 else None),
+            'exit_reason': reason,
+            'finalized': finalized,
+            'output': output,
+        })
+
     with open(output, 'w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         stream.flush()
-        while (not stop['value']
-               and (args.max_runtime_s <= 0.0
-                    or time.monotonic() - observer_start_wall
-                    < args.max_runtime_s)
-               and supervisor.step(timestep) != -1):
-            row_number += 1
-            if row_number % sample_steps:
-                continue
+        while not stop['value']:
+            if (args.max_runtime_s > 0.0
+                    and time.monotonic() - observer_start_wall
+                    >= args.max_runtime_s):
+                exit_reason = 'max_runtime'
+                break
+            step_result = supervisor.step(effective_step_period_ms)
+            step_calls += 1
+            if step_result == -1:
+                exit_reason = 'webots_step_end'
+                break
             now = supervisor.getTime()
+            last_sim_time = now
             rows = []
             for robot_id, node in robots.items():
                 position = node.getPosition()
@@ -205,7 +274,12 @@ def main(argv=None):
                     'angular_velocity_z_rps': velocity[5],
                 })
             writer.writerows(rows)
-            stream.flush()
+            sample_rows += 1
+            rows_since_flush += 1
+            if rows_since_flush >= 10:
+                stream.flush()
+                rows_since_flush = 0
+                save_metrics('running', now, time.monotonic())
             if contact_writer is not None:
                 for robot_id, node in robots.items():
                     try:
@@ -252,12 +326,25 @@ def main(argv=None):
                             'contacted_node_def': contacted_def,
                             'contacted_node_name': contacted_name,
                         })
-                contact_stream.flush()
+                if rows_since_flush == 0:
+                    contact_stream.flush()
+        stream.flush()
     if contact_stream is not None:
         contact_stream.flush()
         contact_stream.close()
-    print(f'FORENSIC_SUPERVISOR_COMPLETE path={output}')
-    return 0
+    observer_end_wall = time.monotonic()
+    # Do not query a Supervisor connection after Webots has returned -1 from
+    # step(): the controller binding may already have lost its socket.
+    observer_end_sim = last_sim_time
+    save_metrics(exit_reason, observer_end_sim, observer_end_wall, True)
+    print(f'FORENSIC_RUNTIME_METRICS path={metrics_path}', flush=True)
+    print(f'FORENSIC_SUPERVISOR_COMPLETE path={output}', flush=True)
+    # The Webots Python controller binding has been observed to segfault in
+    # its interpreter-exit destructor after a remote Webots shutdown, even
+    # after all observer files are closed.  This process is a read-only
+    # diagnostic child; bypass only that binding destructor after the durable
+    # metrics and CSV finalization above, so teardown is reported as clean.
+    os._exit(0)
 
 
 if __name__ == '__main__':

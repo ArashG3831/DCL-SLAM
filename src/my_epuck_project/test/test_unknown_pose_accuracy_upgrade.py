@@ -213,7 +213,9 @@ def test_multi_keyframe_consensus_rejects_one_wrong_constraint():
 
 
 def _selector_constraint(transform, index, quality=0.95, source_center=None,
-                         target_center=None):
+                         target_center=None, source_viewpoint=None,
+                         target_viewpoint=None, source_viewpoint_required=False,
+                         target_viewpoint_required=False):
     return PoseConstraint(
         transform=tuple(transform),
         covariance=(0.03 ** 2, 0.0, 0.0, 0.0, 0.03 ** 2,
@@ -223,6 +225,10 @@ def _selector_constraint(transform, index, quality=0.95, source_center=None,
         source_center=(float(index), 0.0) if source_center is None else source_center,
         target_center=((float(index) + 0.7, -0.2)
                       if target_center is None else target_center),
+        source_viewpoint=source_viewpoint,
+        target_viewpoint=target_viewpoint,
+        source_viewpoint_required=source_viewpoint_required,
+        target_viewpoint_required=target_viewpoint_required,
         source_timestamp_ns=index * 1_000_000_000,
         target_timestamp_ns=(index + 1) * 1_000_000_000)
 
@@ -257,11 +263,87 @@ def test_spatial_baseline_is_invariant_to_reverse_verification_direction():
     constraints = [
         _selector_constraint((0.7, -0.2, 0.03), index,
                              source_center=(0.0, 0.0),
-                             target_center=(float(index), 0.0))
+                             target_center=(float(index), 0.0),
+                             target_viewpoint=(float(index), 0.0))
         for index in range(3)]
     selection = select_robust_hypothesis(constraints, min_inliers=3)
     assert selection.status == ACCEPTED_HYPOTHESIS
     assert selection.diagnostics[0]['spatial_baseline_m'] >= 2.0
+
+
+def test_selector_uses_physical_viewpoints_when_crop_centers_are_close():
+    """Three physical views must not fail on a small crop-center baseline."""
+    constraints = [
+        PoseConstraint(
+            transform=(-2.7, 0.0, 0.0),
+            covariance=(0.03 ** 2, 0.0, 0.0, 0.0, 0.03 ** 2,
+                        0.0, 0.0, 0.0, math.radians(0.35) ** 2),
+            quality=0.95, evidence_id=f'physical-{index}',
+            source_center=(0.0, 0.0), target_center=(0.1, 0.1),
+            source_viewpoint=(float(index), 0.0),
+            source_timestamp_ns=index * 2_000_000_000,
+            target_timestamp_ns=(index + 1) * 2_000_000_000)
+        for index in range(3)]
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
+    assert abs(selection.diagnostics[0]['spatial_baseline_m'] - 2.0) < 1e-9
+
+
+def test_missing_physical_viewpoints_cannot_use_crop_centers_for_baseline():
+    constraints = [
+        _selector_constraint((0.7, -0.2, 0.03), index,
+                             source_center=(float(index), 0.0),
+                             target_center=(float(index), 0.0),
+                             source_viewpoint_required=True,
+                             target_viewpoint_required=True)
+        for index in range(3)]
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status != ACCEPTED_HYPOTHESIS
+    assert all(diagnostic.get('spatial_baseline_m', 0.0) == 0.0
+               for diagnostic in selection.diagnostics
+               if diagnostic.get('kind') == 'robust_hypothesis')
+
+
+def test_selector_allows_quality_below_former_scalar_floor():
+    """Explicit geometry and consensus, not scalar quality, decide inliers."""
+    constraints = [
+        PoseConstraint(
+            transform=(-2.7, 0.0, 0.0),
+            covariance=(0.03 ** 2, 0.0, 0.0, 0.0, 0.03 ** 2,
+                        0.0, 0.0, 0.0, math.radians(0.35) ** 2),
+            quality=0.50, evidence_id=f'low-quality-{index}',
+            source_viewpoint=(float(index), 0.0),
+            source_timestamp_ns=index * 2_000_000_000,
+            target_timestamp_ns=(index + 1) * 2_000_000_000)
+        for index in range(3)]
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status == ACCEPTED_HYPOTHESIS
+    assert set(selection.selected_indices) == {0, 1, 2}
+
+
+def test_accumulator_does_not_count_duplicate_physical_evidence_twice():
+    """Repeated evidence IDs cannot manufacture the three-inlier minimum."""
+    accumulator = IncrementalHypothesisAccumulator()
+    repeated = _selector_constraint((-2.7, 0.0, 0.0), 0)
+    result = accumulator.update([
+        repeated,
+        repeated,
+        _selector_constraint((-2.7, 0.0, 0.0), 1),
+    ])
+    assert result.status != ACCEPTED_HYPOTHESIS
+    assert len(accumulator._constraints) == 2
+
+
+def test_selector_rejects_inconsistent_pi_and_quarter_turn_families():
+    """Inconsistent transform families remain below the three-inlier gate."""
+    constraints = [
+        _selector_constraint((-2.7, 0.0, yaw), index,
+                             source_center=(float(index), 0.0),
+                             target_center=(0.1, 0.1))
+        for index, yaw in enumerate((0.0, math.pi / 2.0, math.pi))]
+    selection = select_robust_hypothesis(constraints, min_inliers=3)
+    assert selection.status != ACCEPTED_HYPOTHESIS
+    assert len(selection.selected_indices) < 3
 
 
 def test_incremental_accumulator_promotes_consistent_evidence_over_batches():
@@ -274,6 +356,18 @@ def test_incremental_accumulator_promotes_consistent_evidence_over_batches():
     assert result.status == ACCEPTED_HYPOTHESIS
     assert len(result.selected_indices) >= 3
     assert result.diagnostics[-1]['kind'] == 'incremental_hypothesis_accumulator'
+
+
+def test_unknown_pose_minimum_inlier_floor_cannot_be_configured_below_three():
+    """Every estimator entry point retains the three-constraint safety gate."""
+    accumulator = IncrementalHypothesisAccumulator(min_inliers=2)
+    assert accumulator.min_inliers == 3
+    two = [
+        _selector_constraint((0.7, -0.2, 0.03), index)
+        for index in range(2)
+    ]
+    assert select_robust_hypothesis(two, min_inliers=2).status != ACCEPTED_HYPOTHESIS
+    assert accumulator.update(two).status != ACCEPTED_HYPOTHESIS
 
 
 def test_incremental_accumulator_retains_ambiguous_three_inlier_cluster():
@@ -542,6 +636,18 @@ def test_candidate_verification_budget_is_deterministic_and_bounded():
     assert [(item[2], item[1]) for item in ordered] == [
         ('own-1', 'peer-1'), ('own-1', 'peer-1-duplicate')]
     assert len(ordered) == 2
+
+
+def test_consensus_requires_temporal_span_when_runtime_timestamps_exist(
+        monkeypatch):
+    transforms = [(0.7, -0.2, 0.03)] * 3
+    monkeypatch.setattr(
+        frontend_core, 'register_crops',
+        lambda source, target: _synthetic_consensus_result(transforms.pop(0)))
+    result = register_crop_set(
+        _synthetic_pairs(3), min_consistent_constraints=3,
+        evidence_timestamps=[(10_000_000_000, 10_000_000_000)] * 3)
+    assert not result.accepted
 
 
 def test_rejected_geometry_is_stable_across_map_revisions():

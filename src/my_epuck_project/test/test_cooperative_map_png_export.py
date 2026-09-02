@@ -16,6 +16,9 @@ from my_epuck_project.cooperative_map_png_export import (
     occupancy_rgb,
     selected_attempt,
     export_maps,
+    load_local_map_paths,
+    load_local_map_poses,
+    load_shared_map_paths,
     write_rgb_png,
 )
 from my_epuck_project.occupancy_map_comparison import Geometry, OccupancyMap, save_map
@@ -181,3 +184,50 @@ def test_no_handoff_local_maps_export_with_explicit_status(tmp_path):
     assert (output / 'NO_HANDOFF_SHARED_MAP_UNAVAILABLE.txt').read_text(
         encoding='utf-8').strip() == manifest['status_label']
     assert not (output / 'robot1_robot2_exact_difference.png').exists()
+
+
+def test_no_handoff_paths_use_recorded_scan_matching_map_to_odom(tmp_path):
+    """No-handoff paths use forensic corrections when TF rows are absent."""
+    attempt = tmp_path / 'attempt'
+    forensic = attempt / 'forensic'
+    (forensic / 'scan_matching').mkdir(parents=True)
+    (forensic / 'transforms.csv').write_text('', encoding='utf-8')
+    (forensic / 'robot1_odom.csv').write_text(
+        'robot_id,received_ros_time_s,header_stamp,pose_x,pose_y,'
+        'orientation_z,orientation_w\n'
+        'robot1,1.0,1.0,0.0,0.0,0.0,1.0\n'
+        'robot1,2.0,2.0,1.0,0.0,0.0,1.0\n', encoding='utf-8')
+    correction = json.dumps({
+        'available': True, 'map_to_odom_stamp': '1.0',
+        'map_to_odom_x': 10.0, 'map_to_odom_y': 20.0,
+        'map_to_odom_yaw': 0.0, 'query_ros_time_s': 1.0})
+    (forensic / 'scan_matching' / 'robot1_corrections.jsonl').write_text(
+        correction + '\n', encoding='utf-8')
+    paths = load_local_map_paths(attempt)
+    poses = load_local_map_poses(attempt)
+    assert paths['robot1']['point_count'] == 2
+    assert paths['robot1']['segments'][0][0] == (10.0, 20.0)
+    assert paths['robot1']['segments'][0][1] == (11.0, 20.0)
+    assert poses['robot1']['x_m'] == 11.0
+    assert poses['robot1']['y_m'] == 20.0
+
+
+def test_shared_paths_project_odom_through_captured_shared_transform(tmp_path):
+    """Shared overlays must use shared_map<-odom, not raw odom coordinates."""
+    attempt = tmp_path / 'attempt'
+    forensic = attempt / 'forensic'
+    forensic.mkdir(parents=True)
+    (forensic / 'transforms.csv').write_text(
+        'query_ros_time_s,target_frame,source_frame,available,'
+        'translation_x,translation_y,rotation_z,rotation_w\n'
+        '0.0,shared_map,robot1/odom,True,10.0,20.0,0.0,1.0\n',
+        encoding='utf-8')
+    (forensic / 'robot1_odom.csv').write_text(
+        'robot_id,received_ros_time_s,header_stamp,pose_x,pose_y\n'
+        'robot1,1.0,1.0,0.0,0.0\n'
+        'robot1,2.0,2.0,1.0,0.0\n', encoding='utf-8')
+
+    paths = load_shared_map_paths(attempt)
+
+    assert paths['robot1']['segments'][0] == [(10.0, 20.0), (11.0, 20.0)]
+    assert 'shared_map<-robot1/odom' in paths['robot1']['source']

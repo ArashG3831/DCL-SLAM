@@ -13,6 +13,7 @@ from my_epuck_project.mission_termination import (
     recommended_exit_code,
     summarize_frontier_regions,
     all_physical_tasks_suppressed,
+    credible_planner_infrastructure_failure,
 )
 
 
@@ -46,6 +47,15 @@ def test_unreachable_frontiers_are_distinguished():
 def test_planner_failure_does_not_masquerade_as_successful_completion():
     evidence = CandidateEvidence(detected=1, planner_failures=1)
     assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
+
+
+def test_candidate_specific_planner_failures_do_not_prove_infrastructure_dead():
+    assert not credible_planner_infrastructure_failure(True, True, 3, 4)
+
+
+def test_unhealthy_planner_stack_with_repeated_failures_remains_detectable():
+    assert credible_planner_infrastructure_failure(False, True, 2, 1)
+    assert credible_planner_infrastructure_failure(True, False, 1, 2)
 
 
 def test_unclassified_frontier_does_not_masquerade_as_completion():

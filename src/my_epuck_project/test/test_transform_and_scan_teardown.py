@@ -1,6 +1,7 @@
 """Executor lifecycle regressions for the small project ROS nodes."""
 
 import inspect
+import time
 from types import SimpleNamespace
 
 import rclpy
@@ -80,6 +81,38 @@ def test_twist_stamper_uses_explicit_executor_and_idempotent_teardown():
     rclpy.init()
     node = TwistStamper()
     _exercise_shutdown(node, shutdown_stamper)
+
+
+def test_twist_stamper_clears_command_when_odom_is_stale(monkeypatch):
+    """A stalled odometry stream cannot leave the last turn active forever."""
+    rclpy.init()
+    node = TwistStamper.__new__(TwistStamper)
+    published = []
+    node.telemetry_timeout_s = 2.0
+    node._last_command_wall_s = 98.0
+    node._last_odom_wall_s = 95.0
+    node._command_active = True
+    node._watchdog_stopped = False
+    node.pub = SimpleNamespace(publish=published.append)
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(
+            to_msg=lambda: SimpleNamespace(sec=1, nanosec=0)))
+    node.get_logger = lambda: SimpleNamespace(error=lambda *args: None)
+    monkeypatch.setattr(time, 'monotonic', lambda: 100.0)
+    node.watchdog_callback()
+    assert len(published) == 1
+    assert published[0].twist.linear.x == 0.0
+    assert published[0].twist.angular.z == 0.0
+    assert node._command_active is False
+    assert node._watchdog_stopped is True
+    rclpy.shutdown()
+
+
+def test_twist_stamper_odom_callback_refreshes_wall_liveness(monkeypatch):
+    node = TwistStamper.__new__(TwistStamper)
+    monkeypatch.setattr(time, 'monotonic', lambda: 123.0)
+    node.odom_callback(SimpleNamespace())
+    assert node._last_odom_wall_s == 123.0
 
 
 def test_nodes_tolerate_context_already_shutdown():

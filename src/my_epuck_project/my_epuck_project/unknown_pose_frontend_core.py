@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from itertools import combinations
+from itertools import combinations, product
 import json
 import math
 from dataclasses import replace
@@ -20,6 +20,7 @@ import numpy as np
 
 from .robust_relative_pose_selector import (
     ACCEPTED_HYPOTHESIS,
+    INSUFFICIENT_EVIDENCE,
     IncrementalHypothesisAccumulator,
     PoseConstraint,
     select_robust_hypothesis,
@@ -39,6 +40,8 @@ except ImportError:  # pragma: no cover - project runtime has scipy.
 OCCUPIED_THRESHOLD = 50
 UNKNOWN_VALUE = -1
 MINIMUM_ACCEPTED_CONFIDENCE = 0.65
+CONSENSUS_MIN_KNOWN_FRACTION = 0.25
+CONSENSUS_MIN_OCCUPIED_CELLS = 400
 
 
 class DedicatedDiagnosticJsonl:
@@ -231,7 +234,7 @@ def crop_batch_is_ready(selected_count: int, minimum_constraints: int) -> bool:
     pending; starting one-shot negotiation at that point would permanently
     prevent the remaining evidence from being requested.
     """
-    return int(selected_count) >= max(1, int(minimum_constraints))
+    return int(selected_count) >= max(3, int(minimum_constraints))
 
 
 def evidence_pairs_for_selection(active_candidate_pairs, evidence_pairs):
@@ -286,7 +289,67 @@ def bounded_candidate_verification_order(candidate_pool, attempted_pairs,
         seen.add(pair)
         ranked.append((float(score), str(peer_key), str(own_key), candidate))
     ranked.sort(key=lambda item: item[:3])
-    return [item[3] for item in ranked[:max(0, int(budget))]]
+    limit = max(0, int(budget))
+    if limit <= 1:
+        return [item[3] for item in ranked[:limit]]
+
+    # A pure similarity ordering can spend the whole bounded budget on one
+    # local keyframe paired with several advertisements of the same peer
+    # view.  Preserve the existing score as the primary ordering, but make
+    # the first pass cover distinct own and peer keyframes.  This is bounded
+    # round-robin scheduling only; registration and consensus remain
+    # authoritative.
+    selected = []
+    selected_pairs = set()
+    covered_own = set()
+    covered_peer = set()
+    for prefer in ('own', 'peer'):
+        for item in ranked:
+            score, peer_key, own_key, candidate = item
+            pair = (own_key, peer_key)
+            if pair in selected_pairs:
+                continue
+            key = own_key if prefer == 'own' else peer_key
+            covered = covered_own if prefer == 'own' else covered_peer
+            if key in covered:
+                continue
+            selected.append(candidate)
+            selected_pairs.add(pair)
+            covered_own.add(own_key)
+            covered_peer.add(peer_key)
+            if len(selected) >= limit:
+                return selected
+    for _, _, _, candidate in ranked:
+        if len(selected) >= limit:
+            break
+        pair = (candidate[2], candidate[1]) if len(candidate) == 5 \
+            else (candidate[1], candidate[0])
+        if pair in selected_pairs:
+            continue
+        selected.append(candidate)
+        selected_pairs.add(pair)
+    return selected
+
+
+def prioritize_unambiguous_candidates(candidate_pool, ambiguous_pairs):
+    """Defer descriptor near-twins while a different view is available.
+
+    Descriptor ambiguity is an acquisition advisory, not an acceptance gate.
+    Ambiguous candidates remain available as a fallback when no other
+    candidate exists, but cannot consume the bounded verification budget
+    while a non-ambiguous candidate is available.
+    """
+    candidates = list(candidate_pool)
+    ambiguous = set(ambiguous_pairs)
+    preferred = []
+    for candidate in candidates:
+        if len(candidate) == 5:
+            peer_key, own_key = candidate[1], candidate[2]
+        else:
+            peer_key, own_key = candidate[0], candidate[1]
+        if (peer_key, own_key) not in ambiguous:
+            preferred.append(candidate)
+    return preferred if preferred else candidates
 
 
 def _identity_float(value: float) -> float:
@@ -300,13 +363,16 @@ def physical_crop_identity(crop: GridCrop, map_epoch: int = 0,
 
     Keyframe IDs are deliberately absent.  The map revision/checksum and the
     complete crop geometry identify the evidence that registration can
-    actually observe; keyframe IDs only identify the advertisement carrying
-    it.  The tuple is intentionally bounded and contains no cell-data copy.
+    actually observe; keyframe IDs and map epochs only identify the
+    advertisement carrying it.  The checksum is the immutable content
+    identity already carried by the descriptor/crop protocol.  A changed
+    checksum or changed footprint remains eligible as a new viewpoint.  The
+    tuple is intentionally bounded and contains no cell-data copy.
     """
     height, width = crop.values.shape[:2]
     centre_x, centre_y = _crop_center(crop)
     return (
-        int(map_epoch), int(checksum), _identity_float(crop.resolution),
+        int(checksum), _identity_float(crop.resolution),
         int(width), int(height), _identity_float(crop.origin_x),
         _identity_float(crop.origin_y), _identity_float(crop.origin_yaw),
         _identity_float(centre_x), _identity_float(centre_y))
@@ -393,10 +459,10 @@ def physical_descriptor_identity(descriptor) -> tuple:
     centre_x = origin_x + 0.5 * width * resolution
     centre_y = origin_y + 0.5 * height * resolution
     return (
-        int(getattr(descriptor, 'map_epoch', 0)),
         int(getattr(descriptor, 'checksum', 0)),
         _identity_float(resolution), width, height,
-        _identity_float(origin_x), _identity_float(origin_y), 0.0,
+        _identity_float(origin_x), _identity_float(origin_y),
+        _identity_float(getattr(descriptor, 'crop_origin_yaw', 0.0)),
         _identity_float(centre_x), _identity_float(centre_y))
 
 
@@ -413,20 +479,41 @@ def physical_candidate_identity(candidate, own_crops: dict) -> tuple:
     own_identity = physical_crop_identity(
         own_crop, getattr(own_descriptor, 'map_epoch', 0),
         getattr(own_descriptor, 'checksum', 0))
-    return own_identity, physical_descriptor_identity(peer_descriptor)
+    return (
+        str(getattr(own_descriptor, 'source_robot_id', '')),
+        str(getattr(peer_descriptor, 'source_robot_id', '')),
+        own_identity, physical_descriptor_identity(peer_descriptor))
 
 
-def deduplicate_physical_candidates(candidates: Iterable, own_crops: dict) -> list:
-    """Keep one deterministic candidate for each physical crop pair."""
+def deduplicate_physical_candidates_with_reasons(
+        candidates: Iterable, own_crops: dict) -> tuple[tuple, tuple]:
+    """Deduplicate physical candidates and retain suppressed records.
+
+    This is intentionally performed on the advertised immutable content
+    checksum plus footprint, before any crop request can be published.  Map
+    epochs and keyframe IDs are not evidence identity: repeated publication
+    of the same content at the same footprint must not consume verification
+    capacity.  The second result contains ``(identity, candidate)`` pairs so
+    the caller can account for the exact early suppression reason.
+    """
     selected = []
+    duplicates = []
     seen = set()
     for candidate in candidates:
         identity = physical_candidate_identity(candidate, own_crops)
         if identity in seen:
+            duplicates.append((identity, candidate))
             continue
         seen.add(identity)
         selected.append(candidate)
-    return selected
+    return tuple(selected), tuple(duplicates)
+
+
+def deduplicate_physical_candidates(candidates: Iterable, own_crops: dict) -> list:
+    """Keep one deterministic candidate for each physical crop pair."""
+    selected, _ = deduplicate_physical_candidates_with_reasons(
+        candidates, own_crops)
+    return list(selected)
 
 
 def accumulate_physical_candidates(candidate_pool: dict, candidates: Iterable,
@@ -483,6 +570,29 @@ class DescriptorMatch:
     known_fraction: float
 
 
+def descriptor_match_is_ambiguous(match: DescriptorMatch,
+                                  alternatives: Iterable[DescriptorMatch],
+                                  margin_gate: float) -> bool:
+    """Identify a weak descriptor match competing with a near-twin.
+
+    The descriptor margin gate remains the acceptance gate.  A survivor is
+    marked ambiguous only when its margin is still close to that configured
+    gate *and* another candidate for the same advertised view has essentially
+    the same similarity.  This is the observed repetitive-corridor pattern:
+    several keyframes produce interchangeable cyclic matches.  A low-margin
+    match with no competing keyframe remains eligible, so a valid distinctive
+    180-degree observation is not rejected by yaw alone.
+    """
+    ambiguity_limit = 2.0 * max(0.0, float(margin_gate))
+    if float(match.margin) >= ambiguity_limit:
+        return False
+    for alternative in alternatives:
+        if abs(float(match.similarity) - float(alternative.similarity)) <= max(
+                float(match.margin), float(alternative.margin)):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class RegistrationResult:
     """Rigid source-to-target registration and quality metrics."""
@@ -495,6 +605,7 @@ class RegistrationResult:
     occupied_free_agreement: float
     overlap_fraction: float
     reason: str
+    reverse_inlier_ratio: float = 0.0
     constraint_count: int = 1
     consistent_constraint_count: int = 1
     spatial_baseline_m: float = 0.0
@@ -518,6 +629,136 @@ class RegistrationResult:
     selector_runner_up_score: float = -math.inf
     selector_runner_up_margin: float = 0.0
     selector_inlier_probabilities: tuple = ()
+    # Backend/mode provenance.  Multiple MRPT modes from one physical pair
+    # remain alternatives, never independent evidence.
+    backend: str = 'legacy'
+    mode_index: int = -1
+    mode_log_weight: float = -math.inf
+    mode_support: int = 1
+
+
+# These are deliberately derived from the existing registration/consensus
+# floors rather than from descriptor similarity.  They define the stronger
+# evidence tier used for consensus admission; the original individual gates
+# remain authoritative for the final handoff.
+STRONG_FORWARD_INLIER_MIN = 2.0 * 0.35
+STRONG_REVERSE_INLIER_MIN = 2.0 * 0.30
+STRONG_AGREEMENT_MIN = 0.55 + 0.10
+STRONG_RESIDUAL_MAX_M = 0.08  # existing robust-consensus residual gate
+STRONG_OVERLAP_MIN = 0.50
+
+
+def strong_registration_quality(
+        result: RegistrationResult,
+        descriptor_ambiguous: bool = False) -> tuple[bool, str]:
+    """Classify a finite registration for the strong consensus pool.
+
+    Individual registration remains diagnostic and keeps its historical
+    acceptance gate.  This second tier prevents a marginal local alignment
+    from occupying one of the independent evidence slots.  Descriptor
+    ambiguity is advisory only: an ambiguous descriptor can still pass when
+    the native-resolution geometry is independently strong.
+    """
+    if not result.accepted:
+        return False, str(result.reason)
+    checks = (
+        (float(result.inlier_ratio) >= STRONG_FORWARD_INLIER_MIN,
+         'STRONG_FORWARD_INLIER_BELOW_THRESHOLD'),
+        (float(result.reverse_inlier_ratio) >= STRONG_REVERSE_INLIER_MIN,
+         'STRONG_REVERSE_INLIER_BELOW_THRESHOLD'),
+        (float(result.occupied_free_agreement) >= STRONG_AGREEMENT_MIN,
+         'STRONG_OCCUPIED_FREE_AGREEMENT_BELOW_THRESHOLD'),
+        (math.isfinite(float(result.residual_m)) and
+         float(result.residual_m) <= STRONG_RESIDUAL_MAX_M,
+         'STRONG_RESIDUAL_ABOVE_THRESHOLD'),
+        (float(result.overlap_fraction) >= STRONG_OVERLAP_MIN,
+         'STRONG_OVERLAP_BELOW_THRESHOLD'),
+    )
+    for passed, reason in checks:
+        if not passed:
+            return False, reason
+    # A low-margin/near-twin descriptor is not a hard rejection.  It must,
+    # however, be backed by geometry comfortably above every strong floor.
+    # This preserves valid unusual orientations while excluding the observed
+    # weak repetitive-corridor candidates.
+    if descriptor_ambiguous:
+        exceptional_geometry = (
+            float(result.inlier_ratio) >= 0.80 and
+            float(result.reverse_inlier_ratio) >= 0.70 and
+            float(result.occupied_free_agreement) >= 0.70 and
+            float(result.residual_m) <= STRONG_RESIDUAL_MAX_M and
+            float(result.overlap_fraction) >= 0.70)
+        if not exceptional_geometry:
+            return False, 'AMBIGUOUS_DESCRIPTOR_WITHOUT_EXCEPTIONAL_GEOMETRY'
+    return True, 'STRONG_CONSENSUS_ELIGIBLE'
+
+
+def consensus_admission_quality(
+        result: RegistrationResult,
+        mature_evidence: bool = True) -> tuple[bool, str]:
+    """Admit individually valid measurements to robust consensus.
+
+    The native crop quality data showed that a correct alignment can have
+    forward inlier and agreement values below the former second-tier floors.
+    Those floors were being applied before the multi-constraint selector could
+    compare independent measurements.  Keep the original individual
+    registration gate here; the selector, three-independent-constraint gate,
+    spatial/temporal checks, final individual-gate check, and peer verification
+    remain authoritative.  This function changes admission timing, not final
+    acceptance.
+    """
+    if not mature_evidence:
+        return False, 'IMMATURE_EVIDENCE_MAP'
+    if not result.accepted:
+        return False, str(result.reason)
+    checks = (
+        (float(result.inlier_ratio) >= 0.35,
+         'FORWARD_INLIER_BELOW_CONSENSUS_GATE'),
+        (float(result.reverse_inlier_ratio) >= 0.30,
+         'REVERSE_INLIER_BELOW_CONSENSUS_GATE'),
+        (math.isfinite(float(result.residual_m)) and
+         float(result.residual_m) <= 0.08,
+         'RESIDUAL_ABOVE_CONSENSUS_GATE'),
+        (float(result.overlap_fraction) >= 0.15,
+         'OVERLAP_BELOW_CONSENSUS_GATE'),
+        (np.asarray(result.transform).shape == (3,) and
+         np.isfinite(np.asarray(result.transform)).all() and
+         np.asarray(result.covariance).size in (9, 36) and
+         np.isfinite(np.asarray(result.covariance)).all() and
+         math.isfinite(float(result.condition_number)) and
+         float(result.condition_number) < 1e8,
+         'NONFINITE_OR_DEGENERATE_REGISTRATION'),
+    )
+    for passed, reason in checks:
+        if not passed:
+            return False, reason
+    # Agreement remains a quality signal/weight.  It is not a hard early
+    # rejection because independently built correct occupancy grids can have
+    # lower exact-cell agreement than a perceptual alias.
+    return True, 'INDIVIDUAL_GEOMETRY_ADMITTED_TO_CONSENSUS'
+
+
+def consensus_crop_maturity(crop: GridCrop,
+                            minimum_known_fraction: float =
+                            CONSENSUS_MIN_KNOWN_FRACTION,
+                            minimum_occupied_cells: int =
+                            CONSENSUS_MIN_OCCUPIED_CELLS) -> tuple[bool, dict]:
+    """Classify intrinsic crop quality without peer or ground-truth data."""
+    values = np.asarray(crop.values)
+    total = int(values.size)
+    known = int(np.count_nonzero(values >= 0))
+    occupied = int(np.count_nonzero(values >= OCCUPIED_THRESHOLD))
+    known_fraction = float(known / total) if total else 0.0
+    details = {
+        'known_fraction': known_fraction,
+        'known_cells': known,
+        'occupied_cells': occupied,
+        'minimum_known_fraction': float(minimum_known_fraction),
+        'minimum_occupied_cells': int(minimum_occupied_cells),
+    }
+    return bool(
+        total > 0 and known_fraction >= float(minimum_known_fraction) and
+        occupied >= int(minimum_occupied_cells)), details
 
 
 def hypothesis_is_acceptable(status: str, accepted: bool,
@@ -1095,7 +1336,8 @@ def _registration_quality(source: GridCrop, target: GridCrop,
                           source_points: np.ndarray,
                           target_points: np.ndarray, transform,
                           max_correspondence_m=0.30,
-                          source_tree=None, target_tree=None) -> RegistrationResult:
+                          source_tree=None, target_tree=None,
+                          minimum_agreement: float = 0.55) -> RegistrationResult:
     transformed = _apply(source_points, transform)
     distances, indices = _nearest(transformed, target_points, target_tree)
     threshold = min(
@@ -1146,12 +1388,13 @@ def _registration_quality(source: GridCrop, target: GridCrop,
     accepted = (
         inlier_ratio >= 0.35 and reverse_ratio >= 0.30 and
         residual <= max(0.12, 3.0 * source.resolution) and
-        occupied_agreement >= 0.55 and overlap >= 0.15)
+        occupied_agreement >= float(minimum_agreement) and overlap >= 0.15)
     reason = 'ACCEPTED' if accepted else 'GEOMETRIC_VERIFICATION_REJECTED'
     return RegistrationResult(
         accepted=accepted, transform=transform,
         covariance=tuple(float(value) for value in covariance.ravel()),
-        inlier_ratio=inlier_ratio, residual_m=residual,
+        inlier_ratio=inlier_ratio, reverse_inlier_ratio=reverse_ratio,
+        residual_m=residual,
         occupied_free_agreement=occupied_agreement, overlap_fraction=overlap,
         reason=reason, median_residual_m=median_residual,
         p95_residual_m=p95_residual,
@@ -1161,11 +1404,119 @@ def _registration_quality(source: GridCrop, target: GridCrop,
         projected_error_m=math.inf)
 
 
+def _deterministic_registration_points(crop: GridCrop,
+                                       maximum: int = 1200) -> np.ndarray:
+    """Return a deterministic bounded occupied-point representation.
+
+    The global matcher historically bounded point clouds by striding through
+    the source array.  Local verification must not depend on which robot
+    happened to call it, so use the same ordered source representation for
+    both directions and choose evenly spaced indices when bounding is needed.
+    The returned points remain in metric map coordinates.
+    """
+    points = _points(crop, occupied=True)
+    if len(points) <= int(maximum):
+        return points
+    indices = np.linspace(0, len(points) - 1, int(maximum), dtype=np.int64)
+    return points[indices]
+
+
+def _symmetric_chamfer_objective(source_points: np.ndarray,
+                                 target_points: np.ndarray,
+                                 transform, source_tree=None,
+                                 target_tree=None) -> float:
+    """Evaluate a bounded bidirectional occupied-geometry objective."""
+    if not len(source_points) or not len(target_points):
+        return math.inf
+    forward, _ = _nearest(_apply(source_points, transform), target_points,
+                          target_tree)
+    reverse, _ = _nearest(_apply(target_points, invert_se2(transform)),
+                          source_points, source_tree)
+    # Clipping prevents a small amount of non-overlap from dominating while
+    # the median term keeps a large unrelated map boundary from pulling the
+    # optimum.  Both map directions contribute equally.
+    forward = np.minimum(np.asarray(forward, dtype=np.float64), 0.30)
+    reverse = np.minimum(np.asarray(reverse, dtype=np.float64), 0.30)
+    return float(0.5 * (np.percentile(forward, 60) +
+                        np.percentile(reverse, 60)) +
+                 0.25 * (np.mean(forward) + np.mean(reverse)))
+
+
+def refine_registration_locally(
+        source: GridCrop, target: GridCrop, initial_transform,
+        translation_bound_m: float = 0.18,
+        yaw_bound_rad: float = math.radians(1.0)) -> RegistrationResult:
+    """Refine an already-established basin with deterministic sub-cell search.
+
+    This is deliberately not a second global matcher.  It evaluates a small
+    coordinate-search neighbourhood around the supplied basin using a
+    symmetric occupied-point Chamfer objective.  Translation is represented
+    as floating point metres at every level, including the final 1 mm level,
+    so output is not quantized to the occupancy-grid resolution.
+    """
+    try:
+        seed = np.asarray(tuple(float(value) for value in initial_transform),
+                          dtype=np.float64)
+    except (TypeError, ValueError):
+        return _empty_registration('INVALID_LOCAL_REFINEMENT_SEED')
+    if seed.shape != (3,) or not np.isfinite(seed).all():
+        return _empty_registration('INVALID_LOCAL_REFINEMENT_SEED')
+    source_points = _deterministic_registration_points(source)
+    target_points = _deterministic_registration_points(target)
+    if len(source_points) < 12 or len(target_points) < 12:
+        return _empty_registration('INSUFFICIENT_OCCUPIED_GEOMETRY')
+    source_tree = cKDTree(source_points) if cKDTree is not None else None
+    target_tree = cKDTree(target_points) if cKDTree is not None else None
+    best = seed.copy()
+    best_objective = _symmetric_chamfer_objective(
+        source_points, target_points, tuple(best), source_tree, target_tree)
+    # The levels are fixed by the existing family limits and the map's metric
+    # representation, not by GT.  A five-point stencil at each level keeps
+    # the work bounded while allowing sub-cell translation.
+    for translation_step, yaw_step in (
+            (0.020, math.radians(0.25)),
+            (0.005, math.radians(0.05)),
+            (0.001, math.radians(0.01))):
+        improved = True
+        while improved:
+            improved = False
+            candidates = []
+            for dx in (-2, -1, 0, 1, 2):
+                for dy in (-2, -1, 0, 1, 2):
+                    for dtheta in (-2, -1, 0, 1, 2):
+                        candidate = best + np.asarray(
+                            (dx * translation_step, dy * translation_step,
+                             dtheta * yaw_step), dtype=np.float64)
+                        candidate[:2] = np.clip(
+                            candidate[:2], seed[:2] - translation_bound_m,
+                            seed[:2] + translation_bound_m)
+                        candidate[2] = seed[2] + max(
+                            -yaw_bound_rad, min(yaw_bound_rad,
+                                                 candidate[2] - seed[2]))
+                        transform = tuple(float(value) for value in candidate)
+                        objective = _symmetric_chamfer_objective(
+                            source_points, target_points, transform,
+                            source_tree, target_tree)
+                        candidates.append((objective, transform))
+            candidate_objective, candidate_transform = min(
+                candidates, key=lambda value: (value[0], value[1]))
+            if candidate_objective + 1.0e-12 < best_objective:
+                best_objective = candidate_objective
+                best = np.asarray(candidate_transform, dtype=np.float64)
+                improved = True
+    return _registration_quality(
+        source, target, source_points, target_points,
+        tuple(float(value) for value in best),
+        source_tree=source_tree, target_tree=target_tree,
+        minimum_agreement=0.0)
+
+
 def register_crops(
         source: GridCrop,
         target: GridCrop,
         max_iterations: int = 25,
-        max_correspondence_m: float = 0.30) -> RegistrationResult:
+        max_correspondence_m: float = 0.30,
+        minimum_agreement: float = 0.55) -> RegistrationResult:
     """Register one crop with bounded global hypotheses then robust refinement.
 
     The function remains the backwards-compatible single-pair diagnostic API.
@@ -1180,10 +1531,28 @@ def register_crops(
         source_points = source_points[::max(1, len(source_points) // 1200)]
     if len(target_points) > 1200:
         target_points = target_points[::max(1, len(target_points) // 1200)]
-    seeds = _coarse_registration_seeds(
+    local_seeds = _coarse_registration_seeds(
         source_points, target, target_points, max_yaw_steps=72,
         translation_step_m=max(source.resolution * 2.0, 0.05),
         translation_radius_m=max(0.40, max_correspondence_m * 1.5), keep=6)
+    # Centroid alignment is useful when the two crops cover corresponding
+    # regions, but partial/non-corresponding windows can bias that seed by
+    # metres.  Add a second, deliberately coarse bounded global pass.  This
+    # is not a fine exhaustive search: it uses 0.50 m translation cells,
+    # retains only eight spatially distinct seeds, and reuses the existing
+    # rigid refinement and quality gates.
+    global_seeds = _coarse_registration_seeds(
+        source_points, target, target_points, max_yaw_steps=72,
+        translation_step_m=0.50,
+        translation_radius_m=3.50, keep=8)
+    seeds = []
+    for seed in tuple(local_seeds) + tuple(global_seeds):
+        if all(
+                abs(seed[0] - other[0]) > 0.20 or
+                abs(seed[1] - other[1]) > 0.20 or
+                abs(wrap_angle(seed[2] - other[2])) > math.radians(8.0)
+                for other in seeds):
+            seeds.append(seed)
     ecc_seed = _ecc_registration_seed(source, target)
     if ecc_seed is not None:
         seeds.insert(0, ecc_seed)
@@ -1196,7 +1565,8 @@ def register_crops(
     for seed in seeds:
         seed_result = _registration_quality(
             source, target, source_points, target_points, seed,
-            max_correspondence_m, source_tree, target_tree)
+            max_correspondence_m, source_tree, target_tree,
+            minimum_agreement=minimum_agreement)
         transform = _refine_registration(
             source_points, target_points, target, seed,
             max_iterations=max_iterations,
@@ -1204,7 +1574,8 @@ def register_crops(
             target_tree=target_tree)
         refined_result = _registration_quality(
             source, target, source_points, target_points, transform,
-            max_correspondence_m, source_tree, target_tree)
+            max_correspondence_m, source_tree, target_tree,
+            minimum_agreement=minimum_agreement)
         results.extend((seed_result, refined_result))
     def ranking(result):
         if target_field is None:
@@ -1216,6 +1587,297 @@ def register_crops(
         return (-int(result.accepted), global_score, result.residual_m,
                 -result.inlier_ratio, abs(result.transform[2]))
     return min(results, key=ranking)
+
+
+def register_crop_hypotheses(
+        source: GridCrop,
+        target: GridCrop,
+        *,
+        backend: str = 'mrpt',
+        minimum_agreement: float = 0.0,
+        mrpt_max_kld: float = 0.05,
+        mrpt_max_modes: int = 64,
+        mrpt_repetitions: int = 10,
+        max_distinct_modes: int = 10) -> tuple[RegistrationResult, ...]:
+    """Return bounded registration alternatives for one physical map pair.
+
+    Registration itself is delegated to the selected backend.  This function
+    only evaluates the returned SE(2) modes with the existing project quality
+    calculation and deduplicates repeated modes from the same physical pair.
+    A mode from one pair is therefore never mistaken for an independent
+    cross-pair constraint.
+    """
+    backend = str(backend).strip().lower()
+    if backend == 'legacy':
+        return (register_crops(
+            source, target, minimum_agreement=minimum_agreement),)
+    if backend != 'mrpt':
+        raise ValueError(f'unsupported registration backend: {backend}')
+
+    source_points = _points(source, occupied=True)
+    target_points = _points(target, occupied=True)
+    if len(source_points) < 12 or len(target_points) < 12:
+        return (replace(_empty_registration('INSUFFICIENT_OCCUPIED_GEOMETRY'),
+                        backend='mrpt'),)
+    if len(source_points) > 1200:
+        source_points = source_points[::max(1, len(source_points) // 1200)]
+    if len(target_points) > 1200:
+        target_points = target_points[::max(1, len(target_points) // 1200)]
+    source_tree = cKDTree(source_points) if cKDTree is not None else None
+    target_tree = cKDTree(target_points) if cKDTree is not None else None
+
+    # Import lazily so the legacy diagnostic/unit path remains usable on hosts
+    # that do not have the optional MRPT shared libraries.
+    from .mrpt_registration_backend import align_crops
+
+    raw_modes = []
+    for _ in range(max(1, int(mrpt_repetitions))):
+        raw_modes.extend(align_crops(
+            source, target, max_kld=float(mrpt_max_kld),
+            max_modes=max(1, int(mrpt_max_modes))))
+    if not raw_modes:
+        return (replace(_empty_registration('MRPT_NO_MODES'),
+                        backend='mrpt'),)
+
+    # The tolerance is deliberately only for collapsing repeated outputs from
+    # one physical pair.  It is tighter than the cross-pair selector limits.
+    mode_clusters = []
+    for mode in raw_modes:
+        candidate = _registration_quality(
+            source, target, source_points, target_points, mode.transform,
+            source_tree=source_tree, target_tree=target_tree,
+            minimum_agreement=float(minimum_agreement))
+        match = None
+        for cluster in mode_clusters:
+            distance, yaw = _transform_distance(
+                candidate.transform, cluster['result'].transform)
+            if distance <= 0.05 and yaw <= math.radians(0.5):
+                match = cluster
+                break
+        if match is None:
+            mode_clusters.append({
+                'result': candidate,
+                'log_weight': float(mode.log_weight),
+                'support': 1,
+                'mode_index': int(mode.mode_index),
+            })
+        else:
+            match['support'] += 1
+            if float(mode.log_weight) > float(match['log_weight']):
+                match.update({
+                    'result': candidate,
+                    'log_weight': float(mode.log_weight),
+                    'mode_index': int(mode.mode_index),
+                })
+
+    mode_clusters.sort(key=lambda item: (
+        -int(item['support']), -float(item['log_weight']),
+        -int(item['result'].accepted), tuple(item['result'].transform)))
+    bounded = mode_clusters[:max(1, int(max_distinct_modes))]
+    results = []
+    for index, cluster in enumerate(bounded):
+        result = cluster['result']
+        diagnostic = {
+            'kind': 'mrpt_mode',
+            'mode_rank': int(index),
+            'mode_index': int(cluster['mode_index']),
+            'mode_support': int(cluster['support']),
+            'mode_log_weight': float(cluster['log_weight']),
+            'same_pair_raw_mode_count': int(len(raw_modes)),
+            'same_pair_distinct_mode_count': int(len(mode_clusters)),
+            'dedup_translation_m': 0.05,
+            'dedup_yaw_rad': math.radians(0.5),
+        }
+        results.append(replace(
+            result, backend='mrpt', mode_index=int(cluster['mode_index']),
+            mode_log_weight=float(cluster['log_weight']),
+            mode_support=int(cluster['support']),
+            consensus_diagnostics=tuple(result.consensus_diagnostics) +
+            (diagnostic,)))
+    return tuple(results)
+
+
+def _pose_constraint_from_result(
+        pair: tuple[GridCrop, GridCrop], result: RegistrationResult,
+        evidence_id: str, timestamp_pair: tuple[int, int],
+        source_viewpoint, target_viewpoint,
+        physical_metadata_supplied: bool) -> PoseConstraint:
+    """Convert one backend mode into the existing selector input type."""
+    quality = max(0.05, min(1.0, float(
+        0.45 * result.inlier_ratio +
+        0.30 * result.occupied_free_agreement +
+        0.25 * result.overlap_fraction)))
+    return PoseConstraint(
+        transform=tuple(float(value) for value in result.transform),
+        covariance=tuple(float(value) for value in result.covariance),
+        quality=quality, evidence_id=str(evidence_id),
+        source_center=_crop_center(pair[0]),
+        target_center=_crop_center(pair[1]),
+        source_viewpoint=source_viewpoint,
+        target_viewpoint=target_viewpoint,
+        source_viewpoint_required=bool(physical_metadata_supplied),
+        target_viewpoint_required=bool(physical_metadata_supplied),
+        source_timestamp_ns=int(timestamp_pair[0]),
+        target_timestamp_ns=int(timestamp_pair[1]))
+
+
+def select_hypothesis_family(
+        pairs: Iterable[tuple[GridCrop, GridCrop]],
+        hypothesis_sets: Iterable[Iterable[RegistrationResult]],
+        *,
+        target_map_radius_m: float = 40.0,
+        min_consistent_constraints: int = 3,
+        min_spatial_baseline_m: float = 0.75,
+        max_translation_consistency_m: float = 0.15,
+        max_yaw_consistency_rad: float = math.radians(1.0),
+        max_projected_registration_error_m: float = 0.20,
+        min_candidate_margin: float = 0.02,
+        minimum_agreement: float = 0.0,
+        evidence_timestamps: Iterable[tuple[int, int]] | None = None,
+        evidence_ids: Iterable[str] | None = None,
+        source_viewpoints: Iterable[tuple[float, float] | None] | None = None,
+        target_viewpoints: Iterable[tuple[float, float] | None] | None = None
+        ) -> RegistrationResult:
+    """Choose one MRPT mode per physical pair with the existing selector.
+
+    This is a bounded bridge from MRPT's multi-modal output to the project's
+    unchanged robust selector.  It enumerates only triples of physical pairs
+    (the minimum safe family), never modes from the same pair, and then lets
+    ``register_crop_set`` perform the existing final acceptance checks.
+    """
+    pair_list = list(pairs)
+    sets = [tuple(values) for values in hypothesis_sets]
+    if len(pair_list) != len(sets):
+        raise ValueError('hypothesis_sets must align one-for-one with pairs')
+    minimum = max(3, int(min_consistent_constraints))
+    if len(pair_list) < minimum:
+        return _empty_registration('INSUFFICIENT_CONSISTENT_CONSTRAINTS')
+    timestamp_list = list(evidence_timestamps or ())
+    evidence_id_list = list(evidence_ids or ())
+    source_viewpoint_list = (list(source_viewpoints)
+                             if source_viewpoints is not None else None)
+    target_viewpoint_list = (list(target_viewpoints)
+                             if target_viewpoints is not None else None)
+    metadata_supplied = (source_viewpoints is not None or
+                         target_viewpoints is not None)
+
+    options = []
+    for index, (pair, values) in enumerate(zip(pair_list, sets)):
+        evidence_id = (str(evidence_id_list[index])
+                       if index < len(evidence_id_list) else str(index))
+        stamp = (timestamp_list[index]
+                 if index < len(timestamp_list) else (0, 0))
+        source_viewpoint = (None if source_viewpoint_list is None or
+                            index >= len(source_viewpoint_list)
+                            else source_viewpoint_list[index])
+        target_viewpoint = (None if target_viewpoint_list is None or
+                            index >= len(target_viewpoint_list)
+                            else target_viewpoint_list[index])
+        # A mode enters the family search only after the existing explicit
+        # per-registration checks.  Agreement is intentionally not applied
+        # here beyond the caller's already-computed result; it is a soft
+        # selector signal, not a hard .55 gate.
+        options.append(tuple(
+            (result, _pose_constraint_from_result(
+                pair, result, evidence_id, stamp, source_viewpoint,
+                target_viewpoint, metadata_supplied))
+            for result in values if result.accepted))
+
+    family_candidates = []
+    for indices in combinations(range(len(pair_list)), minimum):
+        if any(not options[index] for index in indices):
+            continue
+        for choices in product(*(options[index] for index in indices)):
+            selected_results = tuple(choice[0] for choice in choices)
+            constraints = [choice[1] for choice in choices]
+            # The Cartesian selection itself enforces one mode per physical
+            # ID.  Keep an explicit identity check so callers cannot bypass
+            # that rule by supplying duplicate IDs.
+            if len({str(item.evidence_id) for item in constraints}) != len(
+                    constraints):
+                continue
+            selection = select_robust_hypothesis(
+                constraints, min_inliers=minimum,
+                min_spatial_baseline_m=min_spatial_baseline_m,
+                max_translation_disagreement_m=
+                    max_translation_consistency_m,
+                max_yaw_disagreement_rad=max_yaw_consistency_rad)
+            if (selection.status != ACCEPTED_HYPOTHESIS or
+                    len(selection.selected_indices) < minimum):
+                continue
+            family_candidates.append({
+                'indices': tuple(indices),
+                'results': selected_results,
+                'selection': selection,
+                'support': sum(int(item.mode_support)
+                               for item in selected_results),
+            })
+
+    diagnostics = [{
+        'kind': 'mrpt_family_search',
+        'physical_pair_count': len(pair_list),
+        'alternative_counts': [len(values) for values in options],
+        'candidate_family_count': len(family_candidates),
+        'max_modes_per_physical_pair': max(
+            [len(values) for values in options] + [0]),
+    }]
+    if not family_candidates:
+        return replace(
+            _empty_registration('INSUFFICIENT_CONSISTENT_CONSTRAINTS'),
+            consensus_diagnostics=tuple(diagnostics),
+            selector_status=INSUFFICIENT_EVIDENCE)
+
+    family_candidates.sort(key=lambda item: (
+        -float(item['selection'].score),
+        -float(item['selection'].runner_up_margin),
+        -int(item['support']), item['indices'],
+        tuple(result.transform for result in item['results'])))
+    chosen = family_candidates[0]
+    selected_pairs = [pair_list[index] for index in chosen['indices']]
+    selected_results = list(chosen['results'])
+    selected_ids = [
+        str(evidence_id_list[index]) if index < len(evidence_id_list)
+        else str(index) for index in chosen['indices']]
+    selected_stamps = [
+        timestamp_list[index] if index < len(timestamp_list) else (0, 0)
+        for index in chosen['indices']]
+    selected_sources = [
+        None if source_viewpoint_list is None or
+        index >= len(source_viewpoint_list) else source_viewpoint_list[index]
+        for index in chosen['indices']]
+    selected_targets = [
+        None if target_viewpoint_list is None or
+        index >= len(target_viewpoint_list) else target_viewpoint_list[index]
+        for index in chosen['indices']]
+    final = register_crop_set(
+        selected_pairs, target_map_radius_m=target_map_radius_m,
+        min_consistent_constraints=minimum,
+        min_spatial_baseline_m=min_spatial_baseline_m,
+        max_translation_consistency_m=max_translation_consistency_m,
+        max_yaw_consistency_rad=max_yaw_consistency_rad,
+        max_projected_registration_error_m=max_projected_registration_error_m,
+        min_candidate_margin=min_candidate_margin,
+        minimum_agreement=minimum_agreement,
+        individual_results=selected_results,
+        evidence_timestamps=selected_stamps, evidence_ids=selected_ids,
+        source_viewpoints=selected_sources,
+        target_viewpoints=selected_targets)
+    family_diagnostic = {
+        'kind': 'mrpt_selected_family',
+        'physical_evidence_ids': selected_ids,
+        'selected_mode_indices': [int(result.mode_index)
+                                  for result in selected_results],
+        'selected_mode_support': [int(result.mode_support)
+                                  for result in selected_results],
+        'candidate_family_count': len(family_candidates),
+        'selector_score': float(chosen['selection'].score),
+        'selector_runner_up_margin': float(
+            chosen['selection'].runner_up_margin),
+    }
+    return replace(
+        final,
+        consensus_diagnostics=tuple(final.consensus_diagnostics) +
+        tuple(diagnostics) + (family_diagnostic,))
 
 
 def wrap_angle(angle: float) -> float:
@@ -1265,19 +1927,33 @@ def _crop_center(crop: GridCrop) -> tuple[float, float]:
                  .tolist())
 
 
-def _pair_spatial_baseline(pairs, indices):
-    """Measure baseline in each frame and retain the stronger one.
+def _pair_spatial_baseline(pairs, indices, source_viewpoints=None,
+                           target_viewpoints=None):
+    """Measure physical viewpoint baseline.
 
-    Source and target crop centers live in different map frames.  Compute
-    each frame's baseline independently and take the maximum; mixing the two
-    coordinate systems would make the gate order-dependent under inversion.
+    Production supplies the registering robot's local odometry viewpoint.
+    Crop centers remain a compatibility fallback only when the caller omits
+    physical-viewpoint metadata entirely.  An explicit list containing
+    missing viewpoints means that physical independence is unavailable; it
+    must not be silently replaced by map-region centers.
     """
     baselines = []
-    for side in (0, 1):
-        centers = [_crop_center(pairs[index][side]) for index in indices]
-        if len(centers) < 2:
+    physical_metadata_supplied = (source_viewpoints is not None or
+                                  target_viewpoints is not None)
+    for side, viewpoints in ((0, source_viewpoints),
+                             (1, target_viewpoints)):
+        if viewpoints is None and not physical_metadata_supplied:
+            values = [_crop_center(pairs[index][side]) for index in indices]
+        elif viewpoints is None:
+            values = []
+        else:
+            values = [viewpoints[index] if index < len(viewpoints) else None
+                      for index in indices]
+            values = [value for value in values if value is not None]
+        if len(values) < 2:
             continue
-        points = np.asarray(centers, dtype=np.float64)
+        points = np.asarray([tuple(value[:2]) for value in values],
+                            dtype=np.float64)
         baselines.append(float(np.max(np.linalg.norm(
             points[:, None, :] - points[None, :, :], axis=2))))
     return max(baselines, default=0.0)
@@ -1293,7 +1969,8 @@ def consensus_subset_diagnostics(
         max_yaw_consistency_rad: float = math.radians(1.0),
         max_projected_registration_error_m: float = 0.20,
         min_inlier_ratio: float = 0.55,
-        max_robust_residual_m: float = 0.08) -> tuple[dict, ...]:
+        max_robust_residual_m: float = 0.08,
+        source_viewpoints=None, target_viewpoints=None) -> tuple[dict, ...]:
     """Return bounded per-constraint and subset forensic diagnostics.
 
     This function intentionally mirrors the existing consensus thresholds but
@@ -1301,6 +1978,7 @@ def consensus_subset_diagnostics(
     distinction between an invalid individual registration, an inconsistent
     transform subset, and a subset that reaches a later physical gate.
     """
+    min_consistent_constraints = max(3, int(min_consistent_constraints))
     diagnostics = []
     for index, (pair, result) in enumerate(zip(pairs, results)):
         diagnostics.append({
@@ -1363,7 +2041,7 @@ def consensus_subset_diagnostics(
                 max_yaw > max_yaw_consistency_rad):
             reasons.append('PAIRWISE_TRANSFORM_INCONSISTENT')
         spatial_baseline = _pair_spatial_baseline(
-            pairs, indices)
+            pairs, indices, source_viewpoints, target_viewpoints)
         if spatial_baseline < min_spatial_baseline_m:
             reasons.append('INSUFFICIENT_SPATIAL_BASELINE')
         inlier_ratio = float(np.mean(
@@ -1431,9 +2109,12 @@ def register_crop_set(
         min_inlier_ratio: float = 0.55,
         max_robust_residual_m: float = 0.08,
         min_candidate_margin: float = 0.02,
+        minimum_agreement: float = 0.55,
         individual_results: Iterable[RegistrationResult] | None = None,
         evidence_timestamps: Iterable[tuple[int, int]] | None = None,
         evidence_ids: Iterable[str] | None = None,
+        source_viewpoints: Iterable[tuple[float, float]] | None = None,
+        target_viewpoints: Iterable[tuple[float, float]] | None = None,
         hypothesis_accumulator: IncrementalHypothesisAccumulator | None = None
         ) -> RegistrationResult:
     """Estimate one transform from an independently verified crop set.
@@ -1443,11 +2124,17 @@ def register_crop_set(
     translations and circular yaw values.  This is a bounded PCM-like
     consistency gate: one wrong crop cannot determine the handoff.
     """
+    min_consistent_constraints = max(3, int(min_consistent_constraints))
     pair_list = list(pairs)
+    source_viewpoint_list = (list(source_viewpoints)
+                             if source_viewpoints is not None else None)
+    target_viewpoint_list = (list(target_viewpoints)
+                             if target_viewpoints is not None else None)
     if not pair_list:
         return _empty_registration('NO_CONSTRAINTS')
     if individual_results is None:
-        results = [register_crops(source, target)
+        results = [register_crops(source, target,
+                                  minimum_agreement=minimum_agreement)
                    for source, target in pair_list]
     else:
         cached = list(individual_results)
@@ -1460,7 +2147,8 @@ def register_crop_set(
         # duplicate work and leaves all clustering, spatial-diversity,
         # consistency, uncertainty, and projected-error gates unchanged.
         results = [
-            result if result is not None else register_crops(source, target)
+            result if result is not None else register_crops(
+                source, target, minimum_agreement=minimum_agreement)
             for (source, target), result in zip(pair_list, cached)]
     forensic = consensus_subset_diagnostics(
         pair_list, results,
@@ -1471,17 +2159,48 @@ def register_crop_set(
         max_yaw_consistency_rad=max_yaw_consistency_rad,
         max_projected_registration_error_m=max_projected_registration_error_m,
         min_inlier_ratio=min_inlier_ratio,
-        max_robust_residual_m=max_robust_residual_m)
-    accepted = [result for result in results if result.accepted]
-    if not accepted:
+        max_robust_residual_m=max_robust_residual_m,
+        source_viewpoints=source_viewpoint_list,
+        target_viewpoints=target_viewpoint_list)
+    def plausible_finite_registration(result, source, target):
+        """Retain finite rigid observations for robust consensus only.
+
+        This is not an acceptance gate.  It prevents a finite observation
+        that missed one individual quality threshold from disappearing before
+        the existing multi-constraint selector can compare it with stronger
+        independent observations.  Final handoff below still requires every
+        selected observation to pass the original geometric gate.
+        """
+        transform = np.asarray(result.transform, dtype=np.float64)
+        covariance = np.asarray(result.covariance, dtype=np.float64)
+        max_extent = max(source.values.shape[0], source.values.shape[1],
+                         target.values.shape[0], target.values.shape[1]) * max(
+                             float(source.resolution),
+                             float(target.resolution))
+        return bool(
+            transform.shape == (3,) and np.isfinite(transform).all() and
+            covariance.size in (9, 36) and np.isfinite(covariance).all() and
+            math.isfinite(float(result.residual_m)) and
+            0.0 <= float(result.inlier_ratio) <= 1.0 and
+            0.0 <= float(result.reverse_inlier_ratio) <= 1.0 and
+            0.0 <= float(result.occupied_free_agreement) <= 1.0 and
+            0.0 <= float(result.overlap_fraction) <= 1.0 and
+            math.isfinite(float(result.condition_number)) and
+            float(result.condition_number) < 1e8 and
+            float(result.residual_m) <= max(1.0, max_extent))
+
+    plausible_indices = [
+        index for index, result in enumerate(results)
+        if result.accepted or plausible_finite_registration(
+            result, pair_list[index][0], pair_list[index][1])]
+    if not plausible_indices:
         return _empty_registration('NO_GEOMETRIC_CONSTRAINT')
     # The old implementation grew one evolving mean in arrival order.  That
     # could absorb a third constraint even when the final set contained a
     # pairwise-inconsistent transform.  Use a bounded multi-hypothesis,
     # covariance-weighted selector instead; the single-crop registration above
     # remains unchanged and still supplies the observations.
-    accepted_indices = [index for index, result in enumerate(results)
-                        if result.accepted]
+    accepted_indices = plausible_indices
     timestamp_list = list(evidence_timestamps or ())
     robust_candidates = []
     evidence_id_list = list(evidence_ids or ())
@@ -1501,6 +2220,18 @@ def register_crop_set(
                          if index < len(evidence_id_list) else str(index)),
             source_center=_crop_center(pair[0]),
             target_center=_crop_center(pair[1]),
+            source_viewpoint=(
+                None if source_viewpoint_list is None or
+                index >= len(source_viewpoint_list)
+                else source_viewpoint_list[index]),
+            target_viewpoint=(
+                None if target_viewpoint_list is None or
+                index >= len(target_viewpoint_list)
+                else target_viewpoint_list[index]),
+            source_viewpoint_required=(source_viewpoint_list is not None or
+                                       target_viewpoint_list is not None),
+            target_viewpoint_required=(source_viewpoint_list is not None or
+                                       target_viewpoint_list is not None),
             source_timestamp_ns=int(timestamp_pair[0]),
             target_timestamp_ns=int(timestamp_pair[1])))
     if hypothesis_accumulator is None:
@@ -1570,7 +2301,8 @@ def register_crop_set(
     selected_pair_indices = [index for index, item in enumerate(results)
                              if id(item) in selected_result_ids]
     spatial_baseline = _pair_spatial_baseline(
-        pair_list, selected_pair_indices)
+        pair_list, selected_pair_indices, source_viewpoint_list,
+        target_viewpoint_list)
     yaws = np.asarray([item.transform[2] for item in items])
     angular_spread = (float(np.max([abs(wrap_angle(yaw - transform[2]))
                                     for yaw in yaws]))
@@ -1593,8 +2325,12 @@ def register_crop_set(
                    max(1, len(items)))))
     result = items[0]
     projected = translation_uncertainty + target_map_radius_m * yaw_uncertainty
+    selected_individual_gates = all(item.accepted for item in items)
+    mean_occupied_free_agreement = float(np.mean([
+        item.occupied_free_agreement for item in items]))
     accepted_final = (
         len(items) >= min_consistent_constraints and
+        selected_individual_gates and
         spatial_baseline >= min_spatial_baseline_m and
         inlier_ratio >= min_inlier_ratio and
         robust_residual <= max_robust_residual_m and
@@ -1603,7 +2339,9 @@ def register_crop_set(
         robust.status == ACCEPTED_HYPOTHESIS)
     reason = 'ACCEPTED_MULTI_CONSTRAINT' if accepted_final else (
         'INSUFFICIENT_CONSISTENT_CONSTRAINTS' if len(items) < min_consistent_constraints
-        else 'PHYSICAL_ACCURACY_GATE_REJECTED')
+        else ('INDIVIDUAL_GEOMETRIC_GATE_REJECTED'
+              if not selected_individual_gates else
+              'PHYSICAL_ACCURACY_GATE_REJECTED'))
     covariance = list(result.covariance)
     covariance[0] = covariance[7] = translation_uncertainty ** 2
     covariance[35] = yaw_uncertainty ** 2
@@ -1677,7 +2415,8 @@ def temporal_support_count(
         anchor_pair: tuple[str, str], anchor_own_stamp_ns: int,
         anchor_peer_stamp_ns: int, anchor_sector_shift: int, observations,
         similarity_gate: float, margin_gate: float,
-        known_fraction_gate: float, window_ns: int, sector_count: int = 24) -> int:
+        known_fraction_gate: float, window_ns: int, sector_count: int = 24,
+        descriptor_advisory: bool = False) -> int:
     """Count independent keyframe-pair observations for one cheap candidate.
 
     ``observations`` contains tuples of ``(pair, own_stamp_ns,
@@ -1694,7 +2433,8 @@ def temporal_support_count(
         if pair == anchor_pair:
             support.add(pair)
             continue
-        if (similarity < similarity_gate or margin < margin_gate or
+        if ((not descriptor_advisory and
+             (similarity < similarity_gate or margin < margin_gate)) or
                 known_fraction < known_fraction_gate):
             continue
         if (abs(int(own_stamp_ns) - int(anchor_own_stamp_ns)) > window_ns or

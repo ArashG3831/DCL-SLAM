@@ -1,8 +1,57 @@
-from setuptools import find_packages, setup
+from pathlib import Path
+
+from setuptools import Extension, find_packages, setup
 import os
 from glob import glob
 
 package_name = 'my_epuck_project'
+
+
+def _mrpt_extension():
+    """Build the thin MRPT binding when a local MRPT installation is supplied.
+
+    The registration algorithm remains in MRPT.  This extension only converts
+    the project's signed occupancy bytes into a COccupancyGridMap2D and returns
+    the CPosePDFSOG modes.  ``MRPT_PREFIXES`` is a path-separator-delimited
+    list so an extracted ROS package set can be used without installing it
+    into the system or into this workspace.
+    """
+    prefixes = [Path(value) for value in os.environ.get(
+        'MRPT_PREFIXES', '').split(os.pathsep) if value]
+    if not prefixes:
+        extracted = Path('/tmp/mrpt_apt/extracted')
+        if extracted.is_dir():
+            prefixes = sorted(extracted.glob('*/opt/ros/jazzy'))
+    include_dirs = []
+    library_dirs = []
+    for prefix in prefixes:
+        include_root = prefix / 'include'
+        library_root = prefix / 'lib'
+        if include_root.is_dir():
+            include_dirs.append(str(include_root))
+            include_dirs.extend(str(path) for path in sorted(
+                include_root.glob('mrpt/*/include')) if path.is_dir())
+        if library_root.is_dir():
+            library_dirs.append(str(library_root))
+    if not include_dirs or not library_dirs:
+        if os.environ.get('MRPT_REQUIRE', '') == '1':
+            raise RuntimeError(
+                'MRPT_REQUIRE=1 but no MRPT include/library prefixes were found')
+        return []
+    return [Extension(
+        'my_epuck_project._mrpt_registration',
+        sources=['my_epuck_project/mrpt_registration_native.cpp'],
+        include_dirs=include_dirs,
+        library_dirs=library_dirs,
+        libraries=['mrpt-slam', 'mrpt-maps', 'mrpt-poses'],
+        language='c++',
+        extra_compile_args=['-std=c++17', '-O2'],
+        extra_link_args=['-Wl,--no-as-needed'] + [
+            f'-Wl,-rpath,{path}' for path in library_dirs],
+    )]
+
+
+mrpt_extensions = _mrpt_extension()
 
 setup(
     name=package_name,
@@ -29,6 +78,7 @@ setup(
     description='Local Webots e-puck project package',
     license='MIT',
     tests_require=['pytest'],
+    ext_modules=mrpt_extensions,
     entry_points={
         'console_scripts': [
             'd500_scan_fix = my_epuck_project.d500_scan_fix:main',
@@ -87,6 +137,8 @@ setup(
             'my_epuck_project.hard_failure_runtime_fixture:main',
             'terminal_finalization_runtime_fixture = '
             'my_epuck_project.terminal_finalization_runtime_fixture:main',
+            'traffic_test_barrier = '
+            'my_epuck_project.traffic_test_barrier:main',
             'motion_scan_branch_relay = '
             'my_epuck_project.motion_scan_branch_relay:main',
             'paced_ros2_supervisor = '

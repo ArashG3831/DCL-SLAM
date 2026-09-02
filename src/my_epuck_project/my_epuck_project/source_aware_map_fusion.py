@@ -8,9 +8,11 @@ from my_epuck_interfaces.msg import PeerMap, RelativePoseHypothesis
 from my_epuck_project.live_map_sanitizer import (
     apply_incremental_patch,
     footprint_cell_indices,
+    swept_footprint_cell_indices,
 )
-from nav_msgs.msg import MapMetaData, OccupancyGrid
+from nav_msgs.msg import MapMetaData, OccupancyGrid, Path
 from map_msgs.msg import OccupancyGridUpdate
+from std_msgs.msg import Bool
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
@@ -65,6 +67,18 @@ def _same_grid_content(previous, current):
     current_data = np.asarray(current.data, dtype=np.int8)
     return (previous_data.size == current_data.size
             and np.array_equal(previous_data, current_data))
+
+
+def _snapshot_pose_age_s(snapshot_time, pose_stamp):
+    """Return temporal mismatch between a map snapshot and a TF pose.
+
+    The pose is intentionally looked up at the map snapshot timestamp.  The
+    existing freshness tolerance therefore measures correspondence to that
+    snapshot, not age relative to the node's current clock.
+    """
+    if snapshot_time is None or pose_stamp is None:
+        return math.inf
+    return abs(snapshot_time.nanoseconds - pose_stamp.nanoseconds) / 1e9
 
 
 def _changed_update_bounds(current, previous):
@@ -215,6 +229,11 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('sanitize_live_footprints', False)
         self.declare_parameter('min_fusion_rebuild_period_s', 1.0)
         self.declare_parameter('handoff_gated', False)
+        self.declare_parameter('historical_cleanup_required', False)
+        self.declare_parameter('local_prehandoff_path_topic', '')
+        self.declare_parameter('remote_prehandoff_path_topic', '')
+        self.declare_parameter('historical_cleanup_ready_topic', '')
+        self.declare_parameter('historical_footprint_radius_m', 0.037)
 
         local_topic = self.get_parameter('local_map_topic').value
         remote_topic = self.get_parameter('remote_peer_topic').value
@@ -246,6 +265,20 @@ class SourceAwareMapFusion(Node):
             self.get_parameter('sanitize_live_footprints').value)
         self.handoff_gated = bool(
             self.get_parameter('handoff_gated').value)
+        self.historical_cleanup_required = bool(
+            self.get_parameter('historical_cleanup_required').value)
+        self.local_path_topic = str(
+            self.get_parameter('local_prehandoff_path_topic').value)
+        self.remote_path_topic = str(
+            self.get_parameter('remote_prehandoff_path_topic').value)
+        self.cleanup_ready_topic = str(
+            self.get_parameter('historical_cleanup_ready_topic').value)
+        if not self.cleanup_ready_topic:
+            self.cleanup_ready_topic = (
+                f'/cslam/unknown_pose/{self.own_robot_id}/'
+                'historical_cleanup_ready')
+        self.historical_radius = float(
+            self.get_parameter('historical_footprint_radius_m').value)
         self.phase_active = not self.handoff_gated
         self.min_fusion_rebuild_period_s = max(
             0.0, float(self.get_parameter('min_fusion_rebuild_period_s').value))
@@ -272,6 +305,8 @@ class SourceAwareMapFusion(Node):
             ))
         self.local_subscription = None
         self.peer_subscription = None
+        self.local_path_subscription = None
+        self.remote_path_subscription = None
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = (
             None if self.handoff_gated else TransformListener(self.tf_buffer, self))
@@ -296,6 +331,15 @@ class SourceAwareMapFusion(Node):
         self.rebuild_busy = False
         self.visualization_data = None
         self.visualization_geometry = None
+        self.historical_paths = {'local': None, 'remote': None}
+        self.historical_mask_cells = set()
+        self.historical_cleanup_ready = not self.historical_cleanup_required
+        self.historical_mask_built = not self.historical_cleanup_required
+        self.historical_cells_cleared = 0
+        self.cleanup_ready_publisher = self.create_publisher(
+            Bool, self.cleanup_ready_topic,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.profile_window = {
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
@@ -344,10 +388,91 @@ class SourceAwareMapFusion(Node):
             OccupancyGrid, local_topic, self.local_callback, qos)
         self.peer_subscription = self.create_subscription(
             PeerMap, remote_topic, self.peer_callback, qos)
+        if self.historical_cleanup_required:
+            self.local_path_subscription = self.create_subscription(
+                Path, self.local_path_topic,
+                lambda message: self._path_callback('local', message), qos)
+            self.remote_path_subscription = self.create_subscription(
+                Path, self.remote_path_topic,
+                lambda message: self._path_callback('remote', message), qos)
         self.retry_timer = self.create_timer(
             self.rebuild_period_s, self.scheduled_fuse)
         self.get_logger().info(
             'FUSION_PHASE post_handoff=true map_inputs=true timer=true')
+
+    def _path_callback(self, role, message):
+        """Cache one immutable pre-handoff path and trigger first fusion."""
+        frame = str(message.header.frame_id)
+        if not frame:
+            # An empty path is still a valid answer for a robot that had no
+            # usable pre-handoff map pose; retain it so the barrier cannot
+            # wait forever for a second publication.
+            frame = 'unknown'
+        self.historical_paths[role] = message
+        self.get_logger().info(
+            f'HISTORICAL_PATH_RECEIVED role={role} frame={frame} '
+            f'samples={len(message.poses)}')
+        self.mark_dirty()
+
+    def _historical_points_in_output(self):
+        if not self.historical_cleanup_required:
+            return []
+        if any(path is None for path in self.historical_paths.values()):
+            return None
+        points = []
+        for path in self.historical_paths.values():
+            if not path.poses:
+                continue
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.output_frame, path.header.frame_id, Time(),
+                    timeout=Duration(seconds=0.05))
+            except TransformException as error:
+                self.get_logger().warning(
+                    f'Waiting for historical path transform: {error}',
+                    throttle_duration_sec=5.0)
+                return None
+            transform_2d = (
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                self.yaw(transform.transform.rotation),
+            )
+            points.extend(self.transform_point(
+                pose.pose.position.x, pose.pose.position.y, transform_2d)
+                for pose in path.poses)
+        return points
+
+    def _apply_historical_mask(self, grid):
+        points = self._historical_points_in_output()
+        if points is None:
+            return None
+        first_build = not self.historical_mask_built
+        cells = swept_footprint_cell_indices(
+            grid, points, self.historical_radius)
+        cleared = 0
+        for index in cells:
+            if grid.data[index] >= 0:
+                grid.data[index] = 0
+                cleared += 1
+        self.historical_mask_cells = cells
+        self.historical_mask_built = True
+        self.historical_cells_cleared = cleared
+        if first_build:
+            self.get_logger().info(
+                f'HISTORICAL_CLEANUP_READY mask_cells={len(cells)} '
+                f'occupied_cells_cleared={cleared} '
+                f'physical_radius_m={self.historical_radius:.3f}')
+        return cells
+
+    def _publish_cleanup_ready(self):
+        if self.historical_cleanup_ready:
+            return
+        self.historical_cleanup_ready = True
+        message = Bool()
+        message.data = True
+        self.cleanup_ready_publisher.publish(message)
+        self.get_logger().info(
+            f'HISTORICAL_CLEANUP_READY published=true topic={self.cleanup_ready_topic}')
 
     def _handoff_callback(self, message):
         if not bool(message.accepted) or str(message.status) != 'ACCEPTED':
@@ -482,8 +607,10 @@ class SourceAwareMapFusion(Node):
                     snapshot_time if snapshot_time is not None else Time(),
                     timeout=Duration(seconds=0.05))
                 stamp = Time.from_msg(transform.header.stamp)
-                now = self.get_clock().now()
-                age = max(0.0, (now - stamp).nanoseconds / 1e9)
+                reference_time = (
+                    snapshot_time if snapshot_time is not None
+                    else self.get_clock().now())
+                age = _snapshot_pose_age_s(reference_time, stamp)
                 x = transform.transform.translation.x
                 y = transform.transform.translation.y
                 heading = self.yaw(transform.transform.rotation)
@@ -498,11 +625,13 @@ class SourceAwareMapFusion(Node):
                             round(heading, 3), age <= self.live_pose_max_age_s))
             except TransformException as error:
                 cached = self.live_pose_cache.get(frame)
-                now = self.get_clock().now()
                 cached_age = None
                 if cached is not None:
-                    cached_age = max(
-                        0.0, (now - cached[2]).nanoseconds / 1e9)
+                    reference_time = (
+                        snapshot_time if snapshot_time is not None
+                        else self.get_clock().now())
+                    cached_age = _snapshot_pose_age_s(
+                        reference_time, cached[2])
                 if cached is not None and cached_age <= self.live_pose_max_age_s:
                     footprints.append({
                         'robot_frame': frame, 'x': cached[0], 'y': cached[1],
@@ -701,6 +830,12 @@ class SourceAwareMapFusion(Node):
         started_cpu = time.process_time()
         if self.local_map is None or self.remote_map is None:
             return
+        if self.historical_cleanup_required and not self.historical_cleanup_ready:
+            if not self.historical_mask_built:
+                # The first base grid below is where the mask is rasterized;
+                # both paths must arrive before any shared map can publish.
+                if any(path is None for path in self.historical_paths.values()):
+                    return
         if not self.map_dirty and not self.sanitize_live_footprints:
             self._profile(
                 mode='NOOP', map_changed=False, dimensions=(0, 0),
@@ -773,6 +908,12 @@ class SourceAwareMapFusion(Node):
                 return
             base, inspected = self._make_base_grid(
                 messages, transforms, minimum_x, minimum_y, width, height)
+            if self.historical_cleanup_required:
+                # Reapply the fixed geometric mask on every local-map rebuild.
+                # Slam Toolbox can reintroduce pre-handoff observations into a
+                # later OccupancyGrid, and the grid origin/extent may change.
+                if self._apply_historical_mask(base) is None:
+                    return
             self.base_grid = base
             self.base_key = base_key
             self.output_grid = OccupancyGrid()
@@ -805,6 +946,8 @@ class SourceAwareMapFusion(Node):
         self.last_pose_key = pose_key
         if published and rclpy.ok():
             self._publish_fused(self.output_grid)
+            if self.historical_cleanup_required and not self.historical_cleanup_ready:
+                self._publish_cleanup_ready()
         self.map_dirty = False
         self._profile(
             mode=mode, map_changed=map_changed,

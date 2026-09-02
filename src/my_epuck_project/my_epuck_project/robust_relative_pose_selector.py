@@ -62,6 +62,17 @@ class PoseConstraint:
     evidence_id: str = ''
     source_center: tuple[float, float] | None = None
     target_center: tuple[float, float] | None = None
+    # Physical observation positions in each robot's local frame.  These are
+    # distinct from crop/map-region centers and are the authoritative
+    # diversity evidence for production selector calls.
+    source_viewpoint: tuple[float, float] | None = None
+    target_viewpoint: tuple[float, float] | None = None
+    # Explicit metadata-presence markers let production distinguish an
+    # unavailable physical pose from legacy diagnostic callers that omitted
+    # viewpoint metadata entirely.  Only the latter may use crop centers as
+    # a compatibility fallback.
+    source_viewpoint_required: bool = False
+    target_viewpoint_required: bool = False
     source_timestamp_ns: int = 0
     target_timestamp_ns: int = 0
 
@@ -97,7 +108,7 @@ class IncrementalHypothesisAccumulator:
                  max_translation_disagreement_m=0.15,
                  max_yaw_disagreement_rad=math.radians(1.0),
                  min_runner_up_margin=0.10):
-        self.min_inliers = int(min_inliers)
+        self.min_inliers = max(3, int(min_inliers))
         self.min_spatial_baseline_m = float(min_spatial_baseline_m)
         self.max_translation_disagreement_m = float(
             max_translation_disagreement_m)
@@ -299,23 +310,32 @@ def _distance(first, second):
 
 
 def _spatial_baseline(constraints: list[PoseConstraint], indices):
-    """Return the strongest baseline in either observation frame.
+    """Return the strongest physical-observation baseline available.
 
-    A cross-robot constraint has a source and target crop.  The same physical
-    evidence therefore has different source/target coordinates depending on
-    which peer verifies it.  Measuring only ``source_center`` made a valid
-    spatially diverse set fail when the reverse-direction verifier happened
-    to have the shorter baseline in its source frame.  Baseline is a
-    frame-local property, so take the maximum of the two independently
-    measurable baselines; never mix coordinates from different frames.
+    Production supplies local odometry viewpoints. A missing physical
+    viewpoint is not replaced by a crop/map center, because that would turn
+    absent physical evidence into a false independence claim.
     """
     baselines = []
-    for field in ('source_center', 'target_center'):
-        centers = [getattr(constraints[index], field) for index in indices
-                   if getattr(constraints[index], field) is not None]
-        if len(centers) < 2:
+    for viewpoint_field, required_field in (
+            ('source_viewpoint', 'source_viewpoint_required'),
+            ('target_viewpoint', 'target_viewpoint_required')):
+        values = [getattr(constraints[index], viewpoint_field)
+                  for index in indices]
+        values = [value for value in values if value is not None]
+        metadata_required = any(
+            bool(getattr(constraints[index], required_field, False))
+            for index in indices)
+        if not values and not metadata_required:
+            values = [getattr(constraints[index],
+                              'source_center' if viewpoint_field ==
+                              'source_viewpoint' else 'target_center')
+                      for index in indices]
+            values = [value for value in values if value is not None]
+        if len(values) < 2:
             continue
-        points = np.asarray(centers, dtype=np.float64)
+        points = np.asarray([tuple(value[:2]) for value in values],
+                            dtype=np.float64)
         baselines.append(float(np.max(np.linalg.norm(
             points[:, None, :] - points[None, :, :], axis=2))))
     return max(baselines, default=0.0)
@@ -395,15 +415,17 @@ def select_robust_hypothesis(
         max_iterations: int = 20,
         min_runner_up_margin: float = 0.10,
         min_inlier_probability: float = 0.60,
-        min_quality: float = 0.55) -> RobustPoseSelection:
+        min_quality: float = 0.0) -> RobustPoseSelection:
     """Select a transform using bounded multi-hypothesis EM-style inference.
 
     The null model is explicit: if no hypothesis has enough compatible,
     high-probability inliers and a clear score margin, the function refuses to
-    establish a common frame.  All ordering and tie-breaking is deterministic.
+    establish a common frame. Quality remains a soft likelihood/weighting
+    signal and is not a correctness floor. ``min_quality`` is retained only
+    for compatibility with older diagnostic callers.
     """
     items = tuple(candidates)
-    minimum = max(1, int(min_inliers))
+    minimum = max(3, int(min_inliers))
     if not items:
         return RobustPoseSelection(
             NULL_NO_TRUSTWORTHY_ALIGNMENT, (0.0, 0.0, 0.0), (0.0,) * 36,
@@ -449,8 +471,7 @@ def select_robust_hypothesis(
             updated_probabilities = 1.0 / (1.0 + np.exp(-logits))
             high = tuple(index for index, value in enumerate(
                 updated_probabilities)
-                         if float(value) >= float(min_inlier_probability) and
-                         _safe_quality(items[index].quality) >= float(min_quality))
+                         if float(value) >= float(min_inlier_probability))
             compatible = _compatible_subset(
                 high, list(items), max_translation_disagreement_m,
                 max_yaw_disagreement_rad)
@@ -473,8 +494,7 @@ def select_robust_hypothesis(
                 break
 
         high = tuple(index for index, value in enumerate(probabilities)
-                     if float(value) >= float(min_inlier_probability) and
-                     _safe_quality(items[index].quality) >= float(min_quality))
+                     if float(value) >= float(min_inlier_probability))
         high = _compatible_subset(
             high, list(items), max_translation_disagreement_m,
             max_yaw_disagreement_rad)
@@ -569,13 +589,19 @@ def select_robust_hypothesis(
             'normalized_residual': float(hypothesis['normalized_residual']),
         })
 
+    timestamp_values = [
+        value for index in winner['high']
+        for value in (items[index].source_timestamp_ns,
+                      items[index].target_timestamp_ns)
+        if int(value) > 0]
+    temporal_evidence_available = bool(timestamp_values)
     valid_structure = (
         len(winner['high']) >= minimum and
         winner['max_translation_disagreement_m'] <=
         float(max_translation_disagreement_m) and
         winner['max_yaw_disagreement_rad'] <= float(max_yaw_disagreement_rad) and
         winner['spatial_baseline_m'] >= float(min_spatial_baseline_m) and
-        (winner['timestamp_span_s'] <= 0.0 or
+        (not temporal_evidence_available or
          winner['timestamp_span_s'] >= float(min_timestamp_span_s)) and
         margin >= float(min_runner_up_margin))
     if len(winner['high']) < minimum:

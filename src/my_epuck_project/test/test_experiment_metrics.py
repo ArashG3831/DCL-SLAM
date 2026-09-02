@@ -58,6 +58,17 @@ def test_coverage_attribution():
     c=CoverageAttribution(2); c.observe('r1',{(0,0),(1,0)},0); c.observe('r2',{(0,0),(2,0)},1); c.observe('r2',{(1,0)},5); s=c.summary(); assert s['simultaneously_observed_cells']==1 and s['later_duplicated_cells']['r2']==1 and s['total_known_union_cells']==3
 def test_trajectory_overlap_and_revisit():
     t=TrajectoryOverlap(1,0); t.add('r1',0,0); t.add('r1',1.1,0); t.add('r1',1.2,0); t.add('r2',0,0); t.add('r2',1.1,0); s=t.summary(); assert s['cross_robot_bins']==1 and s['repeated_visit_distance_m']['r1']>0
+def test_local_trajectory_is_valid_without_cross_robot_tf():
+    t=LocalTrajectory(1,0); t.add('robot1',0,0); t.add('robot1',1.1,0); t.add('robot1',1.2,0)
+    s=t.summary()
+    assert s['valid'] and s['source_frame_by_robot']=={'robot1':'robot1/odom'}
+    assert s['distance_travelled_m']['robot1']>1.1
+    assert s['repeated_visit_distance_m']['robot1']>0
+def test_local_trajectory_keeps_robot_frames_separate_and_empty_is_unavailable():
+    empty=LocalTrajectory().summary()
+    assert not empty['valid'] and empty['reason']=='no runtime odometry samples'
+    t=LocalTrajectory(1,0); t.add('robot1',0,0); t.add('robot2',0,0); t.add('robot2',1.1,0)
+    assert 'cross_robot_bins' not in t.summary()
 def frontier(x): return {'centroid_x':x,'centroid_y':0,'min_x':x-.1,'max_x':x+.1,'min_y':-.1,'max_y':.1}
 def test_frontier_equivalence(): assert equivalent_frontiers(frontier(0),frontier(.1)) and not equivalent_frontiers(frontier(0),frontier(.19)) and not equivalent_frontiers(frontier(0),frontier(1))
 def test_goal_duplicates(): assert duplicate_goal((0,0),(.1,0)) and not duplicate_goal((0,0),(1,0))

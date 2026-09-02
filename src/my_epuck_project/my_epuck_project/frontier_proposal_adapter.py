@@ -154,9 +154,13 @@ class FrontierProposalAdapter(Node):
             task.frontier_geometry = self._geometry(candidate)
             task.visible_reveal_gain = candidate.information_gain
             task.local_ordering_score = candidate.score
+            task.mrtsp_route_rank = candidate.mrtsp_route_rank
+            task.mrtsp_route_generation = candidate.mrtsp_route_generation
+            task.mrtsp_solver = candidate.mrtsp_solver
             task.local_path_valid = candidate.reachability_state == candidate.REACHABLE
             task.local_path_length_m = candidate.local_path_length_m or candidate.path_length_m
             task.local_path_samples = list(candidate.local_path_samples)
+            task.path_heading_cost_rad = candidate.heading_change_rad
             task.generation_stamp = candidates.header.stamp
             message.tasks.append(task)
         self._publisher.publish(message)

@@ -18,7 +18,7 @@ CONSERVATIVE_SCAN_MATCHING_PARAMETERS = {
     'angle_variance_penalty': 0.05235987755982989,
     'minimum_distance_penalty': 0.15,
     'minimum_angle_penalty': 0.70,
-    'coarse_search_angle_offset': 0.0523596583,
+    'coarse_search_angle_offset': 0.05235987755982989,
     'coarse_angle_resolution': 0.0174532925,
     'fine_search_angle_offset': 0.0034906585,
     'use_response_expansion': False,

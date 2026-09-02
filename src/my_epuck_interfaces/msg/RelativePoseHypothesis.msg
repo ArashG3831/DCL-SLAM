@@ -8,6 +8,7 @@ float64[36] covariance
 float32 descriptor_similarity
 float32 descriptor_margin
 float32 geometric_inlier_ratio
+float32 reverse_inlier_ratio
 float32 registration_residual_m
 float32 occupied_free_agreement
 float32 overlap_fraction
@@ -35,3 +36,15 @@ float64 selector_null_score
 float64 selector_runner_up_score
 float64 selector_runner_up_margin
 float64[] selector_inlier_probabilities
+string physical_evidence_id
+int32 mode_index
+uint32 mode_support
+float64 mode_log_weight
+bool source_viewpoint_available
+float64 source_viewpoint_x
+float64 source_viewpoint_y
+float64 source_viewpoint_yaw
+bool target_viewpoint_available
+float64 target_viewpoint_x
+float64 target_viewpoint_y
+float64 target_viewpoint_yaw

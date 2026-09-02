@@ -9,7 +9,8 @@ from launch_ros.actions import Node
 from my_epuck_project.cooperative_profiles import profile_for_world
 
 def generator(robot, minimum_frontier_cells, approach_clearance,
-              forensic_clearance_cells, log_level):
+              forensic_clearance_cells, log_level, route_ordering_enabled,
+              selection_policy):
     return Node(
         package='my_epuck_frontier_candidates', executable='frontier_candidate_generator',
         name='frontier_candidate_generator', namespace=robot, output='screen',
@@ -34,9 +35,21 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'maximum_candidates_before_path_check': 8,
             'maximum_path_queries_per_cycle': 5,
             'path_query_timeout_s': 1.0,
+            # Mirrors the authoritative shared RPP profiles: desired_linear_vel
+            # 0.13 m/s and rotate_to_heading_angular_vel 0.35 rad/s.  These
+            # references scale only frontier_cost_only's nominal motion cost.
+            'cost_only_reference_linear_speed_mps': 0.13,
+            'cost_only_reference_angular_speed_radps': 0.35,
             'planner_id': 'GridBased',
             'occupied_threshold': 50,
             'visible_gain_range_m': 11.98,
+            # Route context is opt-in and only feeds the distributed
+            # coordinator. The C++ generator never dispatches Nav2 goals.
+            'upstream_route_ordering_enabled': route_ordering_enabled,
+            'upstream_mrtsp_solver': 'dp',
+            'upstream_mrtsp_candidate_limit': 8,
+            'upstream_mrtsp_planning_horizon': 5,
+            'selection_policy': selection_policy,
             'forensic_clearance_cells': forensic_clearance_cells,
             'diagnostic_frontier_capture': LaunchConfiguration(
                 'diagnostic_frontier_capture'),
@@ -57,6 +70,11 @@ def launch_setup(context):
         .lower() == 'true'
     )
     frontier_log_level = 'INFO' if diagnostic_capture else 'WARN'
+    route_ordering_enabled = (
+        LaunchConfiguration('assignment_strategy').perform(context) ==
+        'frontier_mrtsp'
+    )
+    selection_policy = LaunchConfiguration('assignment_strategy').perform(context)
     stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             project, 'launch', 'two_robots_teammate_filtered_stack_launch.py')),
@@ -105,11 +123,11 @@ def launch_setup(context):
         generator('robot1', selected['minimum_frontier_cells'],
                   0.15 if selected['name'] == 'large' else 0.06,
                   LaunchConfiguration('forensic_clearance_cells'),
-                  frontier_log_level),
+                  frontier_log_level, route_ordering_enabled, selection_policy),
         generator('robot2', selected['minimum_frontier_cells'],
                   0.15 if selected['name'] == 'large' else 0.06,
                   LaunchConfiguration('forensic_clearance_cells'),
-                  frontier_log_level),
+                  frontier_log_level, route_ordering_enabled, selection_policy),
     ]
 
 
@@ -169,5 +187,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('handoff_gated', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'assignment_strategy', default_value='frontier_mrtsp',
+            choices=['frontier_cost_only', 'frontier_mrtsp']),
         OpaqueFunction(function=launch_setup),
     ])

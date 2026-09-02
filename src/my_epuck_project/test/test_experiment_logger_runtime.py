@@ -1,11 +1,14 @@
 import json
+import signal
 import threading
 
 import pytest
 import rclpy
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Log
 from my_epuck_interfaces.msg import ExplorationEvent, ExplorationStatus
+from tf2_ros import TransformException
 
 from my_epuck_project.cooperative_experiment_logger import (
     CooperativeExperimentLogger, create_logger_executor,
@@ -21,6 +24,12 @@ def observer(tmp_path):
             f"output_root:={tmp_path}",
             "-p",
             "enable_console_status:=false",
+            # These lifecycle/frontend tests do not provide local occupancy
+            # snapshots.  Keep optional forensic capture off here so a bare
+            # logger test exercises its own contract rather than failing on
+            # deliberately absent map evidence.
+            "-p",
+            "enable_local_map_capture:=false",
         ]
     )
     node = CooperativeExperimentLogger()
@@ -65,6 +74,61 @@ def test_goal_decision_ledger_mirrors_navigation_decision_events(observer):
     assert rows[0]['path_length_m'] == 2.5
 
 
+def test_goal_accounting_exposes_active_and_terminal_goals_per_robot(observer):
+    fields = dict(round_id='round-1', canonical_task_id='task-1',
+                  physical_task_signature='physical-1')
+    observer.event('NAV_GOAL_SENT', 'sent', 'robot1', **fields)
+    observer.event('NAV_GOAL_ACCEPTED', 'accepted', 'robot1', **fields)
+    observer.event('NAVIGATION_SUCCEEDED', 'done', 'robot1', **fields)
+    observer.event('NAV_GOAL_SENT', 'sent', 'robot1', round_id='round-2',
+                   canonical_task_id='task-2', physical_task_signature='physical-2')
+    observer.latest['robot1']['navigation_active'] = True
+    accounting = observer.goal_accounting_summary()
+    assert accounting['by_robot']['robot1']['dispatched'] == 2
+    assert accounting['by_robot']['robot1']['categories'] == {
+        'SUCCEEDED': 1, 'STILL_ACTIVE_AT_MISSION_END': 1}
+    assert accounting['by_robot']['robot2']['dispatched'] == 0
+
+
+def test_goal_accounting_handles_acceptance_before_send(observer):
+    fields = dict(round_id='round-before-send', canonical_task_id='task-before-send',
+                  physical_task_signature='physical-before-send')
+    observer.event('NAV_GOAL_ACCEPTED', 'accepted before dispatch record',
+                   'robot2', **fields)
+    observer.event('NAV_GOAL_SENT', 'sent after acceptance record',
+                   'robot2', **fields)
+    record = observer.goal_accounting_summary()['records'][0]
+    assert record['accepted'] is True
+    assert record['terminal_category'] == 'UNKNOWN_OR_UNACCOUNTED'
+
+
+def test_odom_motion_accounting_uses_local_odom_before_shared_tf(observer,
+                                                                  monkeypatch):
+    def missing_transform(*args, **kwargs):
+        raise TransformException('shared frame unavailable before handoff')
+
+    monkeypatch.setattr(observer.tf_buffer, 'lookup_transform',
+                        missing_transform)
+    first = Odometry()
+    first.header.frame_id = 'robot1/odom'
+    first.pose.pose.position.x = 0.0
+    first.pose.pose.position.y = 0.0
+    first.twist.twist.linear.x = 0.12
+    first.twist.twist.angular.z = 0.20
+    second = Odometry()
+    second.header.frame_id = 'robot1/odom'
+    second.pose.pose.position.x = 0.3
+    second.pose.pose.position.y = 0.4
+    second.twist.twist.linear.x = 0.08
+    second.twist.twist.angular.z = -0.10
+    observer.odom('robot1', first)
+    observer.odom('robot1', second)
+    assert observer.latest['robot1']['pose'][:2] == (0.3, 0.4)
+    assert observer.latest['robot1']['speed'] == (0.08, -0.10)
+    assert observer.latest['robot1']['pose_frame'] == 'robot1/odom'
+    assert observer.local_trajectory.total_distance['robot1'] == pytest.approx(0.5)
+
+
 def test_logger_uses_stable_executor_for_shutdown_pybind_regression():
     """The experimental EventsExecutor conversion crash is not used."""
     from rclpy.executors import SingleThreadedExecutor
@@ -107,6 +171,10 @@ def test_forensic_child_keyboard_interrupt_does_not_abort_finalization(observer,
         def poll(self):
             return self.returncode
 
+        def send_signal(self, value):
+            assert value == signal.SIGINT
+            self.returncode = 0
+
         def terminate(self):
             pass
 
@@ -115,12 +183,12 @@ def test_forensic_child_keyboard_interrupt_does_not_abort_finalization(observer,
 
         def wait(self, timeout=None):
             del timeout
-            raise KeyboardInterrupt
+            return self.returncode
 
     child = Child()
     observer.ground_truth_process = child
     observer.stop_forensic_ground_truth()
-    assert child.returncode == -9
+    assert child.returncode == 0
 
 
 def controller_error():
@@ -220,6 +288,18 @@ def test_partial_and_terminal_robot_states_are_retained(observer):
     )
 
 
+def test_missing_shared_map_is_explicitly_unavailable_not_zero(observer):
+    """A no-handoff observer run must not encode missing coverage as zero."""
+    summary = observer.summary(False)
+    mapping = summary["mapping"]
+    assert mapping["available"] is False
+    assert mapping["initial_known_cells"] is None
+    assert mapping["final_known_cells"] is None
+    assert mapping["coverage_gain_cells"] is None
+    assert mapping["coverage_gain_per_metre_travelled"] is None
+    assert "unavailable" in mapping["reason"]
+
+
 def test_clean_finalization_closes_files_after_internal_error(observer):
     observer.safe_call("optional_metric", lambda: 1 / 0)
     assert observer.finalize(True)
@@ -255,7 +335,11 @@ def test_missing_forensic_artifact_fails_closed(observer):
     assert observer.finalize(True) is False
     status = read_json(observer.directory / "artifact_finalization.json")
     assert status["complete"] is False
-    assert "forensic/transforms.csv" in status["missing"]
+    assert sorted(status["missing"]) == sorted([
+        "forensic/transforms.csv",
+        "forensic/maps/robot1_map_final.npz",
+        "forensic/maps/robot2_map_final.npz",
+    ])
     assert read_json(observer.directory / "mission_result.json")[
         "artifact_finalization"]["complete"] is False
 

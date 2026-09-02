@@ -119,6 +119,42 @@ class TrajectoryOverlap:
         self.last[robot]=(x,y)
     def summary(self):
         sets=list(self.bins.values()); shared=set.intersection(*sets) if len(sets)>=2 else set(); union=set.union(*sets) if sets else set(); return {'bins_per_robot':{k:len(v) for k,v in self.bins.items()},'cross_robot_bins':len(shared),'cross_robot_overlap_fraction':len(shared)/len(union) if union else 0.,'repeated_visit_distance_m':dict(self.repeated_distance),'distance_travelled_m':dict(self.total_distance)}
+class LocalTrajectory:
+    """Per-robot route metric in that robot's odometry frame.
+
+    Independent odometry frames are valid for measuring each robot's own
+    travel and revisits.  They are not valid for cross-robot overlap, which is
+    why this class intentionally exposes no cross-robot comparison.
+    """
+    def __init__(self,bin_size=.05,exclusion_radius=.15):
+        self.bin_size=bin_size; self.exclusion_radius=exclusion_radius
+        self.bins={}; self.starts={}; self.repeated_distance={}
+        self.total_distance={}; self.last={}; self.samples={}
+    def add(self,robot,x,y):
+        x=float(x); y=float(y)
+        self.samples[robot]=self.samples.get(robot,0)+1
+        self.starts.setdefault(robot,(x,y)); previous=self.last.get(robot)
+        distance=math.hypot(x-previous[0],y-previous[1]) if previous else 0.
+        cell=(math.floor(x/self.bin_size),math.floor(y/self.bin_size))
+        visited=self.bins.setdefault(robot,set())
+        if cell in visited:
+            self.repeated_distance[robot]=self.repeated_distance.get(robot,0.)+distance
+        self.total_distance[robot]=self.total_distance.get(robot,0.)+distance
+        if math.hypot(x-self.starts[robot][0],y-self.starts[robot][1])>self.exclusion_radius:
+            visited.add(cell)
+        self.last[robot]=(x,y)
+    def summary(self):
+        return {
+            'valid': bool(self.samples),
+            'reason': 'runtime odometry samples' if self.samples else
+                      'no runtime odometry samples',
+            'source_frame_by_robot': {robot: f'{robot}/odom'
+                                     for robot in self.samples},
+            'bins_per_robot': {k: len(v) for k,v in self.bins.items()},
+            'repeated_visit_distance_m': dict(self.repeated_distance),
+            'distance_travelled_m': dict(self.total_distance),
+            'sample_count_by_robot': dict(self.samples),
+        }
 def equivalent_frontiers(a,b,centroid_tolerance=.15,bbox_margin=.05):
     centroid=math.hypot(a['centroid_x']-b['centroid_x'],a['centroid_y']-b['centroid_y']); overlap=not(a['max_x']+bbox_margin<b['min_x'] or b['max_x']+bbox_margin<a['min_x'] or a['max_y']+bbox_margin<b['min_y'] or b['max_y']+bbox_margin<a['min_y']); return centroid<=centroid_tolerance and overlap
 def duplicate_goal(a,b,tolerance=.15): return math.hypot(a[0]-b[0],a[1]-b[1])<=tolerance

@@ -61,29 +61,31 @@ def test_clean_robot_pose_axes_replace_initial_full_tf_tree():
     by_name = {display['Name']: display for display in displays}
     enabled = {
         display['Name'] for display in displays if display['Enabled']}
-    assert enabled == {
-        'Robot1 Overlay Map', 'Robot2 Overlay Map',
-    }
+    assert {
+        'Shared Map (single replica)',
+        'Robot1 Pose (visualization)', 'Robot2 Pose (visualization)',
+        'Handoff Status', 'Robot1 Traveled Path', 'Robot2 Traveled Path',
+    } <= enabled
     assert by_name['Grid']['Enabled'] is False
     assert by_name['Grid']['Value'] is False
-    assert by_name['Robot1 Overlay Map']['Topic']['Value'] == '/viz/robot1_map'
-    assert by_name['Robot1 Overlay Map']['Enabled'] is True
-    assert by_name['Robot2 Overlay Map']['Topic']['Value'] == '/viz/robot2_map'
-    assert by_name['Robot2 Overlay Map']['Enabled'] is True
+    assert by_name['Robot1 Pre-Handoff Map Overlay']['Topic']['Value'] == '/viz/robot1_map'
+    assert by_name['Robot1 Pre-Handoff Map Overlay']['Enabled'] is False
+    assert by_name['Robot2 Pre-Handoff Map Overlay']['Topic']['Value'] == '/viz/robot2_map'
+    assert by_name['Robot2 Pre-Handoff Map Overlay']['Enabled'] is False
     transform = by_name['TF']
     assert transform['Class'] == 'rviz_default_plugins/TF'
     assert transform['Enabled'] is False
     assert transform['Show Names'] is False
     assert transform['Show Arrows'] is False
-    assert 0.08 <= transform['Marker Scale'] <= 0.10
+    assert 0.08 <= transform['Marker Scale'] <= 0.16
     expected_frames = {
-        'Robot1 Pose Axes': 'robot1/base_link',
-        'Robot2 Pose Axes': 'robot2/base_link',
+        'Robot1 Pose (visualization)': 'viz/robot1/base_footprint',
+        'Robot2 Pose (visualization)': 'viz/robot2/base_footprint',
     }
     for name, frame in expected_frames.items():
         axes = by_name[name]
         assert axes['Class'] == 'rviz_default_plugins/Axes'
-        assert axes['Enabled'] is False
+        assert axes['Enabled'] is True
         assert axes['Reference Frame'] == frame
         assert 0.12 <= axes['Length'] <= 0.15
         assert 0.008 <= axes['Radius'] <= 0.012
@@ -99,9 +101,8 @@ def test_single_rviz_preset_has_two_visualization_map_displays():
         if display['Class'] == 'rviz_default_plugins/Map'
         and display['Enabled']
     ]
-    assert len(enabled_maps) == 2
     assert {display['Topic']['Value'] for display in enabled_maps} == {
-        '/viz/robot1_map', '/viz/robot2_map'}
+        '/viz/shared_map'}
     assert manager['Global Options']['Fixed Frame'] == 'viz/world'
 
 
@@ -116,9 +117,9 @@ def test_namespaced_optional_display_topics_are_exact():
             topics[display['Name']] = topic
     assert topics == {
         'Robot1 Shared Map': '/robot1/shared_map_visualization',
-        'Robot2 Shared Map': '/robot2/shared_map_visualization',
-        'Robot1 Overlay Map': '/viz/robot1_map',
-        'Robot2 Overlay Map': '/viz/robot2_map',
+        'Robot2 Shared Map (raw replica)': '/robot2/shared_map_visualization',
+        'Robot1 Pre-Handoff Map Overlay': '/viz/robot1_map',
+        'Robot2 Pre-Handoff Map Overlay': '/viz/robot2_map',
         'Robot1 LaserScan': '/robot1/scan_d500_fixed',
         'Robot2 LaserScan': '/robot2/scan_d500_fixed',
         'Robot1 Global Costmap': '/robot1/global_costmap/costmap',
@@ -129,19 +130,23 @@ def test_namespaced_optional_display_topics_are_exact():
         'Robot1 Local Plan': '/robot1/local_plan',
         'Robot2 Global Plan': '/robot2/plan',
         'Robot2 Local Plan': '/robot2/local_plan',
-        'Robot1 Model': '/robot1/robot_description',
-        'Robot2 Model': '/robot2/robot_description',
         'Robot1 Frontier Candidates':
             '/robot1/frontier_candidate_markers',
         'Robot2 Frontier Candidates':
             '/robot2/frontier_candidate_markers',
+        'Shared Map (single replica)': '/viz/shared_map',
+        'Handoff Status': '/viz/handoff_status',
+        'Robot1 Traveled Path': '/viz/robot1_traveled_path',
+        'Robot2 Traveled Path': '/viz/robot2_traveled_path',
     }
     optional = [
         display for display in displays
         if display['Name'] not in {
-            'Grid', 'Robot1 Shared Map', 'Robot2 Shared Map',
-            'Robot1 Overlay Map', 'Robot2 Overlay Map',
-            'Robot1 Pose Axes', 'Robot2 Pose Axes',
+            'Grid', 'Robot1 Shared Map', 'Robot2 Shared Map (raw replica)',
+            'Robot1 Pre-Handoff Map Overlay', 'Robot2 Pre-Handoff Map Overlay',
+            'Shared Map (single replica)', 'TF',
+            'Robot1 Pose (visualization)', 'Robot2 Pose (visualization)',
+            'Handoff Status', 'Robot1 Traveled Path', 'Robot2 Traveled Path',
         }]
     assert all(display['Enabled'] is False for display in optional)
 
@@ -151,8 +156,13 @@ def test_shared_map_visualization_uses_incremental_update_topics():
     displays = configuration()['Visualization Manager']['Displays']
     by_name = {display['Name']: display for display in displays}
     for robot in ('Robot1', 'Robot2'):
-        display = by_name[f'{robot} Shared Map']
+        name = f'{robot} Shared Map'
+        if robot == 'Robot2':
+            name += ' (raw replica)'
+        display = by_name[name]
         assert display['Topic']['Value'] == (
             f'/{robot.lower()}/shared_map_visualization')
         assert display['Update Topic']['Value'] == (
             f'/{robot.lower()}/shared_map_visualization_updates')
+    assert by_name['Shared Map (single replica)']['Topic']['Value'] == '/viz/shared_map'
+    assert by_name['Shared Map (single replica)']['Color Scheme'] == 'map'

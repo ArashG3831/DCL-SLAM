@@ -69,6 +69,7 @@ def launch_setup(context):
     unknown_initial_pose = (
         LaunchConfiguration('unknown_initial_pose').perform(context).lower()
         == 'true')
+    assignment_strategy = LaunchConfiguration('assignment_strategy').perform(context)
     visualization_overlay_nodes = []
     if (LaunchConfiguration('launch_visualization_overlay').perform(context)
             .lower() == 'true'):
@@ -160,6 +161,14 @@ def launch_setup(context):
         LaunchConfiguration('dispatch_enabled').perform(context).lower()
         == 'true'
     )
+    synchronized_traffic_test = (
+        LaunchConfiguration('synchronized_traffic_test').perform(context).lower()
+        == 'true'
+    )
+    synchronized_traffic_hold_prehandoff_motion = (
+        LaunchConfiguration('synchronized_traffic_hold_prehandoff_motion')
+        .perform(context).lower() == 'true'
+    )
     # The known-pose launch keeps the existing shared assignment include.  In
     # unknown-pose mode it is deliberately omitted from the returned action
     # graph; a one-shot activation node launches it after acceptance.
@@ -198,6 +207,10 @@ def launch_setup(context):
             'burgard_beta': LaunchConfiguration('burgard_beta'),
             'traffic_scheduler_enabled': LaunchConfiguration(
                 'traffic_scheduler_enabled'),
+            'synchronized_traffic_test': LaunchConfiguration(
+                'synchronized_traffic_test'),
+            'traffic_test_force_conflict_pair': LaunchConfiguration(
+                'traffic_test_force_conflict_pair'),
             'enable_mission_timeout': LaunchConfiguration(
                 'enable_mission_timeout'),
             'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
@@ -240,8 +253,14 @@ def launch_setup(context):
             'controller_variant': LaunchConfiguration('controller_variant'),
             'unknown_initial_pose': 'true',
             'launch_mapping': 'true',
-            'launch_shared_stack': 'false',
+            # Keep shared Nav2 phase-gated and inactive, but start its
+            # processes early so startup/DDS/service discovery overlaps the
+            # unknown-pose and cleanup work.
+            'launch_shared_stack': LaunchConfiguration(
+                'prelaunch_shared_nav2'),
             'launch_shared_fusion': 'true',
+            'prelaunch_shared_nav2': LaunchConfiguration(
+                'prelaunch_shared_nav2'),
             'phase_already_aligned': 'false',
         }.items(),
     )
@@ -253,6 +272,8 @@ def launch_setup(context):
     if unknown_initial_pose:
         diagnostic_output = LaunchConfiguration(
             'unknown_pose_diagnostic_output').perform(context)
+        registration_capture_output = LaunchConfiguration(
+            'unknown_pose_registration_capture_output').perform(context)
         for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
             profile_prefix = os.environ.get(
                 'MY_EPUCK_UNKNOWN_POSE_CPROFILE_PREFIX', '')
@@ -276,10 +297,35 @@ def launch_setup(context):
                         'peer_map_publish_period_s'),
                     'shared_frame': 'shared_map',
                     'diagnostic_output': diagnostic_output,
+                    'registration_input_capture_output':
+                        registration_capture_output,
+                    'registration_input_capture_max_pairs': 64,
+                    'full_map_registration': LaunchConfiguration(
+                        'full_map_registration'),
+                    # Latest useful full-map pair cadence for startup-only
+                    # discovery; the matcher remains serialized per robot.
+                    'full_map_registration_period_s': 1.0,
+                    # Keep a bounded exact-ID history long enough for a
+                    # startup proposal's confirmation snapshots to remain
+                    # recoverable while DDS delivery and peer verification
+                    # complete. This is transport/cache capacity only; it
+                    # does not change map registration or acceptance rules.
+                    'full_map_max_snapshots': 64,
+                    # Keep the production MRPT path explicitly pinned to the
+                    # configuration validated offline.  These are estimator
+                    # parameters, not GT or navigation inputs.
+                    # This close-start validation uses the existing custom
+                    # full-map matcher.  MRPT remains an explicit optional
+                    # backend for prior experiments, but is not part of this
+                    # production path.
+                    'registration_backend': 'legacy',
                     'max_verification_batches': LaunchConfiguration(
                         'max_verification_batches'),
                     'verification_lifetime_s': LaunchConfiguration(
                         'verification_lifetime_s'),
+                    'evidence_keyframe_translation_threshold_m':
+                        LaunchConfiguration(
+                            'evidence_keyframe_translation_threshold_m'),
                 }],
             ))
             frontend_watchdogs.append(RegisterEventHandler(
@@ -316,9 +362,14 @@ def launch_setup(context):
                         'maximum_candidates_before_path_check': 8,
                         'maximum_path_queries_per_cycle': 5,
                         'path_query_timeout_s': 1.0,
+                        # Mirrors nav2_robot{1,2}_shared_map.yaml RPP motion
+                        # references; not controller tuning or an ETA model.
+                        'cost_only_reference_linear_speed_mps': 0.13,
+                        'cost_only_reference_angular_speed_radps': 0.35,
                         'planner_id': 'GridBased',
                         'occupied_threshold': 50,
                         'visible_gain_range_m': 11.98,
+                        'selection_policy': assignment_strategy,
                         'stop_after_handoff': True,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                     }],
@@ -360,6 +411,12 @@ def launch_setup(context):
                         'local_only': True,
                         'handoff_gated': True,
                         'stop_after_handoff': True,
+                        # Unknown-pose two-robot local explorers must not
+                        # dispatch a unilateral head start.  Each replica
+                        # publishes its existing local-snapshot readiness and
+                        # waits for the peer's matching fact; single-robot
+                        # diagnostic launches do not use these local nodes.
+                        'initial_peer_readiness_barrier': True,
                         # Local pre-handoff assignment is a single-owner
                         # action boundary; one executor avoids four-worker
                         # waitable/GIL contention without changing task logic.
@@ -369,7 +426,14 @@ def launch_setup(context):
                         # shared allocator.  The default remains true; a
                         # diagnostic dispatch-off run can now exercise the
                         # identical graph without Nav2 goal traffic.
-                        'dispatch_enabled': dispatch_enabled,
+                        # Test-only traffic mode holds local navigation sends
+                        # while retaining mapping and evidence acquisition.
+                        'dispatch_enabled': (
+                            False if (
+                                synchronized_traffic_test and
+                                synchronized_traffic_hold_prehandoff_motion
+                            ) else
+                            dispatch_enabled),
                         'prehandoff_dispatch_delay_s': LaunchConfiguration(
                             'prehandoff_dispatch_delay_s'),
                         'synthetic_bids': False,
@@ -378,11 +442,15 @@ def launch_setup(context):
                         'maximum_path_queries': 5,
                         'minimum_solo_visible_gain_m': 0.05,
                         'minimum_solo_ordering_score': 0.0,
-                        'maximum_solo_path_m': 18.0,
+                        'path_cost_scale_m': 12.0,
+                        # Same authoritative RPP references used by the
+                        # candidate generator and shared Nav2 profiles.
+                        'cost_only_reference_linear_speed_mps': 0.13,
+                        'cost_only_reference_angular_speed_radps': 0.35,
                         'bid_validity_s': 8.0,
                         'decision_validity_s': 8.0,
                         'peer_timeout_s': 0.0,
-                        'assignment_strategy': 'burgard',
+                        'assignment_strategy': assignment_strategy,
                         'burgard_beta': 1.0,
                         'traffic_scheduler_enabled': False,
                         'terminal_small_frontier_length_m': LaunchConfiguration(
@@ -407,6 +475,7 @@ def launch_setup(context):
                         'handoff_marker_path': os.path.join(
                             diagnostic_output,
                             f'{robot}_accepted_handoff.marker'),
+                        'historical_cleanup_required': True,
                     }],
                 ),
             ])
@@ -437,6 +506,10 @@ def launch_setup(context):
                         'motion_fixture_robot2_linear_scale'),
                     'angular_speed': LaunchConfiguration(
                         'motion_fixture_angular_speed'),
+                    'synchronized_traffic_test': LaunchConfiguration(
+                        'synchronized_traffic_test'),
+                    'hold_prehandoff_motion': LaunchConfiguration(
+                        'synchronized_traffic_hold_prehandoff_motion'),
                 }],
             ))
         shared_activation = Node(
@@ -469,6 +542,12 @@ def launch_setup(context):
                 'burgard_beta': LaunchConfiguration('burgard_beta'),
                 'traffic_scheduler_enabled': LaunchConfiguration(
                     'traffic_scheduler_enabled'),
+                'synchronized_traffic_test': LaunchConfiguration(
+                    'synchronized_traffic_test'),
+                'traffic_test_force_conflict_pair': LaunchConfiguration(
+                    'traffic_test_force_conflict_pair'),
+                'prelaunch_shared_nav2': LaunchConfiguration(
+                    'prelaunch_shared_nav2'),
                 'enable_mission_timeout': LaunchConfiguration(
                     'enable_mission_timeout'),
                 'mission_timeout_s': LaunchConfiguration('mission_timeout_s'),
@@ -483,6 +562,14 @@ def launch_setup(context):
                 'webots_port': LaunchConfiguration('webots_port'),
             }],
         )
+    traffic_test_barrier = Node(
+        package='my_epuck_project',
+        executable='traffic_test_barrier',
+        name='traffic_test_dispatch_barrier',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('synchronized_traffic_test')),
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+    )
     observer = Node(
         package='my_epuck_project', executable='cooperative_experiment_logger',
         name='cooperative_experiment_logger', output='screen',
@@ -565,12 +652,16 @@ def launch_setup(context):
             # graph, motion limits, SLAM, fusion, or allocation.
             'enable_forensic_capture': LaunchConfiguration(
                 'enable_forensic_capture'),
+            'diagnostic_frontier_capture': LaunchConfiguration(
+                'diagnostic_frontier_capture'),
             'enable_contact_capture': LaunchConfiguration(
                 'enable_contact_capture'),
             'contact_sampling_period_ms': LaunchConfiguration(
                 'contact_sampling_period_ms'),
             'forensic_snapshot_interval_s': LaunchConfiguration(
                 'forensic_snapshot_interval_s'),
+            'forensic_ground_truth_sample_period_s': LaunchConfiguration(
+                'forensic_ground_truth_sample_period_s'),
             'webots_port': LaunchConfiguration('webots_port'),
         }],
     )
@@ -586,7 +677,7 @@ def launch_setup(context):
         return [profile_log, unknown_local_mapping, *unknown_pose_frontends,
                 *local_phase_nodes, *motion_fixture_nodes,
                 *visualization_overlay_nodes,
-                shared_activation, *frontend_watchdogs,
+                traffic_test_barrier, shared_activation, *frontend_watchdogs,
                 observer]
     return [profile_log, assignment, *visualization_overlay_nodes, observer]
 
@@ -643,6 +734,17 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('unknown_pose_diagnostic_output',
                               default_value=''),
+        DeclareLaunchArgument('unknown_pose_registration_capture_output',
+                              default_value=''),
+        DeclareLaunchArgument('full_map_registration', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument(
+            # Keep the resource-heavy inactive shared Nav2 graph opt-in.  The
+            # normal unknown-pose profile starts it at accepted handoff; an
+            # earlier prelaunch experiment could starve Webots before /clock
+            # became available on a loaded host.
+            'prelaunch_shared_nav2', default_value='false',
+            choices=['true', 'false']),
         # Validation-only motion for unknown-pose evidence acquisition.  The
         # default is disabled so production launches remain unchanged.
         DeclareLaunchArgument('enable_motion_fixture', default_value='false',
@@ -672,11 +774,23 @@ def generate_launch_description():
         DeclareLaunchArgument('max_verification_batches', default_value='64'),
         DeclareLaunchArgument('verification_lifetime_s',
                               default_value='1100.0'),
-        DeclareLaunchArgument('assignment_strategy', default_value='burgard',
-                              choices=['burgard', 'legacy_weighted']),
+        DeclareLaunchArgument(
+            'evidence_keyframe_translation_threshold_m',
+            default_value='0.80'),
+        DeclareLaunchArgument(
+            'assignment_strategy', default_value='frontier_mrtsp',
+            choices=['frontier_cost_only', 'frontier_mrtsp']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
         DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('synchronized_traffic_test', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'traffic_test_force_conflict_pair', default_value='false',
+            choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'synchronized_traffic_hold_prehandoff_motion',
+            default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('enable_observer', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('run_id', default_value=''),
@@ -700,7 +814,7 @@ def generate_launch_description():
         DeclareLaunchArgument('visualization_robot1_offset_yaw_rad',
                               default_value='0.0'),
         DeclareLaunchArgument('visualization_robot2_offset_x_m',
-                              default_value='25.0'),
+                              default_value='10.0'),
         DeclareLaunchArgument('visualization_robot2_offset_y_m',
                               default_value='0.0'),
         DeclareLaunchArgument('visualization_robot2_offset_z_m',
@@ -722,6 +836,10 @@ def generate_launch_description():
         DeclareLaunchArgument('contact_sampling_period_ms', default_value='20'),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
-        DeclareLaunchArgument('forensic_snapshot_interval_s', default_value='15.0'),
+        DeclareLaunchArgument('forensic_snapshot_interval_s', default_value='5.0'),
+        # Preserve the historical default while making the passive Supervisor
+        # observer rate an explicit experiment-time launch override.
+        DeclareLaunchArgument(
+            'forensic_ground_truth_sample_period_s', default_value='0.02'),
         OpaqueFunction(function=launch_setup),
     ])

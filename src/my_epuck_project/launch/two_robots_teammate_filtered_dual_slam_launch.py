@@ -38,10 +38,7 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
         'use_lifecycle_manager': False,
         'use_sim_time': LaunchConfiguration('use_sim_time'),
         'resolution': slam_resolution,
-        'scan_topic': (
-            f'/{robot}/scan_d500_fixed'
-            if unknown_initial_pose else
-            f'/{robot}/scan_d500_slam'),
+        'scan_topic': f'/{robot}/scan_d500_slam',
     }
     if slam_runtime_parameters:
         # Raw Webots transport QoS belongs to the namespaced driver/relay
@@ -158,8 +155,7 @@ def launch_setup(context):
             selected['world_metadata']['reverse_relative_transform']),
     }
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
-        if not unknown_initial_pose:
-            filters.append(Node(
+        filters.append(Node(
                 package='my_epuck_project',
                 executable='teammate_scan_filter',
                 name='teammate_scan_filter',
@@ -175,6 +171,17 @@ def launch_setup(context):
                     'own_odom_frame': f'{robot}/odom',
                     'peer_odom_frame': f'{peer}/odom',
                     'own_odom_to_peer_odom': fixed_odom[robot],
+                    'robot_id': robot,
+                    'map_frame': f'{robot}/map',
+                    'accepted_hypothesis_topic':
+                        '/cslam/relative_pose/hypotheses',
+                    'active_at_start': not unknown_initial_pose,
+                    'require_accepted_handoff': unknown_initial_pose,
+                    'record_prehandoff_path': unknown_initial_pose,
+                    'pre_handoff_path_topic':
+                        f'/cslam/unknown_pose/{robot}/pre_handoff_path',
+                    'trajectory_min_spacing_m': 0.03,
+                    'trajectory_max_samples': 2048,
                     'peer_radius_m': 0.060,
                     'range_tolerance_m': 0.005,
                     'teammate_geometry_radius_m': LaunchConfiguration(
@@ -186,7 +193,7 @@ def launch_setup(context):
                     'simulation_free_space_completion': True,
                     'free_space_cap': FREE_SPACE_CAP,
                 }],
-            ))
+                ))
     local_frame_anchors = []
     if unknown_initial_pose and not phase_already_aligned:
         for robot in ('robot1', 'robot2'):

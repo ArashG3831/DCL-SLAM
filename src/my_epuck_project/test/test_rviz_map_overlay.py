@@ -71,3 +71,9 @@ def test_launch_contains_optional_overlay_and_no_real_frame_aliases():
     assert 'viz/world -> robot2/map' not in source
     assert 'robot1/map -> robot2/map' not in source
     assert 'robot2/map -> robot1/map' not in source
+
+
+def test_late_overlay_can_recover_handoff_from_phase_gated_shared_map():
+    """A viewer started after handoff must not remain in offset mode."""
+    source = (ROOT / 'my_epuck_project' / 'rviz_map_overlay.py').read_text()
+    assert "self._accept_handoff('shared_map_observed')" in source

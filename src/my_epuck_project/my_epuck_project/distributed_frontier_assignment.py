@@ -1233,10 +1233,16 @@ class DistributedFrontierAssignment(Node):
                 message.local_nav_goal_active or
                 message.state == DistributedExplorationStatus.NAVIGATING
             )
+            advertised_task_id = str(message.active_canonical_task_id).strip()
+            # Some status heartbeats prove active liveness and session but do
+            # not carry the optional active task identity.  That omission
+            # must not discard the immutable commitment needed by the free
+            # robot's continuation round.  A non-empty mismatch remains a
+            # hard invalidation guard.
             if (not peer_active or
-                    str(message.active_canonical_task_id) !=
-                    prior_commitment.canonical_id or
-                    peer_session != prior_commitment.source_session_id):
+                    peer_session != prior_commitment.source_session_id or
+                    (advertised_task_id and
+                     advertised_task_id != prior_commitment.canonical_id)):
                 self._clear_active_commitment(
                     self._peer_id, 'peer active commitment ended or changed',
                 )
@@ -1413,9 +1419,13 @@ class DistributedFrontierAssignment(Node):
         if commitment is None or not self._finite_path_samples(commitment.path):
             return None
         if busy_robot_id == self._peer_id:
-            if (str(peer.value.active_canonical_task_id) != commitment.canonical_id or
-                    uuid_to_text(peer.value.source_session_id) !=
-                    commitment.source_session_id):
+            advertised_task_id = str(
+                peer.value.active_canonical_task_id,
+            ).strip()
+            if (uuid_to_text(peer.value.source_session_id) !=
+                    commitment.source_session_id or
+                    (advertised_task_id and
+                     advertised_task_id != commitment.canonical_id)):
                 return None
         elif (self._active_task is not None and
               self._active_task.canonical_id != commitment.canonical_id):

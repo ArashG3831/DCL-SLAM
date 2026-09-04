@@ -103,7 +103,46 @@ uint64_t stable_frontier_id(
   }
   return h;
 }
-std::optional<double> path_length(const nav_msgs::msg::Path&p,double rx,double ry,double gx,double gy,double tol){if(p.poses.empty())return{};for(auto&s:p.poses)if(!std::isfinite(s.pose.position.x)||!std::isfinite(s.pose.position.y))return{};auto&last=p.poses.back().pose.position;if(std::hypot(last.x-gx,last.y-gy)>tol)return{};if(p.poses.size()==1){if(std::hypot(rx-gx,ry-gy)<=tol)return 0.;return{};}double total=0;for(size_t i=1;i<p.poses.size();i++)total+=std::hypot(p.poses[i].pose.position.x-p.poses[i-1].pose.position.x,p.poses[i].pose.position.y-p.poses[i-1].pose.position.y);return total;}
+std::optional<double> extract_nav2_path_cost(const nav_msgs::msg::Path &path)
+{
+  if (path.poses.empty()) {
+    return std::nullopt;
+  }
+  for (const auto & stamped : path.poses) {
+    const auto & position = stamped.pose.position;
+    const auto & orientation = stamped.pose.orientation;
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+        !std::isfinite(position.z) || !std::isfinite(orientation.x) ||
+        !std::isfinite(orientation.y) || !std::isfinite(orientation.z) ||
+        !std::isfinite(orientation.w)) {
+      return std::nullopt;
+    }
+  }
+  double total = 0.0;
+  for (std::size_t i = 1; i < path.poses.size(); ++i) {
+    total += std::hypot(
+      path.poses[i].pose.position.x - path.poses[i - 1].pose.position.x,
+      path.poses[i].pose.position.y - path.poses[i - 1].pose.position.y);
+  }
+  return std::isfinite(total) ? std::optional<double>(total) : std::nullopt;
+}
+
+std::optional<double> path_length(
+  const nav_msgs::msg::Path & path, double rx, double ry, double gx, double gy, double tol)
+{
+  const auto total = extract_nav2_path_cost(path);
+  if (!total) {
+    return std::nullopt;
+  }
+  const auto & last = path.poses.back().pose.position;
+  if (std::hypot(last.x - gx, last.y - gy) > tol) {
+    return std::nullopt;
+  }
+  if (path.poses.size() == 1 && std::hypot(rx - gx, ry - gy) > tol) {
+    return std::nullopt;
+  }
+  return total;
+}
 std::optional<double> path_initial_heading_cost(
   const nav_msgs::msg::Path & path, double robot_yaw, double minimum_segment_m)
 {

@@ -61,6 +61,36 @@ TEST(StableId,SmallBoundaryChangeKeepsPhysicalIdentity){
   EXPECT_EQ(stable_frontier_id(before, map, .05), stable_frontier_id(after, map, .05));
 }
 TEST(Path,LengthAndValidation){nav_msgs::msg::Path p;geometry_msgs::msg::PoseStamped a,b,c;a.pose.position.x=0;b.pose.position.x=3;b.pose.position.y=4;c.pose.position.x=6;c.pose.position.y=8;p.poses={a,b,c};auto l=path_length(p,0,0,6,8,.01);ASSERT_TRUE(l);EXPECT_DOUBLE_EQ(*l,10);p.poses.clear();EXPECT_FALSE(path_length(p,0,0,0,0,.1));p.poses={a};EXPECT_TRUE(path_length(p,0,0,0,0,.1));EXPECT_FALSE(path_length(p,1,1,0,0,.1));p.poses={a,b};p.poses[1].pose.position.x=std::numeric_limits<double>::quiet_NaN();EXPECT_FALSE(path_length(p,0,0,0,0,.1));}
+TEST(Path,ExtractNav2PathCostAcceptsFinitePathWithoutEndpointRule){
+  nav_msgs::msg::Path p;
+  geometry_msgs::msg::PoseStamped first, last;
+  first.pose.position.x = 0.0;
+  last.pose.position.x = 3.0;
+  last.pose.position.y = 4.0;
+  p.poses = {first, last};
+  const double requested_goal_x = 3.1;
+  const double requested_goal_y = 4.0;
+  ASSERT_GT(std::hypot(last.pose.position.x - requested_goal_x,
+    last.pose.position.y - requested_goal_y), 0.03);
+  const auto cost = extract_nav2_path_cost(p);
+  ASSERT_TRUE(cost);
+  EXPECT_DOUBLE_EQ(*cost, 5.0);
+}
+TEST(Path,ExtractNav2PathCostRejectsEmptyPath){
+  nav_msgs::msg::Path p;
+  EXPECT_FALSE(extract_nav2_path_cost(p));
+}
+TEST(Path,ExtractNav2PathCostRejectsNonFinitePose){
+  nav_msgs::msg::Path p;
+  geometry_msgs::msg::PoseStamped point;
+  point.pose.position.x = std::numeric_limits<double>::quiet_NaN();
+  p.poses = {point};
+  EXPECT_FALSE(extract_nav2_path_cost(p));
+  point.pose.position.x = 0.0;
+  point.pose.orientation.w = std::numeric_limits<double>::infinity();
+  p.poses = {point};
+  EXPECT_FALSE(extract_nav2_path_cost(p));
+}
 TEST(Path,InitialHeadingUsesFirstMeaningfulSegment){
   nav_msgs::msg::Path p;
   geometry_msgs::msg::PoseStamped first, duplicate, forward, left;

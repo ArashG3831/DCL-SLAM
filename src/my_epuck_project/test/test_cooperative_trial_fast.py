@@ -9,6 +9,7 @@ from my_epuck_project.cooperative_trial_fast import (
     LAUNCH_FILE,
     LOCAL_NAV2_NODES,
     ReadyProbe,
+    WallWatchdog,
     boolean,
     filtered_runtime_environment,
     is_campaign_webots_driver,
@@ -78,6 +79,8 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert args.hold_open is False
     assert args.enable_observer is False
     assert args.enable_forensic_capture is False
+    assert args.simulation_horizon_s is None
+    assert args.wall_watchdog_s is None
     assert parser().parse_args([
         '--world-profile', 'large_unknown_pose_16m']).world_profile == (
             'large_unknown_pose_16m')
@@ -231,6 +234,35 @@ def test_wait_process_continues_cleanup_after_sigint(monkeypatch):
     process = InterruptOnceProcess()
     assert fast.wait_process(process, 1.0) is True
     assert process.calls == 2
+
+
+def test_ready_probe_horizon_uses_live_clock_not_observer_files():
+    probe = ReadyProbe.__new__(ReadyProbe)
+    probe.clock_values = []
+    probe.clock_start_s = None
+    probe.latest_clock_s = None
+    probe._on_clock(SimpleNamespace(clock=SimpleNamespace(sec=0, nanosec=0)))
+    probe._on_clock(SimpleNamespace(clock=SimpleNamespace(sec=1499, nanosec=0)))
+    assert probe.clock_start_s == 0
+    assert probe.latest_clock_s == 1499
+    assert not probe.simulation_horizon_reached(1500.0)
+    probe._on_clock(SimpleNamespace(clock=SimpleNamespace(sec=1500, nanosec=0)))
+    assert probe.simulation_horizon_reached(1500.0)
+
+
+def test_wall_watchdog_has_independent_deadline_and_process_group_control():
+    source = inspect.getsource(WallWatchdog)
+    assert 'time.monotonic()' in source
+    assert 'signal.SIGTERM' in source
+    assert 'signal.SIGKILL' in source
+    assert 'read_text' not in source
+    assert 'open(' not in source
+
+
+def test_cleanup_waits_are_bounded_by_absolute_wall_deadline():
+    source = inspect.getsource(fast.shutdown_processes)
+    assert 'absolute_deadline' in source
+    assert 'absolute_deadline=absolute_deadline' in source
 
 
 def test_unknown_pose_readiness_accepts_local_graph_before_handoff():
@@ -413,11 +445,12 @@ def test_nav2_readiness_retries_a_failed_lifecycle_startup():
     assert 'next_startup_attempt[robot]' in source
 
 
-def test_mission_timeout_reserves_total_wall_clock_finalization_budget():
+def test_runner_separates_simulation_horizon_and_wall_watchdog():
     source = inspect.getsource(fast.run)
-    assert 'hard_deadline = started + max(0.0, total_wall_limit)' in source
-    assert 'service_deadline = hard_deadline - FINALIZATION_BUDGET_S' in source
-    assert 'mission_deadline = None if args.hold_open else service_deadline' in source
+    assert 'wall_deadline = started + max(0.0, float(configured_wall_limit))' in source
+    assert 'simulation_horizon_target_s = configured_horizon' in source
+    assert "termination_reason = 'SIM_TIME_COMPLETE'" in source
+    assert "termination_reason = 'WALL_WATCHDOG'" in source
 
 
 def test_campaign_driver_filter_is_namespaced_and_not_broad_kill():

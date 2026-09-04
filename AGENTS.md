@@ -82,6 +82,22 @@ simulation horizon was reached and observer/forensic finalization completed.
 Fast mode changes the real duration required to reach the horizon; it does not
 change the horizon itself.
 
+When a task specifies a **20-minute simulation limit**, the horizon is exactly
+`1200` simulated seconds. Do not interpret that instruction as 1200 wall-clock
+seconds, and do not substitute a 1500-second horizon. The runner must stop from
+a live Webots simulation clock or live ROS `/clock` at the configured horizon,
+before post-processing or observer-file flushing. The configured horizon must
+be printed and recorded in the effective command and run manifest before the
+launch is accepted.
+
+The normal stop target is the configured horizon `H`. A run is invalid if its
+live simulation clock reaches `H + 60` simulated seconds before teardown; this
+is an overrun fence, not extra scientific runtime. At that fence the launch
+process group must be terminated immediately and the run recorded as
+`FAILURE` with detail `SIM_HORIZON_OVERRUN`. Reports must never use samples
+past `H`, and a 20-simulated-minute report must never include samples at or
+past `1260` simulated seconds.
+
 Cut coverage, travel, milestones, inactivity intervals, traffic metrics,
 overlap metrics, and all other scientific measurements at the verified
 simulation-time boundary. Never use wall time as a substitute for simulation
@@ -104,11 +120,13 @@ Every run manifest, summary, and report must record:
 
 If the watchdog fires, preserve all artifacts but do not claim a clean
 full-horizon result. Existing and currently running experiments are not
-discarded. For a run that exceeds the wall-clock limit, only its verified first
-1200 wall-clock seconds may be used as bounded prefix/partial evidence, with
-metrics still cut by their verified simulation timestamps and the result
-explicitly labeled partial. This rule is not retroactive and does not delete
-or invalidate the historical artifacts themselves.
+discarded. For a run that exceeds the wall-clock limit, the usable scientific
+prefix is still determined by the configured simulated-time horizon, not by a
+wall-clock slice. For a 20-simulated-minute task, only records with verified
+simulation time `<= 1200` may be used; any wall-clock prefix used for separate
+diagnostics must be labeled non-scientific partial evidence. This rule is not
+retroactive and does not delete or invalidate the historical artifacts
+themselves.
 
 ## Thesis-runtime integrity rules
 
@@ -137,12 +155,66 @@ parameter files exist, classify each as active, inactive, obsolete, or
 diagnostic-only. For policy comparisons, ensure the only intentional difference
 is the policy variable under study.
 
-For this WSL/Webots NAT runtime, the external-controller endpoint is not the
-DDS loopback endpoint. Any Webots launch must explicitly set
-`MY_EPUCK_WEBOTS_NETWORK_MODE=nat` (unless a measured mirrored-network setup is
-being used), and the launch log must show the resolved WSL default-route
-gateway in `WEBOTS_CONTROLLER_ENDPOINT`. Sourcing the CycloneDDS loopback
-profile alone is not sufficient evidence for Webots TCP connectivity.
+## Webots controller-network preflight
+
+The Webots controller TCP connection and ROS DDS discovery are separate
+validation concerns. Before every Webots launch, explicitly verify and record
+the effective Webots networking mode and the resolved controller endpoint.
+
+For the WSL NAT runtime:
+
+- Set `MY_EPUCK_WEBOTS_NETWORK_MODE=nat` explicitly before launch.
+- Resolve `WEBOTS_CONTROLLER_ENDPOINT` to the reachable Windows host gateway or
+  interface, including its selected TCP port.
+- Never use `127.0.0.1` for the Windows Webots server from WSL NAT mode. Linux
+  loopback is not proof of reachability to the Windows host.
+
+Do not confuse a CycloneDDS loopback profile with Webots controller
+connectivity. `ROS_AUTOMATIC_DISCOVERY_RANGE`, `ROS_LOCALHOST_ONLY`, and the
+CycloneDDS URI govern ROS discovery only; they do not prove that the Webots TCP
+controller endpoint is reachable.
+
+The launch must fail during preflight, before scientific data collection, if
+any of the following holds:
+
+- `WEBOTS_CONTROLLER_ENDPOINT` is missing;
+- NAT mode is expected but the resolved endpoint is localhost;
+- controller connectivity cannot be actively verified for the robot
+  controllers and the Webots supervisor.
+
+Every run manifest, launch provenance record, and final report must record:
+
+- `MY_EPUCK_WEBOTS_NETWORK_MODE`;
+- the resolved `WEBOTS_CONTROLLER_ENDPOINT` (host and port);
+- the Webots controller connection result, including each required controller;
+- whether ROS `/clock` advanced after controller connection.
+
+This is a validation/preflight rule only. Do not add runtime workarounds or
+new networking scripts to satisfy it.
+
+## Custom-code skepticism
+
+Do not treat existing custom project code as inherently correct simply because it already exists.
+
+When investigating bugs, distinguish between:
+
+1. established external frameworks/libraries with documented behavior;
+2. custom project code written specifically for this project.
+
+Custom code is a valid first suspect when:
+
+- its behavior is undocumented;
+- it duplicates responsibility already handled by a mature external system;
+- it introduces stricter rules than the external system;
+- it creates unexplained failures.
+
+Before preserving or extending custom infrastructure, verify:
+
+- why it exists;
+- what documented requirement it satisfies;
+- whether the underlying framework already provides the same functionality.
+
+Do not solve bugs in custom layers by adding more custom layers unless the existing architecture and requirements justify it.
 
 ## Completed-task report handoff
 

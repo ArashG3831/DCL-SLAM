@@ -29,7 +29,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--observer-url', default='')
     result.add_argument('--webots-port', type=int, default=23000)
     result.add_argument('--ros-domain-id', type=int, default=110)
-    result.add_argument('--mission-timeout', type=float, default=850.0)
+    result.add_argument(
+        '--simulation-horizon-s', type=float, default=1500.0,
+        help='Scientific simulated-time horizon controlled by live /clock.')
+    result.add_argument(
+        '--wall-watchdog-s', type=float, default=1200.0,
+        help='Emergency real-time watchdog for the complete run.')
+    result.add_argument(
+        '--mission-timeout', type=float, default=None,
+        help='Deprecated alias for --wall-watchdog-s.')
     result.add_argument('--startup-timeout', type=float, default=280.0)
     result.add_argument('--webots-mode', default='fast')
     result.add_argument('--dry-run', action='store_true')
@@ -50,7 +58,11 @@ def runner_arguments(config: argparse.Namespace) -> list[str]:
         '--enable-observer', 'true',
         '--enable-forensic-capture', 'true',
         '--fusion-process-nice', '0',
-        '--mission-timeout', str(config.mission_timeout),
+        '--simulation-horizon-s', str(config.simulation_horizon_s),
+        '--wall-watchdog-s', str(
+            config.mission_timeout
+            if config.mission_timeout is not None
+            else config.wall_watchdog_s),
         '--startup-timeout', str(config.startup_timeout),
         '--ros-domain-id', str(config.ros_domain_id),
         '--webots-port', str(config.webots_port),

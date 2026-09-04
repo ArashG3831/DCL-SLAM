@@ -1498,10 +1498,14 @@ private:
         ++cache.query_count;
         const auto duration = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - request_started).count();
-        auto length = ok ? path_length(
+        // Nav2's successful, finite path is the reachability result. Keep the
+        // former endpoint rule only for optional forensic diagnostics; it must
+        // not turn a successful Nav2 plan into PLANNER_FAILED.
+        const auto diagnostic_length = ok ? path_length(
           result.result->path, rx_, ry_, candidate.pose.pose.position.x,
           candidate.pose.pose.position.y, goal_tolerance_m_) : std::nullopt;
-        log_path_validation(candidate, result, length, candidate_generation, duration);
+        auto length = ok ? extract_nav2_path_cost(result.result->path) : std::nullopt;
+        log_path_validation(candidate, result, diagnostic_length, candidate_generation, duration);
         if (length) {
           if (candidate.tier1_unqueried) {++cycle_tier1_reachable_;}
           auto reachable = candidate;

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from functools import partial
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -76,10 +77,7 @@ LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
 )
 SHUTDOWN_GRACE_S = 20.0
 SHUTDOWN_TERM_S = 10.0
-# The public mission timeout is a hard total wall-clock cap.  Reserve enough
-# time for launch-group escalation, campaign-driver cleanup, and final log
-# flushing so a timeout cannot turn into an over-limit run.
-FINALIZATION_BUDGET_S = 55.0
+WATCHDOG_TERM_GRACE_S = 3.0
 
 
 def _stale_workspace_root() -> Path:
@@ -105,6 +103,75 @@ FILTERED_PATH_VARIABLES = (
 
 class FastTrialError(RuntimeError):
     """A bounded preflight, readiness, or cleanup failure."""
+
+
+class WallWatchdog:
+    """Independent monotonic watchdog for the complete launch process group.
+
+    The watchdog is armed before the launch subprocess is spawned.  It does
+    not inspect observer files or ROS log output.  Once the absolute wall
+    deadline is reached it records the latest live clock value, terminates all
+    attached process groups, and escalates to SIGKILL after a short grace.
+    """
+
+    def __init__(self, deadline: float, clock_getter, started: float | None = None):
+        self.deadline = float(deadline)
+        self.started = time.monotonic() if started is None else float(started)
+        self._clock_getter = clock_getter
+        self._processes = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self.armed = False
+        self.fired = False
+        self.fired_wall_elapsed_s = None
+        self.fired_sim_time_s = None
+
+    def add_process(self, process):
+        with self._lock:
+            self._processes.append(process)
+            fired = self.fired
+        if fired:
+            stop_process(process, signal.SIGTERM)
+            stop_process(process, signal.SIGKILL)
+
+    def _live_processes(self):
+        with self._lock:
+            return [process for process in self._processes
+                    if process is not None and process.poll() is None]
+
+    def _run(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining > 0.0 and self._stop.wait(remaining):
+            return
+        if self._stop.is_set():
+            return
+        self.fired = True
+        self.fired_wall_elapsed_s = time.monotonic() - self.started
+        try:
+            self.fired_sim_time_s = self._clock_getter()
+        except Exception:
+            self.fired_sim_time_s = None
+        for process in self._live_processes():
+            stop_process(process, signal.SIGTERM)
+        grace_deadline = time.monotonic() + WATCHDOG_TERM_GRACE_S
+        while time.monotonic() < grace_deadline:
+            if not self._live_processes():
+                return
+            self._stop.wait(0.05)
+        for process in self._live_processes():
+            stop_process(process, signal.SIGKILL)
+
+    def start(self):
+        self.armed = True
+        self._thread = threading.Thread(
+            target=self._run, name='cooperative-wall-watchdog', daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.25)
 
 
 def _is_stale_workspace_entry(entry: str) -> bool:
@@ -210,6 +277,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--slam-tf-publish-probe-library', default='')
     result.add_argument('--slam-tf-publish-probe-log', default='')
     result.add_argument('--slam-tf-publication-mode', default='')
+    result.add_argument(
+        '--simulation-horizon-s', type=float, default=None,
+        help='Scientific simulated-time horizon controlled by live /clock.')
+    result.add_argument(
+        '--wall-watchdog-s', type=float, default=None,
+        help='Emergency monotonic wall-clock limit for the whole run.')
     result.add_argument('--mission-timeout', type=float)
     result.add_argument('--startup-timeout', type=float)
     result.add_argument(
@@ -383,7 +456,8 @@ def campaign_webots_drivers(created_after: float | None = None):
     return drivers
 
 
-def cleanup_campaign_webots_drivers(created_after: float) -> list[int]:
+def cleanup_campaign_webots_drivers(
+        created_after: float, absolute_deadline: float | None = None) -> list[int]:
     drivers = campaign_webots_drivers(created_after)
     pids = [process.pid for process in drivers]
     for process in drivers:
@@ -391,13 +465,32 @@ def cleanup_campaign_webots_drivers(created_after: float) -> list[int]:
             process.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    _, alive = psutil.wait_procs(drivers, timeout=5.0)
+    timeout = 5.0
+    if absolute_deadline is not None:
+        timeout = max(0.0, min(timeout, absolute_deadline - time.monotonic()))
+    _, alive = psutil.wait_procs(drivers, timeout=timeout)
     for process in alive:
         try:
             process.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return pids
+
+
+def observer_finalization_status(attempt: Path | None):
+    """Return persisted observer finalization state without controlling stop."""
+    if attempt is None:
+        return None
+    metrics = sorted(attempt.glob('**/runtime_metrics.json'))
+    if not metrics:
+        return None
+    statuses = []
+    for path in metrics:
+        try:
+            statuses.append(bool(json.loads(path.read_text()).get('finalized')))
+        except (OSError, ValueError, TypeError):
+            statuses.append(False)
+    return all(statuses)
 
 
 def resolve_world(args: argparse.Namespace) -> Path:
@@ -536,6 +629,8 @@ class ReadyProbe(Node):
     def __init__(self):
         super().__init__('cooperative_trial_fast_probe')
         self.clock_values: list[float] = []
+        self.clock_start_s = None
+        self.latest_clock_s = None
         self.scans: set[str] = set()
         self.odometry: set[str] = set()
         self.maps: set[str] = set()
@@ -575,9 +670,16 @@ class ReadyProbe(Node):
 
     def _on_clock(self, message: Clock):
         value = message.clock.sec + message.clock.nanosec * 1e-9
+        if self.clock_start_s is None:
+            self.clock_start_s = value
+        self.latest_clock_s = value
         if not self.clock_values or value != self.clock_values[-1]:
             self.clock_values.append(value)
             self.clock_values = self.clock_values[-4:]
+
+    def simulation_horizon_reached(self, horizon_s: float) -> bool:
+        return (self.latest_clock_s is not None and
+                self.latest_clock_s >= float(horizon_s))
 
     def clock_ready(self) -> bool:
         return len(self.clock_values) >= 2 and any(
@@ -755,8 +857,11 @@ def stop_process(process: subprocess.Popen, sig: int):
         pass
 
 
-def wait_process(process: subprocess.Popen, timeout: float) -> bool:
+def wait_process(process: subprocess.Popen, timeout: float,
+                 absolute_deadline: float | None = None) -> bool:
     deadline = time.monotonic() + max(0.0, float(timeout))
+    if absolute_deadline is not None:
+        deadline = min(deadline, float(absolute_deadline))
     interrupted = False
     while process.poll() is None:
         remaining = deadline - time.monotonic()
@@ -776,22 +881,27 @@ def wait_process(process: subprocess.Popen, timeout: float) -> bool:
     return process.poll() is not None
 
 
-def shutdown_processes(launch, rviz=None) -> dict:
+def shutdown_processes(launch, rviz=None, absolute_deadline=None) -> dict:
     stop_process(launch, signal.SIGINT)
     if rviz is not None:
         stop_process(rviz, signal.SIGINT)
-    graceful = wait_process(launch, SHUTDOWN_GRACE_S)
+    graceful = wait_process(
+        launch, SHUTDOWN_GRACE_S, absolute_deadline=absolute_deadline)
     if not graceful:
         stop_process(launch, signal.SIGTERM)
-        wait_process(launch, SHUTDOWN_TERM_S)
+        wait_process(
+            launch, SHUTDOWN_TERM_S, absolute_deadline=absolute_deadline)
     if launch.poll() is None:
         stop_process(launch, signal.SIGKILL)
-        wait_process(launch, SHUTDOWN_TERM_S)
+        wait_process(
+            launch, SHUTDOWN_TERM_S, absolute_deadline=absolute_deadline)
     if rviz is not None and rviz.poll() is None:
         stop_process(rviz, signal.SIGTERM)
-        if not wait_process(rviz, 5.0):
+        if not wait_process(
+                rviz, 5.0, absolute_deadline=absolute_deadline):
             stop_process(rviz, signal.SIGKILL)
-            wait_process(rviz, 5.0)
+            wait_process(
+                rviz, 5.0, absolute_deadline=absolute_deadline)
     return {
         'graceful': graceful,
         'launch_return_code': launch.returncode,
@@ -834,7 +944,8 @@ def run(args: argparse.Namespace) -> int:
     lock = threading.Lock()
     ready_time = None
     phases = {}
-    exit_reason = 'preflight_failure'
+    termination_reason = 'FAILURE'
+    termination_detail = 'preflight_failure'
     launch_return_code = None
     prefix = ''
     webots_driver_prefix = ''
@@ -848,7 +959,22 @@ def run(args: argparse.Namespace) -> int:
     rclpy_started = False
     probe = None
     executor = None
+    wall_watchdog = None
+    simulation_start_s = None
+    simulation_horizon_target_s = None
+    simulation_stop_s = None
     previous_domain = os.environ.get('ROS_DOMAIN_ID')
+
+    configured_wall_limit = getattr(args, 'wall_watchdog_s', None)
+    if configured_wall_limit is None:
+        configured_wall_limit = getattr(args, 'mission_timeout', None)
+    if configured_wall_limit is None:
+        configured_wall_limit = 1800.0
+    wall_deadline = started + max(0.0, float(configured_wall_limit))
+    configured_horizon = getattr(args, 'simulation_horizon_s', None)
+    if configured_horizon is None:
+        configured_horizon = 1500.0
+    configured_horizon = float(configured_horizon)
 
     if (requires_fixed_anchor_forensics(args) and
             not args.enable_forensic_capture):
@@ -869,6 +995,13 @@ def run(args: argparse.Namespace) -> int:
             pass
 
     try:
+        if (not math.isfinite(float(configured_wall_limit)) or
+                float(configured_wall_limit) <= 0.0):
+            raise FastTrialError(
+                'wall watchdog limit must be finite and positive')
+        if not math.isfinite(configured_horizon) or configured_horizon <= 0.0:
+            raise FastTrialError(
+                'simulation horizon must be finite and positive')
         require_explicit_local_path_gate_mode(args)
         inherited_environment = os.environ.copy()
         environment, removed_stale_environment_entries = (
@@ -953,10 +1086,20 @@ def run(args: argparse.Namespace) -> int:
             'PYTHONUNBUFFERED': '1',
         })
         log_file = (attempt / 'launch.log').open('w', encoding='utf-8')
+        if time.monotonic() >= wall_deadline:
+            raise FastTrialError('wall watchdog budget expired before launch')
+        # Arm the emergency watchdog before spawning the launch wrapper.  The
+        # process list is attached immediately after each subprocess exists.
+        wall_watchdog = WallWatchdog(
+            wall_deadline,
+            lambda: probe.latest_clock_s if probe is not None else None,
+            started=started)
+        wall_watchdog.start()
         launch = subprocess.Popen(
             command, env=environment, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
             start_new_session=True)
+        wall_watchdog.add_process(launch)
         launch_spawn_elapsed = time.monotonic() - started
         print(f'launch_spawn_elapsed_s={launch_spawn_elapsed:.3f}', flush=True)
         output_threads.append(threading.Thread(
@@ -969,6 +1112,7 @@ def run(args: argparse.Namespace) -> int:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True)
+            wall_watchdog.add_process(rviz)
             output_threads.append(threading.Thread(
                 target=pump_output, args=(rviz.stdout, log_file, lock),
                 daemon=True))
@@ -982,11 +1126,8 @@ def run(args: argparse.Namespace) -> int:
         executor = SingleThreadedExecutor()
         executor.add_node(probe)
         probe.executor = executor
-        total_wall_limit = args.mission_timeout or 1800.0
-        hard_deadline = started + max(0.0, total_wall_limit)
-        service_deadline = hard_deadline - FINALIZATION_BUDGET_S
         readiness_deadline = min(
-            started + (args.startup_timeout or 300.0), service_deadline,
+            started + (args.startup_timeout or 300.0), wall_deadline,
         )
         checks = (
             ('clock_ready', probe.clock_ready),
@@ -1026,43 +1167,75 @@ def run(args: argparse.Namespace) -> int:
         nav2_details = probe.activate_and_check_nav2(nav2_deadline)
         phases['nav2_ready'] = time.monotonic() - phase_start
         print(f'nav2_ready_s={phases["nav2_ready"]:.3f}', flush=True)
-        probe.destroy_node()
-        executor.shutdown()
-        rclpy.shutdown()
+        if probe.clock_start_s is None:
+            raise FastTrialError('no live /clock sample was received')
+        simulation_start_s = probe.clock_start_s
+        simulation_horizon_target_s = configured_horizon
         ready_time = utc_now()
         ready_duration = time.monotonic() - started
         ready_wall_elapsed = ready_duration
         phases['total_ready'] = ready_duration
         print(f'total_ready_s={ready_duration:.3f}', flush=True)
+        print(
+            'SIMULATION_CLOCK_READY start_s=%.9f horizon_s=%.9f' % (
+                simulation_start_s, simulation_horizon_target_s),
+            flush=True)
         print('FAST_TRIAL_READY', flush=True)
 
-        mission_deadline = None if args.hold_open else service_deadline
         while True:
-            if launch.poll() is not None:
-                launch_return_code = launch.returncode
-                exit_reason = 'launch_process_exit'
+            if wall_watchdog is not None and wall_watchdog.fired:
+                termination_reason = 'WALL_WATCHDOG'
+                termination_detail = 'wall_watchdog_expired'
                 return_code = 1
                 break
-            if not args.hold_open and time.monotonic() >= mission_deadline:
-                exit_reason = 'mission_timeout'
+            if launch.poll() is not None:
+                launch_return_code = launch.returncode
+                termination_reason = 'FAILURE'
+                termination_detail = 'launch_process_exit'
+                return_code = 1
                 break
-            time.sleep(0.2)
+            executor.spin_once(timeout_sec=0.1)
             sample_runner_rss()
-        return_code = 0
+            if (not args.hold_open and
+                    probe.simulation_horizon_reached(
+                        simulation_horizon_target_s)):
+                simulation_stop_s = probe.latest_clock_s
+                termination_reason = 'SIM_TIME_COMPLETE'
+                termination_detail = 'simulation_horizon_reached'
+                return_code = 0
+                break
+            if wall_watchdog is not None and wall_watchdog.fired:
+                termination_reason = 'WALL_WATCHDOG'
+                termination_detail = 'wall_watchdog_expired'
+                return_code = 1
+                break
     except KeyboardInterrupt:
-        exit_reason = 'interrupt'
+        termination_reason = 'MANUAL_ABORT'
+        termination_detail = 'interrupt'
         return_code = 130
     except (FastTrialError, OSError, subprocess.SubprocessError) as error:
-        exit_reason = f'failure: {error}'
+        termination_reason = 'FAILURE'
+        termination_detail = f'failure: {error}'
         print(f'FAST_TRIAL_FAILURE reason={error}', file=sys.stderr, flush=True)
         return_code = 1
     except Exception as error:
-        exit_reason = f'unexpected_failure: {type(error).__name__}: {error}'
-        print(f'FAST_TRIAL_FAILURE reason={exit_reason}', file=sys.stderr,
+        termination_reason = 'FAILURE'
+        termination_detail = (
+            f'unexpected_failure: {type(error).__name__}: {error}')
+        print(f'FAST_TRIAL_FAILURE reason={termination_detail}', file=sys.stderr,
               flush=True)
         return_code = 1
     finally:
+        # A wall watchdog firing during readiness or cleanup takes precedence
+        # over a secondary launch/cleanup exception: the artifact must state
+        # that the emergency real-time limit, not the scientific horizon,
+        # ended the run.
+        if wall_watchdog is not None and wall_watchdog.fired:
+            termination_reason = 'WALL_WATCHDOG'
+            termination_detail = 'wall_watchdog_expired'
         if probe is not None:
+            if simulation_stop_s is None:
+                simulation_stop_s = probe.latest_clock_s
             probe.destroy_node()
         if executor is not None:
             executor.shutdown()
@@ -1073,15 +1246,20 @@ def run(args: argparse.Namespace) -> int:
         else:
             os.environ['ROS_DOMAIN_ID'] = previous_domain
         if launch is not None:
-            cleanup = shutdown_processes(launch, rviz)
+            cleanup = shutdown_processes(
+                launch, rviz, absolute_deadline=wall_deadline)
             launch_return_code = cleanup['launch_return_code']
         else:
             cleanup = {}
-        cleanup['campaign_webots_driver_pids'] = cleanup_campaign_webots_drivers(
-            started_wall)
+        cleanup['campaign_webots_driver_pids'] = (
+            cleanup_campaign_webots_drivers(
+                started_wall, absolute_deadline=wall_deadline))
+        if wall_watchdog is not None:
+            wall_watchdog.stop()
         if log_file is not None:
             for thread in output_threads:
-                thread.join(timeout=2.0)
+                remaining = max(0.0, wall_deadline - time.monotonic())
+                thread.join(timeout=min(2.0, remaining))
             log_file.close()
         end_time = utc_now()
         summary = {
@@ -1092,7 +1270,33 @@ def run(args: argparse.Namespace) -> int:
             'ready_duration_s': ready_wall_elapsed,
             'launch_spawn_elapsed_s': launch_spawn_elapsed,
             'readiness_phase_durations': phases,
-            'exit_reason': exit_reason,
+            'exit_reason': termination_detail,
+            'termination_reason': termination_reason,
+            'termination_detail': termination_detail,
+            'simulation_horizon_s': configured_horizon,
+            'simulation_horizon_target_s': simulation_horizon_target_s,
+            'simulation_start_time_s': simulation_start_s,
+            'simulation_end_time_s': simulation_stop_s,
+            'ros_clock_start_s': simulation_start_s,
+            'ros_clock_end_s': simulation_stop_s,
+            'simulation_horizon_reached': (
+                termination_reason == 'SIM_TIME_COMPLETE'),
+            'simulation_measurement_cutoff_s': (
+                simulation_horizon_target_s
+                if simulation_horizon_target_s is not None else None),
+            'wall_watchdog_s': float(configured_wall_limit),
+            'wall_watchdog_armed': bool(
+                wall_watchdog is not None and wall_watchdog.armed),
+            'wall_watchdog_termination': bool(
+                wall_watchdog is not None and wall_watchdog.fired),
+            'wall_watchdog_fired_wall_elapsed_s': (
+                wall_watchdog.fired_wall_elapsed_s
+                if wall_watchdog is not None else None),
+            'wall_watchdog_fired_sim_time_s': (
+                wall_watchdog.fired_sim_time_s
+                if wall_watchdog is not None else None),
+            'observer_finalization_complete': observer_finalization_status(
+                attempt),
             'launch_return_code': launch_return_code,
             'world_profile': args.world_profile,
             'world_path': str(world) if world else args.world_path,
@@ -1123,8 +1327,22 @@ def run(args: argparse.Namespace) -> int:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     settings = PROFILE_SETTINGS[args.world_profile]
+    explicit_mission_timeout = args.mission_timeout
     if args.mission_timeout is None:
         args.mission_timeout = settings['mission_timeout']
+    if args.wall_watchdog_s is None:
+        args.wall_watchdog_s = (
+            explicit_mission_timeout
+            if explicit_mission_timeout is not None
+            else settings['mission_timeout'])
+    elif (explicit_mission_timeout is not None and
+          float(explicit_mission_timeout) != float(args.wall_watchdog_s)):
+        raise SystemExit(
+            '--mission-timeout and --wall-watchdog-s must match when both '
+            'are supplied; use --wall-watchdog-s for new campaigns')
+    if args.simulation_horizon_s is None:
+        args.simulation_horizon_s = settings.get(
+            'simulation_horizon_s', 1500.0)
     if args.startup_timeout is None:
         args.startup_timeout = settings['startup_timeout']
     if not ROS_DOMAIN_MIN <= args.ros_domain_id <= ROS_DOMAIN_MAX:

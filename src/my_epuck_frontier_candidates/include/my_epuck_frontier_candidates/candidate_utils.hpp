@@ -41,6 +41,10 @@ uint64_t local_context_checksum(
   const frontier_exploration_ros2::OccupancyGrid2d & map,
   double world_x, double world_y, double radius_m);
 uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate &f,const frontier_exploration_ros2::OccupancyGrid2d &map,double quantum);
+// Defensive extraction of a metric from a successful Nav2 path. This helper
+// checks that the path is non-empty and finite, but does not impose an
+// additional endpoint-distance reachability rule.
+std::optional<double> extract_nav2_path_cost(const nav_msgs::msg::Path &path);
 std::optional<double> path_length(const nav_msgs::msg::Path &path,double robot_x,double robot_y,double goal_x,double goal_y,double tolerance);
 std::optional<double> path_initial_heading_cost(
   const nav_msgs::msg::Path &path, double robot_yaw, double minimum_segment_m = 0.05);

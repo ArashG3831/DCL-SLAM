@@ -122,6 +122,7 @@ class Generator : public rclcpp::Node {
     uint64_t cycles_not_queried{0};
     int64_t last_query_ns{0};
     bool path_refresh{false};
+    bool tier1_unqueried{false};
     uint64_t query_event_id{0};
   };
 
@@ -133,6 +134,7 @@ class Generator : public rclcpp::Node {
     double approach_y{0.0};
     bool has_approach{false};
     double visible_reveal_gain{std::numeric_limits<double>::quiet_NaN()};
+    double optimistic_cost_lower_bound_s{std::numeric_limits<double>::quiet_NaN()};
   };
 
   struct IdentityReference {
@@ -156,7 +158,15 @@ class Generator : public rclcpp::Node {
     uint64_t cycles_not_queried{0};
     int64_t last_query_ns{0};
     int64_t last_seen_ns{0};
+    // Diagnostic-only record of the most recent completed query outcome.
+    // This is never consulted by scheduling or classification decisions.
+    std::string last_query_result;
   };
+
+  static const char * query_termination_name(const std::string & reason)
+  {
+    return reason.empty() ? "OTHER" : reason.c_str();
+  }
 
   struct Suppression {
     uint64_t revision{0};
@@ -302,6 +312,7 @@ public:
               1s, [this] {emit_receipt_summary();});
             RCLCPP_INFO(get_logger(), "FRONTIER_PHASE post_handoff=true processing_active=true");
           } else if (stop_after_handoff_ && processing_active_) {
+            cycle_termination_reason_ = "HANDOFF_CANCEL";
             processing_active_ = false;
             request_generation_++;
             active_request_ = 0;
@@ -442,6 +453,174 @@ private:
     }
   }
 
+  struct CostmapValidationEvidence {
+    int goal_cost{-1};
+    int start_cost{-1};
+    double nearest_lethal_m{std::numeric_limits<double>::quiet_NaN()};
+    double nearest_inflated_m{std::numeric_limits<double>::quiet_NaN()};
+    double nearest_unknown_m{std::numeric_limits<double>::quiet_NaN()};
+    bool goal_lethal{false};
+    bool goal_inflated{false};
+  };
+
+  static CostmapValidationEvidence costmap_validation_evidence(
+    const frontier_exploration_ros2::OccupancyGrid2d * costmap,
+    double start_x, double start_y, double goal_x, double goal_y,
+    double radius_m)
+  {
+    CostmapValidationEvidence evidence;
+    if (!costmap) {
+      return evidence;
+    }
+    int start_x_cell, start_y_cell, goal_x_cell, goal_y_cell;
+    if (costmap->worldToMapNoThrow(start_x, start_y, start_x_cell, start_y_cell)) {
+      evidence.start_cost = costmap->getCost(start_x_cell, start_y_cell);
+    }
+    if (!costmap->worldToMapNoThrow(goal_x, goal_y, goal_x_cell, goal_y_cell)) {
+      return evidence;
+    }
+    evidence.goal_cost = costmap->getCost(goal_x_cell, goal_y_cell);
+    evidence.goal_lethal = evidence.goal_cost >= 254;
+    evidence.goal_inflated = evidence.goal_cost > 0 && evidence.goal_cost < 254;
+    const int radius_cells = std::max(
+      1, static_cast<int>(std::ceil(radius_m / costmap->map().info.resolution)));
+    for (int y = goal_y_cell - radius_cells; y <= goal_y_cell + radius_cells; ++y) {
+      for (int x = goal_x_cell - radius_cells; x <= goal_x_cell + radius_cells; ++x) {
+        if (x < 0 || y < 0 || x >= costmap->getSizeX() || y >= costmap->getSizeY()) {
+          continue;
+        }
+        const auto value = costmap->getCost(x, y);
+        const double distance = std::hypot(
+          static_cast<double>(x - goal_x_cell) * costmap->map().info.resolution,
+          static_cast<double>(y - goal_y_cell) * costmap->map().info.resolution);
+        if (distance > radius_m) {
+          continue;
+        }
+        if (value < 0) {
+          evidence.nearest_unknown_m = std::min(evidence.nearest_unknown_m, distance);
+        } else if (value >= 254) {
+          evidence.nearest_lethal_m = std::min(evidence.nearest_lethal_m, distance);
+        } else if (value > 0) {
+          evidence.nearest_inflated_m = std::min(evidence.nearest_inflated_m, distance);
+        }
+      }
+    }
+    return evidence;
+  }
+
+  void log_path_validation(
+    const Work & candidate, const GoalHandle::WrappedResult & result,
+    const std::optional<double> & length, uint64_t candidate_generation,
+    double duration_s) const
+  {
+    if (!diagnostic_frontier_capture_ ||
+      result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
+      result.result->error_code != Action::Result::NONE || length)
+    {
+      return;
+    }
+    const auto & path = result.result->path;
+    const std::size_t pose_count = path.poses.size();
+    std::vector<std::size_t> nonfinite_indices;
+    for (std::size_t index = 0; index < path.poses.size(); ++index) {
+      const auto & pose = path.poses[index];
+      const auto & p = pose.pose.position;
+      const auto & q = pose.pose.orientation;
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+        !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) ||
+        !std::isfinite(q.w))
+      {
+        nonfinite_indices.push_back(index);
+      }
+    }
+    const auto endpoint = [&](std::size_t index) {
+      if (path.poses.empty()) {
+        return std::array<double, 3>{
+          std::numeric_limits<double>::quiet_NaN(),
+          std::numeric_limits<double>::quiet_NaN(),
+          std::numeric_limits<double>::quiet_NaN()};
+      }
+      const auto & pose = path.poses[index].pose;
+      return std::array<double, 3>{
+        pose.position.x, pose.position.y, orientation_yaw(pose.orientation)};
+    };
+    const auto first = endpoint(0);
+    const auto last = endpoint(path.poses.empty() ? 0 : path.poses.size() - 1);
+    const double final_goal_distance = !path.poses.empty() ? std::hypot(
+      last[0] - candidate.pose.pose.position.x,
+      last[1] - candidate.pose.pose.position.y) :
+      std::numeric_limits<double>::quiet_NaN();
+    const double start_goal_distance = std::hypot(
+      rx_ - candidate.pose.pose.position.x, ry_ - candidate.pose.pose.position.y);
+    std::string reason;
+    if (pose_count == 0) {
+      reason = "EMPTY_PATH";
+    } else if (!nonfinite_indices.empty()) {
+      reason = "NONFINITE_POSE";
+    } else if (pose_count == 1 && start_goal_distance > goal_tolerance_m_) {
+      reason = "ONE_POSE_PATH";
+    } else if (final_goal_distance > goal_tolerance_m_) {
+      reason = "FINAL_POSE_TOLERANCE";
+    } else if (length) {
+      reason = "VALID";
+    } else {
+      reason = "OTHER_VALIDATION_FAILURE";
+    }
+    std::optional<frontier_exploration_ros2::OccupancyGrid2d> cost_grid;
+    if (cycle_cost_) {
+      cost_grid.emplace(cycle_cost_);
+    }
+    const auto costmap = costmap_validation_evidence(
+      cost_grid ? &*cost_grid : nullptr, rx_, ry_,
+      candidate.pose.pose.position.x, candidate.pose.pose.position.y, 0.5);
+    std::ostringstream nonfinite_text;
+    if (nonfinite_indices.empty()) {
+      nonfinite_text << "none";
+    } else {
+      for (std::size_t i = 0; i < nonfinite_indices.size(); ++i) {
+        if (i) {nonfinite_text << ',';}
+        nonfinite_text << nonfinite_indices[i];
+      }
+    }
+    const auto finite_or_na = [](double value) {
+      return std::isfinite(value) ? std::to_string(value) : std::string("nan");
+    };
+    RCLCPP_INFO(
+      get_logger(),
+      "FRONTIER_PATH_VALIDATION robot=%s sim_time=%.9f query_id=%lu id=%lu "
+      "candidate_generation_id=%lu planner_id=%s planner_frame=%s goal_frame=%s "
+      "path_frame=%s map_revision=%lu map_stamp_s=%.9f global_costmap_revision=%lu "
+      "global_costmap_stamp_s=%.9f local_costmap_revision=UNAVAILABLE "
+      "local_costmap_stamp_s=UNAVAILABLE action_result=%s error_code=%d error_name=%s "
+      "error_message=\"%s\" duration_s=%.6f start_x=%.9f start_y=%.9f start_yaw=%.9f "
+      "goal_x=%.9f goal_y=%.9f goal_yaw=%.9f "
+      "path_pose_count=%zu first_x=%.9f first_y=%.9f first_yaw=%.9f "
+      "last_x=%.9f last_y=%.9f last_yaw=%.9f final_goal_distance_m=%.9f "
+      "validator_path_length_m=%.9f nonfinite=%s nonfinite_indices=%s "
+      "global_start_cost=%d global_goal_cost=%d global_goal_lethal=%s "
+      "global_goal_inflated=%s global_nearest_lethal_m=%s "
+      "global_nearest_inflated_m=%s global_nearest_unknown_m=%s "
+      "planner_result_metadata=\"%s\" validation=%s",
+      robot_id_.c_str(), now().seconds(), candidate.query_event_id, candidate.id,
+      candidate_generation, planner_id_.c_str(), candidate.pose.header.frame_id.c_str(),
+      candidate.pose.header.frame_id.c_str(), path.poses.empty() ? "UNAVAILABLE" :
+      path.poses.front().header.frame_id.c_str(), cycle_revision_,
+      cycle_map_ ? stamp_seconds(cycle_map_->header.stamp) : 0.0, cycle_cost_revision_,
+      cycle_cost_ ? stamp_seconds(cycle_cost_->header.stamp) : 0.0,
+      action_result_name(result.code), result.result->error_code,
+      nav2_error_name(result.result->error_code), log_safe(result.result->error_msg).c_str(),
+      duration_s, rx_, ry_, yaw_, candidate.pose.pose.position.x,
+      candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
+      pose_count, first[0], first[1], first[2], last[0], last[1], last[2],
+      final_goal_distance, length.value_or(-1.0), nonfinite_indices.empty() ? "false" : "true",
+      nonfinite_text.str().c_str(), costmap.start_cost, costmap.goal_cost,
+      costmap.goal_lethal ? "true" : "false", costmap.goal_inflated ? "true" : "false",
+      finite_or_na(costmap.nearest_lethal_m).c_str(),
+      finite_or_na(costmap.nearest_inflated_m).c_str(),
+      finite_or_na(costmap.nearest_unknown_m).c_str(), log_safe(result.result->error_msg).c_str(),
+      reason.c_str());
+  }
+
   static const char * nav2_error_name(int error_code)
   {
     switch (error_code) {
@@ -457,6 +636,19 @@ private:
       case Action::Result::NO_VALID_PATH: return "NO_VALID_PATH";
       default: return "UNRECOGNIZED";
     }
+  }
+
+  static double stamp_seconds(const builtin_interfaces::msg::Time & stamp)
+  {
+    return static_cast<double>(stamp.sec) +
+           static_cast<double>(stamp.nanosec) * 1.0e-9;
+  }
+
+  static double orientation_yaw(const geometry_msgs::msg::Quaternion & q)
+  {
+    return std::atan2(
+      2.0 * (q.w * q.z + q.x * q.y),
+      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
   }
 
   static const char * query_failure_class(
@@ -790,6 +982,27 @@ private:
   {
     TimingScope timing(this, TimingSection::START_CYCLE, now().seconds());
     state_ = State::EXTRACTING;
+    ++cycle_sequence_;
+    cycle_start_sim_time_ = now().seconds();
+    cycle_cache_before_ = evaluation_cache_.size();
+    cycle_new_ids_ = 0;
+    cycle_reused_ids_ = 0;
+    cycle_pruned_absent_ = 0;
+    cycle_evicted_capacity_ = 0;
+    cycle_identity_associations_ = 0;
+    cycle_unique_frontier_records_ = 0;
+    cycle_duplicate_id_records_ = 0;
+    cycle_tier1_selected_ = 0;
+    cycle_tier1_sent_ = 0;
+    cycle_tier1_reachable_ = 0;
+    cycle_tier1_unreachable_ = 0;
+    cycle_tier1_aborted_ = 0;
+    cycle_tier1_timeout_ = 0;
+    cycle_tier1_remaining_dnu_ = 0;
+    cycle_termination_reason_ = "OTHER";
+    cycle_old_revision_ = 0;
+    cycle_new_revision_ = 0;
+    cycle_map_cancelled_tier1_ = 0;
     const auto started = now();
     cycle_map_ = map;
     cycle_cost_ = costmap;
@@ -803,6 +1016,10 @@ private:
     region_diagnostics_.clear();
     query_index_ = 0;
     queries_ = 0;
+    tier1_queries_issued_ = 0;
+    tier2_queries_issued_ = 0;
+    tier1_pending_count_ = 0;
+    tier2_pending_count_ = 0;
     safe_approach_rejections_ = 0;
     detected_frontier_count_ = 0;
     small_frontier_count_ = 0;
@@ -838,10 +1055,24 @@ private:
     region_diagnostics_.reserve(regions.size());
     std::vector<FrontierEvaluationRecord> schedule_records;
     std::vector<Work> pending_work;
+    std::unordered_set<uint64_t> cycle_frontier_ids;
+    cycle_frontier_ids.reserve(regions.size());
     const auto now_ns = now().nanoseconds();
 
     for (const auto & region : regions) {
       const uint64_t id = stable_frontier_id(region, grid, stable_id_quantization_m_);
+      if (!cycle_frontier_ids.insert(id).second) {
+        ++cycle_duplicate_id_records_;
+        RCLCPP_WARN(
+          get_logger(),
+          "FRONTIER_ID_DUPLICATE robot=%s id=%lu centroid_x=%.3f centroid_y=%.3f map_revision=%lu",
+          robot_id_.c_str(), id, region.centroid.first, region.centroid.second, map_revision);
+      }
+      if (evaluation_cache_.find(id) == evaluation_cache_.end()) {
+        ++cycle_new_ids_;
+      } else {
+        ++cycle_reused_ids_;
+      }
       if (evaluation_cache_.find(id) == evaluation_cache_.end()) {
         const auto current_bounds = frontier_world_bounds(region, grid);
         double best_distance = 0.12;
@@ -861,6 +1092,7 @@ private:
           }
         }
         if (best) {
+          ++cycle_identity_associations_;
           RCLCPP_INFO(
             get_logger(),
             "FRONTIER_ID_ASSOCIATION old_id=%lu new_id=%lu centroid_distance_m=%.3f",
@@ -881,6 +1113,7 @@ private:
       if (suppressed(id, map_revision)) {
         set_region_status(id, "UNREACHABLE");
         cache.classification = "UNREACHABLE";
+        cache.last_query_result = "SUPPRESSED";
         count_classification("UNREACHABLE");
         continue;
       }
@@ -893,11 +1126,18 @@ private:
         diagnostic.approach_x = work.pose.pose.position.x;
         diagnostic.approach_y = work.pose.pose.position.y;
         diagnostic.visible_reveal_gain = work.gain;
+        // Nav2's initial path heading is unavailable before querying.  Zero
+        // is its safe lower bound; the existing endpoint tolerance is removed
+        // from the geometric path lower bound.
+        diagnostic.optimistic_cost_lower_bound_s =
+          std::max(0.0, work.euclid - goal_tolerance_m_) /
+          std::max(cost_only_reference_linear_speed_mps_, 1e-9);
         diagnostic.has_approach = true;
       }
       if (work.pose.header.frame_id.empty()) {
         set_region_status(id, "UNREACHABLE_SAFE_APPROACH");
         cache.classification = "UNREACHABLE";
+        cache.last_query_result = "UNREACHABLE_SAFE_APPROACH";
         cache.map_context = local_context_checksum(
           grid, region.centroid.first, region.centroid.second, classification_context_radius_m_);
         cache.cost_context = 0;
@@ -933,7 +1173,10 @@ private:
           work.path_refresh = true;
           work.cycles_not_queried = 0;
           pending_work.push_back(std::move(work));
-          schedule_records.push_back({id, false, true, false, 0, cache.last_query_ns});
+          schedule_records.push_back({
+              id, false, true, false, 0, cache.last_query_ns,
+              std::max(0.0, pending_work.back().euclid - goal_tolerance_m_) /
+              std::max(cost_only_reference_linear_speed_mps_, 1e-9), false});
           RCLCPP_INFO(
             get_logger(),
             "FRONTIER_PATH_CACHE_INVALIDATED id=%lu reason=%s map_revision=%lu costmap_revision=%lu",
@@ -978,11 +1221,16 @@ private:
       ++cache.cycles_not_queried;
       work.cycles_not_queried = cache.cycles_not_queried;
       work.last_query_ns = cache.last_query_ns;
+      work.tier1_unqueried = true;
       pending_work.push_back(std::move(work));
       schedule_records.push_back({id, never_queried, context_invalidated,
                                   transient_failure, cache.cycles_not_queried,
-                                  cache.last_query_ns});
+                                  cache.last_query_ns,
+                                  std::max(0.0, pending_work.back().euclid -
+                                    goal_tolerance_m_) /
+                                  std::max(cost_only_reference_linear_speed_mps_, 1e-9), true});
     }
+    cycle_unique_frontier_records_ = cycle_frontier_ids.size();
 
     record_timing(
       TimingSection::FRONTIER_FILTERING, filtering_sim_time_s,
@@ -990,6 +1238,11 @@ private:
         std::chrono::steady_clock::now() - filtering_started).count());
 
     normalize_coarse(pending_work);
+    tier1_pending_count_ = static_cast<std::size_t>(std::count_if(
+      schedule_records.begin(), schedule_records.end(),
+      [](const auto & record) {return record.tier1_unqueried;}));
+    cycle_tier1_pending_start_ = tier1_pending_count_;
+    tier2_pending_count_ = schedule_records.size() - tier1_pending_count_;
     const auto selected_indices = fair_frontier_query_order(
       schedule_records, static_cast<std::size_t>(maximum_candidates_before_path_check_),
       static_cast<std::size_t>(maximum_path_queries_per_cycle_));
@@ -1003,6 +1256,7 @@ private:
         get_logger(), "FRONTIER_QUERY_SELECTED query_id=%lu id=%lu canonical_id=%016lx cycles_not_queried=%lu query_index=%zu",
         works_.back().query_event_id, works_.back().id, works_.back().id,
         works_.back().cycles_not_queried, works_.size() - 1);
+      if (works_.back().tier1_unqueried) {++cycle_tier1_selected_;}
     }
     extract_ms_ = (now() - started).seconds() * 1000.0;
     state_ = State::PATH_CHECKING;
@@ -1041,15 +1295,25 @@ private:
   void send_next()
   {
     TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
-    if (query_index_ >= works_.size() || queries_ >= static_cast<std::size_t>(maximum_path_queries_per_cycle_)) {
+    if (queries_ >= static_cast<std::size_t>(maximum_path_queries_per_cycle_)) {
+      cycle_termination_reason_ = "QUERY_LIMIT_REACHED";
+      finish();
+      return;
+    }
+    if (query_index_ >= works_.size()) {
+      cycle_termination_reason_ = "WORK_EXHAUSTED";
       finish();
       return;
     }
     if (!planner_->action_server_is_ready()) {
+      cycle_termination_reason_ = "PLANNER_UNAVAILABLE";
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "planner action unavailable");
       for (std::size_t i = query_index_; i < works_.size(); ++i) {
+        if (works_[i].tier1_unqueried) {++cycle_tier1_aborted_;}
         set_region_status(works_[i].id, "PLANNER_FAILED");
         evaluation_cache_[works_[i].id].classification = "PLANNER_FAILED";
+        evaluation_cache_[works_[i].id].last_query_result =
+          "ACTION_SERVER_UNAVAILABLE";
         RCLCPP_INFO(
           get_logger(),
           "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=ACTION_SERVER_UNAVAILABLE failure_class=ACTION_SERVER_UNAVAILABLE target_x=%.3f target_y=%.3f",
@@ -1065,6 +1329,7 @@ private:
       return;
     }
     if (!acquire_path_lock()) {
+      cycle_termination_reason_ = "PATH_LOCK_RETRY";
       if (!retry_timer_) {
         retry_timer_ = create_wall_timer(50ms, [this] {
           if (retry_timer_) {retry_timer_->cancel();}
@@ -1077,8 +1342,15 @@ private:
     const auto candidate = works_[query_index_++];
     const auto revision = cycle_revision_;
     const auto cost_revision = cycle_cost_revision_;
+    const auto candidate_generation = candidate_generation_id_ + 1;
     const auto request = ++request_generation_;
     ++queries_;
+    if (candidate.tier1_unqueried) {
+      ++tier1_queries_issued_;
+      ++cycle_tier1_sent_;
+    } else {
+      ++tier2_queries_issued_;
+    }
     auto & cache = evaluation_cache_[candidate.id];
     cache.last_query_ns = now().nanoseconds();
     cache.map_context = candidate.map_context;
@@ -1087,18 +1359,26 @@ private:
     cache.path_cost_context = candidate.path_cost_context;
     cache.cycles_not_queried = 0;
     RCLCPP_INFO(
-      get_logger(), "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=REQUEST_SENT request_id=%lu map_revision=%lu costmap_revision=%lu",
-      candidate.query_event_id, candidate.id, request, revision, cost_revision);
+      get_logger(), "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=REQUEST_SENT request_id=%lu candidate_generation_id=%lu map_revision=%lu costmap_revision=%lu map_stamp_s=%.9f costmap_stamp_s=%.9f target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s",
+      candidate.query_event_id, candidate.id, request, candidate_generation,
+      revision, cost_revision, stamp_seconds(cycle_map_->header.stamp),
+      stamp_seconds(cycle_cost_->header.stamp), candidate.pose.pose.position.x,
+      candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
+      candidate.pose.header.frame_id.c_str());
     RCLCPP_INFO(
-      get_logger(), "FRONTIER_QUERY_RESULT_PENDING query_id=%lu id=%lu canonical_id=%016lx map_revision=%lu costmap_revision=%lu",
-      candidate.query_event_id, candidate.id, candidate.id, revision, cost_revision);
+      get_logger(), "FRONTIER_QUERY_RESULT_PENDING query_id=%lu id=%lu canonical_id=%016lx candidate_generation_id=%lu map_revision=%lu costmap_revision=%lu map_stamp_s=%.9f costmap_stamp_s=%.9f target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s",
+      candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
+      revision, cost_revision, stamp_seconds(cycle_map_->header.stamp),
+      stamp_seconds(cycle_cost_->header.stamp), candidate.pose.pose.position.x,
+      candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
+      candidate.pose.header.frame_id.c_str());
     const auto request_started = std::chrono::steady_clock::now();
     Action::Goal goal;
     goal.goal = candidate.pose;
     goal.planner_id = planner_id_;
     goal.use_start = false;
     auto options = rclcpp_action::Client<Action>::SendGoalOptions();
-    options.goal_response_callback = [this, candidate, revision, request, request_started](GoalHandle::SharedPtr handle) {
+    options.goal_response_callback = [this, candidate, revision, candidate_generation, request, request_started](GoalHandle::SharedPtr handle) {
         if (!async_request_is_current(request, request_generation_, revision, cycle_revision_, state_ == State::PATH_CHECKING)) {
           RCLCPP_INFO(
             get_logger(),
@@ -1116,23 +1396,27 @@ private:
           finish(false);
           return;
         }
-        if (!handle) {
+          if (!handle) {
+          if (candidate.tier1_unqueried) {++cycle_tier1_aborted_;}
           set_region_status(candidate.id, "PLANNER_FAILED");
           auto & cache = evaluation_cache_[candidate.id];
           cache.classification = "PLANNER_FAILED";
+          cache.last_query_result = "TRANSIENT_PLANNER_QUERY_FAILURE";
           cache.has_work = false;
           ++cache.query_count;
           ++planner_failure_count_;
           RCLCPP_INFO(
             get_logger(),
-            "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=GOAL_REJECTED failure_class=TRANSIENT_PLANNER_QUERY_FAILURE target_x=%.3f target_y=%.3f",
-            candidate.query_event_id, candidate.id,
-            candidate.pose.pose.position.x, candidate.pose.pose.position.y);
+            "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=GOAL_REJECTED failure_class=TRANSIENT_PLANNER_QUERY_FAILURE candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s",
+            candidate.query_event_id, candidate.id, candidate_generation,
+            candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+            orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str());
           RCLCPP_INFO(
             get_logger(),
-            "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=UNKNOWN failure_class=TRANSIENT_PLANNER_QUERY_FAILURE target_x=%.3f target_y=%.3f error_code=-1 error_name=GOAL_REJECTED duration_s=%.3f",
-            candidate.query_event_id, candidate.id, candidate.id,
+            "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=UNKNOWN failure_class=TRANSIENT_PLANNER_QUERY_FAILURE candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s error_code=-1 error_name=GOAL_REJECTED duration_s=%.3f",
+            candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
             candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+            orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
             std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
           release_path_lock();
           send_next();
@@ -1140,27 +1424,32 @@ private:
         }
         active_ = handle;
         active_request_ = request;
-        timeout_timer_ = create_wall_timer(std::chrono::duration<double>(path_query_timeout_s_), [this, candidate, revision, request, request_started] {
+          timeout_timer_ = create_wall_timer(std::chrono::duration<double>(path_query_timeout_s_), [this, candidate, revision, candidate_generation, request, request_started] {
             if (request != active_request_ || !active_) {return;}
+            cycle_termination_reason_ = "QUERY_TIMEOUT";
+            if (candidate.tier1_unqueried) {++cycle_tier1_timeout_;}
             planner_->async_cancel_goal(active_);
             active_.reset();
             active_request_ = 0;
             set_region_status(candidate.id, "PLANNER_FAILED");
             auto & cache = evaluation_cache_[candidate.id];
             cache.classification = "PLANNER_FAILED";
+            cache.last_query_result = "PLANNER_QUERY_TIMEOUT";
             cache.has_work = false;
             ++cache.query_count;
             ++planner_failure_count_;
             RCLCPP_INFO(
               get_logger(),
-              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT target_x=%.3f target_y=%.3f",
-              candidate.query_event_id, candidate.id,
-              candidate.pose.pose.position.x, candidate.pose.pose.position.y);
+              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s",
+              candidate.query_event_id, candidate.id, candidate_generation,
+              candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+              orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str());
             RCLCPP_INFO(
               get_logger(),
-              "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT target_x=%.3f target_y=%.3f error_code=%d error_name=TIMEOUT duration_s=%.3f",
-              candidate.query_event_id, candidate.id, candidate.id,
+              "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s error_code=%d error_name=TIMEOUT duration_s=%.3f",
+              candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
               candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+              orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
               Action::Result::TIMEOUT,
               std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
             timeout_timer_->cancel();
@@ -1168,7 +1457,7 @@ private:
             send_next();
           });
       };
-    options.result_callback = [this, candidate, revision, request, request_started](const GoalHandle::WrappedResult & result) {
+    options.result_callback = [this, candidate, revision, candidate_generation, request, request_started](const GoalHandle::WrappedResult & result) {
         TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
         if (!async_request_is_current(request, active_request_, revision, cycle_revision_, state_ == State::PATH_CHECKING)) {
           RCLCPP_INFO(
@@ -1185,6 +1474,12 @@ private:
         uint64_t current;
         {std::lock_guard<std::mutex> lock(mu_); current = revision_;}
         if (current != revision) {
+          cycle_termination_reason_ = "MAP_REVISION_CHANGED";
+          cycle_old_revision_ = revision;
+          cycle_new_revision_ = current;
+          for (std::size_t i = query_index_; i < works_.size(); ++i) {
+            if (works_[i].tier1_unqueried) {++cycle_map_cancelled_tier1_;}
+          }
           ++stale_results_;
           release_path_lock();
           finish(false);
@@ -1206,7 +1501,9 @@ private:
         auto length = ok ? path_length(
           result.result->path, rx_, ry_, candidate.pose.pose.position.x,
           candidate.pose.pose.position.y, goal_tolerance_m_) : std::nullopt;
+        log_path_validation(candidate, result, length, candidate_generation, duration);
         if (length) {
+          if (candidate.tier1_unqueried) {++cycle_tier1_reachable_;}
           auto reachable = candidate;
           reachable.path = *length;
           if (selection_policy_ == "frontier_cost_only") {
@@ -1242,6 +1539,9 @@ private:
           set_region_status(candidate.id, "REACHABLE");
           reachable_.push_back(reachable);
         } else {
+          if (candidate.tier1_unqueried) {
+            if (hard) {++cycle_tier1_unreachable_;} else {++cycle_tier1_aborted_;}
+          }
           cache.has_work = false;
           cache.map_context = candidate.map_context;
           cache.cost_context = candidate.cost_context;
@@ -1260,23 +1560,26 @@ private:
             ++planner_failure_count_;
           }
         }
+        cache.last_query_result = cache.classification;
         RCLCPP_INFO(
-          get_logger(), "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=%s action_result=%s failure_class=%s target_x=%.3f target_y=%.3f error_code=%d error_name=%s error_message=\"%s\" duration_s=%.3f path_length_m=%.6f",
+          get_logger(), "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=%s action_result=%s failure_class=%s candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s error_code=%d error_name=%s error_message=\"%s\" duration_s=%.3f path_length_m=%.6f",
           candidate.query_event_id, candidate.id, candidate.id, cache.classification.c_str(),
           action_result_name(result.code),
           ok ? "PATH_SUCCESS" : (hard ? "CANDIDATE_UNREACHABLE" :
           query_failure_class(result.code, error_code)),
-          candidate.pose.pose.position.x, candidate.pose.pose.position.y,
+          candidate_generation, candidate.pose.pose.position.x,
+          candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
+          candidate.pose.header.frame_id.c_str(),
           error_code, nav2_error_name(error_code),
           result.result ? log_safe(result.result->error_msg).c_str() : "NO_RESULT",
           duration, length.value_or(-1.0));
         RCLCPP_INFO(
           get_logger(),
-          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=%s action_result=%s failure_class=%s error_code=%d error_name=%s duration_s=%.3f",
+          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=%s action_result=%s failure_class=%s candidate_generation_id=%lu error_code=%d error_name=%s duration_s=%.3f",
           candidate.query_event_id, candidate.id, cache.classification.c_str(),
           action_result_name(result.code),
           ok ? "PATH_SUCCESS" : (hard ? "CANDIDATE_UNREACHABLE" :
-          query_failure_class(result.code, error_code)),
+          query_failure_class(result.code, error_code)), candidate_generation,
           error_code, nav2_error_name(error_code), duration);
         release_path_lock();
         send_next();
@@ -1301,8 +1604,24 @@ private:
     if (publish) {
       normalize_final();
       publish_batch();
+      cycle_tier1_remaining_dnu_ = static_cast<std::size_t>(std::count_if(
+        region_diagnostics_.begin(), region_diagnostics_.end(),
+        [](const auto & diagnostic) {return diagnostic.status == "DETECTED_NOT_QUERIED";}));
     }
+    cycle_cache_before_ = evaluation_cache_.size();
     prune_evaluation_cache();
+    RCLCPP_WARN(
+      get_logger(),
+      "FRONTIER_LIFECYCLE robot=%s cycle=%lu sim_time=%.3f snapshot_frontiers=%u unique_frontier_records=%zu duplicate_id_records=%zu cache_before=%zu cache_after=%zu reused_ids=%zu new_ids=%zu pruned_absent=%zu evicted_capacity=%zu identity_associations=%zu dnu=%u tier1_pending_start=%zu tier1_selected=%zu tier1_sent=%zu tier1_reachable=%zu tier1_unreachable=%zu tier1_aborted=%zu tier1_timeout=%zu tier1_remaining_dnu=%zu termination=%s old_revision=%lu new_revision=%lu map_cancelled_tier1=%zu",
+      robot_id_.c_str(), cycle_sequence_, cycle_start_sim_time_, detected_frontier_count_,
+      cycle_unique_frontier_records_, cycle_duplicate_id_records_, cycle_cache_before_,
+      evaluation_cache_.size(), cycle_reused_ids_, cycle_new_ids_,
+      cycle_pruned_absent_, cycle_evicted_capacity_, cycle_identity_associations_,
+      detected_not_queried_count_, cycle_tier1_pending_start_, cycle_tier1_selected_,
+      cycle_tier1_sent_, cycle_tier1_reachable_, cycle_tier1_unreachable_,
+      cycle_tier1_aborted_, cycle_tier1_timeout_, cycle_tier1_remaining_dnu_,
+      query_termination_name(cycle_termination_reason_), cycle_old_revision_,
+      cycle_new_revision_, cycle_map_cancelled_tier1_);
     state_ = State::IDLE;
     works_.clear();
     reachable_.clear();
@@ -1321,6 +1640,7 @@ private:
     }
     for (auto it = evaluation_cache_.begin(); it != evaluation_cache_.end();) {
       if (current_ids.find(it->first) == current_ids.end()) {
+        ++cycle_pruned_absent_;
         it = evaluation_cache_.erase(it);
       } else {
         ++it;
@@ -1333,6 +1653,7 @@ private:
           victim = it;
         }
       }
+      ++cycle_evicted_capacity_;
       evaluation_cache_.erase(victim);
     }
     RCLCPP_INFO(
@@ -1458,6 +1779,7 @@ private:
            << "{\"schema\":2,\"robot_id\":\"" << robot_id_
            << "\",\"map_revision\":" << cycle_revision_
            << ",\"costmap_revision\":" << cycle_cost_revision_
+           << ",\"candidate_generation_id\":" << (candidate_generation_id_ + 1)
            << ",\"frame\":\"" << global_frame_ << "\",\"resolution\":"
            << cycle_map_->info.resolution << ",\"width\":" << cycle_map_->info.width
            << ",\"height\":" << cycle_map_->info.height << ",\"origin\":["
@@ -1482,6 +1804,12 @@ private:
              << ",\"cell_count\":" << diagnostic.region.size
              << ",\"size_m\":" <<
                 (diagnostic.region.size * grid.map().info.resolution)
+             << ",\"query_count\":" << evaluation_cache_.at(diagnostic.id).query_count
+             << ",\"cycles_seen\":" << evaluation_cache_.at(diagnostic.id).cycles_seen
+             << ",\"cycles_not_queried\":" << evaluation_cache_.at(diagnostic.id).cycles_not_queried
+             << ",\"last_query_ns\":" << evaluation_cache_.at(diagnostic.id).last_query_ns
+             << ",\"last_query_result\":\""
+             << evaluation_cache_.at(diagnostic.id).last_query_result << "\""
              << ",\"centroid\":[" << diagnostic.region.centroid.first << ","
              << diagnostic.region.centroid.second << "],\"bbox\":[" << bounds[0]
              << "," << bounds[1] << "," << bounds[2] << "," << bounds[3]
@@ -1508,7 +1836,11 @@ private:
     if (!cycle_map_) {return {};}  // bounded summary for normal production
     std::ostringstream output;
     output << std::setprecision(8) << "{\"resolution\":"
-           << cycle_map_->info.resolution << ",\"regions\":[";
+           << cycle_map_->info.resolution
+           << ",\"map_revision\":" << cycle_revision_
+           << ",\"costmap_revision\":" << cycle_cost_revision_
+           << ",\"candidate_generation_id\":" << (candidate_generation_id_ + 1)
+           << ",\"regions\":[";
     for (std::size_t i = 0; i < region_diagnostics_.size(); ++i) {
       const auto & diagnostic = region_diagnostics_[i];
       if (i) {output << ',';}
@@ -1523,9 +1855,60 @@ private:
       output
              << ",\"cell_count\":" << diagnostic.region.size
              << ",\"size_m\":" <<
-                (diagnostic.region.size * cycle_map_->info.resolution) << "}";
+                (diagnostic.region.size * cycle_map_->info.resolution)
+             << ",\"query_count\":" << evaluation_cache_.at(diagnostic.id).query_count
+             << ",\"cycles_seen\":" << evaluation_cache_.at(diagnostic.id).cycles_seen
+             << ",\"cycles_not_queried\":" << evaluation_cache_.at(diagnostic.id).cycles_not_queried
+             << ",\"last_query_ns\":" << evaluation_cache_.at(diagnostic.id).last_query_ns
+             << ",\"last_query_result\":\""
+             << evaluation_cache_.at(diagnostic.id).last_query_result << "\""
+             << ",\"optimistic_cost_lower_bound_s\":";
+      if (std::isfinite(diagnostic.optimistic_cost_lower_bound_s)) {
+        output << diagnostic.optimistic_cost_lower_bound_s;
+      } else {
+        output << "null";
+      }
+      output << "}";
     }
     output << "]}";
+    return output.str();
+  }
+
+  std::string lower_bound_context_fingerprint() const
+  {
+    // The lower bound uses the current robot position and the current
+    // candidate-generation context, not map revision alone. Keep the wire
+    // value compact while hashing every input that can change the emitted
+    // region summary or its optimistic motion bound.
+    std::ostringstream payload;
+    payload << std::setprecision(17)
+            << "lb-context-v1|" << robot_id_ << '|'
+            << cycle_revision_ << '|' << cycle_cost_revision_ << '|'
+            << rx_ << '|' << ry_ << '|' << yaw_ << '|'
+            << goal_tolerance_m_ << '|'
+            << cost_only_reference_linear_speed_mps_ << '|';
+    for (const auto & diagnostic : region_diagnostics_) {
+      const auto & region = diagnostic.region;
+      payload << diagnostic.id << '|' << diagnostic.status << '|'
+              << region.size << '|'
+              << region.centroid.first << '|' << region.centroid.second << '|';
+      if (region.goal_point) {
+        payload << region.goal_point->first << '|' << region.goal_point->second;
+      } else {
+        payload << "no-goal";
+      }
+      payload << '|' << diagnostic.approach_x << '|' << diagnostic.approach_y
+              << '|' << diagnostic.visible_reveal_gain << '|'
+              << diagnostic.optimistic_cost_lower_bound_s << '|';
+      for (const auto & cell : region.cells) {
+        payload << cell.first << ':' << cell.second << ';';
+      }
+      payload << '|';
+    }
+    const auto serialized = payload.str();
+    const auto hash = fnv1a64(serialized.data(), serialized.size());
+    std::ostringstream output;
+    output << std::hex << hash;
     return output.str();
   }
 
@@ -1551,7 +1934,9 @@ private:
     message.header.stamp = now();
     message.source_robot_id = robot_id_;
     message.map_revision = cycle_revision_;
+    message.costmap_revision = cycle_cost_revision_;
     message.map_stamp = cycle_map_->header.stamp;
+    message.lower_bound_context_fingerprint = lower_bound_context_fingerprint();
     message.planner_id = planner_id_;
     message.detected_frontier_count = detected_frontier_count_;
     message.small_frontier_count = small_frontier_count_;
@@ -1560,6 +1945,7 @@ private:
     message.planner_failure_count = planner_failure_count_;
     message.detected_not_queried_count = detected_not_queried_count_;
     message.unclassified_frontier_count = detected_not_queried_count_;
+    message.candidate_generation_id = ++candidate_generation_id_;
     message.diagnostic_regions_json = diagnostic_regions_json();
     message.terminal_frontier_regions_json = terminal_frontier_regions_json();
     visualization_msgs::msg::MarkerArray markers;
@@ -1609,11 +1995,12 @@ private:
       cycle_map_ ? cycle_map_->data.size() : 0, detected_frontier_count_, reachable_.size());
     RCLCPP_INFO(
       get_logger(),
-      "CANDIDATE_METRICS source=FRONTIER_REACHABILITY revision=%lu costmap_revision=%lu detected=%u reachable=%zu queries=%zu cache_hits=%lu cache_misses=%lu detected_not_queried=%u small=%u out_of_range=%u unreachable=%u planner_failures=%u",
+      "CANDIDATE_METRICS source=FRONTIER_REACHABILITY revision=%lu costmap_revision=%lu detected=%u reachable=%zu queries=%zu cache_hits=%lu cache_misses=%lu detected_not_queried=%u small=%u out_of_range=%u unreachable=%u planner_failures=%u tier1_pending=%zu tier2_pending=%zu tier1_queries=%zu tier2_queries=%zu",
       cycle_revision_, cycle_cost_revision_, detected_frontier_count_, reachable_.size(), queries_,
       classification_cache_hits_, classification_cache_misses_, detected_not_queried_count_,
       small_frontier_count_, out_of_range_frontier_count_, unreachable_frontier_count_,
-      planner_failure_count_);
+      planner_failure_count_, tier1_pending_count_, tier2_pending_count_,
+      tier1_queries_issued_, tier2_queries_issued_);
     RCLCPP_INFO(
       get_logger(), "FRONTIER_CACHE_SUMMARY classification_hits=%lu classification_misses=%lu path_invalidations=%lu",
       classification_cache_hits_, classification_cache_misses_, path_cache_invalidations_);
@@ -1650,6 +2037,7 @@ private:
   uint64_t core_map_revision_{0}, core_costmap_revision_{0};
   uint64_t cycle_revision_{0}, cycle_cost_revision_{0}, stale_results_{0};
   uint64_t request_generation_{0}, active_request_{0}, query_event_sequence_{0};
+  uint64_t candidate_generation_id_{0};
   uint64_t map_receipts_{0}, map_changed_{0};
   uint64_t cost_receipts_{0}, cost_changed_{0}, classification_cache_hits_{0};
   uint64_t classification_cache_misses_{0}, path_cache_invalidations_{0};
@@ -1662,6 +2050,8 @@ private:
   std::unordered_map<uint64_t, EvaluationCache> evaluation_cache_;
   std::unique_ptr<frontier_exploration_ros2::FrontierExplorerCore> core_;
   std::size_t query_index_{0}, queries_{0}, safe_approach_rejections_{0};
+  std::size_t tier1_pending_count_{0}, tier2_pending_count_{0};
+  std::size_t tier1_queries_issued_{0}, tier2_queries_issued_{0};
   uint32_t detected_frontier_count_{0}, small_frontier_count_{0};
   uint32_t out_of_range_frontier_count_{0}, unreachable_frontier_count_{0};
   uint32_t planner_failure_count_{0}, detected_not_queried_count_{0};
@@ -1706,6 +2096,19 @@ private:
   std::array<std::array<TimingStats, 2>, static_cast<std::size_t>(TimingSection::COUNT)>
     timing_stats_{};
   std::array<CycleStats, 2> cycle_stats_{};
+  uint64_t cycle_sequence_{0};
+  double cycle_start_sim_time_{0.0};
+  std::size_t cycle_cache_before_{0}, cycle_new_ids_{0}, cycle_reused_ids_{0};
+  std::size_t cycle_pruned_absent_{0}, cycle_evicted_capacity_{0};
+  std::size_t cycle_identity_associations_{0};
+  std::size_t cycle_unique_frontier_records_{0}, cycle_duplicate_id_records_{0};
+  std::size_t cycle_tier1_pending_start_{0}, cycle_tier1_selected_{0};
+  std::size_t cycle_tier1_sent_{0}, cycle_tier1_reachable_{0};
+  std::size_t cycle_tier1_unreachable_{0}, cycle_tier1_aborted_{0};
+  std::size_t cycle_tier1_timeout_{0}, cycle_tier1_remaining_dnu_{0};
+  std::size_t cycle_map_cancelled_tier1_{0};
+  uint64_t cycle_old_revision_{0}, cycle_new_revision_{0};
+  std::string cycle_termination_reason_{"OTHER"};
 };
 
 }  // namespace my_epuck_frontier_candidates

@@ -1997,6 +1997,12 @@ class CooperativeExperimentLogger(Node):
             'robot_id': robot, 'query_start_ros_s': query_ros,
             'map_revision': self._query_number(r'map_revision=(\d+)', message.msg, None, int),
             'costmap_revision': self._query_number(r'costmap_revision=(\d+)', message.msg, None, int),
+            'candidate_generation_id': self._query_number(
+                r'candidate_generation_id=(\d+)', message.msg, None, int),
+            'map_stamp_s': self._query_number(
+                r'map_stamp_s=([-+0-9.eE]+)', message.msg, None),
+            'costmap_stamp_s': self._query_number(
+                r'costmap_stamp_s=([-+0-9.eE]+)', message.msg, None),
             'query_count_before': prior,
             'previously_queried': prior > 0,
             'last_query_ros_s': self.frontier_query_last_time.get((robot, frontier_id)),
@@ -2004,7 +2010,9 @@ class CooperativeExperimentLogger(Node):
             'start_yaw_rad': start[2] if start[2] is not None else None,
             'start_frame': str(start_frame),
             'planner_frame': str(global_costmap.header.frame_id) if global_costmap is not None else self.p['global_frame'],
-            'goal_frame': self.latest[robot].get('candidate_frame') or self.p['global_frame'],
+            'goal_frame': (re.search(r'goal_frame=([^\s]+)', message.msg).group(1)
+                          if re.search(r'goal_frame=([^\s]+)', message.msg)
+                          else self.latest[robot].get('candidate_frame') or self.p['global_frame']),
             'selected_message': message.msg,
         }
 
@@ -2025,12 +2033,16 @@ class CooperativeExperimentLogger(Node):
             pose = self.latest[robot].get('shared_pose') or self.latest[robot].get('pose')
             start_xy = [pose[0], pose[1]] if pose is not None else None
         start_frame = pending.get('start_frame') or self.p['global_frame']
-        goal_frame = pending.get('goal_frame') or self.p['global_frame']
+        goal_frame_match = re.search(r'goal_frame=([^\s]+)', message.msg)
+        goal_frame = (goal_frame_match.group(1) if goal_frame_match
+                      else pending.get('goal_frame') or self.p['global_frame'])
         planner_frame = pending.get('planner_frame') or self.p['global_frame']
         if target_x is None or target_y is None:
             approach = metadata.get('approach')
             target_x, target_y = (approach if approach else (None, None))
         goal_xy = [target_x, target_y] if target_x is not None and target_y is not None else None
+        target_yaw = self._query_number(
+            r'target_yaw=([-+0-9.eE]+)', message.msg, None)
         error_name = re.search(r'error_name=([^\s]+)', message.msg)
         error_name = error_name.group(1) if error_name else 'UNKNOWN'
         action_result = re.search(r'action_result=([^\s]+)', message.msg)
@@ -2129,9 +2141,15 @@ class CooperativeExperimentLogger(Node):
             'physical_signature_source': 'canonical_frontier_id_only',
             'centroid_xy': metadata.get('centroid'), 'approach_xy': goal_xy,
             'start_xy': start_xy, 'start_yaw_rad': pending.get('start_yaw_rad'),
+            'goal_yaw_rad': target_yaw,
             'planner_frame': planner_frame, 'goal_frame': goal_frame,
             'start_frame': start_frame, 'map_revision': pending.get('map_revision'),
             'costmap_revision': pending.get('costmap_revision'),
+            'candidate_generation_id': self._query_number(
+                r'candidate_generation_id=(\d+)', message.msg,
+                pending.get('candidate_generation_id'), int),
+            'map_stamp_s': pending.get('map_stamp_s'),
+            'costmap_stamp_s': pending.get('costmap_stamp_s'),
             'query_count': query_count, 'query_count_before': pending.get('query_count_before', query_count - 1),
             'previously_queried': bool(pending.get('previously_queried', query_count > 1)),
             'last_query_time_s': pending.get('last_query_ros_s'),
@@ -2173,7 +2191,8 @@ class CooperativeExperimentLogger(Node):
         text = str(message.msg)
         if 'FRONTIER_QUERY_LIFECYCLE' in text and 'state=REQUEST_SENT' in text:
             self._query_capture_request(robot, message)
-        elif 'FRONTIER_QUERY_RESULT' in text:
+        elif ('FRONTIER_QUERY_RESULT' in text and
+              'FRONTIER_QUERY_RESULT_PENDING' not in text):
             self._query_capture_result(robot, message)
 
     def rosout(self,msg):

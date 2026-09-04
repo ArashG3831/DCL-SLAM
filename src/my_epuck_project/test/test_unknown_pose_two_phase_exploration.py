@@ -123,8 +123,14 @@ def test_shared_inputs_are_created_once_after_handoff():
 def test_shared_stack_is_activated_only_by_one_shot_handoff_activation():
     full = (LAUNCH / 'two_robots_decentralized_exploration_launch.py').read_text()
     activation = (PY / 'unknown_pose_shared_stack_activation.py').read_text()
+    nested = (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text()
     assert "executable='unknown_pose_shared_stack_activation'" in full
     assert "two_robots_distributed_assignment_launch.py" in activation
+    assert "'local_path_gate_mode': LaunchConfiguration(" in full
+    assert "('local_path_gate_mode', '')" in activation
+    assert "'local_path_gate_mode': self._parameters['local_path_gate_mode']" in activation
+    assert "'local_path_gate_mode': LaunchConfiguration(" in nested
+    assert "'local_path_gate_mode', default_value='MODE_A'" in nested
     assert "'phase_already_aligned': 'true'" in activation
     assert "'launch_mapping': 'false'" in activation
     assert "'launch_shared_stack': (" in activation

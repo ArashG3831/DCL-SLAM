@@ -86,6 +86,88 @@ def nominal_motion_cost_s(
             heading_cost_rad / reference_angular_speed_radps)
 
 
+def cost_only_dispatch_certificate(
+        decision: PairDecision,
+        robot1_bids: BidBatch,
+        robot2_bids: BidBatch,
+        robot1_unqueried_bounds: Optional[Sequence[float]],
+        robot2_unqueried_bounds: Optional[Sequence[float]],
+        weights: AssignmentWeights,
+        ) -> tuple[bool, int, float, str]:
+    """Certify that unevaluated cost-only options cannot improve a decision.
+
+    The unknown option bounds are optimistic motion costs.  Pair penalties are
+    deliberately set to zero here, making every unknown combination at least
+    as attractive as it could be under the real ``_score_assignment``.  A
+    missing bound set is not certified.  MRTSP never calls this helper.
+    """
+    if robot1_unqueried_bounds is None or robot2_unqueried_bounds is None:
+        return False, 0, float('-inf'), 'MISSING_UNQUERIED_LOWER_BOUNDS'
+
+    def bid_cost(bid: Bid) -> Optional[float]:
+        if not bid.path_valid:
+            return None
+        try:
+            value = nominal_motion_cost_s(
+                float(bid.path_length_m), float(bid.heading_cost),
+                weights.cost_only_reference_linear_speed_mps,
+                weights.cost_only_reference_angular_speed_radps,
+            )
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    def bounds(values: Sequence[float]) -> Optional[list[float]]:
+        output = []
+        for value in values:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or value < 0.0:
+                return None
+            output.append(value)
+        return output
+
+    unknown1 = bounds(robot1_unqueried_bounds)
+    unknown2 = bounds(robot2_unqueried_bounds)
+    if unknown1 is None or unknown2 is None:
+        return False, 0, float('-inf'), 'INVALID_UNQUERIED_LOWER_BOUNDS'
+
+    # ``True`` marks an option supplied only by an unevaluated frontier.
+    options1 = [(0.0, False)]
+    options2 = [(0.0, False)]
+    options1.extend((cost, False) for bid in robot1_bids.bids
+                    for cost in [bid_cost(bid)] if cost is not None)
+    options2.extend((cost, False) for bid in robot2_bids.bids
+                    for cost in [bid_cost(bid)] if cost is not None)
+    options1.extend((value, True) for value in unknown1)
+    options2.extend((value, True) for value in unknown2)
+
+    best_unknown_score = float('-inf')
+    blocking_count = 0
+    for cost1, unknown_flag1 in options1:
+        for cost2, unknown_flag2 in options2:
+            if not (unknown_flag1 or unknown_flag2):
+                continue
+            if cost1 == 0.0 and cost2 == 0.0:
+                continue
+            optimistic_score = -(cost1 + cost2)
+            best_unknown_score = max(best_unknown_score, optimistic_score)
+            if optimistic_score >= decision.score.total - 1e-9:
+                if unknown_flag1:
+                    blocking_count += 1
+                if unknown_flag2:
+                    blocking_count += 1
+
+    if best_unknown_score == float('-inf'):
+        return True, 0, best_unknown_score, 'NO_UNQUERIED_OPTIONS'
+    if best_unknown_score >= decision.score.total - 1e-9:
+        return (False, blocking_count, best_unknown_score,
+                'UNQUERIED_OPTION_CAN_BEAT_EVALUATED_ASSIGNMENT')
+    return True, 0, best_unknown_score, 'ALL_UNQUERIED_OPTIONS_DOMINATED'
+
+
 def _hash(payload: object) -> str:
     data = json.dumps(
         payload, sort_keys=True, separators=(',', ':'), allow_nan=False,

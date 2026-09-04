@@ -74,6 +74,7 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert args.sensor_profile == 'full'
     assert args.rendering is False
     assert args.rviz is False
+    assert args.local_path_gate_mode is None
     assert args.hold_open is False
     assert args.enable_observer is False
     assert args.enable_forensic_capture is False
@@ -108,6 +109,24 @@ def test_fast_runner_checks_runtime_contract_before_launch(monkeypatch):
     args = parser().parse_args([
         '--world-profile', 'large_unknown_pose_close_start_20ms_scan_matching',
     ])
+    assert fast.run(args) == 1
+
+
+def test_fast_runner_requires_explicit_gate_mode_before_environment(monkeypatch):
+    args = parser().parse_args([])
+    monkeypatch.setattr(
+        fast, 'filtered_runtime_environment',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('environment lookup must not run')))
+    assert fast.run(args) == 1
+
+
+def test_fast_runner_requires_explicit_gate_mode_before_environment(monkeypatch):
+    args = parser().parse_args([])
+    monkeypatch.setattr(
+        fast, 'filtered_runtime_environment',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('environment lookup must not run')))
     assert fast.run(args) == 1
 
 

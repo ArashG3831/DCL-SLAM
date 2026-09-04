@@ -224,6 +224,10 @@ def parser() -> argparse.ArgumentParser:
         default='frontier_mrtsp',
         help='Distributed pair scoring mode.')
     result.add_argument(
+        '--local-path-gate-mode',
+        choices=('MODE_A', 'MODE_B'), default=None,
+        help='Required explicit final local-path dispatch gate experiment mode.')
+    result.add_argument(
         '--synchronized-traffic-test', type=boolean, default=False,
         help='Enable the test-only simulated-time synchronized dispatch barrier.')
     result.add_argument(
@@ -280,6 +284,17 @@ def package_prefix(environment=None) -> str:
             f'{PACKAGE} resolves to {prefix}, expected {expected}; '
             'set MY_EPUCK_INSTALL_PREFIX to the intended isolated install')
     return prefix
+
+
+def require_explicit_local_path_gate_mode(args: argparse.Namespace) -> str:
+    """Fail closed when a campaign does not select its final gate policy."""
+    mode = str(getattr(args, 'local_path_gate_mode', '') or '').strip().upper()
+    if mode not in ('MODE_A', 'MODE_B'):
+        raise FastTrialError(
+            'local_path_gate_mode must be explicitly provided as '
+            'MODE_A or MODE_B before simulation launch')
+    args.local_path_gate_mode = mode
+    return mode
 
 
 def webots_driver_provenance(environment=None) -> tuple[str, str]:
@@ -408,6 +423,10 @@ def prepare_attempt(args: argparse.Namespace, prefix: str, world: Path):
 def launch_command(
         args: argparse.Namespace, world: Path, output_root: Path | None = None,
         run_id: str = '') -> list[str]:
+    # run() calls require_explicit_local_path_gate_mode before this helper.
+    # Keep the construction helper usable by legacy non-launch unit tests
+    # whose Namespace predates the required campaign option.
+    gate_mode = getattr(args, 'local_path_gate_mode', None) or 'MODE_A'
     command = [
         'ros2', 'launch', PACKAGE, LAUNCH_FILE,
         f'world_profile:={args.world_profile}',
@@ -434,6 +453,7 @@ def launch_command(
         'dispatch_enabled:=true',
         f'traffic_scheduler_enabled:={str(args.traffic_scheduler_enabled).lower()}',
         f'assignment_strategy:={args.assignment_strategy}',
+        f'local_path_gate_mode:={gate_mode}',
         f'synchronized_traffic_test:={str(args.synchronized_traffic_test).lower()}',
         f'traffic_test_force_conflict_pair:='
         f'{str(args.traffic_test_force_conflict_pair).lower()}',
@@ -849,6 +869,7 @@ def run(args: argparse.Namespace) -> int:
             pass
 
     try:
+        require_explicit_local_path_gate_mode(args)
         inherited_environment = os.environ.copy()
         environment, removed_stale_environment_entries = (
             filtered_runtime_environment(inherited_environment))
@@ -1080,6 +1101,7 @@ def run(args: argparse.Namespace) -> int:
             'rendering': args.rendering,
             'rviz': args.rviz,
             'diagnostic_mode': args.diagnostic_mode,
+            'local_path_gate_mode': args.local_path_gate_mode,
             'ros_domain_id': args.ros_domain_id,
             'webots_port': args.webots_port,
             'launch_file': LAUNCH_FILE,

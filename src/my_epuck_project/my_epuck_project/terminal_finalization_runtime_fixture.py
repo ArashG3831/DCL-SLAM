@@ -122,6 +122,7 @@ class FixtureHarness(Node):
             self.case, map_revision,
         )
         message.task_generation_stamp = message.header.stamp
+        message.candidate_generation_id = epoch
         message.validity = seconds_to_duration(5.0)
         return message
 
@@ -130,6 +131,7 @@ class FixtureHarness(Node):
         message.header.stamp = self._stamp()
         message.header.frame_id = 'shared_map'
         message.source_robot_id = robot
+        message.candidate_generation_id = self.publish_count + 1
         message.map_revision = 1 if not self.replacement_done else 2
         message.detected_frontier_count = len(_regions(self.case))
         message.terminal_frontier_regions_json = json.dumps(

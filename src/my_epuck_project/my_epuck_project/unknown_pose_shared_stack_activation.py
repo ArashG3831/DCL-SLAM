@@ -23,6 +23,9 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
+LOCAL_PATH_GATE_MODES = ('MODE_A', 'MODE_B')
+
+
 class UnknownPoseSharedStackActivation(Node):
     """Launch shared fusion/frontiers/allocation exactly once after acceptance."""
 
@@ -74,6 +77,10 @@ class UnknownPoseSharedStackActivation(Node):
                 ('fusion_rebuild_period_s', 1.0),
                 ('controller_variant', 'rpp'),
                 ('assignment_strategy', 'frontier_mrtsp'),
+                # The parent launch must provide this explicitly.  An empty
+                # default makes a standalone/miswired activation fail closed
+                # instead of silently selecting the nested launch default.
+                ('local_path_gate_mode', ''),
                 ('burgard_beta', 1.0),
                 ('traffic_scheduler_enabled', False),
                 ('synchronized_traffic_test', False),
@@ -97,6 +104,13 @@ class UnknownPoseSharedStackActivation(Node):
                 self._parameters[name] = str(bool(value)).lower()
             else:
                 self._parameters[name] = str(value)
+        local_path_gate_mode = self._parameters.get(
+            'local_path_gate_mode', '').strip().upper()
+        if local_path_gate_mode not in LOCAL_PATH_GATE_MODES:
+            raise ValueError(
+                'local_path_gate_mode must be explicitly provided as '
+                'MODE_A or MODE_B')
+        self._parameters['local_path_gate_mode'] = local_path_gate_mode
         qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -270,6 +284,7 @@ class UnknownPoseSharedStackActivation(Node):
             'unknown_initial_pose': 'true',
             'phase_already_aligned': 'true',
             'launch_mapping': 'false',
+            'local_path_gate_mode': self._parameters['local_path_gate_mode'],
             # Initial unknown-pose startup may already have launched the
             # shared Nav2 processes inactive and phase-gated.  In that case
             # launch only the distributed frontier/assignment layer now.

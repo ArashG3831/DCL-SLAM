@@ -451,6 +451,8 @@ def launch_setup(context):
                         'decision_validity_s': 8.0,
                         'peer_timeout_s': 0.0,
                         'assignment_strategy': assignment_strategy,
+                        'local_path_gate_mode': LaunchConfiguration(
+                            'local_path_gate_mode'),
                         'burgard_beta': 1.0,
                         'traffic_scheduler_enabled': False,
                         'terminal_small_frontier_length_m': LaunchConfiguration(
@@ -539,6 +541,8 @@ def launch_setup(context):
                     'fusion_rebuild_period_s'),
                 'controller_variant': LaunchConfiguration('controller_variant'),
                 'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+                'local_path_gate_mode': LaunchConfiguration(
+                    'local_path_gate_mode'),
                 'burgard_beta': LaunchConfiguration('burgard_beta'),
                 'traffic_scheduler_enabled': LaunchConfiguration(
                     'traffic_scheduler_enabled'),
@@ -615,6 +619,8 @@ def launch_setup(context):
                 'dispatch_enabled': dispatch_enabled,
                 'assignment_strategy': LaunchConfiguration(
                     'assignment_strategy').perform(context),
+                'local_path_gate_mode': LaunchConfiguration(
+                    'local_path_gate_mode').perform(context),
                 'burgard_beta': float(LaunchConfiguration(
                     'burgard_beta').perform(context)),
                 'use_scan_matching': profile_scan_parameters.get(
@@ -780,6 +786,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'assignment_strategy', default_value='frontier_mrtsp',
             choices=['frontier_cost_only', 'frontier_mrtsp']),
+        DeclareLaunchArgument(
+            'local_path_gate_mode', default_value='MODE_A',
+            choices=['MODE_A', 'MODE_B']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
         DeclareLaunchArgument('traffic_scheduler_enabled', default_value='false',
                               choices=['true', 'false']),

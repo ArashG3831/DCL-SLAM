@@ -129,13 +129,22 @@ class FrontierProposalAdapter(Node):
         message.source_session_id = self._session_uuid
         message.source_snapshot_epoch = self._epoch
         message.source_map_revision = candidates.map_revision
+        message.source_costmap_revision = int(
+            getattr(candidates, 'costmap_revision', 0))
         fingerprint_data = '%s:%d:%d' % (
             self._robot_id, candidates.map_revision, len(candidates.candidates),
         )
+        message.lower_bound_context_fingerprint = str(
+            getattr(candidates, 'lower_bound_context_fingerprint', '') or ''
+        )
         message.source_map_fingerprint = hashlib.sha256(
-            fingerprint_data.encode(),
+            (fingerprint_data + ':' +
+             message.lower_bound_context_fingerprint).encode(),
         ).hexdigest()[:24]
         message.task_generation_stamp = candidates.header.stamp
+        message.candidate_generation_id = int(
+            getattr(candidates, 'candidate_generation_id', 0) or 0
+        )
         message.validity = seconds_to_duration(self._validity_s)
         for candidate in candidates.candidates[:self._maximum_tasks]:
             task = PhysicalTask()

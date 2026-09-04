@@ -20,9 +20,17 @@ struct FrontierEvaluationRecord {
   bool transient_failure{false};
   uint64_t cycles_not_queried{0};
   int64_t last_query_ns{0};
+  // Optimistic frontier_cost_only motion-cost lower bound.  The default keeps
+  // source compatibility for callers that do not provide pre-query geometry.
+  double optimistic_cost_lower_bound_s{0.0};
+  // Tier 1 means the frontier has no current valid path evaluation and must
+  // receive first-evaluation service before refresh work can consume slots.
+  bool tier1_unqueried{false};
 };
 
-// Deterministic bounded scheduling: older/starved work wins before score.
+// Deterministic bounded two-tier scheduling: first-evaluation work is always
+// preferred to path/context refresh work; bounds and starvation age order each
+// tier. The limits remain the existing candidate/query budgets.
 std::vector<std::size_t> fair_frontier_query_order(
   const std::vector<FrontierEvaluationRecord> & records,
   std::size_t candidate_limit,

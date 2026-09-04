@@ -63,6 +63,20 @@ class FrontierRegionEvidence:
     size_m: float
     status: str
     visible_reveal_gain: float | None = None
+    # Conservative pre-Nav2 motion-cost bound, when supplied by the
+    # candidate generator for an unevaluated but policy-valid region.
+    optimistic_cost_lower_bound_s: float | None = None
+    # The remaining fields are diagnostic provenance from the candidate
+    # generator.  They are intentionally not used by terminal classification
+    # or allocation decisions.
+    candidate_generation_id: int = 0
+    map_revision: int = 0
+    costmap_revision: int = 0
+    query_count: int = 0
+    cycles_seen: int = 0
+    cycles_not_queried: int = 0
+    last_query_ns: int = 0
+    last_query_result: str = ''
 
 
 def credible_planner_infrastructure_failure(

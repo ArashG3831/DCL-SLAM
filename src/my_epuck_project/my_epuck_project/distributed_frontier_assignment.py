@@ -76,6 +76,7 @@ from .distributed_assignment.scoring import (
     AssignmentWeights,
     choose_pair_assignment,
     choose_mrtsp_route_assignment,
+    cost_only_dispatch_certificate,
     nominal_motion_cost_s,
     route_overlap,
     rank_solo_tasks,
@@ -120,6 +121,142 @@ def solo_retry_delay_s(retry_count: int) -> float:
     """Return bounded exponential delay for retryable local failures."""
     count = max(1, int(retry_count))
     return min(30.0, 2.0 ** min(count - 1, 5))
+
+
+def lower_bound_context_matches(
+        provenance: Optional[tuple[int, str, int]], snapshot: TaskSnapshot) -> bool:
+    """Return whether compact bounds belong to this exact task snapshot."""
+    return bool(
+        provenance is not None and
+        len(provenance) == 3 and
+        provenance[0] == snapshot.map_revision and
+        bool(provenance[1]) and
+        provenance[1] == snapshot.lower_bound_context_fingerprint and
+        int(provenance[2]) > 0 and
+        int(getattr(snapshot, 'candidate_generation_id', 0) or 0) > 0 and
+        int(provenance[2]) == int(snapshot.candidate_generation_id)
+    )
+
+
+CERTIFICATE_EVIDENCE_REASONS = frozenset({
+    'OK', 'NO_CANDIDATE_BOUND_SUMMARY', 'EMPTY_BOUND_SUMMARY',
+    'NONFINITE_BOUND', 'INCOMPLETE_BOUND_SET', 'MAP_REVISION_MISMATCH',
+    'COSTMAP_REVISION_MISMATCH', 'FINGERPRINT_MISMATCH',
+    'SESSION_EPOCH_MISMATCH', 'TASK_CANDIDATE_GENERATION_MISMATCH',
+    'SOURCE_UNHEALTHY', 'OTHER',
+})
+
+
+def classify_lower_bound_evidence(
+        candidate_meta: Optional[dict], snapshot: Optional[TaskSnapshot],
+        raw_bounds: Optional[tuple[float, ...]],
+        expected_count: int) -> tuple[str, dict]:
+    """Classify certificate evidence without changing certificate behavior.
+
+    This is deliberately diagnostic-only.  The production certificate still
+    uses its existing ``lower_bound_context_matches`` gate; this helper merely
+    records which existing input made that gate conservative.
+    """
+    has_candidate_summary = candidate_meta is not None
+    meta = candidate_meta or {}
+    candidate_fp = str(meta.get('fingerprint', '') or '')
+    candidate_map = meta.get('map_revision')
+    candidate_costmap = meta.get('costmap_revision')
+    candidate_generation = meta.get('generation_ros_ns')
+    candidate_generation_id = int(meta.get('candidate_generation_id', 0) or 0)
+    candidate_session = meta.get('source_session_id')
+    candidate_epoch = meta.get('source_epoch')
+    task_fp = ('' if snapshot is None else
+               str(getattr(snapshot, 'lower_bound_context_fingerprint', '') or ''))
+    task_map = None if snapshot is None else int(getattr(snapshot, 'map_revision', 0))
+    task_costmap = (None if snapshot is None else
+                    int(getattr(snapshot, 'costmap_revision', 0)))
+    task_generation = (None if snapshot is None else
+                       int(getattr(snapshot, 'generation_ros_ns', 0)))
+    task_generation_id = (0 if snapshot is None else int(
+        getattr(snapshot, 'candidate_generation_id', 0) or 0))
+    task_session = (None if snapshot is None else snapshot.source_session_id)
+    task_epoch = None if snapshot is None else int(snapshot.epoch)
+    fingerprints_equal = candidate_fp == task_fp
+    map_equal = (candidate_map is not None and task_map is not None and
+                 int(candidate_map) == int(task_map))
+    costmap_comparable = candidate_costmap is not None and task_costmap is not None
+    costmaps_equal = (costmap_comparable and
+                      int(candidate_costmap) == int(task_costmap))
+    bound_count = int(meta.get('bound_entry_count', 0) or 0)
+    finite = bool(meta.get('all_bounds_finite', False))
+    state = str(meta.get('bound_state', '') or '')
+
+    if not has_candidate_summary:
+        reason = 'NO_CANDIDATE_BOUND_SUMMARY'
+    elif snapshot is None:
+        reason = 'OTHER'
+    elif state == 'NO_CANDIDATE_BOUND_SUMMARY':
+        reason = state
+    elif state == 'EMPTY_BOUND_SUMMARY':
+        reason = 'EMPTY_BOUND_SUMMARY'
+    elif state in ('NONFINITE_BOUND', 'INCOMPLETE_BOUND_SET', 'OTHER'):
+        reason = state
+    elif ((candidate_session is not None and candidate_session != task_session) or
+          (candidate_epoch is not None and int(candidate_epoch) != task_epoch)):
+        reason = 'SESSION_EPOCH_MISMATCH'
+    elif (candidate_generation_id <= 0 or task_generation_id <= 0 or
+          candidate_generation_id != task_generation_id):
+        reason = 'TASK_CANDIDATE_GENERATION_MISMATCH'
+    elif expected_count > bound_count:
+        reason = 'INCOMPLETE_BOUND_SET'
+    elif raw_bounds is not None and not all(
+            math.isfinite(float(value)) and float(value) >= 0.0
+            for value in raw_bounds):
+        reason = 'NONFINITE_BOUND'
+    elif not map_equal:
+        reason = 'MAP_REVISION_MISMATCH'
+    elif costmap_comparable and not costmaps_equal:
+        reason = 'COSTMAP_REVISION_MISMATCH'
+    elif not candidate_fp or not task_fp or not fingerprints_equal:
+        reason = 'FINGERPRINT_MISMATCH'
+    elif (candidate_generation and task_generation and
+          int(candidate_generation) != int(task_generation)):
+        reason = 'TASK_CANDIDATE_GENERATION_MISMATCH'
+    else:
+        reason = 'OK'
+    if reason not in CERTIFICATE_EVIDENCE_REASONS:
+        reason = 'OTHER'
+    comparison = {
+        'candidate': {
+            'lower_bound_context_fingerprint': candidate_fp,
+            'map_revision': candidate_map,
+            'costmap_revision': candidate_costmap,
+            'source_session_id': meta.get('source_session_id'),
+            'source_epoch': meta.get('source_epoch'),
+            'generation_ros_ns': candidate_generation,
+            'candidate_generation_id': candidate_generation_id,
+            'bound_entry_count': bound_count,
+            'expected_bound_entry_count': int(expected_count),
+            'detected_not_queried_count': int(
+                meta.get('detected_not_queried_count', 0) or 0),
+        },
+        'task_snapshot': {
+            'lower_bound_context_fingerprint': task_fp,
+            'map_revision': task_map,
+            'costmap_revision': task_costmap,
+            'source_session_id': (None if snapshot is None else
+                                  snapshot.source_session_id),
+            'source_epoch': (None if snapshot is None else snapshot.epoch),
+            'generation_ros_ns': task_generation,
+            'candidate_generation_id': task_generation_id,
+        },
+        'fingerprints_equal': fingerprints_equal,
+        'map_revisions_equal': map_equal,
+        'costmap_revisions_equal': (costmaps_equal
+                                    if costmap_comparable else None),
+        'revisions_equal': bool(map_equal and (
+            costmaps_equal if costmap_comparable else True)),
+        'bound_set_complete': bool(
+            bound_count == int(expected_count) and finite),
+        'reason': reason,
+    }
+    return reason, comparison
 
 
 @dataclass
@@ -629,9 +766,36 @@ class DistributedFrontierAssignment(Node):
         self._candidate_evidence = {
             robot: CandidateEvidence() for robot in ('robot1', 'robot2')
         }
+        # Keep source-local evidence separate from the merged physical-region
+        # view used by terminal/status reporting.  Certificate completeness
+        # must never compare one source's bounds with a cross-robot union.
+        self._candidate_source_local_evidence = {
+            robot: CandidateEvidence() for robot in ('robot1', 'robot2')
+        }
         self._candidate_region_snapshots: dict[
             str, tuple[FrontierRegionEvidence, ...]] = {}
+        # Latest pre-query lower-bound evidence, retained separately from
+        # terminal classification.  ``None`` means the source did not provide
+        # enough geometry to certify a cost-only decision.
+        self._unqueried_cost_bounds: dict[
+            str, Optional[tuple[float, ...]]] = {
+                robot: None for robot in ('robot1', 'robot2')}
+        # (source-local map revision, exact generator context token,
+        # immutable candidate-generation ID). Receipt time below is retained
+        # for diagnostics only, never as a TTL.
+        self._unqueried_cost_bound_provenance: dict[
+            str, tuple[int, str, int]] = {}
+        self._unqueried_cost_bounds_received: dict[str, float] = {}
+        # Compact candidate-side provenance is retained for certificate
+        # diagnostics only.  It is never consulted by allocation behavior.
+        self._candidate_lower_bound_metadata: dict[str, dict] = {}
         self._candidate_evidence_seen = set()
+        self._last_cost_only_certificate_key = None
+        # Certificate blocker history is diagnostic-only.  It is deliberately
+        # kept separate from round state so it cannot affect allocation,
+        # query scheduling, or certificate results.
+        self._certificate_blocker_history: dict[tuple[str, str], dict] = {}
+        self._certificate_blocker_last_round: dict[str, str] = {}
         self._nav2 = LocalNav2(self, phase_gated=self._phase_gated)
         qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -767,7 +931,14 @@ class DistributedFrontierAssignment(Node):
 
     def _sim_time_s(self) -> float:
         """Return current simulation/ROS time for authoritative startup logs."""
-        return self.get_clock().now().nanoseconds / 1e9
+        # Some focused certificate tests construct the node with __new__ so
+        # they can exercise pure decision logic without starting ROS. Keep
+        # diagnostic timestamps optional for those fixtures; a real Node
+        # always has _clock initialized by rclpy.
+        clock = getattr(self, '_clock', None)
+        if clock is None:
+            return 0.0
+        return clock.now().nanoseconds / 1e9
 
     def _startup_event(self, event_type: str, **fields) -> None:
         """Emit one compact startup milestone to ROS logs and the observer."""
@@ -1069,12 +1240,104 @@ class DistributedFrontierAssignment(Node):
                 candidate.information_gain >= self._minimum_solo_visible_gain_m
             ),
         )
+        if not hasattr(self, '_candidate_source_local_evidence'):
+            self._candidate_source_local_evidence = {
+                robot: CandidateEvidence() for robot in ('robot1', 'robot2')
+            }
+        self._candidate_source_local_evidence[
+            message.source_robot_id] = fallback
         raw_regions = str(getattr(
             message, 'terminal_frontier_regions_json', '') or '')
         if not raw_regions:
             raw_regions = str(getattr(
                 message, 'diagnostic_regions_json', '') or '')
-        regions = self._decode_frontier_regions(raw_regions)
+        regions = self._decode_frontier_regions(
+            raw_regions,
+            candidate_generation_id=int(getattr(
+                message, 'candidate_generation_id', 0) or 0),
+            map_revision=int(getattr(message, 'map_revision', 0) or 0),
+            costmap_revision=int(getattr(
+                message, 'costmap_revision', 0) or 0),
+        )
+        unqueried = tuple(
+            region.optimistic_cost_lower_bound_s
+            for region in regions
+            if str(region.status) == 'DETECTED_NOT_QUERIED'
+        )
+        detected_not_queried = int(
+            getattr(message, 'detected_not_queried_count',
+                    message.unclassified_frontier_count) or 0)
+        bound_values = tuple(
+            region.optimistic_cost_lower_bound_s for region in regions
+            if str(region.status) == 'DETECTED_NOT_QUERIED')
+        if not raw_regions:
+            bound_state = ('EMPTY_BOUND_SUMMARY' if detected_not_queried == 0
+                           else 'NO_CANDIDATE_BOUND_SUMMARY')
+        else:
+            try:
+                parsed_regions = json.loads(raw_regions)
+                if isinstance(parsed_regions, dict):
+                    parsed_regions = parsed_regions.get('regions', [])
+                if not isinstance(parsed_regions, list):
+                    bound_state = 'OTHER'
+                elif detected_not_queried > len(bound_values):
+                    bound_state = 'INCOMPLETE_BOUND_SET'
+                elif any(value is None for value in bound_values):
+                    bound_state = 'INCOMPLETE_BOUND_SET'
+                elif any(not math.isfinite(float(value)) or float(value) < 0.0
+                         for value in bound_values):
+                    bound_state = 'NONFINITE_BOUND'
+                else:
+                    bound_state = 'OK'
+            except (TypeError, ValueError, json.JSONDecodeError):
+                bound_state = 'OTHER'
+        header_stamp = getattr(message, 'header', None)
+        generation_ros_ns = None
+        if header_stamp is not None:
+            generation_ros_ns = (int(getattr(header_stamp.stamp, 'sec', 0)) *
+                                 1_000_000_000 +
+                                 int(getattr(header_stamp.stamp, 'nanosec', 0)))
+        if not hasattr(self, '_candidate_lower_bound_metadata'):
+            self._candidate_lower_bound_metadata = {}
+        self._candidate_lower_bound_metadata[message.source_robot_id] = {
+            'fingerprint': str(getattr(
+                message, 'lower_bound_context_fingerprint', '') or ''),
+            'map_revision': int(getattr(message, 'map_revision', 0)),
+            'costmap_revision': int(getattr(
+                message, 'costmap_revision', 0)),
+            # Candidate arrays predate session/epoch provenance; record that
+            # absence explicitly rather than inventing a comparison.
+            'source_session_id': None,
+            'source_epoch': None,
+            'generation_ros_ns': generation_ros_ns,
+            'candidate_generation_id': int(getattr(
+                message, 'candidate_generation_id', 0) or 0),
+            'bound_entry_count': len(bound_values),
+            'detected_not_queried_count': detected_not_queried,
+            'all_bounds_finite': bool(
+                all(value is not None and math.isfinite(float(value)) and
+                    float(value) >= 0.0 for value in bound_values)),
+            'bound_state': bound_state,
+        }
+        # A generator may omit diagnostic region JSON.  In that case an empty
+        # tuple must not be mistaken for proof that no unqueried options
+        # exist; the certificate is conservative until their bounds arrive.
+        if detected_not_queried > 0 and not unqueried:
+            self._unqueried_cost_bounds[message.source_robot_id] = None
+        else:
+            self._unqueried_cost_bounds[message.source_robot_id] = (
+                tuple(float(value) for value in unqueried)
+                if all(value is not None and math.isfinite(float(value)) and
+                       float(value) >= 0.0 for value in unqueried)
+                else None
+            )
+        self._unqueried_cost_bound_provenance[message.source_robot_id] = (
+            int(getattr(message, 'map_revision', 0)),
+            str(getattr(message, 'lower_bound_context_fingerprint', '') or ''),
+            int(getattr(message, 'candidate_generation_id', 0) or 0),
+        )
+        self._unqueried_cost_bounds_received[
+            message.source_robot_id] = time.monotonic()
         if regions:
             self._candidate_region_snapshots[message.source_robot_id] = regions
             if set(self._candidate_region_snapshots) == {'robot1', 'robot2'}:
@@ -1093,7 +1356,10 @@ class DistributedFrontierAssignment(Node):
         self._candidate_evidence[message.source_robot_id] = fallback
 
     @staticmethod
-    def _decode_frontier_regions(value: str) -> tuple[FrontierRegionEvidence, ...]:
+    def _decode_frontier_regions(
+            value: str, candidate_generation_id: int = 0,
+            map_revision: int = 0, costmap_revision: int = 0,
+    ) -> tuple[FrontierRegionEvidence, ...]:
         """Decode compact diagnostic region geometry; malformed data is ignored."""
         if not value:
             return ()
@@ -1121,6 +1387,15 @@ class DistributedFrontierAssignment(Node):
                 gain_value = item.get('visible_reveal_gain')
                 visible_reveal_gain = (
                     float(gain_value) if gain_value is not None else None)
+                lower_bound_value = item.get('optimistic_cost_lower_bound_s')
+                lower_bound = (
+                    float(lower_bound_value)
+                    if lower_bound_value is not None else None)
+                item_query_count = int(item.get('query_count', 0) or 0)
+                item_cycles_seen = int(item.get('cycles_seen', 0) or 0)
+                item_cycles_not_queried = int(
+                    item.get('cycles_not_queried', 0) or 0)
+                item_last_query_ns = int(item.get('last_query_ns', 0) or 0)
             except (TypeError, ValueError):
                 continue
             output.append(FrontierRegionEvidence(
@@ -1128,6 +1403,17 @@ class DistributedFrontierAssignment(Node):
                 size_m=max(0.0, size_m),
                 status=str(item.get('status', 'UNCLASSIFIED')),
                 visible_reveal_gain=visible_reveal_gain,
+                optimistic_cost_lower_bound_s=lower_bound,
+                candidate_generation_id=int(item.get(
+                    'candidate_generation_id', candidate_generation_id) or 0),
+                map_revision=int(item.get('map_revision', map_revision) or 0),
+                costmap_revision=int(item.get(
+                    'costmap_revision', costmap_revision) or 0),
+                query_count=item_query_count,
+                cycles_seen=item_cycles_seen,
+                cycles_not_queried=item_cycles_not_queried,
+                last_query_ns=item_last_query_ns,
+                last_query_result=str(item.get('last_query_result', '') or ''),
             ))
         return tuple(output)
     def _snapshot_callback(self, message: TaskSnapshotMsg) -> None:
@@ -1256,6 +1542,9 @@ class DistributedFrontierAssignment(Node):
             self._record_hard_failure(
                 message.physical_task_signature,
                 duration_to_seconds(message.validity),
+                canonical_task_id=str(message.canonical_task_id),
+                failure_class=str(message.failure_class),
+                reason='peer failure message',
             )
 
     def _peer_event_callback(self, message: DistributedExplorationEvent) -> None:
@@ -1294,7 +1583,10 @@ class DistributedFrontierAssignment(Node):
             'peer traffic conflict cleared; rebuilding from fresh proposals',
         )
 
-    def _record_hard_failure(self, signature: str, requested_ttl_s: float) -> None:
+    def _record_hard_failure(
+            self, signature: str, requested_ttl_s: float, *,
+            canonical_task_id: str = '', failure_class: str = '',
+            reason: str = '') -> None:
         """Record bounded suppression for directly observed hard evidence."""
         if not signature:
             return
@@ -1315,8 +1607,10 @@ class DistributedFrontierAssignment(Node):
         # Keep this diagnostic bounded and auditable without making failure
         # suppression dependent on logger timing.
         self.get_logger().info(
-            'HARD_FAILURE_SUPPRESSION signature=%s count=%d ttl_s=%.3f' %
-            (signature, count, ttl),
+            'HARD_FAILURE_SUPPRESSION signature=%s count=%d ttl_s=%.3f '
+            'canonical_task_id=%s failure_class=%s reason=%s active=%s' %
+            (signature, count, ttl, canonical_task_id, failure_class,
+             reason, bool(ttl > 0.0)),
         )
 
     def _fresh_snapshot(self, robot_id: str, now: float) -> Optional[TaskSnapshot]:
@@ -1625,7 +1919,14 @@ class DistributedFrontierAssignment(Node):
                     round(getattr(task, 'local_path_length_m', 0.0), 3),
                     round(getattr(task, 'path_heading_cost_rad', 0.0), 3),
                 ))
-            payload.append((snapshot.source_robot_id, tuple(tasks)))
+            payload.append((
+                snapshot.source_robot_id,
+                snapshot.source_session_id,
+                getattr(snapshot, 'map_revision', 0),
+                getattr(snapshot, 'map_fingerprint', ''),
+                getattr(snapshot, 'lower_bound_context_fingerprint', ''),
+                tuple(tasks),
+            ))
         return hashlib.sha256(repr(tuple(payload)).encode('utf-8')).hexdigest()
 
     def _round_is_current(self, round_work: RoundWork, generation: int) -> bool:
@@ -2167,6 +2468,19 @@ class DistributedFrontierAssignment(Node):
             decision = self._select_traffic_test_conflict_pair(
                 decision, round_work.union, first_batch, second_batch,
             )
+            if self._assignment_strategy == 'frontier_cost_only':
+                certified, blocking, optimistic_score, certificate_reason = (
+                    self._cost_only_dispatch_certificate(
+                        round_work, decision, first_batch, second_batch,
+                    )
+                )
+                if not certified:
+                    self._transition(
+                        CoordinatorState.WAITING_FOR_INPUTS,
+                        'cost-only dispatch certificate deferred: %s' %
+                        certificate_reason,
+                    )
+                    return
             traffic = self._traffic_for_decision(decision, first_batch, second_batch)
             # Snapshot cardinalities are transport/provenance facts rather
             # than solver inputs.  Attach them here so the decision telemetry
@@ -2289,6 +2603,342 @@ class DistributedFrontierAssignment(Node):
             self._discard_stale_tick(round_work, generation, 'before local dispatch')
             return
         self._start_local_dispatch(round_work, generation)
+
+    def _cost_only_certificate_blocker_diagnostics(
+            self, round_work: RoundWork, decision: PairDecision,
+            first_batch: BidBatch, second_batch: BidBatch,
+            required_robots: tuple[str, ...],
+            bounds: dict[str, Optional[tuple[float, ...]]],
+            bound_diagnostics: dict[str, dict], certified: bool,
+    ) -> tuple[list[dict], list[dict]]:
+        """Describe certificate blockers without changing certificate behavior."""
+        # Focused certificate tests may bypass __init__ because this method is
+        # diagnostic-only. Real ROS nodes initialize these containers there.
+        if not hasattr(self, '_candidate_region_snapshots'):
+            self._candidate_region_snapshots = {}
+        if not hasattr(self, '_certificate_blocker_history'):
+            self._certificate_blocker_history = {}
+        if not hasattr(self, '_certificate_blocker_last_round'):
+            self._certificate_blocker_last_round = {}
+        batches = {
+            'robot1': first_batch,
+            'robot2': second_batch,
+        }
+
+        def bid_costs(batch: BidBatch) -> list[float]:
+            values = [0.0]
+            for bid in batch.bids:
+                if not bid.path_valid:
+                    continue
+                try:
+                    value = nominal_motion_cost_s(
+                        float(bid.path_length_m), float(bid.heading_cost),
+                        self._weights.cost_only_reference_linear_speed_mps,
+                        self._weights.cost_only_reference_angular_speed_radps,
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+            return values
+
+        evaluated_costs = {
+            robot: bid_costs(batch) for robot, batch in batches.items()
+        }
+        sim_time = self._sim_time_s()
+        current_by_robot: dict[str, list[dict]] = {}
+
+        for robot_id in required_robots:
+            regions = tuple(
+                region for region in self._candidate_region_snapshots.get(
+                    robot_id, ())
+                if str(region.status) == 'DETECTED_NOT_QUERIED'
+            )
+            current_ids = {str(region.physical_id) for region in regions}
+            round_id = round_work.round_id
+            is_new_round = self._certificate_blocker_last_round.get(robot_id) != round_id
+            if is_new_round:
+                for (history_robot, history_id), history in (
+                        self._certificate_blocker_history.items()):
+                    if history_robot != robot_id or not history.get('last_present'):
+                        continue
+                    if history_id not in current_ids:
+                        history['last_present'] = False
+                        history['disappeared_count'] += 1
+
+            raw_bounds = bounds.get(robot_id)
+            diagnostic = bound_diagnostics.get(robot_id, {})
+            evidence_reason = str(diagnostic.get('reason', 'OTHER'))
+            other_robot = 'robot2' if robot_id == 'robot1' else 'robot1'
+            other_options = list(evaluated_costs[other_robot])
+            other_bounds = bounds.get(other_robot)
+            if other_bounds is not None:
+                other_options.extend(float(value) for value in other_bounds)
+
+            output = []
+            for index, region in enumerate(regions):
+                physical_id = str(region.physical_id)
+                bound_value = None
+                if raw_bounds is not None and index < len(raw_bounds):
+                    bound_value = float(raw_bounds[index])
+                evidence_available = bool(
+                    evidence_reason == 'OK' and
+                    bound_value is not None and
+                    math.isfinite(bound_value) and bound_value >= 0.0)
+                if not evidence_available:
+                    if evidence_reason in {
+                            'TASK_CANDIDATE_GENERATION_MISMATCH',
+                            'MAP_REVISION_MISMATCH',
+                            'COSTMAP_REVISION_MISMATCH',
+                            'FINGERPRINT_MISMATCH',
+                            'SESSION_EPOCH_MISMATCH'}:
+                        evidence_state = 'STALE_EVIDENCE'
+                    else:
+                        evidence_state = 'UNAVAILABLE_EVIDENCE'
+                elif region.query_count == 0:
+                    evidence_state = 'PENDING_FIRST_EVALUATION'
+                elif region.cycles_not_queried > 0:
+                    evidence_state = 'STALE_EVIDENCE_REQUIRES_REQUERY'
+                elif region.last_query_result:
+                    evidence_state = 'FINISHED_QUERY_NOT_REFLECTED'
+                else:
+                    evidence_state = 'UNAVAILABLE_EVIDENCE'
+
+                best_competing_score = float('-inf')
+                if evidence_available:
+                    for partner_cost in other_options:
+                        if bound_value == 0.0 and partner_cost == 0.0:
+                            continue
+                        best_competing_score = max(
+                            best_competing_score,
+                            -(bound_value + partner_cost),
+                        )
+                is_blocking = bool(
+                    evidence_available and
+                    best_competing_score >= decision.score.total - 1e-9)
+                key = (robot_id, physical_id)
+                history = self._certificate_blocker_history.setdefault(key, {
+                    'robot_id': robot_id,
+                    'physical_id': physical_id,
+                    'first_candidate_generation_id': int(
+                        region.candidate_generation_id),
+                    'candidate_generations_seen': [],
+                    'first_seen_sim_time_s': sim_time,
+                    'last_seen_sim_time_s': sim_time,
+                    'certificate_rounds_waiting': 0,
+                    'observed_count': 0,
+                    'ever_queried': False,
+                    'max_query_count': 0,
+                    'last_query_result': '',
+                    'disappeared_count': 0,
+                    'reappeared_count': 0,
+                    'prevented_certification_rounds': 0,
+                    'last_present': False,
+                    'last_round_id': '',
+                })
+                generation_id = int(region.candidate_generation_id)
+                if generation_id and generation_id not in history[
+                        'candidate_generations_seen']:
+                    history['candidate_generations_seen'].append(generation_id)
+                if (not history['last_present'] and history['observed_count'] and
+                        is_new_round):
+                    history['reappeared_count'] += 1
+                history['last_present'] = True
+                history['last_seen_sim_time_s'] = sim_time
+                history['observed_count'] += 1
+                history['ever_queried'] = bool(
+                    history['ever_queried'] or region.query_count > 0)
+                history['max_query_count'] = max(
+                    history['max_query_count'], int(region.query_count))
+                if region.last_query_result:
+                    history['last_query_result'] = region.last_query_result
+                if is_new_round:
+                    history['certificate_rounds_waiting'] += 1
+                    history['prevented_certification_rounds'] += int(
+                        is_blocking and not certified)
+                    history['last_round_id'] = round_id
+                item = {
+                    'robot_id': robot_id,
+                    'physical_id': physical_id,
+                    'candidate_generation_id': generation_id,
+                    'map_revision': int(region.map_revision),
+                    'costmap_revision': int(region.costmap_revision),
+                    'certificate_evidence_reason': evidence_reason,
+                    'evidence_state': evidence_state,
+                    'bound_s': bound_value,
+                    'bound_entry_count': (0 if raw_bounds is None
+                                          else len(raw_bounds)),
+                    'detected_not_queried_count': int(
+                        getattr(self, '_candidate_source_local_evidence',
+                                self._candidate_evidence).get(
+                                    robot_id, CandidateEvidence()).detected_not_queried),
+                    'query_count': int(region.query_count),
+                    'cycles_seen': int(region.cycles_seen),
+                    'cycles_not_queried': int(region.cycles_not_queried),
+                    'last_query_ns': int(region.last_query_ns),
+                    'last_query_result': region.last_query_result,
+                    'ever_queried': bool(history['ever_queried']),
+                    'best_competing_score': best_competing_score,
+                    'is_blocking': is_blocking,
+                    'certificate_rounds_waiting': history[
+                        'certificate_rounds_waiting'],
+                    'prevented_certification_rounds': history[
+                        'prevented_certification_rounds'],
+                    'disappeared_count': history['disappeared_count'],
+                    'reappeared_count': history['reappeared_count'],
+                }
+                output.append(item)
+            current_by_robot[robot_id] = output
+            if is_new_round:
+                self._certificate_blocker_last_round[robot_id] = round_id
+
+        history_output = []
+        for history in sorted(
+                self._certificate_blocker_history.values(),
+                key=lambda item: (item['robot_id'], item['physical_id'])):
+            item = dict(history)
+            item['candidate_generations_seen'] = list(
+                item['candidate_generations_seen'])
+            history_output.append(item)
+        current_output = [
+            item for robot_id in sorted(current_by_robot)
+            for item in sorted(current_by_robot[robot_id],
+                               key=lambda value: value['physical_id'])
+        ]
+        return current_output, history_output
+
+    def _cost_only_dispatch_certificate(
+            self, round_work: RoundWork, decision: PairDecision,
+            first_batch: BidBatch, second_batch: BidBatch) -> tuple[
+                bool, int, float, str]:
+        """Prevent dispatch before an unqueried cost-only option is dominated."""
+        if self._assignment_strategy != 'frontier_cost_only':
+            return True, 0, float('-inf'), 'POLICY_NOT_COST_ONLY'
+
+        bounds: dict[str, Optional[tuple[float, ...]]] = {}
+        bound_diagnostics: dict[str, dict] = {}
+        if round_work.mode == 'continuation':
+            # The busy side is represented by its immutable commitment.  Its
+            # stale proposal is deliberately irrelevant to continuation.
+            bounds[round_work.continuation_busy_robot_id] = ()
+        required_robots = (
+            ('robot1', 'robot2') if round_work.mode != 'continuation' else
+            (round_work.continuation_free_robot_id,)
+        )
+        snapshots_by_robot = {
+            snapshot.source_robot_id: snapshot
+            for snapshot in round_work.snapshots
+        }
+        for robot_id in required_robots:
+            # Certificate completeness is source-local.  The merged evidence
+            # view intentionally used for terminal/status reporting must not
+            # inflate (or erase) this participant's DNU count.
+            evidence = getattr(
+                self, '_candidate_source_local_evidence',
+                self._candidate_evidence,
+            ).get(robot_id)
+            raw_bounds = self._unqueried_cost_bounds.get(robot_id)
+            snapshot = snapshots_by_robot.get(robot_id)
+            provenance = self._unqueried_cost_bound_provenance.get(robot_id)
+            matching_context = bool(
+                snapshot is not None and
+                lower_bound_context_matches(provenance, snapshot)
+            )
+            bound_diagnostics[robot_id] = {
+                'required_for_certificate': robot_id in required_robots,
+            }
+            _evidence_reason, comparison = classify_lower_bound_evidence(
+                getattr(self, '_candidate_lower_bound_metadata', {}).get(robot_id),
+                snapshot,
+                raw_bounds,
+                int(evidence.detected_not_queried if evidence is not None else 0),
+            )
+            bound_diagnostics[robot_id].update(comparison)
+            if (evidence is not None and evidence.detected_not_queried == 0 and
+                    raw_bounds is None):
+                bounds[robot_id] = ()
+            elif raw_bounds is not None and matching_context:
+                bounds[robot_id] = raw_bounds
+            else:
+                # Compact bounds are revision/context evidence, not an
+                # 8-second heartbeat. Any provenance mismatch blocks.
+                bounds[robot_id] = None
+        for robot_id in ('robot1', 'robot2'):
+            bounds.setdefault(robot_id, ())
+
+        evidence_reason = next((bound_diagnostics[robot]['reason'] for robot in
+                                required_robots
+                                if bound_diagnostics.get(robot, {}).get(
+                                    'reason') != 'OK'), 'OK')
+        provenance_key = tuple(
+            (robot, bound_diagnostics.get(robot, {}).get('reason'),
+             bound_diagnostics.get(robot, {}).get('candidate', {}).get(
+                 'lower_bound_context_fingerprint'),
+             bound_diagnostics.get(robot, {}).get('task_snapshot', {}).get(
+                 'lower_bound_context_fingerprint'),
+             bound_diagnostics.get(robot, {}).get('candidate', {}).get(
+                 'generation_ros_ns'),
+             bound_diagnostics.get(robot, {}).get('task_snapshot', {}).get(
+                 'generation_ros_ns'),
+             bound_diagnostics.get(robot, {}).get('candidate', {}).get(
+                 'candidate_generation_id'),
+             bound_diagnostics.get(robot, {}).get('task_snapshot', {}).get(
+                 'candidate_generation_id'))
+            for robot in required_robots)
+
+        certified, blocking, optimistic_score, reason = (
+            cost_only_dispatch_certificate(
+                decision, first_batch, second_batch,
+                bounds.get('robot1'), bounds.get('robot2'), self._weights,
+            )
+        )
+        blocker_diagnostics, blocker_history = (
+            self._cost_only_certificate_blocker_diagnostics(
+                round_work, decision, first_batch, second_batch,
+                required_robots, bounds, bound_diagnostics, certified,
+            )
+        )
+        dnu = 0
+        for robot_id in (
+                ('robot1', 'robot2') if round_work.mode != 'continuation'
+                else (round_work.continuation_free_robot_id,)):
+            source_bounds = bounds.get(robot_id)
+            if source_bounds is not None:
+                dnu += len(source_bounds)
+            else:
+                dnu += int(getattr(
+                    self, '_candidate_source_local_evidence',
+                    self._candidate_evidence,
+                ).get(
+                    robot_id, CandidateEvidence()).detected_not_queried)
+        key = (round_work.round_id, len(first_batch.bids), len(second_batch.bids),
+               dnu, blocking, round(float(decision.score.total), 9),
+               round(float(optimistic_score), 9), certified, reason,
+               evidence_reason, provenance_key)
+        if key != self._last_cost_only_certificate_key:
+            self._last_cost_only_certificate_key = key
+            self._emit_event(
+                'COST_ONLY_DISPATCH_CERTIFICATE',
+                json.dumps({
+                    'evaluated_candidate_count': len(first_batch.bids) +
+                    len(second_batch.bids),
+                    'detected_not_queried_count': dnu,
+                    'blocking_unqueried_candidates': blocking,
+                    'current_evaluated_assignment_score': decision.score.total,
+                    'best_optimistic_unqueried_score': optimistic_score,
+                    'dispatch_certified': certified,
+                    'reason': reason,
+                    # ``evidence_reason`` is a diagnostic taxonomy for the
+                    # exact conservative branch.  The legacy ``reason`` above
+                    # remains unchanged for downstream consumers.
+                    'evidence_reason': evidence_reason,
+                    'evidence_branch': evidence_reason,
+                    'provenance_comparison': bound_diagnostics,
+                    'blocker_diagnostics': blocker_diagnostics,
+                    'blocker_history': blocker_history,
+                }, sort_keys=True, separators=(',', ':')),
+            )
+        return certified, blocking, optimistic_score, reason
 
     def _traffic_for_bid_pair(
             self, robot1_bid: Optional[Bid], robot2_bid: Optional[Bid],
@@ -2934,6 +3584,7 @@ class DistributedFrontierAssignment(Node):
                 task.members[0], True,
                 lambda checks: self._dispatch_after_checks(task, result, checks),
                 path_samples=result.samples,
+                path_frame_id=result.path_frame_id,
             )
 
         if not self._nav2.evaluate_path(
@@ -3371,6 +4022,7 @@ class DistributedFrontierAssignment(Node):
                     task, result, checks, round_work, generation,
                 ),
                 path_samples=result.samples,
+                path_frame_id=result.path_frame_id,
             )
 
         local_evaluation = round_work.local_path_evaluations.get(task_id)
@@ -3413,6 +4065,33 @@ class DistributedFrontierAssignment(Node):
             self._discard_stale_tick(round_work, generation, 'dispatch checks callback')
             self._dispatch_in_progress = False
             return
+        failure = None
+        if not checks.ready:
+            failure = classify_dispatch_precondition_failure(checks)
+        failure_memory_interaction = (
+            'NOT_APPLICABLE' if checks.ready else
+            'HARD_FAILURE_SUPPRESSION_NEXT' if failure in HARD_FAILURES else
+            'NO_HARD_FAILURE_SUPPRESSION')
+        self.get_logger().info(
+            'DISPATCH_GATE_DECISION %s' % json.dumps({
+                'mode': checks.local_path_gate_mode,
+                'robot': self._robot_id,
+                'task_signature': (
+                    task.members[0].physical_signature if task.members else ''),
+                'maximum_local_cost': checks.local_path_maximum_cost,
+                'first_blocked_point_index': (
+                    checks.local_path_first_blocked_point_index),
+                'first_blocked_point': checks.local_path_first_blocked_point,
+                'first_blocked_local_point': (
+                    checks.local_path_first_blocked_local_point),
+                'nav2_path_valid': checks.final_path_valid,
+                'final_decision': (
+                    'ACCEPT_FOR_DISPATCH' if checks.ready else 'REJECT'),
+                'failure_memory_interaction': failure_memory_interaction,
+                'failure_class': None if failure is None else failure.value,
+                'reason': checks.reason,
+            }, sort_keys=True, separators=(',', ':')),
+        )
         self.get_logger().info(
             'DISPATCH_PRECONDITIONS robot=%s round=%s task=%s ready=%s '
             'action=%s lifecycle=%s tf=%s tf_age=%s map_inside=%s map_value=%s '
@@ -3432,7 +4111,6 @@ class DistributedFrontierAssignment(Node):
             )
         )
         if not checks.ready:
-            failure = classify_dispatch_precondition_failure(checks)
             self._invalidate_round(failure, checks.reason, final_path)
             return
         if self._local_only and self._active_task is not None:
@@ -3660,7 +4338,12 @@ class DistributedFrontierAssignment(Node):
             # Record local suppression before consulting snapshot provenance;
             # a stale snapshot must not make the failing robot immediately
             # reselect the same physical task.
-            self._record_hard_failure(member.physical_signature, 15.0)
+            self._record_hard_failure(
+                member.physical_signature, 15.0,
+                canonical_task_id=str(self._active_task.canonical_id),
+                failure_class=failure.value,
+                reason=reason,
+            )
         elif self._local_only and member.physical_signature:
             # Infrastructure/TF failures are retryable, but never in a tight
             # loop while the same stale condition persists.

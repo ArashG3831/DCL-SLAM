@@ -5,12 +5,16 @@
 #include <limits>
 #include <numeric>
 #include <tuple>
+#include <unordered_set>
 #include "frontier_exploration_ros2/frontier_policy.hpp"
 namespace my_epuck_frontier_candidates {
 std::vector<std::size_t> fair_frontier_query_order(
   const std::vector<FrontierEvaluationRecord> & records,
   std::size_t candidate_limit, std::size_t query_limit)
 {
+  if (candidate_limit == 0U || query_limit == 0U) {
+    return {};
+  }
   std::vector<std::size_t> order(records.size());
   std::iota(order.begin(), order.end(), 0U);
   std::stable_sort(order.begin(), order.end(), [&records](std::size_t a, std::size_t b) {
@@ -21,37 +25,82 @@ std::vector<std::size_t> fair_frontier_query_order(
       if (record.transient_failure) {return 2;}
       return 3;
     };
-    if (priority(a) != priority(b)) {return priority(a) < priority(b);}
+    if (records[a].tier1_unqueried != records[b].tier1_unqueried) {
+      return records[a].tier1_unqueried > records[b].tier1_unqueried;
+    }
+    if (records[a].optimistic_cost_lower_bound_s !=
+        records[b].optimistic_cost_lower_bound_s) {
+      return records[a].optimistic_cost_lower_bound_s <
+             records[b].optimistic_cost_lower_bound_s;
+    }
     if (records[a].cycles_not_queried != records[b].cycles_not_queried) {
       return records[a].cycles_not_queried > records[b].cycles_not_queried;
     }
     if (records[a].last_query_ns != records[b].last_query_ns) {
       return records[a].last_query_ns < records[b].last_query_ns;
     }
+    if (priority(a) != priority(b)) {return priority(a) < priority(b);}
     return records[a].id < records[b].id;
   });
-  if (order.size() > candidate_limit) {order.resize(candidate_limit);}
-  if (order.size() > query_limit) {order.resize(query_limit);}
-  return order;
+  // A malformed or transiently colliding candidate batch must not spend more
+  // than one bounded query slot on one cache key. Keep the best-ranked record
+  // for each ID and apply both existing limits to the deduplicated order.
+  std::vector<std::size_t> unique_order;
+  unique_order.reserve(std::min(order.size(), query_limit));
+  std::unordered_set<uint64_t> selected_ids;
+  selected_ids.reserve(order.size());
+  for (const auto index : order) {
+    if (!selected_ids.insert(records[index].id).second) {
+      continue;
+    }
+    unique_order.push_back(index);
+    if (unique_order.size() >= candidate_limit || unique_order.size() >= query_limit) {
+      break;
+    }
+  }
+  return unique_order;
 }
 uint64_t fnv1a64(const void*d,size_t n,uint64_t h){auto*p=static_cast<const uint8_t*>(d);for(size_t i=0;i<n;i++){h^=p[i];h*=1099511628211ULL;}return h;}
 template<class T>static void add(uint64_t&h,const T&v){h=fnv1a64(&v,sizeof(v),h);}
 uint64_t map_checksum(const nav_msgs::msg::OccupancyGrid&m){uint64_t h=14695981039346656037ULL;add(h,m.info.resolution);add(h,m.info.width);add(h,m.info.height);add(h,m.info.origin.position.x);add(h,m.info.origin.position.y);add(h,m.info.origin.position.z);add(h,m.info.origin.orientation.x);add(h,m.info.origin.orientation.y);add(h,m.info.origin.orientation.z);add(h,m.info.origin.orientation.w);if(!m.data.empty())h=fnv1a64(m.data.data(),m.data.size(),h);return h;}
 uint64_t local_context_checksum(const frontier_exploration_ros2::OccupancyGrid2d&m,double wx,double wy,double radius){int cx,cy;uint64_t h=14695981039346656037ULL;if(!m.worldToMapNoThrow(wx,wy,cx,cy)){return fnv1a64(&wx,sizeof(wx),fnv1a64(&wy,sizeof(wy),h));}const int r=std::max(1,int(std::ceil(radius/m.map().info.resolution)));add(h,cx);add(h,cy);for(int y=cy-r;y<=cy+r;y++)for(int x=cx-r;x<=cx+r;x++){if(x<0||y<0||x>=m.getSizeX()||y>=m.getSizeY()){const int value=-2;add(h,value);continue;}const auto value=m.getCost(x,y);add(h,value);}return h;}
-uint64_t stable_frontier_id(const frontier_exploration_ros2::FrontierCandidate&f,const frontier_exploration_ros2::OccupancyGrid2d&,double q){
-  // Physical identity must survive the frontier boundary gaining or losing a
-  // few cells. The old hash included the complete cell signature, bounds,
-  // and exact size, so normal map growth created a new cache key. Use the
-  // same physical reference geometry as the project's canonicalization
-  // policy, with a minimum 0.15 m bin, while retaining deterministic
-  // separation of nearby tasks.
-  const double quantum = std::max({3.0 * std::max(q, 1e-6), 0.15});
+uint64_t stable_frontier_id(
+  const frontier_exploration_ros2::FrontierCandidate & f,
+  const frontier_exploration_ros2::OccupancyGrid2d & map,
+  double q)
+{
+  // The old centroid-only 0.15 m hash merged distinct frontiers that happened
+  // to fall in one bin. Keep that coarse centroid for continuity, then add a
+  // finer frontier-cell reference and coarse physical bounds. The center point
+  // is selected from the frontier cells (not from the robot), while the bounds
+  // are intentionally coarser so a small boundary change does not churn the
+  // cache key.
+  const double centroid_quantum = std::max({3.0 * std::max(q, 1e-6), 0.15});
+  const double reference_quantum = std::max({std::max(q, 1e-6), 0.08});
+  const double bounds_quantum = std::max({2.0 * std::max(q, 1e-6), 0.12});
   uint64_t h = 14695981039346656037ULL;
-  const auto quantize = [quantum](double value) {
+  const auto round_quantize = [](double value, double quantum) {
       return static_cast<int64_t>(std::llround(value / quantum));
     };
-  add(h, quantize(f.centroid.first));
-  add(h, quantize(f.centroid.second));
+  const auto floor_quantize = [](double value, double quantum) {
+      return static_cast<int64_t>(std::floor(value / quantum));
+    };
+  add(h, round_quantize(f.centroid.first, centroid_quantum));
+  add(h, round_quantize(f.centroid.second, centroid_quantum));
+  add(h, floor_quantize(f.center_point.first, reference_quantum));
+  add(h, floor_quantize(f.center_point.second, reference_quantum));
+  if (f.visible_reveal_bounds) {
+    const auto bounds = frontier_world_bounds(f, map);
+    add(h, floor_quantize(bounds[0], bounds_quantum));
+    add(h, floor_quantize(bounds[1], bounds_quantum));
+    add(h, floor_quantize(bounds[2], bounds_quantum));
+    add(h, floor_quantize(bounds[3], bounds_quantum));
+  } else {
+    // Compatibility-constructed candidates do not carry cell bounds. The
+    // center-point reference above remains their physical tie-breaker.
+    const uint8_t no_bounds = 0U;
+    add(h, no_bounds);
+  }
   return h;
 }
 std::optional<double> path_length(const nav_msgs::msg::Path&p,double rx,double ry,double gx,double gy,double tol){if(p.poses.empty())return{};for(auto&s:p.poses)if(!std::isfinite(s.pose.position.x)||!std::isfinite(s.pose.position.y))return{};auto&last=p.poses.back().pose.position;if(std::hypot(last.x-gx,last.y-gy)>tol)return{};if(p.poses.size()==1){if(std::hypot(rx-gx,ry-gy)<=tol)return 0.;return{};}double total=0;for(size_t i=1;i<p.poses.size();i++)total+=std::hypot(p.poses[i].pose.position.x-p.poses[i-1].pose.position.x,p.poses[i].pose.position.y-p.poses[i-1].pose.position.y);return total;}

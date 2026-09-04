@@ -1,6 +1,8 @@
 """Regressions for exhaustive deterministic two-robot pair assignment."""
 
+import json
 import math
+from types import SimpleNamespace
 
 from my_epuck_project.distributed_assignment.canonical import build_canonical_union
 from my_epuck_project.distributed_assignment.models import (
@@ -8,9 +10,11 @@ from my_epuck_project.distributed_assignment.models import (
     BidBatch,
     Bounds,
     PhysicalTask,
+    TaskSnapshot,
 )
 from my_epuck_project.distributed_assignment.scoring import (
     AssignmentWeights,
+    cost_only_dispatch_certificate,
     choose_mrtsp_route_assignment,
     choose_pair_assignment,
     decisions_match,
@@ -20,6 +24,13 @@ from my_epuck_project.distributed_assignment.scoring import (
     route_overlap,
 )
 from my_epuck_project.distributed_assignment.traffic_scheduler import schedule_traffic
+from my_epuck_project.distributed_frontier_assignment import (
+    DistributedFrontierAssignment,
+    classify_lower_bound_evidence,
+    lower_bound_context_matches,
+)
+from my_epuck_project.mission_termination import CandidateEvidence
+from my_epuck_interfaces.msg import FrontierCandidateArray
 from dataclasses import replace
 
 
@@ -987,3 +998,508 @@ def test_existing_rank_selects_best_of_multiple_conflict_free_pairs():
     assert (decision.robot1_task_id, decision.robot2_task_id) == (
         ids['first'], ids['higher'],
     )
+
+
+def _cost_only_certificate_fixture(evaluated_path_m):
+    """One evaluated option plus an optional lower-bound-only option."""
+    known = cost_task('evaluated', (1.0, 0.0), evaluated_path_m, 0.0)
+    union = build_canonical_union([known], [])
+    task_id = union.tasks[0].canonical_id
+    first = batch('robot1', union.union_hash, [
+        bid(task_id, evaluated_path_m, [(0.0, 0.0),
+                                        (evaluated_path_m, 0.0)]),
+    ])
+    second = batch('robot2', union.union_hash, [])
+    decision = choose_pair_assignment(
+        'round', union, first, second,
+        scoring_mode='frontier_cost_only',
+    )
+    return decision, first, second
+
+
+def test_cost_only_certificate_blocks_near_unqueried_candidate():
+    """A 4 m lower bound must block dispatch of a 16 m evaluated option."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    certified, blocking, optimistic, reason = cost_only_dispatch_certificate(
+        decision, first, second, [4.0 / 0.13], [], AssignmentWeights(),
+    )
+    assert not certified
+    assert blocking >= 1
+    assert optimistic > decision.score.total
+    assert reason == 'UNQUERIED_OPTION_CAN_BEAT_EVALUATED_ASSIGNMENT'
+
+
+def test_cost_only_certificate_allows_dominated_unqueried_candidate():
+    """A provably slower lower bound need not consume every query slot."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    certified, blocking, _optimistic, reason = cost_only_dispatch_certificate(
+        decision, first, second, [200.0], [], AssignmentWeights(),
+    )
+    assert certified
+    assert blocking == 0
+    assert reason == 'ALL_UNQUERIED_OPTIONS_DOMINATED'
+
+
+def test_cost_only_certificate_checks_unknown_pair_in_both_free_case():
+    """An unknown/evaluated pair remains a possible winning assignment."""
+    r1 = cost_task('r1-known', (1.0, 0.0), 16.0, 0.0)
+    r2 = cost_task('r2-known', (2.0, 0.0), 16.0, 0.0)
+    union = build_canonical_union([r1], [r2])
+    ids = {m.physical_signature: t.canonical_id
+           for t in union.tasks for m in t.members}
+    first = batch('robot1', union.union_hash, [
+        bid(ids['r1-known'], 16.0, [(0.0, 0.0), (16.0, 0.0)]),
+    ])
+    second = batch('robot2', union.union_hash, [
+        bid(ids['r2-known'], 16.0, [(0.0, 0.0), (16.0, 0.0)]),
+    ])
+    decision = choose_pair_assignment(
+        'round', union, first, second,
+        scoring_mode='frontier_cost_only',
+    )
+    certified, _blocking, _optimistic, _reason = cost_only_dispatch_certificate(
+        decision, first, second, [4.0 / 0.13], [4.0 / 0.13],
+        AssignmentWeights(),
+    )
+    assert not certified
+
+
+def test_terminal_bounds_reach_allocator_when_diagnostic_capture_is_off():
+    """The production compact summary is independent of verbose diagnostics."""
+    def ingest(diagnostic_payload):
+        node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+        node._candidate_evidence = {
+            'robot1': CandidateEvidence(), 'robot2': CandidateEvidence(),
+        }
+        node._candidate_evidence_seen = set()
+        node._candidate_region_snapshots = {}
+        node._unqueried_cost_bounds = {'robot1': None, 'robot2': None}
+        node._unqueried_cost_bound_provenance = {}
+        node._unqueried_cost_bounds_received = {}
+        node._terminal_small_frontier_length_m = 0.2
+        node._minimum_solo_visible_gain_m = 0.05
+        message = FrontierCandidateArray()
+        message.source_robot_id = 'robot1'
+        message.candidate_generation_id = 7
+        message.detected_frontier_count = 1
+        message.detected_not_queried_count = 1
+        message.unclassified_frontier_count = 1
+        message.lower_bound_context_fingerprint = 'context-7'
+        message.terminal_frontier_regions_json = json.dumps({
+            'regions': [{
+                'physical_id': 7, 'status': 'DETECTED_NOT_QUERIED',
+                'size_m': 0.6, 'visible_reveal_gain': 0.2,
+                'optimistic_cost_lower_bound_s': 30.0,
+            }],
+        })
+        message.diagnostic_regions_json = diagnostic_payload
+        node._candidate_callback(message)
+        return node._unqueried_cost_bounds['robot1']
+
+    assert ingest('') == (30.0,)
+    assert ingest('{"regions": []}') == (30.0,)
+
+
+def test_lower_bound_context_provenance_matches_snapshot_without_receipt_ttl():
+    """An unchanged context remains valid after the former eight-second lease."""
+    snapshot = TaskSnapshot(
+        'robot1', 'session-1', 4, 27, 'map', 0, 2.0, (), 'context-27', 0, 7,
+    )
+    assert lower_bound_context_matches((27, 'context-27', 7), snapshot)
+    assert not lower_bound_context_matches((26, 'context-27', 7), snapshot)
+    assert not lower_bound_context_matches((27, 'context-old', 7), snapshot)
+    assert not lower_bound_context_matches((27, 'context-27', 6), snapshot)
+
+
+def test_cost_only_certificate_uses_matching_context_not_bound_receipt_age():
+    """A matching lower-bound snapshot is accepted independent of wall age."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._assignment_strategy = 'frontier_cost_only'
+    node._unqueried_cost_bounds = {
+        'robot1': (4.0 / 0.13,), 'robot2': (),
+    }
+    node._unqueried_cost_bound_provenance = {
+        'robot1': (1, 'r1-context', 7), 'robot2': (1, 'r2-context', 7),
+    }
+    node._unqueried_cost_bounds_received = {'robot1': 0.0, 'robot2': 0.0}
+    node._candidate_evidence = {
+        'robot1': CandidateEvidence(detected_not_queried=1),
+        'robot2': CandidateEvidence(),
+    }
+    node._candidate_lower_bound_metadata = {
+        'robot1': {
+            'fingerprint': 'r1-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 0,
+            'candidate_generation_id': 7, 'bound_entry_count': 1,
+            'detected_not_queried_count': 1, 'all_bounds_finite': True,
+            'bound_state': 'OK',
+        },
+        'robot2': {
+            'fingerprint': 'r2-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 0,
+            'candidate_generation_id': 7, 'bound_entry_count': 0,
+            'detected_not_queried_count': 0, 'all_bounds_finite': True,
+            'bound_state': 'OK',
+        },
+    }
+    node._weights = AssignmentWeights()
+    node._last_cost_only_certificate_key = None
+    node._emit_event = lambda *_args, **_kwargs: None
+    round_work = SimpleNamespace(
+        round_id='round',
+        mode='normal',
+        snapshots=(
+            TaskSnapshot('robot1', 's1', 1, 1, 'map', 0, 2.0, (), 'r1-context', 0, 7),
+            TaskSnapshot('robot2', 's2', 1, 1, 'map', 0, 2.0, (), 'r2-context', 0, 7),
+        ),
+    )
+    certified, blocking, _optimistic, reason = (
+        node._cost_only_dispatch_certificate(
+            round_work, decision, first, second,
+        )
+    )
+    assert not certified
+    assert blocking >= 1
+    assert reason == 'UNQUERIED_OPTION_CAN_BEAT_EVALUATED_ASSIGNMENT'
+
+
+def test_cost_only_certificate_blocks_context_mismatch_conservatively():
+    """A changed context cannot reuse an otherwise well-formed old bound."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._assignment_strategy = 'frontier_cost_only'
+    node._unqueried_cost_bounds = {'robot1': (200.0,), 'robot2': ()}
+    node._unqueried_cost_bound_provenance = {
+        'robot1': (1, 'old-context', 7), 'robot2': (1, 'r2-context', 7),
+    }
+    node._candidate_evidence = {
+        'robot1': CandidateEvidence(detected_not_queried=1),
+        'robot2': CandidateEvidence(),
+    }
+    node._candidate_lower_bound_metadata = {
+        'robot1': {
+            'fingerprint': 'old-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 0,
+            'candidate_generation_id': 7, 'bound_entry_count': 1,
+            'detected_not_queried_count': 1, 'all_bounds_finite': True,
+            'bound_state': 'OK',
+        },
+        'robot2': {
+            'fingerprint': 'r2-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 0,
+            'candidate_generation_id': 7, 'bound_entry_count': 0,
+            'detected_not_queried_count': 0, 'all_bounds_finite': True,
+            'bound_state': 'OK',
+        },
+    }
+    node._weights = AssignmentWeights()
+    node._last_cost_only_certificate_key = None
+    node._emit_event = lambda *_args, **_kwargs: None
+    round_work = SimpleNamespace(
+        round_id='round',
+        mode='normal',
+        snapshots=(
+            TaskSnapshot('robot1', 's1', 1, 1, 'map', 0, 2.0, (), 'new-context', 0, 7),
+            TaskSnapshot('robot2', 's2', 1, 1, 'map', 0, 2.0, (), 'r2-context', 0, 7),
+        ),
+    )
+    certified, blocking, optimistic, reason = (
+        node._cost_only_dispatch_certificate(
+            round_work, decision, first, second,
+        )
+    )
+    assert not certified
+    assert blocking == 0
+    assert optimistic == float('-inf')
+    assert reason == 'MISSING_UNQUERIED_LOWER_BOUNDS'
+
+
+def test_cost_only_certificate_requires_missing_bounds_conservatively():
+    """Missing genuinely required production evidence still blocks dispatch."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    certified, blocking, optimistic, reason = cost_only_dispatch_certificate(
+        decision, first, second, None, [], AssignmentWeights(),
+    )
+    assert not certified
+    assert blocking == 0
+    assert optimistic == float('-inf')
+    assert reason == 'MISSING_UNQUERIED_LOWER_BOUNDS'
+
+
+def _bound_diag_fixture(**overrides):
+    meta = {
+        'fingerprint': 'fp', 'map_revision': 7, 'costmap_revision': 9,
+        'source_session_id': None, 'source_epoch': None,
+        'generation_ros_ns': 100, 'bound_entry_count': 1,
+        'candidate_generation_id': 7,
+        'detected_not_queried_count': 1, 'all_bounds_finite': True,
+        'bound_state': 'OK',
+    }
+    meta.update(overrides)
+    snapshot = TaskSnapshot(
+        'robot1', 'session-1', 3, 7, 'map', 100, 2.0, (), 'fp', 9, 7,
+    )
+    return meta, snapshot
+
+
+def test_certificate_telemetry_classifies_missing_and_empty_summary():
+    meta, snapshot = _bound_diag_fixture(
+        bound_state='NO_CANDIDATE_BOUND_SUMMARY', bound_entry_count=0,
+        all_bounds_finite=False,
+    )
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, None, 1)
+    assert reason == 'NO_CANDIDATE_BOUND_SUMMARY'
+    reason, _ = classify_lower_bound_evidence(None, snapshot, None, 1)
+    assert reason == 'NO_CANDIDATE_BOUND_SUMMARY'
+    meta['bound_state'] = 'EMPTY_BOUND_SUMMARY'
+    meta['detected_not_queried_count'] = 0
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, None, 0)
+    assert reason == 'EMPTY_BOUND_SUMMARY'
+
+
+def test_certificate_telemetry_classifies_nonfinite_and_incomplete_bounds():
+    meta, snapshot = _bound_diag_fixture(
+        bound_state='NONFINITE_BOUND', all_bounds_finite=False,
+    )
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, (float('nan'),), 1)
+    assert reason == 'NONFINITE_BOUND'
+    meta['bound_state'] = 'INCOMPLETE_BOUND_SET'
+    meta['bound_entry_count'] = 0
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, None, 1)
+    assert reason == 'INCOMPLETE_BOUND_SET'
+
+
+def test_certificate_telemetry_classifies_provenance_mismatches():
+    meta, snapshot = _bound_diag_fixture(fingerprint='other')
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, (1.0,), 1)
+    assert reason == 'FINGERPRINT_MISMATCH'
+    meta, snapshot = _bound_diag_fixture(map_revision=8)
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, (1.0,), 1)
+    assert reason == 'MAP_REVISION_MISMATCH'
+    meta, snapshot = _bound_diag_fixture(costmap_revision=8)
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, (1.0,), 1)
+    assert reason == 'COSTMAP_REVISION_MISMATCH'
+    meta, snapshot = _bound_diag_fixture(source_session_id='other')
+    reason, _ = classify_lower_bound_evidence(meta, snapshot, (1.0,), 1)
+    assert reason == 'SESSION_EPOCH_MISMATCH'
+
+
+def test_certificate_telemetry_reports_matching_evidence_as_ok():
+    meta, snapshot = _bound_diag_fixture()
+    reason, comparison = classify_lower_bound_evidence(
+        meta, snapshot, (1.0,), 1,
+    )
+    assert reason == 'OK'
+    assert comparison['fingerprints_equal']
+    assert comparison['revisions_equal']
+    assert comparison['bound_set_complete']
+
+
+def test_one_busy_continuation_only_requires_free_robot_bounds():
+    """A busy commitment is represented by an empty bound set."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    certified, blocking, _optimistic, reason = cost_only_dispatch_certificate(
+        decision, first, second, [200.0], [], AssignmentWeights(),
+    )
+    assert certified
+    assert blocking == 0
+    assert reason == 'ALL_UNQUERIED_OPTIONS_DOMINATED'
+
+
+def _certificate_node_with_provenance(candidate_generation_id=7,
+                                      task_generation_id=7):
+    """Build a small ROS-free certificate fixture with two source records."""
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._assignment_strategy = 'frontier_cost_only'
+    node._unqueried_cost_bounds = {
+        'robot1': (4.0 / 0.13,), 'robot2': (),
+    }
+    node._unqueried_cost_bound_provenance = {
+        'robot1': (1, 'r1-context', candidate_generation_id),
+        'robot2': (1, 'r2-context', 7),
+    }
+    node._candidate_source_local_evidence = {
+        'robot1': CandidateEvidence(detected_not_queried=1),
+        'robot2': CandidateEvidence(),
+    }
+    node._candidate_evidence = dict(node._candidate_source_local_evidence)
+    node._candidate_lower_bound_metadata = {
+        'robot1': {
+            'fingerprint': 'r1-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 100,
+            'candidate_generation_id': candidate_generation_id,
+            'bound_entry_count': 1, 'detected_not_queried_count': 1,
+            'all_bounds_finite': True, 'bound_state': 'OK',
+        },
+        'robot2': {
+            'fingerprint': 'r2-context', 'map_revision': 1,
+            'costmap_revision': 0, 'source_session_id': None,
+            'source_epoch': None, 'generation_ros_ns': 100,
+            'candidate_generation_id': 7,
+            'bound_entry_count': 0, 'detected_not_queried_count': 0,
+            'all_bounds_finite': True, 'bound_state': 'OK',
+        },
+    }
+    node._weights = AssignmentWeights()
+    node._last_cost_only_certificate_key = None
+    node._emit_event = lambda *_args, **_kwargs: None
+    snapshots = (
+        TaskSnapshot('robot1', 's1', 1, 1, 'map', 0, 2.0, (), 'r1-context', 0,
+                     task_generation_id),
+        TaskSnapshot('robot2', 's2', 1, 1, 'map', 0, 2.0, (), 'r2-context', 0,
+                     7),
+    )
+    return node, decision, first, second, SimpleNamespace(
+        round_id='round', mode='normal', snapshots=snapshots,
+    )
+
+
+def test_source_local_certificate_does_not_use_merged_peer_count():
+    """R1's 76 bounds are checked against R1's 76 DNU items only."""
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._candidate_evidence = {
+        'robot1': CandidateEvidence(), 'robot2': CandidateEvidence(),
+    }
+    node._candidate_source_local_evidence = {
+        'robot1': CandidateEvidence(), 'robot2': CandidateEvidence(),
+    }
+    node._candidate_evidence_seen = set()
+    node._candidate_region_snapshots = {}
+    node._unqueried_cost_bounds = {'robot1': None, 'robot2': None}
+    node._unqueried_cost_bound_provenance = {}
+    node._unqueried_cost_bounds_received = {}
+    node._candidate_lower_bound_metadata = {}
+    node._terminal_small_frontier_length_m = 0.2
+    node._minimum_solo_visible_gain_m = 0.05
+
+    def message(robot, generation, count, fingerprint):
+        value = FrontierCandidateArray()
+        value.source_robot_id = robot
+        value.candidate_generation_id = generation
+        value.map_revision = 1
+        value.costmap_revision = 1
+        value.detected_frontier_count = count
+        value.detected_not_queried_count = count
+        value.unclassified_frontier_count = count
+        value.lower_bound_context_fingerprint = fingerprint
+        value.terminal_frontier_regions_json = json.dumps({
+            'regions': [
+                {'physical_id': index, 'status': 'DETECTED_NOT_QUERIED',
+                 'size_m': 0.6, 'visible_reveal_gain': 0.2,
+                 'optimistic_cost_lower_bound_s': 20.0}
+                for index in range(
+                    (0 if robot == 'robot1' else 1000),
+                    (0 if robot == 'robot1' else 1000) + count,
+                )
+            ],
+        })
+        return value
+
+    node._candidate_callback(message('robot1', 1, 76, 'r1'))
+    node._candidate_callback(message('robot2', 1, 39, 'r2'))
+    assert node._candidate_source_local_evidence['robot1'].detected_not_queried == 76
+    assert node._candidate_source_local_evidence['robot2'].detected_not_queried == 39
+    assert node._candidate_evidence['robot1'].detected_not_queried == 115
+    assert node._unqueried_cost_bounds['robot1'] == (20.0,) * 76
+    emitted = []
+    decision, first, second = _cost_only_certificate_fixture(16.0)
+    node._assignment_strategy = 'frontier_cost_only'
+    node._weights = AssignmentWeights()
+    node._last_cost_only_certificate_key = None
+    node._emit_event = lambda event_type, message, **_kwargs: emitted.append(
+        (event_type, json.loads(message)))
+    round_work = SimpleNamespace(
+        round_id='source-local-round', mode='normal', snapshots=(
+            TaskSnapshot('robot1', 's1', 1, 1, 'map', 0, 2.0, (), 'r1', 1, 1),
+            TaskSnapshot('robot2', 's2', 1, 1, 'map', 0, 2.0, (), 'r2', 1, 1),
+        ),
+    )
+    node._cost_only_dispatch_certificate(round_work, decision, first, second)
+    payload = emitted[-1][1]
+    comparison = payload['provenance_comparison']
+    assert comparison['robot1']['candidate']['bound_entry_count'] == 76
+    assert comparison['robot1']['candidate']['expected_bound_entry_count'] == 76
+    assert comparison['robot1']['bound_set_complete']
+    assert comparison['robot2']['candidate']['expected_bound_entry_count'] == 39
+    assert comparison['robot2']['bound_set_complete']
+
+
+def test_candidate_generation_mismatch_defers_then_matching_snapshot_rechecks():
+    """A newer candidate cannot be joined to an older task snapshot."""
+    node, decision, first, second, round_work = (
+        _certificate_node_with_provenance(candidate_generation_id=8,
+                                           task_generation_id=7)
+    )
+    emitted = []
+    node._emit_event = lambda event_type, message, **_kwargs: emitted.append(
+        (event_type, json.loads(message)))
+    certified, blocking, _optimistic, reason = node._cost_only_dispatch_certificate(
+        round_work, decision, first, second,
+    )
+    assert not certified
+    assert blocking == 0
+    assert reason == 'MISSING_UNQUERIED_LOWER_BOUNDS'
+    assert emitted[-1][1]['evidence_reason'] == (
+        'TASK_CANDIDATE_GENERATION_MISMATCH')
+    round_work.snapshots = (
+        replace(round_work.snapshots[0], candidate_generation_id=8),
+        round_work.snapshots[1],
+    )
+    certified, blocking, _optimistic, reason = node._cost_only_dispatch_certificate(
+        round_work, decision, first, second,
+    )
+    assert not certified
+    assert blocking >= 1
+    assert reason == 'UNQUERIED_OPTION_CAN_BEAT_EVALUATED_ASSIGNMENT'
+
+
+def test_missing_candidate_generation_id_blocks_conservatively():
+    meta, snapshot = _bound_diag_fixture(
+        candidate_generation_id=0,
+    )
+    snapshot = replace(snapshot, candidate_generation_id=0)
+    reason, comparison = classify_lower_bound_evidence(
+        meta, snapshot, (1.0,), 1,
+    )
+    assert reason == 'TASK_CANDIDATE_GENERATION_MISMATCH'
+    assert comparison['bound_set_complete']
+
+
+def test_adapter_copies_candidate_generation_id_unchanged():
+    """The adapter must not reconstruct or alter the source generation ID."""
+    from my_epuck_project.frontier_proposal_adapter import FrontierProposalAdapter
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    node = FrontierProposalAdapter.__new__(FrontierProposalAdapter)
+    node._robot_id = 'robot1'
+    node._stopped_after_handoff = False
+    node._epoch = 0
+    node._session_text = '11' * 16
+    from my_epuck_project.distributed_assignment.ros_conversion import text_to_uuid
+    node._session_uuid = text_to_uuid(node._session_text)
+    node._maximum_tasks = 5
+    node._validity_s = 8.0
+    node._signature_quantum_m = 0.05
+    node._publisher = Publisher()
+    node.get_logger = lambda: SimpleNamespace(info=lambda *_args: None)
+    message = FrontierCandidateArray()
+    message.source_robot_id = 'robot1'
+    message.candidate_generation_id = 42
+    node._on_candidates(message)
+    assert node._publisher.messages[0].candidate_generation_id == 42
+    from my_epuck_project.distributed_assignment.ros_conversion import snapshot_from_msg
+    snapshot = snapshot_from_msg(node._publisher.messages[0])
+    assert snapshot.candidate_generation_id == 42

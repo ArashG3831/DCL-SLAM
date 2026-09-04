@@ -15,6 +15,7 @@ from my_epuck_project.distributed_assignment.local_nav2 import (
     downsample_path,
     local_path_clearance,
     local_path_clear,
+    local_path_gate_threshold,
     occupancy_value,
     upstream_point_validation,
     path_length,
@@ -101,6 +102,46 @@ def test_local_path_clear_rejects_inflated_or_unknown_cells():
     assert not local_path_clear(
         grid, ((0.5, 0.5), (1.5, 1.5)), lambda point: point,
     )
+
+
+def test_mode_b_accepts_known_inflation_but_rejects_unknown_and_lethal():
+    """Mode B accepts Nav2 inflation costs but keeps unsafe cells blocked."""
+    grid = OccupancyGrid()
+    grid.info.resolution = 1.0
+    grid.info.width = 4
+    grid.info.height = 1
+    grid.data = [0, 99, 100, -1]
+    points = ((0.5, 0.5), (1.5, 0.5))
+
+    mode_a = local_path_clearance(grid, points, lambda point: point,
+                                  local_path_gate_threshold('MODE_A'))
+    mode_b = local_path_clearance(grid, points, lambda point: point,
+                                  local_path_gate_threshold('MODE_B'))
+    assert not mode_a.clear
+    assert mode_a.reason == 'BLOCKED_LOCAL_CELL'
+    assert mode_a.maximum_cost == 99
+    assert mode_a.first_blocked_point_index == 1
+    assert mode_b.clear
+    assert mode_b.maximum_cost == 99
+
+    lethal = local_path_clearance(
+        grid, points + ((2.5, 0.5),), lambda point: point,
+        local_path_gate_threshold('MODE_B'),
+    )
+    assert not lethal.clear
+    assert lethal.reason == 'BLOCKED_LOCAL_CELL'
+    assert lethal.first_blocked_point_index == 2
+    unknown_grid = OccupancyGrid()
+    unknown_grid.info.resolution = 1.0
+    unknown_grid.info.width = 2
+    unknown_grid.info.height = 1
+    unknown_grid.data = [0, -1]
+    unknown = local_path_clearance(
+        unknown_grid, points, lambda point: point,
+        local_path_gate_threshold('MODE_B'),
+    )
+    assert not unknown.clear
+    assert unknown.reason == 'UNKNOWN_LOCAL_CELL'
 
 
 def test_local_path_clear_ignores_blocked_start_anchor_but_checks_corridor():

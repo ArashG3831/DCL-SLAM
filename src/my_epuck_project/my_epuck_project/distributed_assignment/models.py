@@ -50,7 +50,7 @@ class PhysicalTask:
 
 @dataclass(frozen=True)
 class TaskSnapshot:
-    """Bounded task snapshot with ROS provenance and sender TTL."""
+    """Bounded task snapshot with ROS and lower-bound provenance."""
 
     source_robot_id: str
     source_session_id: str
@@ -60,6 +60,14 @@ class TaskSnapshot:
     generation_ros_ns: int
     validity_s: float
     tasks: Tuple[PhysicalTask, ...]
+    # Separate from sender TTL: unchanged snapshot evidence is not a
+    # heartbeat, while a context change invalidates old lower bounds.
+    lower_bound_context_fingerprint: str = ''
+    # Diagnostic provenance only; does not participate in allocation validity.
+    costmap_revision: int = 0
+    # Immutable source-local candidate-generation identity.  Zero means that
+    # the producer did not provide the required provenance.
+    candidate_generation_id: int = 0
 
 
 @dataclass(frozen=True)

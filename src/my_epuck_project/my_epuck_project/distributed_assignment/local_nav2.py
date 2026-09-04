@@ -138,6 +138,10 @@ class PathEvaluation:
     map_stamp_ns: int = 0
     costmap_stamp_ns: int = 0
     heading_cost: float = 0.0
+    # Diagnostic provenance only.  Nav2 returns the path frame in the action
+    # result; retaining it lets the final dispatch audit compare the planner
+    # path with the local-costmap transform without changing path semantics.
+    path_frame_id: str = ''
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,12 @@ class DispatchPreconditions:
     local_path_reason: str = ''
     local_path_inspected_points: int = 0
     local_path_outside_points: int = 0
+    local_path_gate_mode: str = 'MODE_A'
+    local_path_gate_threshold: int = 80
+    local_path_maximum_cost: Optional[int] = None
+    local_path_first_blocked_point_index: Optional[int] = None
+    local_path_first_blocked_point: Optional[Point] = None
+    local_path_first_blocked_local_point: Optional[Point] = None
 
     @property
     def ready(self) -> bool:
@@ -191,6 +201,33 @@ class NavigationOutcome:
     deepest_failure_classification: str = ''
     deepest_failure_timestamp_ros_ns: int = 0
     diagnostic_snapshot_json: str = ''
+
+
+# Controlled final-dispatch experiment modes. MODE_A is the historical
+# policy and remains the default. MODE_B uses Nav2 costmap semantics for the
+# local execution corridor: unknown cells remain unsafe, while known
+# inflation costs below the lethal/inscribed boundary remain traversable.
+LOCAL_PATH_GATE_MODE_A = 'MODE_A'
+LOCAL_PATH_GATE_MODE_B = 'MODE_B'
+LOCAL_PATH_GATE_MODES = frozenset({
+    LOCAL_PATH_GATE_MODE_A, LOCAL_PATH_GATE_MODE_B,
+})
+LOCAL_PATH_GATE_MODE_A_THRESHOLD = 80
+# The final gate reads nav_msgs/OccupancyGrid values, whose known cost range
+# is 0..100.  100 is the occupied/lethal boundary used by this stack.
+LOCAL_PATH_GATE_MODE_B_THRESHOLD = 100
+
+
+def local_path_gate_threshold(mode: str, lethal_threshold: int = 253) -> int:
+    """Return the selected local-path acceptance threshold."""
+    if mode == LOCAL_PATH_GATE_MODE_A:
+        return LOCAL_PATH_GATE_MODE_A_THRESHOLD
+    if mode == LOCAL_PATH_GATE_MODE_B:
+        # This path reads nav_msgs/OccupancyGrid, not raw uint8 costmap data:
+        # -1 is unknown, 0..99 is known free/inflation cost, and 100 is the
+        # occupied/lethal boundary used by the project’s costmap observer.
+        return LOCAL_PATH_GATE_MODE_B_THRESHOLD
+    raise ValueError('local_path_gate_mode must be MODE_A or MODE_B')
 
 
 UPSTREAM_POINT_BLOCK_THRESHOLD = 50
@@ -329,6 +366,16 @@ def path_length(points: tuple[Point, ...]) -> float:
     return sum(math.dist(first, second) for first, second in zip(points, points[1:]))
 
 
+def path_samples_digest(points: tuple[Point, ...]) -> str:
+    """Return a compact deterministic digest for planner/gate path identity."""
+    return hashlib.sha256(
+        json.dumps(
+            [[float(point[0]), float(point[1])] for point in points],
+            separators=(',', ':'),
+        ).encode('utf-8'),
+    ).hexdigest()[:20]
+
+
 def path_is_valid_finite(evaluation: PathEvaluation) -> bool:
     """Return whether a successful path is structurally safe to consume.
 
@@ -395,6 +442,11 @@ class LocalPathClearance:
     inspected_points: int
     outside_points: int
 
+    maximum_cost: Optional[int] = None
+    first_blocked_point_index: Optional[int] = None
+    first_blocked_path_point: Optional[Point] = None
+    first_blocked_local_point: Optional[Point] = None
+
 
 def local_path_clearance(
         grid: Optional[OccupancyGrid], points: tuple[Point, ...],
@@ -416,6 +468,7 @@ def local_path_clearance(
         return LocalPathClearance(False, 'NO_LOCAL_COSTMAP', 0, 0)
     inspected = 0
     outside = 0
+    maximum_cost = None
     for point_index, point in enumerate(points):
         local = transform_point(point)
         if local is None:
@@ -426,6 +479,10 @@ def local_path_clearance(
         if value is None:
             outside += 1
             break
+        maximum_cost = (
+            int(value) if maximum_cost is None else
+            max(int(maximum_cost), int(value))
+        )
         # Nav2's path normally starts at the robot pose.  The rolling local
         # costmap can mark that exact footprint cell as inflated/lethal even
         # while the immediately-following execution corridor is clear.  The
@@ -436,9 +493,15 @@ def local_path_clearance(
             continue
         if value < 0 or value >= blocked_threshold:
             reason = 'UNKNOWN_LOCAL_CELL' if value < 0 else 'BLOCKED_LOCAL_CELL'
-            return LocalPathClearance(False, reason, inspected + 1, outside)
+            return LocalPathClearance(
+                False, reason, inspected + 1, outside, maximum_cost,
+                point_index, (float(point[0]), float(point[1])),
+                (float(local[0]), float(local[1])),
+            )
         inspected += 1
-    return LocalPathClearance(True, 'CLEAR', inspected, outside)
+    return LocalPathClearance(
+        True, 'CLEAR', inspected, outside, maximum_cost,
+    )
 
 
 def local_path_clear(
@@ -485,6 +548,11 @@ class LocalNav2:
         self._costmap_lethal_threshold = int(
             node.declare_parameter('costmap_lethal_threshold', 253).value,
         )
+        self._local_path_gate_mode = str(node.declare_parameter(
+            'local_path_gate_mode', LOCAL_PATH_GATE_MODE_A).value).upper()
+        if self._local_path_gate_mode not in LOCAL_PATH_GATE_MODES:
+            raise ValueError(
+                'local_path_gate_mode must be MODE_A or MODE_B')
         namespace = node.get_namespace().strip('/') or 'root'
         self._path_query_lock_path = str(node.declare_parameter(
             'path_query_lock_path',
@@ -1109,6 +1177,9 @@ class LocalNav2:
             (pose.pose.position.x, pose.pose.position.y)
             for pose in result.path.poses
         ) if result is not None else ()
+        path_frame_id = (
+            '' if result is None else str(result.path.header.frame_id or '')
+        )
         valid = (
             wrapped.status == GoalStatus.STATUS_SUCCEEDED and result is not None and
             result.error_code == ComputePathToPose.Result.NONE and bool(points) and
@@ -1166,6 +1237,7 @@ class LocalNav2:
             caller=self._path_caller,
             task_signature=self._path_task_signature,
             heading_cost=heading_cost,
+            path_frame_id=path_frame_id,
         ))
 
     def _finish_path(self, result: PathEvaluation) -> None:
@@ -1184,10 +1256,13 @@ class LocalNav2:
             )
         self._node.get_logger().info(
             'COMPUTE_PATH_RESULT source=%s task=%s valid=%s error_code=%d '
-            'failure_class=%s duration_s=%.3f error=%r' % (
+            'failure_class=%s duration_s=%.3f path_frame=%s samples=%d '
+            'path_digest=%s error=%r' % (
                 result.caller, result.task_signature, result.valid,
                 result.error_code, result.failure_class.value,
-                result.duration_s, result.error_message,
+                result.duration_s, result.path_frame_id or self._global_frame,
+                len(result.samples), path_samples_digest(result.samples),
+                result.error_message,
             )
         )
         callback, self._path_callback = self._path_callback, None
@@ -1225,11 +1300,14 @@ class LocalNav2:
     def check_dispatch_preconditions(
             self, task: PhysicalTask, final_path_valid: bool,
             callback: Callable[[DispatchPreconditions], None],
-            path_samples: tuple[Point, ...] = ()) -> None:
+            path_samples: tuple[Point, ...] = (),
+            path_frame_id: str = '') -> None:
         """Asynchronously confirm local lifecycle plus map, costmap, and TF context."""
         self._ensure_navigate_client()
         self._ensure_lifecycle_clients()
-        base = self._basic_preconditions(task, final_path_valid, path_samples)
+        base = self._basic_preconditions(
+            task, final_path_valid, path_samples, path_frame_id,
+        )
         if base.reason:
             callback(base)
             return
@@ -1263,7 +1341,8 @@ class LocalNav2:
 
     def _basic_preconditions(
             self, task: PhysicalTask, final_path_valid: bool,
-            path_samples: tuple[Point, ...] = ()) -> DispatchPreconditions:
+            path_samples: tuple[Point, ...] = (),
+            path_frame_id: str = '') -> DispatchPreconditions:
         map_value = None if self._map is None else occupancy_value(self._map, task.approach)
         cost_value = (
             None if self._costmap is None else occupancy_value(self._costmap, task.approach)
@@ -1297,6 +1376,11 @@ class LocalNav2:
             reason = reason or 'goal lies outside current global costmap'
         elif cost_value < 0 or cost_value >= self._costmap_lethal_threshold:
             reason = reason or 'goal costmap cell is unknown or lethal'
+        gate_mode = getattr(
+            self, '_local_path_gate_mode', LOCAL_PATH_GATE_MODE_A)
+        gate_threshold = local_path_gate_threshold(
+            gate_mode, getattr(self, '_costmap_lethal_threshold', 253),
+        )
         local_path_evidence = local_path_clearance(
             self._local_costmap, path_samples,
             lambda point: (
@@ -1305,11 +1389,16 @@ class LocalNav2:
                     self._tf_buffer, self._local_costmap.header.frame_id,
                     self._global_frame, point) or (None, 0))[0]
             ),
-            blocked_threshold=80,
+            blocked_threshold=gate_threshold,
         )
         local_path_is_clear = local_path_evidence.clear
         if not local_path_is_clear:
             reason = reason or 'local path gate: ' + local_path_evidence.reason
+            if local_path_evidence.reason == 'BLOCKED_LOCAL_CELL':
+                self._log_blocked_local_path(
+                    task, path_samples, path_frame_id, local_path_evidence,
+                    blocked_threshold=gate_threshold,
+                )
         if self.local_goal_active:
             reason = reason or 'another local navigation goal is active'
         if not final_path_valid:
@@ -1332,6 +1421,155 @@ class LocalNav2:
             local_path_reason=local_path_evidence.reason,
             local_path_inspected_points=local_path_evidence.inspected_points,
             local_path_outside_points=local_path_evidence.outside_points,
+            local_path_gate_mode=gate_mode,
+            local_path_gate_threshold=gate_threshold,
+            local_path_maximum_cost=local_path_evidence.maximum_cost,
+            local_path_first_blocked_point_index=(
+                local_path_evidence.first_blocked_point_index),
+            local_path_first_blocked_point=(
+                local_path_evidence.first_blocked_path_point),
+            local_path_first_blocked_local_point=(
+                local_path_evidence.first_blocked_local_point),
+        )
+
+    def _log_blocked_local_path(
+            self, task: PhysicalTask, path_samples: tuple[Point, ...],
+            path_frame_id: str, evidence: LocalPathClearance,
+            blocked_threshold: int) -> None:
+        """Emit bounded point-level evidence for a local-path rejection.
+
+        This is intentionally rejection-only telemetry.  It repeats the
+        read-only transform/grid lookup used by ``local_path_clearance`` and
+        does not feed any value back into the dispatch decision.
+        """
+        now_ns = self._node.get_clock().now().nanoseconds
+        robot_pose = None
+        robot_yaw = None
+        robot_tf_stamp_ns = 0
+        robot_tf_error = ''
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._global_frame, self._base_frame, Time(),
+                timeout=Duration(seconds=0.0),
+            )
+            rotation = transform.transform.rotation
+            robot_yaw = math.atan2(
+                2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+                1.0 - 2.0 * (rotation.y ** 2 + rotation.z ** 2),
+            )
+            robot_pose = (
+                float(transform.transform.translation.x),
+                float(transform.transform.translation.y),
+            )
+            robot_tf_stamp_ns = _stamp_ns_static(transform.header.stamp)
+        except TransformException as error:
+            robot_tf_error = str(error)
+
+        local_grid = self._local_costmap
+        local_frame = '' if local_grid is None else str(local_grid.header.frame_id)
+        local_stamp_ns = self._grid_stamp(local_grid)
+        origin = None
+        if local_grid is not None:
+            origin = {
+                'x': float(local_grid.info.origin.position.x),
+                'y': float(local_grid.info.origin.position.y),
+                'yaw_rad': math.atan2(
+                    2.0 * (local_grid.info.origin.orientation.w *
+                            local_grid.info.origin.orientation.z),
+                    1.0 - 2.0 * (local_grid.info.origin.orientation.y ** 2 +
+                                  local_grid.info.origin.orientation.z ** 2),
+                ),
+            }
+
+        points = []
+        for point_index, point in enumerate(path_samples[:12]):
+            transformed = None if local_grid is None else _transform_point(
+                self._tf_buffer, local_frame, self._global_frame, point,
+            )
+            local_point = None if transformed is None else transformed[0]
+            local_tf_stamp_ns = 0 if transformed is None else int(transformed[1])
+            cell = None if local_grid is None or local_point is None else _grid_cell(
+                local_grid, local_point,
+            )
+            value = None if local_grid is None or local_point is None else occupancy_value(
+                local_grid, local_point,
+            )
+            point_record = {
+                'index': point_index,
+                'path_point': [float(point[0]), float(point[1])],
+                'path_frame': path_frame_id or self._global_frame,
+                'local_point': (
+                    None if local_point is None else
+                    [float(local_point[0]), float(local_point[1])]
+                ),
+                'local_frame': local_frame,
+                'local_cell': None if cell is None else [int(cell[0]), int(cell[1])],
+                'occupancy_cost': None if value is None else int(value),
+                'global_map_value': (
+                    None if self._map is None else occupancy_value(
+                        self._map, point,
+                    )
+                ),
+                'global_costmap_value': (
+                    None if self._costmap is None else occupancy_value(
+                        self._costmap, point,
+                    )
+                ),
+                'transform_stamp_ns': local_tf_stamp_ns,
+                'transform_age_s': self._age_s(local_tf_stamp_ns, now_ns),
+                'distance_from_robot_m': None,
+                'distance_from_goal_m': None,
+            }
+            effective_path_frame = path_frame_id or self._global_frame
+            if effective_path_frame == self._global_frame:
+                if robot_pose is not None:
+                    point_record['distance_from_robot_m'] = math.dist(
+                        (float(point[0]), float(point[1])), robot_pose,
+                    )
+                point_record['distance_from_goal_m'] = math.dist(
+                    (float(point[0]), float(point[1])), task.approach,
+                )
+            points.append(point_record)
+
+        payload = {
+            'schema_version': 'dispatch_local_path_gate.v1',
+            'sample_ros_ns': int(now_ns),
+            'robot': self._robot_id,
+            'task_physical_signature': task.physical_signature,
+            'task_canonical_id': getattr(task, 'canonical_id', ''),
+            'robot_pose': robot_pose,
+            'robot_pose_frame': self._global_frame,
+            'robot_yaw_rad': robot_yaw,
+            'robot_tf_stamp_ns': int(robot_tf_stamp_ns),
+            'robot_tf_age_s': self._age_s(robot_tf_stamp_ns, now_ns),
+            'robot_tf_error': robot_tf_error,
+            'goal_pose': [float(task.approach[0]), float(task.approach[1])],
+            'goal_yaw_rad': float(task.approach_yaw),
+            'goal_frame': self._global_frame,
+            'path_frame': path_frame_id or self._global_frame,
+            'path_frame_recorded': bool(path_frame_id),
+            'local_costmap_frame': local_frame,
+            'local_costmap_stamp_ns': int(local_stamp_ns),
+            'local_costmap_age_s': self._age_s(local_stamp_ns, now_ns),
+            'local_costmap_resolution_m': (
+                None if local_grid is None else float(local_grid.info.resolution)
+            ),
+            'local_costmap_size': (
+                None if local_grid is None else
+                [int(local_grid.info.width), int(local_grid.info.height)]
+            ),
+            'local_costmap_origin': origin,
+            'blocked_threshold': int(blocked_threshold),
+            'gate_reason': evidence.reason,
+            'gate_inspected_points': int(evidence.inspected_points),
+            'gate_outside_points': int(evidence.outside_points),
+            'path_sample_count': len(path_samples),
+            'path_digest': path_samples_digest(path_samples),
+            'first_path_points': points,
+        }
+        self._node.get_logger().warning(
+            'DISPATCH_LOCAL_PATH_GATE_DIAGNOSTIC %s' % json.dumps(
+                payload, sort_keys=True, separators=(',', ':')),
         )
 
     def send_navigation(

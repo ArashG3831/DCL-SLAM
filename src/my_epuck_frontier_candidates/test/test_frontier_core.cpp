@@ -24,6 +24,42 @@ TEST(StableId,SmallFrontierGrowthPreservesPhysicalIdentity){
   EXPECT_EQ(stable_frontier_id(first,map,.05),stable_frontier_id(grown,map,.05));
   EXPECT_NE(stable_frontier_id(first,map,.05),stable_frontier_id(separate,map,.05));
 }
+TEST(StableId,NearbyPhysicalRegionsDoNotCollide){
+  OccupancyGrid2d map(grid(800,800,.01,-5.0,0.0));
+  using Candidate = frontier_exploration_ros2::FrontierCandidate;
+  const auto first = Candidate(
+    {0.705, 3.525}, {0.705, 3.525}, {570, 352}, {570, 352},
+    {0.705, 3.525}, std::make_pair(0.705, 3.525), 20,
+    Candidate::CellBounds{569, 351, 575, 357});
+  const auto second = Candidate(
+    {0.765, 3.510}, {0.765, 3.510}, {576, 351}, {576, 351},
+    {0.765, 3.510}, std::make_pair(0.765, 3.510), 20,
+    Candidate::CellBounds{575, 350, 581, 355});
+  EXPECT_NE(stable_frontier_id(first, map, .05), stable_frontier_id(second, map, .05));
+
+  const auto third = Candidate(
+    {-3.600, 4.065}, {-3.600, 4.065}, {139, 406}, {139, 406},
+    {-3.600, 4.065}, std::make_pair(-3.600, 4.065), 20,
+    Candidate::CellBounds{138, 405, 144, 411});
+  const auto fourth = Candidate(
+    {-3.600, 4.125}, {-3.600, 4.125}, {139, 412}, {139, 412},
+    {-3.600, 4.125}, std::make_pair(-3.600, 4.125), 20,
+    Candidate::CellBounds{138, 411, 144, 417});
+  EXPECT_NE(stable_frontier_id(third, map, .05), stable_frontier_id(fourth, map, .05));
+}
+TEST(StableId,SmallBoundaryChangeKeepsPhysicalIdentity){
+  OccupancyGrid2d map(grid(800,800,.01,-5.0,0.0));
+  using Candidate = frontier_exploration_ros2::FrontierCandidate;
+  const auto before = Candidate(
+    {1.020, 2.040}, {1.000, 2.000}, {600, 200}, {600, 200},
+    {1.000, 2.000}, std::make_pair(1.000, 2.000), 20,
+    Candidate::CellBounds{598, 198, 608, 208});
+  const auto after = Candidate(
+    {1.045, 2.065}, {1.020, 2.020}, {600, 200}, {600, 200},
+    {1.020, 2.020}, std::make_pair(1.020, 2.020), 23,
+    Candidate::CellBounds{598, 198, 609, 208});
+  EXPECT_EQ(stable_frontier_id(before, map, .05), stable_frontier_id(after, map, .05));
+}
 TEST(Path,LengthAndValidation){nav_msgs::msg::Path p;geometry_msgs::msg::PoseStamped a,b,c;a.pose.position.x=0;b.pose.position.x=3;b.pose.position.y=4;c.pose.position.x=6;c.pose.position.y=8;p.poses={a,b,c};auto l=path_length(p,0,0,6,8,.01);ASSERT_TRUE(l);EXPECT_DOUBLE_EQ(*l,10);p.poses.clear();EXPECT_FALSE(path_length(p,0,0,0,0,.1));p.poses={a};EXPECT_TRUE(path_length(p,0,0,0,0,.1));EXPECT_FALSE(path_length(p,1,1,0,0,.1));p.poses={a,b};p.poses[1].pose.position.x=std::numeric_limits<double>::quiet_NaN();EXPECT_FALSE(path_length(p,0,0,0,0,.1));}
 TEST(Path,InitialHeadingUsesFirstMeaningfulSegment){
   nav_msgs::msg::Path p;
@@ -108,6 +144,14 @@ TEST(FairEvaluation, DeterministicTieBreakUsesCanonicalId){
   EXPECT_EQ(records[selected[0]].id, 10U);
   EXPECT_EQ(records[selected[1]].id, 20U);
 }
+TEST(FairEvaluation, LowerOptimisticCostPrecedesFairnessAge){
+  std::vector<FrontierEvaluationRecord> records{
+    {1, false, false, false, 99, 100, 200.0},
+    {2, true, false, false, 0, 200, 5.0}};
+  const auto selected = fair_frontier_query_order(records, 2, 1);
+  ASSERT_EQ(selected.size(), 1U);
+  EXPECT_EQ(records[selected[0]].id, 2U);
+}
 TEST(FairEvaluation, NeverQueriedAndInvalidatedWorkPrecedeStableCache){
   std::vector<FrontierEvaluationRecord> records{
     {30, false, false, false, 0, 30},
@@ -126,4 +170,76 @@ TEST(FairEvaluation, TransientPlannerFailureRemainsEligibleForRetry){
   const auto selected = fair_frontier_query_order(records, 2, 1);
   ASSERT_EQ(selected.size(), 1U);
   EXPECT_EQ(records[selected[0]].id, 42U);
+}
+
+TEST(FairEvaluation, Tier1ConsumesAllSlotsBeforeRefreshWork){
+  std::vector<FrontierEvaluationRecord> records{
+    {1, false, false, false, 0, 1, 50.0, true},
+    {2, false, false, false, 0, 2, 40.0, true},
+    {3, false, false, false, 0, 3, 30.0, true},
+    {4, false, false, false, 0, 4, 20.0, true},
+    {5, false, false, false, 0, 5, 10.0, true},
+    {6, false, true, false, 99, 6, 0.1, false},
+    {7, false, true, false, 98, 7, 0.2, false}};
+  const auto selected = fair_frontier_query_order(records, 8, 5);
+  ASSERT_EQ(selected.size(), 5U);
+  for (const auto index : selected) {EXPECT_TRUE(records[index].tier1_unqueried);}
+}
+TEST(FairEvaluation, DuplicateIdsConsumeOneTier1Slot){
+  std::vector<FrontierEvaluationRecord> records{
+    {42, true, false, false, 0, 1, 1.0, true},
+    {42, true, false, false, 0, 2, 2.0, true},
+    {7, true, false, false, 0, 3, 3.0, true}};
+  const auto selected = fair_frontier_query_order(records, 3, 2);
+  ASSERT_EQ(selected.size(), 2U);
+  EXPECT_EQ(records[selected[0]].id, 42U);
+  EXPECT_EQ(records[selected[1]].id, 7U);
+}
+
+TEST(FairEvaluation, ThreeTier1ItemsLeaveRemainingSlotsForRefresh){
+  std::vector<FrontierEvaluationRecord> records{
+    {1, false, false, false, 0, 1, 3.0, true},
+    {2, false, false, false, 0, 2, 2.0, true},
+    {3, false, false, false, 0, 3, 1.0, true},
+    {4, false, true, false, 100, 4, 0.1, false},
+    {5, false, true, false, 99, 5, 0.2, false},
+    {6, false, true, false, 98, 6, 0.3, false}};
+  const auto selected = fair_frontier_query_order(records, 8, 5);
+  ASSERT_EQ(selected.size(), 5U);
+  EXPECT_EQ(records[selected[0]].id, 3U);
+  EXPECT_EQ(records[selected[1]].id, 2U);
+  EXPECT_EQ(records[selected[2]].id, 1U);
+  EXPECT_FALSE(records[selected[3]].tier1_unqueried);
+  EXPECT_FALSE(records[selected[4]].tier1_unqueried);
+}
+
+TEST(FairEvaluation, Tier1OrderingUsesLowerBoundThenFairness){
+  std::vector<FrontierEvaluationRecord> records{
+    {30, false, false, false, 1, 30, 3.0, true},
+    {20, false, false, false, 9, 20, 1.0, true},
+    {10, false, false, false, 2, 10, 2.0, true}};
+  const auto selected = fair_frontier_query_order(records, 3, 3);
+  ASSERT_EQ(selected.size(), 3U);
+  EXPECT_EQ(records[selected[0]].id, 20U);
+  EXPECT_EQ(records[selected[1]].id, 10U);
+  EXPECT_EQ(records[selected[2]].id, 30U);
+}
+
+TEST(FairEvaluation, RefreshCannotJumpAheadOfNeverEvaluatedWork){
+  std::vector<FrontierEvaluationRecord> records{
+    {100, false, false, false, 0, 100, 0.1, false},
+    {200, false, false, false, 0, 200, 100.0, true}};
+  const auto selected = fair_frontier_query_order(records, 2, 1);
+  ASSERT_EQ(selected.size(), 1U);
+  EXPECT_EQ(records[selected[0]].id, 200U);
+}
+
+TEST(FairEvaluation, RefreshWorkProgressesWhenTier1Drains){
+  std::vector<FrontierEvaluationRecord> records{
+    {100, false, true, false, 1, 100, 8.0, false},
+    {200, false, true, false, 2, 200, 4.0, false}};
+  const auto selected = fair_frontier_query_order(records, 2, 2);
+  ASSERT_EQ(selected.size(), 2U);
+  EXPECT_EQ(records[selected[0]].id, 200U);
+  EXPECT_EQ(records[selected[1]].id, 100U);
 }

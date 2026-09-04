@@ -126,6 +126,9 @@ class FixedTaskSnapshotSource(Node):
             ('fixed:' + self._scenario).encode(),
         ).hexdigest()[:24]
         message.task_generation_stamp = message.header.stamp
+        # Fixed protocol fixtures use one immutable candidate-generation
+        # provenance value for their one snapshot.
+        message.candidate_generation_id = 1
         message.validity = seconds_to_duration(self._validity_s)
         message.tasks = alternate_hallway_tasks(self._robot_id, session_id, 1)
         for task in message.tasks:

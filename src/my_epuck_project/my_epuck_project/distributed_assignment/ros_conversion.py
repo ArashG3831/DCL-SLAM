@@ -119,10 +119,17 @@ def snapshot_from_msg(message: TaskSnapshotMsg) -> TaskSnapshot:
         source_session_id=uuid_to_text(message.source_session_id),
         epoch=message.source_snapshot_epoch,
         map_revision=message.source_map_revision,
+        costmap_revision=int(getattr(message, 'source_costmap_revision', 0)),
         map_fingerprint=message.source_map_fingerprint,
         generation_ros_ns=stamp.sec * 1_000_000_000 + stamp.nanosec,
         validity_s=duration_to_seconds(message.validity),
         tasks=tuple(task_from_msg(item) for item in message.tasks),
+        lower_bound_context_fingerprint=str(
+            getattr(message, 'lower_bound_context_fingerprint', '') or ''
+        ),
+        candidate_generation_id=int(
+            getattr(message, 'candidate_generation_id', 0) or 0
+        ),
     )
 
 

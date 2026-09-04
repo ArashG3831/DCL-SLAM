@@ -101,7 +101,10 @@ def test_first_actionable_pair_is_gated_by_shared_tf_and_logs_startup_milestones
     tick = source[source.index('    def _tick(self)'):
                   source.index('    def _traffic_for_decision')]
     tf_gate = tick.index('tf_ready, tf_age_s, tf_reason = self._nav2.shared_tf_status()')
-    decision_publish = tick.index('self._publish_decision(round_work, generation)')
+    # The call may pass optional diagnostic arguments after the required round
+    # and generation arguments; keep this source-order guard independent of
+    # those optional arguments.
+    decision_publish = tick.index('self._publish_decision')
     assert tf_gate < decision_publish
     assert "'SHARED_TF_READY'" in tick
     assert "'FIRST_VALID_TASK_SNAPSHOTS'" in tick

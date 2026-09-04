@@ -58,6 +58,8 @@ def _assignment_peer(robot):
             # Algorithm 1.  Nav2 path length remains a soft cost; it is never
             # used as an ordinary feasibility ceiling.
             'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+            'local_path_gate_mode': LaunchConfiguration(
+                'local_path_gate_mode'),
             'burgard_beta': LaunchConfiguration('burgard_beta'),
             'burgard_sensor_max_range_m': 11.98,
             'burgard_occupied_threshold': 50,
@@ -203,6 +205,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'assignment_strategy', default_value='frontier_mrtsp',
             choices=['frontier_cost_only', 'frontier_mrtsp']),
+        DeclareLaunchArgument(
+            'local_path_gate_mode', default_value='MODE_A',
+            choices=['MODE_A', 'MODE_B']),
         DeclareLaunchArgument('burgard_beta', default_value='1.0'),
         DeclareLaunchArgument(
             'cost_only_reference_linear_speed_mps', default_value='0.13'),

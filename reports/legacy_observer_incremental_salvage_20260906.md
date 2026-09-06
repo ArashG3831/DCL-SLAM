@@ -864,3 +864,22 @@ install_legacy_salvage_nav2_defer_20260907
 
 Installed-package focused tests passed: `84 passed in 27.19s`.  No Webots
 runtime was run.
+
+## Action/path live-calculation cleanup
+
+`6b86e80` removes the unused live path-length calculation in `plan()`.  The
+callback still marks and retains the received plan message for the legacy
+stream semantics, while `deferred_navigation.py` remains the sole producer of
+the normalized raw action/path plan lengths in
+`navigation_action_replay.json`.  A repository reference check found no
+consumer of `latest[r]['path_length']`; no output schema, action lifecycle,
+terminal classification, or robot behavior changed.
+
+Focused syntax/deferred-navigation/protocol/logger tests passed: `67 passed`.
+The affected packages rebuilt successfully in:
+
+```text
+install_legacy_salvage_plan_20260907
+```
+
+No Webots runtime was run for this checkpoint.

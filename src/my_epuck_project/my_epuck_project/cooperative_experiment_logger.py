@@ -238,6 +238,12 @@ class CooperativeExperimentLogger(Node):
             self.directory, self.robots, self.p['forensic_snapshot_interval_s'],
             scan_matching_enabled=scan_matching_enabled)
             if (forensic_enabled or self.local_map_capture) else None)
+        if self.forensic is not None:
+            # Preserve only the scalar distance state needed by live
+            # telemetry/cycle rows.  Full bins/revisit state is reconstructed
+            # from the authoritative forensic odometry at finalization.
+            from .experiment_metrics import LiveDistanceAccumulator
+            self.local_trajectory = LiveDistanceAccumulator()
         self.forensic_supervisor_enabled = bool(forensic_enabled or
                                                 self.contact_capture)
         self.forensic_sync_enabled = bool(self.forensic_supervisor_enabled)
@@ -2653,7 +2659,8 @@ class CooperativeExperimentLogger(Node):
         the existing live ``LocalTrajectory`` result authoritative until the
         two semantic summaries are equal on real artifacts.
         """
-        live = self.local_trajectory.summary()
+        live = (self.local_trajectory.summary()
+                if hasattr(self.local_trajectory, 'summary') else None)
         if self.forensic is None:
             return {
                 'live': live,
@@ -2690,6 +2697,13 @@ class CooperativeExperimentLogger(Node):
                 'equal': False,
                 'status': 'DEFERRED_REPLAY_FAILED',
                 'error': str(exc),
+            }
+        if live is None:
+            return {
+                'live': None,
+                'deferred': deferred,
+                'equal': None,
+                'status': 'DEFERRED_AUTHORITATIVE',
             }
         return {
             'live': live,
@@ -2861,7 +2875,14 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'odometry_trajectory_parity.json',
                 self._odometry_trajectory_parity)
-            if self._odometry_trajectory_parity.get('equal') is True:
+            parity_status = self._odometry_trajectory_parity.get('status')
+            if parity_status == 'DEFERRED_REPLAY_FAILED':
+                self.write_failures += 1
+                from .experiment_metrics import LocalTrajectory
+                self.local_trajectory = LocalTrajectory(
+                    self.p['trajectory_bin_size_m'],
+                    self.p['initial_overlap_exclusion_radius_m'])
+            elif parity_status in ('PARITY_PASS', 'DEFERRED_AUTHORITATIVE'):
                 self._odometry_trajectory_live = self.local_trajectory
                 self.local_trajectory = self._deferred_local_trajectory
             self._artifact_finalization=self.required_artifact_status(False)

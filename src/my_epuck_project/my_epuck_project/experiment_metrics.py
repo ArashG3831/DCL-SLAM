@@ -112,7 +112,7 @@ class CoverageAttribution:
 class TrajectoryOverlap:
     def __init__(self,bin_size=.05,exclusion_radius=.15): self.bin_size=bin_size; self.exclusion_radius=exclusion_radius; self.bins={}; self.starts={}; self.repeated_distance={}; self.total_distance={}; self.last={}
     def add(self,robot,x,y):
-        self.starts.setdefault(robot,(x,y)); previous=self.last.get(robot); distance=math.hypot(x-previous[0],y-previous[1]) if previous else 0.; cell=(math.floor(x/self.bin_size),math.floor(y/self.bin_size)); visited=self.bins.setdefault(robot,set())
+        self.starts.setdefault(robot,(x,y)); previous=self.last.get(robot); distance=planar_step_distance(previous, (x, y)); cell=(math.floor(x/self.bin_size),math.floor(y/self.bin_size)); visited=self.bins.setdefault(robot,set())
         if cell in visited: self.repeated_distance[robot]=self.repeated_distance.get(robot,0.)+distance
         self.total_distance[robot]=self.total_distance.get(robot,0.)+distance
         if all(math.hypot(x-sx,y-sy)>self.exclusion_radius for sx,sy in self.starts.values()): visited.add(cell)
@@ -134,7 +134,7 @@ class LocalTrajectory:
         x=float(x); y=float(y)
         self.samples[robot]=self.samples.get(robot,0)+1
         self.starts.setdefault(robot,(x,y)); previous=self.last.get(robot)
-        distance=math.hypot(x-previous[0],y-previous[1]) if previous else 0.
+        distance=planar_step_distance(previous, (x, y))
         cell=(math.floor(x/self.bin_size),math.floor(y/self.bin_size))
         visited=self.bins.setdefault(robot,set())
         if cell in visited:
@@ -155,6 +155,35 @@ class LocalTrajectory:
             'distance_travelled_m': dict(self.total_distance),
             'sample_count_by_robot': dict(self.samples),
         }
+
+
+def planar_step_distance(previous, current):
+    """Return the legacy planar step distance for two poses."""
+    if previous is None:
+        return 0.0
+    return math.hypot(current[0] - previous[0],
+                     current[1] - previous[1])
+
+
+class LiveDistanceAccumulator:
+    """Minimal live state retained for telemetry and cycle accounting.
+
+    Full bins/revisit state belongs to deferred ``LocalTrajectory`` replay.
+    This object preserves the legacy live consumers that need cumulative
+    distance before finalization without retaining a second full trajectory.
+    """
+
+    def __init__(self):
+        self.total_distance = {}
+        self.last = {}
+
+    def add(self, robot, x, y):
+        point = (float(x), float(y))
+        previous = self.last.get(robot)
+        self.total_distance[robot] = (
+            self.total_distance.get(robot, 0.0) +
+            planar_step_distance(previous, point))
+        self.last[robot] = point
 
 
 def replay_local_trajectory_csv(path, robot, bin_size=.05,

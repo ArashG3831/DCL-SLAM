@@ -5,6 +5,7 @@ import csv
 import pytest
 
 from my_epuck_project.experiment_metrics import (
+    LiveDistanceAccumulator,
     LocalTrajectory,
     replay_local_trajectory_csv,
 )
@@ -39,6 +40,17 @@ def test_deferred_local_trajectory_reuses_live_metric_semantics(tmp_path):
         path, 'robot1', bin_size=0.05, exclusion_radius=0.0)
 
     assert replayed.summary() == live.summary()
+
+
+def test_live_distance_accumulator_preserves_legacy_distance_scalar():
+    points = [(0.0, 0.0), (0.10, 0.0), (0.10, 0.10), (0.0, 0.0)]
+    full = LocalTrajectory(bin_size=0.05, exclusion_radius=0.0)
+    scalar = LiveDistanceAccumulator()
+    for x, y in points:
+        full.add('robot1', x, y)
+        scalar.add('robot1', x, y)
+
+    assert scalar.total_distance == full.total_distance
 
 
 def test_deferred_local_trajectory_fails_closed_for_missing_evidence(tmp_path):
@@ -81,3 +93,4 @@ def test_logger_finalization_helper_reports_live_deferred_parity(tmp_path):
     assert result['status'] == 'PARITY_PASS'
     assert result['equal'] is True
     assert result['live'] == result['deferred']
+    assert node._deferred_local_trajectory.summary() == result['deferred']

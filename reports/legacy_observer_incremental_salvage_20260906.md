@@ -147,3 +147,25 @@ PYTHONPATH=src/my_epuck_project:$PYTHONPATH python3 -m pytest -q \\
 The six authority-file hashes recorded before this checkpoint remain unchanged
 for all files except `experiment_metrics.py`, whose change is exactly this
 checkpoint. No Webots run or build was performed.
+
+## Raw-evidence boundary for the next family
+
+The next required source-first migration is lossless scientific rosbag capture
+for map/coverage and TF-dependent replay. The current worktree contains an
+uncommitted passive-bag implementation with an `include_scientific_raw` option,
+but that module is not tracked at `HEAD`; the corresponding logger startup and
+finalization wiring is also part of a 1,375-line pre-existing dirty diff in
+`cooperative_experiment_logger.py`. The salvage protocol requires that an
+accepted checkpoint contain only the isolated responsibility and directly
+required tests. Staging that wiring would therefore absorb unrelated
+pre-existing observer changes and would not be a safe isolated commit.
+
+The preserved artifact confirms the scientific consequence independently: the
+existing forensic map snapshots are sparse relative to the live coverage timer,
+and the raw TF CSV does not preserve the live `tf2` lookup fallback. The
+shared-trajectory/overlap replay was consequently rejected for exact parity.
+Coverage/map replay must not be switched until the lossless raw source is
+committed separately and its parity is proven.
+
+No source migration was accepted after `426b69b`; no raw-capture code remains
+uncommitted from this continuation attempt.

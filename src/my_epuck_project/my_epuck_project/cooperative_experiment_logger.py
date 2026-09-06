@@ -3858,6 +3858,47 @@ class CooperativeExperimentLogger(Node):
             'status': 'PARITY_PASS' if live == deferred else 'PARITY_FAIL',
         }
 
+    def _replay_shared_trajectory_for_parity(self):
+        """Compare complete rosbag tf2 replay with live overlap evidence."""
+        live = self.trajectory.summary()
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'live': live,
+                'deferred': None,
+                'equal': None,
+                'status': 'NO_SCIENTIFIC_RAW_BAG',
+            }
+        try:
+            from .deferred_tf_trajectory import (
+                replay_shared_trajectory_from_bag)
+            replay = replay_shared_trajectory_from_bag(
+                self.directory / 'passive_rosbag', self.robots,
+                self.p['global_frame'],
+                bin_size=self.p['trajectory_bin_size_m'],
+                exclusion_radius=self.p[
+                    'initial_overlap_exclusion_radius_m'])
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                'live': live,
+                'deferred': None,
+                'equal': False,
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        deferred = replay['summary']
+        return {
+            'live': live,
+            'deferred': deferred,
+            'equal': live == deferred,
+            'status': 'PARITY_PASS' if live == deferred else 'PARITY_FAIL',
+            'accepted_samples': replay['accepted_samples'],
+            'skipped_transform_samples': replay[
+                'skipped_transform_samples'],
+            'deserialized_messages': replay['deserialized_messages'],
+            'errors': replay['errors'],
+        }
+
     def summary(self,clean):
         elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
@@ -4021,9 +4062,14 @@ class CooperativeExperimentLogger(Node):
                             self.forensic.manifest())
         if self.passive_bag_enabled:
             self.finalize_passive_rosbag()
-        self.flush()
         successful=False
         try:
+            self._shared_trajectory_parity = (
+                self._replay_shared_trajectory_for_parity())
+            atomic_json(
+                self.directory / 'shared_trajectory_parity.json',
+                self._shared_trajectory_parity)
+            self.flush()
             # The scan-age artifact is observer-owned and must not depend on
             # a frontend summary that may be delayed by ROS shutdown.  Emit it
             # first so a missing/late frontend file can never erase the

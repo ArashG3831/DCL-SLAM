@@ -753,3 +753,26 @@ consumers of the legacy callback.  No robot, allocator, certificate, Nav2,
 sampling, or protocol behavior changed.  The focused deferred-protocol and
 logger tests passed: `64` tests.  No runtime validation was run for this
 checkpoint.
+
+## Action/path replay checkpoint
+
+`288357c` adds `deferred_navigation.py`, a bounded replay over the existing
+native action/path streams.  It preserves bag order while normalizing status
+transitions with the same per-goal duplicate suppression as the legacy
+`action_status()` callback, computes planner-path length from finite path
+poses, and records only recovery transitions from NavigateToPose feedback
+rather than retaining full deserialized messages.  Missing or mistyped
+navigation-status streams are reported as incomplete.
+
+Finalization writes `navigation_action_replay.json` for raw-enabled runs and
+Condition C requires that artifact through the existing fail-closed artifact
+contract.  The existing claim/distributed-event lifecycle remains the
+authority for the legacy navigation summary; this replay artifact supplies
+the previously missing raw action/path evidence and does not change dispatch,
+terminal classification, or Nav2 behavior.
+
+The replay was run offline against the preserved complete-evidence bag from
+`legacy_salvage_action_raw_20260906`: `7,377` messages deserialized,
+`248` planner paths, `23` recovery transitions, and complete per-robot
+NavigateToPose status streams.  Focused replay, protocol, and logger tests
+passed: `66` tests.  No Webots runtime was run for this checkpoint.

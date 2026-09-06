@@ -662,6 +662,8 @@ def launch_setup(context):
                 'diagnostic_frontier_capture'),
             'enable_contact_capture': LaunchConfiguration(
                 'enable_contact_capture'),
+            'enable_scientific_raw_capture': LaunchConfiguration(
+                'enable_scientific_raw_capture'),
             'contact_sampling_period_ms': LaunchConfiguration(
                 'contact_sampling_period_ms'),
             'forensic_snapshot_interval_s': LaunchConfiguration(
@@ -842,6 +844,9 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('enable_contact_capture', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument(
+            'enable_scientific_raw_capture', default_value='false',
+            choices=['true', 'false']),
         DeclareLaunchArgument('contact_sampling_period_ms', default_value='20'),
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),

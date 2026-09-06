@@ -273,6 +273,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         '--enable-forensic-capture', type=boolean, default=False,
         help='Enable passive Webots Supervisor/map forensic capture.')
+    result.add_argument(
+        '--enable-scientific-raw-capture', type=boolean, default=False,
+        help='Enable native lossless scientific rosbag capture for legacy C.')
     result.add_argument('--fusion-process-nice', type=int, default=0)
     result.add_argument('--slam-tf-publish-probe-library', default='')
     result.add_argument('--slam-tf-publish-probe-log', default='')
@@ -584,6 +587,7 @@ def launch_command(
         'controller_variant:=rpp',
         f'enable_observer:={str(args.enable_observer).lower()}',
         f'enable_forensic_capture:={str(args.enable_forensic_capture).lower()}',
+        f'enable_scientific_raw_capture:={str(getattr(args, "enable_scientific_raw_capture", False)).lower()}',
         # The runner owns the RViz process, while the launch graph owns the
         # passive map/path/handoff bridge. Start the bridge at simulation
         # launch so it cannot miss the volatile accepted-handoff message.

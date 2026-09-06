@@ -48,7 +48,7 @@ def scientific_raw_topics(robots):
     # offloaded sensor set is intentionally not copied into thin mode: the
     # three scan variants and joint states are duplicate diagnostic streams,
     # while thesis replay uses odom/commands/maps/TF plus GT/contact.
-    topics = ['/clock', '/tf', '/tf_static',
+    topics = ['/clock', '/tf', '/tf_static', '/rosout',
               '/cslam/unknown_pose/start_release']
     for robot in robots:
         prefix = f'/{robot}'

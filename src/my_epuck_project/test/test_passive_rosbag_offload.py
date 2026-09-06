@@ -67,7 +67,7 @@ def test_thin_recorder_topic_command_contains_custom_raw_contract(tmp_path):
     assert '/robot2/joint_states' not in command
     assert '/robot1/plan' in command
     assert '/robot1/navigate_to_pose/_action/feedback' in command
-    assert '/rosout' not in command
+    assert '/rosout' in command
 
 
 def test_scientific_raw_recording_includes_action_path_evidence():

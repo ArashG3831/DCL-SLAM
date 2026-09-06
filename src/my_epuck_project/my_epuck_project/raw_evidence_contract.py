@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Iterable
 
 
-SCHEMA_VERSION = "thin_raw_evidence_contract_1.3"
+SCHEMA_VERSION = "thin_raw_evidence_contract_1.4"
 
 
 def _topic(specs, topic, message_type, semantic, required=False,
@@ -35,6 +35,8 @@ def topic_spec(robots: Iterable[str] = ("robot1", "robot2")) -> dict:
            required=True)
     _topic(specs, "/tf_static", "tf2_msgs/msg/TFMessage", "static_tf",
            required=True)
+    _topic(specs, "/rosout", "rcl_interfaces/msg/Log", "rosout",
+           expected_presence="if_published")
     _topic(specs, "/cslam/unknown_pose/start_release", "std_msgs/msg/String",
            "common_start_release", required=True,
            expected_presence="before_exploration")

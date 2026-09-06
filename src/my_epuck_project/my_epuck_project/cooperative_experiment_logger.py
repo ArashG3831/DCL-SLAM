@@ -433,8 +433,12 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.rosout_receipt_file=None; self._rosout_receipt_sequence=0; self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
         if bool(self.p.get('enable_scientific_raw_capture', False)):
+            self.rosout_receipt_file=open(
+                self.directory / 'rosout_receipts.jsonl', 'a',
+                encoding='utf-8', buffering=1)
+            self.files.append(self.rosout_receipt_file)
             self.map_receipt_file=open(
                 self.directory / 'map_receipts.jsonl', 'a', encoding='utf-8',
                 buffering=1)
@@ -3100,6 +3104,31 @@ class CooperativeExperimentLogger(Node):
     def rosout(self,msg):
         if msg.name.lstrip('/')=='cooperative_experiment_logger':return
         self._capture_frontier_query_rosout(msg)
+        if self.rosout_receipt_file is not None:
+            receipt_sec, receipt_nanosec = self.ros_now()
+            row = {
+                'schema_version': SCHEMA,
+                'run_id': self.run_id,
+                'receipt_sequence': self._rosout_receipt_sequence,
+                'wall_time_utc': utc_now(),
+                'ros_time_sec': receipt_sec,
+                'ros_time_nanosec': receipt_nanosec,
+                'elapsed_s': self.ros_seconds() - self.start_ros,
+                'wall_elapsed_s': time.monotonic() - self.start,
+                'source_stamp_sec': int(msg.stamp.sec),
+                'source_stamp_nanosec': int(msg.stamp.nanosec),
+                'level': int(msg.level),
+                'name': str(msg.name),
+                'message': str(msg.msg),
+            }
+            self._rosout_receipt_sequence += 1
+            try:
+                with self._io_lock:
+                    self.rosout_receipt_file.write(
+                        json.dumps(finite(row), separators=(',', ':')) + '\n')
+            except (OSError, TypeError, ValueError) as exc:
+                self.write_failures += 1
+                self.record_internal_error('rosout_receipt', exc)
         text=msg.name+' '+msg.msg
         lower=text.lower()
         diagnostic_rules=(
@@ -3441,6 +3470,7 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'coverage_replay_parity.json',
                 self.directory / 'pair_decision_replay_parity.json',
                 self.directory / 'agreement_replay_parity.json',
+                self.directory / 'rosout_receipts.jsonl',
             ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])

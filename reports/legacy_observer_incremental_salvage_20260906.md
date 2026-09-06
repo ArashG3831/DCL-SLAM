@@ -495,3 +495,51 @@ family was migrated in this continuation. Those remain explicitly open rather
 than being represented as completed. The next salvage family would therefore
 require a new isolated raw/parity checkpoint; this task is intentionally stopped
 at the successful coverage checkpoint.
+
+## Protocol raw-export and pair-decision continuation
+
+The next protocol checkpoint exposed a contract bug rather than a scientific
+parity failure. `dae3528` had correctly recorded optional C protocol streams,
+but the scientific export path treated every selected `if_published` stream as
+mandatory. A valid run with zero messages on an optional exploration-status/event
+topic was therefore marked incomplete. `0b7165f` changed only the export-set
+resolution: the strict `required_nonempty_topics()` set is now used for the
+required export contract, while optional streams remain selected and reported
+without being promoted to missing evidence. The focused passive tests passed
+(`17`), and the change was committed separately.
+
+The repaired clean canonical C validation was:
+
+```text
+results/legacy_salvage_protocol_exportfix_20260906/
+  fast_trial_20260906T192547Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.62 s` simulated time, with artifact
+finalization `COMPLETE`, no missing artifacts, complete native raw-bag export,
+`44` pair-decision messages replayed, and pair-decision replay parity passing.
+The fixed-horizon run was intentionally `MISSION_NOT_TERMINATED` in its compact
+mission result; that is expected for a 120-second validation horizon and is not
+a full mission-completion claim.
+
+`1d3c133` then switched the pair-decision summary authority: finalization keeps
+the live/deferred parity artifact, but `summary.json` uses replayed outcomes only
+after `PARITY_PASS` (or an explicitly authoritative deferred result), with live
+fallback on replay failure or raw capture being disabled. Focused protocol,
+passive, and logger tests passed (`49`), plus syntax and diff checks.
+
+`548be61` added the next isolated protocol subfamily, agreement-counter replay.
+It replays `/robot*/distributed_event` from the existing native bag and checks
+the exact legacy semantics for `DECISION_AGREED` publications, unique rounds,
+and unique decision hashes. The logger now emits
+`agreement_replay_parity.json` and switches those three summary counters to the
+deferred values only after parity. The preserved complete-evidence raw bag was
+replayed offline: `81` distributed-event messages were deserialized and the
+legacy summary matched exactly (`0` publications, `0` unique rounds, `0` unique
+decisions). Focused protocol/passive/logger tests passed (`72`), and the source
+was rebuilt in `install_legacy_salvage_protocol_20260906`.
+
+The agreement checkpoint has not yet been given a new Webots runtime run; the
+next validation must confirm the new parity artifact is included in the final
+artifact contract. No claim is made here that the runtime finalization contract
+has already been exercised with this latest commit.

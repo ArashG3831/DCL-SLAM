@@ -201,7 +201,8 @@ def replay_warning_records_from_receipts(receipt_path: Path):
                 level = int(row['level'])
                 name = str(row['name'])
                 message = str(row['message'])
-                wall_time = str(row['wall_time_utc'])
+                wall_time = str(row.get(
+                    'warning_wall_time_utc', row['wall_time_utc']))
             except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
                 raise ValueError(
                     f'invalid rosout receipt at line {line_number}: {exc}') from exc
@@ -218,6 +219,7 @@ def replay_warning_records_from_receipts(receipt_path: Path):
         'receipt_count': receipt_count,
         'warning_receipt_count': warning_receipt_count,
         'records': records,
+        'authority_ready': True,
     }
 
 
@@ -254,12 +256,33 @@ def replay_nav2_diagnostics_from_receipts(receipt_path: Path):
                 continue
             previous[key] = now
             records.append({
-                'node': name,
+                'schema_version': row.get('schema_version', '1.1.0'),
+                'run_id': row.get('run_id', ''),
+                'event_sequence': row.get('diagnostic_event_sequence'),
+                'wall_time_utc': row.get(
+                    'diagnostic_wall_time_utc', row.get('wall_time_utc')),
+                'ros_time_sec': row.get(
+                    'diagnostic_ros_time_sec', source_sec),
+                'ros_time_nanosec': row.get(
+                    'diagnostic_ros_time_nanosec', source_nanosec),
+                'elapsed_s': row.get('diagnostic_elapsed_s', now),
+                'wall_elapsed_s': row.get(
+                    'diagnostic_wall_elapsed_s', row.get('wall_elapsed_s')),
+                'robot_id': None,
+                'source': f'/rosout:{name}',
                 'severity': 'ERROR' if level >= 40 else (
                     'WARN' if level >= 30 else 'INFO'),
                 'category': category,
                 'message': message,
+                'node': name,
                 'source_stamp_sec': source_sec,
                 'source_stamp_nanosec': source_nanosec,
             })
-    return {'receipt_count': receipt_count, 'records': records}
+    return {
+        'receipt_count': receipt_count,
+        'records': records,
+        'authority_ready': all(
+            record.get('event_sequence') is not None
+            and record.get('wall_elapsed_s') is not None
+            for record in records),
+    }

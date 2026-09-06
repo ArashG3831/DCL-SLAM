@@ -186,3 +186,46 @@ def test_nav2_diagnostic_replay_preserves_rate_limit_and_category(tmp_path):
     assert replay['receipt_count'] == 3
     assert len(replay['records']) == 2
     assert replay['records'][0]['category'] == 'MISSED_RATE_WARNING'
+
+
+def test_nav2_diagnostic_replay_preserves_final_artifact_fields(tmp_path):
+    receipts = tmp_path / 'rosout_receipts.jsonl'
+    receipts.write_text(json.dumps({
+        'schema_version': '1.1.0',
+        'run_id': 'run-1',
+        'receipt_sequence': 7,
+        'wall_time_utc': 'receipt-time',
+        'wall_elapsed_s': 1.1,
+        'level': 40,
+        'name': 'planner_server',
+        'message': 'planner failure',
+        'elapsed_s': 12.5,
+        'source_stamp_sec': 12,
+        'source_stamp_nanosec': 50,
+        'diagnostic_event_sequence': 19,
+        'diagnostic_wall_time_utc': 'diagnostic-time',
+        'diagnostic_ros_time_sec': 12,
+        'diagnostic_ros_time_nanosec': 50,
+        'diagnostic_elapsed_s': 12.6,
+        'diagnostic_wall_elapsed_s': 1.2,
+    }) + '\n', encoding='utf-8')
+    replay = replay_module.replay_nav2_diagnostics_from_receipts(receipts)
+    assert replay['authority_ready'] is True
+    assert replay['records'] == [{
+        'schema_version': '1.1.0',
+        'run_id': 'run-1',
+        'event_sequence': 19,
+        'wall_time_utc': 'diagnostic-time',
+        'ros_time_sec': 12,
+        'ros_time_nanosec': 50,
+        'elapsed_s': 12.6,
+        'wall_elapsed_s': 1.2,
+        'robot_id': None,
+        'source': '/rosout:planner_server',
+        'severity': 'ERROR',
+        'category': 'CONTROLLER_OR_PLANNER_ERROR',
+        'message': 'planner failure',
+        'node': 'planner_server',
+        'source_stamp_sec': 12,
+        'source_stamp_nanosec': 50,
+    }]

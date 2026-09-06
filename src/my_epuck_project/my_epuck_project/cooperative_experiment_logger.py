@@ -433,7 +433,7 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.rosout_receipt_file=None; self._rosout_receipt_sequence=0; self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.rosout_receipt_file=None; self._rosout_receipt_sequence=0; self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self._deferred_warning_records=None; self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
         if bool(self.p.get('enable_scientific_raw_capture', False)):
             self.rosout_receipt_file=open(
                 self.directory / 'rosout_receipts.jsonl', 'a',
@@ -3101,12 +3101,31 @@ class CooperativeExperimentLogger(Node):
               'FRONTIER_QUERY_RESULT_PENDING' not in text):
             self._query_capture_result(robot, message)
 
+    def _write_rosout_receipt(self, row, diagnostic=None,
+                              warning_wall_time=None):
+        if row is None or self.rosout_receipt_file is None:
+            return
+        if warning_wall_time is not None:
+            row['warning_wall_time_utc'] = warning_wall_time
+        if diagnostic is not None:
+            for key in ('event_sequence', 'wall_time_utc', 'ros_time_sec',
+                        'ros_time_nanosec', 'elapsed_s', 'wall_elapsed_s'):
+                row[f'diagnostic_{key}'] = diagnostic.get(key)
+        try:
+            with self._io_lock:
+                self.rosout_receipt_file.write(
+                    json.dumps(finite(row), separators=(',', ':')) + '\n')
+        except (OSError, TypeError, ValueError) as exc:
+            self.write_failures += 1
+            self.record_internal_error('rosout_receipt', exc)
+
     def rosout(self,msg):
         if msg.name.lstrip('/')=='cooperative_experiment_logger':return
         self._capture_frontier_query_rosout(msg)
+        receipt_row = None
         if self.rosout_receipt_file is not None:
             receipt_sec, receipt_nanosec = self.ros_now()
-            row = {
+            receipt_row = {
                 'schema_version': SCHEMA,
                 'run_id': self.run_id,
                 'receipt_sequence': self._rosout_receipt_sequence,
@@ -3122,16 +3141,10 @@ class CooperativeExperimentLogger(Node):
                 'message': str(msg.msg),
             }
             self._rosout_receipt_sequence += 1
-            try:
-                with self._io_lock:
-                    self.rosout_receipt_file.write(
-                        json.dumps(finite(row), separators=(',', ':')) + '\n')
-            except (OSError, TypeError, ValueError) as exc:
-                self.write_failures += 1
-                self.record_internal_error('rosout_receipt', exc)
         text=msg.name+' '+msg.msg
         lower=text.lower()
         diagnostic_category=rosout_diagnostic_category(text)
+        diagnostic_record = None
         if 'COMPUTE_PATH_REUSED' in msg.msg:
             source_match = re.search(r'source=([A-Z0-9_]+)', msg.msg)
             source = source_match.group(1) if source_match else 'UNKNOWN'
@@ -3158,16 +3171,22 @@ class CooperativeExperimentLogger(Node):
             source_stamp=(msg.stamp.sec,msg.stamp.nanosec)
             row=self.common('/rosout:'+msg.name,source_stamp=source_stamp)
             row.update(severity='ERROR' if msg.level>=Log.ERROR else ('WARN' if msg.level>=Log.WARN else 'INFO'),category=diagnostic_category,message=msg.msg,node=msg.name)
+            diagnostic_record = row
             key=(msg.name,diagnostic_category,msg.msg); previous=self._diagnostic_last.get(key); now=row['elapsed_s']
             if (previous is None or now-previous>=0.25) and self.nav2_diagnostic_count<10000:
                 self._diagnostic_last[key]=now; self.nav2_diagnostic_count+=1
                 try:
                     with self._io_lock:self.nav2_diagnostics.write(json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n')
                 except (OSError,TypeError,ValueError) as exc:self.write_failures+=1; self.get_logger().error(f'Nav2 diagnostic write failed: {exc}',throttle_duration_sec=10.)
-        if msg.level<Log.WARN:return
+        if msg.level<Log.WARN:
+            self._write_rosout_receipt(receipt_row, diagnostic_record)
+            return
         severity='ERROR' if msg.level>=Log.ERROR else 'WARN'; category=warning_category(text)
-        with self._state_lock:record,new=self.warns.add(msg.name,severity,msg.msg,utc_now(),category)
+        warning_wall_time = utc_now()
+        with self._state_lock:record,new=self.warns.add(msg.name,severity,msg.msg,warning_wall_time,category)
         if new:self.event(category,msg.msg,source='/rosout:'+msg.name,severity=severity,source_stamp=(msg.stamp.sec,msg.stamp.nanosec),occurrence_count=1)
+        self._write_rosout_receipt(
+            receipt_row, diagnostic_record, warning_wall_time)
     def row_time(self):
         sec,nsec=self.ros_now()
         with self._state_lock:self.sequence+=1; sequence=self.sequence
@@ -4267,6 +4286,7 @@ class CooperativeExperimentLogger(Node):
             'equal': equal,
             'live': live_semantics,
             'deferred': deferred_semantics,
+            'deferred_records': deferred['records'],
             'receipt_count': deferred['receipt_count'],
             'warning_receipt_count': deferred['warning_receipt_count'],
             'timestamp_comparison': 'semantic_only',
@@ -4298,8 +4318,10 @@ class CooperativeExperimentLogger(Node):
                 'equal': equal,
                 'live': live_semantics,
                 'deferred': deferred_semantics,
+                'deferred_records': deferred['records'],
                 'receipt_count': deferred['receipt_count'],
                 'diagnostic_record_count': len(deferred['records']),
+                'authority_ready': deferred['authority_ready'],
                 'timestamp_comparison': 'semantic_only',
             }
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
@@ -4308,6 +4330,24 @@ class CooperativeExperimentLogger(Node):
                 'equal': False,
                 'error': f'{type(exc).__name__}:{exc}',
             }
+
+    def _write_replayed_jsonl(self, path, records, handle=None):
+        """Write a final artifact from replayed records after closing its live handle."""
+        if handle is not None:
+            with self._io_lock:
+                try:
+                    handle.flush()
+                finally:
+                    handle.close()
+                try:
+                    self.files.remove(handle)
+                except ValueError:
+                    pass
+        with path.open('w', encoding='utf-8') as stream:
+            for record in records:
+                stream.write(json.dumps(
+                    finite(record), separators=(',', ':'),
+                    allow_nan=False) + '\n')
 
     def _write_deferred_coverage_csv(self, replay):
         """Materialize the legacy coverage schema from deferred rows."""
@@ -4353,7 +4393,11 @@ class CooperativeExperimentLogger(Node):
         shared_motion=getattr(
             self, '_deferred_shared_trajectory_summary',
             self.trajectory.summary())
-        records=list(self.warns.records.values()); rss=0
+        records = (
+            list(self._deferred_warning_records)
+            if self._deferred_warning_records is not None else
+            list(self.warns.records.values()))
+        rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
         except OSError:pass
         cpu=sorted(self._cpu_samples); rss_values=self._rss_samples or [rss]
@@ -4544,6 +4588,9 @@ class CooperativeExperimentLogger(Node):
                     'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
                 self.write_failures += 1
                 self._warning_replay_failed = True
+            elif self._warning_parity.get('status') == 'PARITY_PASS':
+                self._deferred_warning_records = list(
+                    self._warning_parity.get('deferred_records', ()))
             self._nav2_diagnostic_parity = (
                 self._replay_nav2_diagnostics_for_parity())
             atomic_json(
@@ -4553,6 +4600,14 @@ class CooperativeExperimentLogger(Node):
                     'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
                 self.write_failures += 1
                 self._nav2_diagnostic_replay_failed = True
+            elif (self._nav2_diagnostic_parity.get('status') == 'PARITY_PASS'
+                  and self._nav2_diagnostic_parity.get('authority_ready',
+                                                        False)):
+                self._write_replayed_jsonl(
+                    self.directory / 'nav2_diagnostics.jsonl',
+                    self._nav2_diagnostic_parity.get('deferred_records', ()),
+                    handle=self.nav2_diagnostics)
+                self.nav2_diagnostics = None
             if self._agreement_parity.get('status') in (
                     'PARITY_PASS', 'DEFERRED_AUTHORITATIVE'):
                 deferred_agreement = self._agreement_parity.get('deferred', {})
@@ -4630,7 +4685,11 @@ class CooperativeExperimentLogger(Node):
                 self.local_trajectory = self._deferred_local_trajectory
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
-            with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]
+            with self._state_lock:
+                warning_records = (
+                    list(self._deferred_warning_records)
+                    if self._deferred_warning_records is not None else
+                    [asdict(r) for r in self.warns.records.values()])
             with open(self.directory/'warnings.jsonl','w',encoding='utf-8') as f:
                 for record in warning_records:f.write(json.dumps(finite(record),allow_nan=False)+'\n')
             atomic_json(self.directory/'summary.json',self.summary(clean)); self.write_mission_result(clean)

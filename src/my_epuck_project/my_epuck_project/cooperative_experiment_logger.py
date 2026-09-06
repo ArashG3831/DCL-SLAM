@@ -3417,7 +3417,10 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'passive_rosbag_qos_overrides.yaml',
             ])
         if bool(self.p.get('enable_scientific_raw_capture', False)):
-            required.append(self.directory / 'map_receipts.jsonl')
+            required.extend([
+                self.directory / 'map_receipts.jsonl',
+                self.directory / 'coverage_replay_parity.json',
+            ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
         if self.scan_matching_enabled:
@@ -3964,6 +3967,84 @@ class CooperativeExperimentLogger(Node):
             },
         }
 
+    def _replay_coverage_for_parity(self):
+        """Compare raw-map replay against the legacy coverage CSV semantics."""
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'status': 'NO_SCIENTIFIC_RAW_BAG',
+                'equal': None,
+            }
+        self.flush()
+        try:
+            from .deferred_coverage import replay_coverage_from_bag
+            replay = replay_coverage_from_bag(
+                self.directory / 'passive_rosbag',
+                self.directory / 'map_receipts.jsonl',
+                self.directory / 'coverage.csv', self.robots,
+                self.coverage_source,
+                self.p['coverage_attribution_resolution'],
+                self.p['known_relative_transform'],
+                self.p['simultaneous_coverage_window_s'])
+            with (self.directory / 'coverage.csv').open(
+                    newline='', encoding='utf-8') as stream:
+                live_rows = list(csv.DictReader(stream))
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'equal': False,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        semantic_fields = (
+            'robot1_local_known', 'robot2_local_known',
+            'robot1_shared_known', 'robot2_shared_known',
+            'shared_free_cells', 'shared_occupied_cells',
+            'shared_unknown_cells', 'known_area_m2', 'coverage_gain_cells',
+            'coverage_gain_since_start_cells',
+            'unique_first_seen_robot1_cells',
+            'unique_first_seen_robot2_cells',
+            'later_duplicated_by_robot1_cells',
+            'later_duplicated_by_robot2_cells',
+            'simultaneously_observed_cells', 'total_known_union_cells',
+            'duplicated_known_fraction', 'shared_maps_equivalent')
+
+        def parse(field, value):
+            if field == 'shared_maps_equivalent':
+                return str(value).strip().lower() == 'true'
+            if field in ('known_area_m2', 'duplicated_known_fraction'):
+                return float(value)
+            return int(float(value))
+
+        differences = []
+        if len(live_rows) != len(replay['rows']):
+            differences.append({
+                'kind': 'row_count', 'live': len(live_rows),
+                'deferred': len(replay['rows'])})
+        for live_row, deferred_row in zip(live_rows, replay['rows']):
+            expected = deferred_row['semantic']
+            for field in semantic_fields:
+                try:
+                    actual = parse(field, live_row[field])
+                    proposed = expected[field]
+                except (KeyError, TypeError, ValueError):
+                    differences.append({
+                        'row': deferred_row['row_number'],
+                        'field': field, 'live': live_row.get(field),
+                        'deferred': expected.get(field)})
+                    continue
+                if actual != proposed:
+                    differences.append({
+                        'row': deferred_row['row_number'],
+                        'field': field, 'live': actual, 'deferred': proposed})
+        return {
+            'status': 'PARITY_PASS' if not differences else 'PARITY_FAIL',
+            'equal': not differences,
+            'sample_count': replay['sample_count'],
+            'differences': differences[:100],
+            'difference_count': len(differences),
+            'source': 'native_bag_payload_plus_causal_map_receipts',
+        }
+
     def summary(self,clean):
         elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=getattr(self, '_deferred_shared_trajectory_summary', self.trajectory.summary()); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
@@ -4134,6 +4215,10 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'shared_trajectory_parity.json',
                 self._shared_trajectory_parity)
+            self._coverage_parity = self._replay_coverage_for_parity()
+            atomic_json(
+                self.directory / 'coverage_replay_parity.json',
+                self._coverage_parity)
             self.flush()
             # The scan-age artifact is observer-owned and must not depend on
             # a frontend summary that may be delayed by ROS shutdown.  Emit it

@@ -491,10 +491,14 @@ sampling, START_RELEASE/readiness, provenance, finalization, schemas, and the
 robot/coordinator behavior were not changed.
 
 No protocol/event, action-result, warning, health-history, summary, or resource
-family was migrated in this continuation. Those remain explicitly open rather
-than being represented as completed. The next salvage family would therefore
-require a new isolated raw/parity checkpoint; this task is intentionally stopped
-at the successful coverage checkpoint.
+family was migrated in the initial coverage checkpoint. Subsequent isolated
+checkpoints have since enabled raw protocol/action/path/rosout capture, switched
+pair-decision and agreement summaries to deferred authority, and added warning
+and Nav2-diagnostic semantic replay parity. The live warning and diagnostic
+artifacts remain authoritative because receipt wall-time and global event-order
+semantics have not yet been replaced. Health-history, summary/resource, and
+full action-result authority migrations remain open; they require their own
+raw/parity checkpoints rather than being represented as completed here.
 
 ## Protocol raw-export and pair-decision continuation
 

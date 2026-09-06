@@ -40,6 +40,7 @@ from my_epuck_interfaces.msg import (
 )
 from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
 from .forensic_evidence import ForensicEvidenceWriter
+from .deferred_protocol import pair_decision_outcome
 from .passive_rosbag import (
     export_index_with_bounded_retry,
     load_offloaded_timing,
@@ -2445,24 +2446,7 @@ class CooperativeExperimentLogger(Node):
     def distributed_decision(self,r,msg):
         self.mark(r,'pair_decision',msg)
         if not self.distributed_changed((r,'decision'),(msg.round_id,msg.union_hash,msg.decision_hash)):return
-        try:
-            diagnostics = json.loads(msg.diagnostics_json or '{}')
-        except (TypeError, ValueError):
-            diagnostics = {}
-        if not msg.robot1_canonical_task_id and not msg.robot2_canonical_task_id:
-            if not diagnostics.get('union_task_count', 0):
-                outcome = 'NO_CANONICAL_TASKS'
-            elif diagnostics.get('rejected_failure_suppression_count', 0):
-                outcome = 'TASK_SUPPRESSED_BY_FAILURE_MEMORY'
-            elif diagnostics.get('rejected_path_threshold_count', 0):
-                outcome = 'TASKS_OUT_OF_RANGE'
-            elif diagnostics.get('robot1_valid_bid_count', 0) == 0 and \
-                    diagnostics.get('robot2_valid_bid_count', 0) == 0:
-                outcome = 'NO_REACHABLE_TASK'
-            else:
-                outcome = 'IDLE_BY_DETERMINISTIC_ASSIGNMENT'
-        else:
-            outcome = 'DISPATCHABLE_ASSIGNMENT'
+        outcome, diagnostics = pair_decision_outcome(msg)
         self.round_outcomes[outcome] += 1
         self.event('DISTRIBUTED_PAIR_DECISION','replicated complete pair decision',r,f'/{r}/pair_decision',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,robot1_snapshot_epoch=msg.robot1_snapshot_epoch,robot2_snapshot_epoch=msg.robot2_snapshot_epoch,robot1_bid_fingerprint=msg.robot1_bid_fingerprint,robot2_bid_fingerprint=msg.robot2_bid_fingerprint,robot1_task=msg.robot1_canonical_task_id or 'IDLE',robot2_task=msg.robot2_canonical_task_id or 'IDLE',decision_hash=msg.decision_hash,total_team_score=msg.total_team_score,team_visible_gain=msg.team_visible_gain,combined_path_cost=msg.combined_path_cost,nearby_goal_penalty=msg.nearby_goal_penalty,route_overlap_penalty=msg.route_overlap_penalty,hard_failure_penalty=msg.hard_failure_penalty,sensing_overlap_penalty=msg.sensing_overlap_penalty,workload_imbalance_penalty=msg.workload_imbalance_penalty,coordinator_state=msg.coordinator_state,decision_diagnostics_json=msg.diagnostics_json,decision_outcome=outcome,decision_idle_reason=diagnostics.get('idle_reason'),decision_availability_reason=diagnostics.get('availability_reason'))
     def distributed_status(self,r,msg):
@@ -3448,6 +3432,7 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'coverage_requests.jsonl',
                 self.directory / 'coverage.csv',
                 self.directory / 'coverage_replay_parity.json',
+                self.directory / 'pair_decision_replay_parity.json',
             ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
@@ -4099,6 +4084,38 @@ class CooperativeExperimentLogger(Node):
             self._deferred_coverage_authority = replay['final_state']
         return result
 
+    def _replay_pair_decisions_for_parity(self):
+        """Compare raw pair decisions with the live outcome accounting."""
+        live = dict(self.round_outcomes)
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'status': 'NO_SCIENTIFIC_RAW_BAG',
+                'equal': None,
+                'live': live,
+            }
+        try:
+            from .deferred_protocol import replay_pair_decisions_from_bag
+            deferred = replay_pair_decisions_from_bag(
+                self.directory / 'passive_rosbag', self.robots)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'equal': False,
+                'live': live,
+                'deferred': None,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        equal = live == deferred['round_outcomes']
+        return {
+            'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
+            'equal': equal,
+            'live': live,
+            'deferred': deferred['round_outcomes'],
+            'record_count': len(deferred['records']),
+            'deserialized_messages': deferred['deserialized_messages'],
+        }
+
     def _write_deferred_coverage_csv(self, replay):
         """Materialize the legacy coverage schema from deferred rows."""
         if self.coverage_stream is not None:
@@ -4316,6 +4333,11 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'coverage_replay_parity.json',
                 self._coverage_parity)
+            self._pair_decision_parity = (
+                self._replay_pair_decisions_for_parity())
+            atomic_json(
+                self.directory / 'pair_decision_replay_parity.json',
+                self._pair_decision_parity)
             self.flush()
             # The scan-age artifact is observer-owned and must not depend on
             # a frontend summary that may be delayed by ROS shutdown.  Emit it

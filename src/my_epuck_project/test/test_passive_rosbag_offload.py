@@ -8,6 +8,7 @@ import pytest
 import my_epuck_project.passive_rosbag as passive_rosbag
 from my_epuck_project.passive_rosbag import (
     export_index_with_bounded_retry,
+    export_required_topics,
     load_offloaded_timing,
     offloaded_sensor_topics,
     passive_topics,
@@ -87,6 +88,17 @@ def test_if_published_topics_do_not_invalidate_complete_required_contract():
     assert status['complete'] is True
     assert status['missing_required_types'] == []
     assert status['missing_optional_topics'] == ['/robot1/exploration_event']
+
+
+def test_scientific_export_required_set_excludes_if_published_topics():
+    # The native exporter must apply the same required/non-required distinction
+    # as the raw contract.  Optional topics may be absent from rosbag2's type
+    # metadata when they never published, but required streams remain strict.
+    required = export_required_topics(('robot1',), include_scientific_raw=True)
+    assert '/robot1/exploration_event' not in required
+    assert '/robot1/distributed_event' not in required
+    assert '/robot1/odom' in required
+    assert '/clock' in required
 
 
 def test_missing_required_topic_type_still_invalidates_raw_contract():

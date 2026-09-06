@@ -80,6 +80,15 @@ def recorded_topics(robots, include_offloaded=False,
     return tuple(dict.fromkeys(topics))
 
 
+def export_required_topics(robots, include_scientific_raw=False,
+                           required_topics=None):
+    """Resolve the strict export set without promoting optional streams."""
+    if required_topics is None and include_scientific_raw:
+        from .raw_evidence_contract import required_nonempty_topics
+        return required_nonempty_topics(robots)
+    return tuple(required_topics or ())
+
+
 def write_qos_profile_overrides(output_directory: Path) -> Path:
     """Write the native rosbag2 QoS override required by Webots `/clock`."""
     output_directory = Path(output_directory)
@@ -333,10 +342,17 @@ def export_index(bag_directory: Path, output_path: Path, robots,
             stream.write(json.dumps(row, sort_keys=True,
                                     separators=(',', ':')) + '\n')
             counts[topic] += 1
-    required_topics = tuple(required_topics or ())
-    type_presence_ok = all(topic in type_map for topic in selected_topics)
-    if include_scientific_raw and required_topics:
-        type_presence_ok = all(topic in type_map for topic in required_topics)
+    # ``scientific_raw_topics()`` intentionally includes streams marked
+    # ``if_published`` by the raw contract.  rosbag2 may omit the type entry
+    # entirely when such a stream never published in this run.  Export
+    # completeness must therefore use the contract's required non-empty set,
+    # not every requested topic.  Otherwise a valid zero-event run is rejected
+    # before the semantic/finalization checks can distinguish zero from
+    # missing evidence.
+    required_topics = export_required_topics(
+        robots, include_scientific_raw=include_scientific_raw,
+        required_topics=required_topics)
+    type_presence_ok = all(topic in type_map for topic in required_topics)
     metadata = {
         'schema_version': 'passive_rosbag_index_1.0',
         'raw_bag_directory': str(bag_directory),

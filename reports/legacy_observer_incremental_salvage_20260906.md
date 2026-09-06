@@ -883,3 +883,78 @@ install_legacy_salvage_plan_20260907
 ```
 
 No Webots runtime was run for this checkpoint.
+
+## Action-evidence zero-versus-missing contract checkpoint
+
+`3c9ddbb` corrects the action replay contract so that a correctly typed,
+present NavigateToPose status channel with zero messages is represented as
+valid `NOT_INVOKED` evidence rather than missing evidence.  A missing or
+mistyped required status channel still fails closed.  The focused replay,
+protocol, passive-rosbag, and logger tests passed (`68` tests before installed
+validation and `87` tests after rebuilding the installed package).
+
+The complete current source stack was rebuilt into:
+
+```text
+install_legacy_salvage_full_20260907
+```
+
+The build explicitly selected `my_epuck_interfaces`,
+`my_epuck_frontier_candidates`, and `my_epuck_project`; all three finished
+successfully.  This was the first validation build in this sequence that also
+installed the current C++ frontier generator, so the runtime generator could
+not silently resolve from the older default `install` prefix.
+
+## Bounded runtime attempts after the full-stack rebuild
+
+The following attempts are recorded as diagnostics only and are not accepted
+scientific validations:
+
+* `results/legacy_salvage_final_short_20260907h/fast_trial_20260906T221738Z`
+  reached `SIM_TIME_COMPLETE` at `120.06 s`, but its effective launch command
+  resolved both frontier generators from the old
+  `.../install/my_epuck_frontier_candidates` prefix.  Both generators later
+  exited with `-11`.  The resulting bag had zero candidate-array and
+  `cmd_vel` messages, and the raw artifact was correctly incomplete.  This is
+  a failed runtime stack, not evidence that the raw contract should be
+  weakened.
+* `results/legacy_salvage_final_short_20260907m/fast_trial_20260906T222800Z`
+  used the newly built generator, but the launch environment omitted
+  `MY_EPUCK_WEBOTS_NETWORK_MODE=nat`; the log recorded
+  `WEBOTS_CONTROLLER_ENDPOINT host=127.0.0.1`.  Controllers could not connect
+  to the Windows Webots server.  It was stopped before simulation progress.
+* `results/legacy_salvage_final_short_20260907n/fast_trial_20260906T222940Z`
+  used the newly built generator and the NAT endpoint
+  `172.18.32.1:23405`.  `/clock` advanced and common `START_RELEASE` occurred
+  at `29.60 s`, but the robot2 Webots ROS2 driver exited with a segmentation
+  fault before the scientific horizon.  The run was stopped and is invalid;
+  it has no accepted RTF or mission result.
+
+No runtime RTF is claimed from these attempts.  All launch process groups were
+stopped and verified absent after each failed attempt.
+
+## Current salvage boundary
+
+The remaining items named in the working plan have now been resolved or
+explicitly retained by semantic ownership:
+
+* warning and Nav2 standalone artifacts use deferred replay authority in raw
+  mode;
+* action/path streams are replayed into
+  `navigation_action_replay.json`; the coordinator claim/distributed-event
+  lifecycle remains the authority for the existing navigation outcome summary
+  because that summary has coordinator-level semantics not present in action
+  status alone;
+* raw-backed health history is reconstructed after shutdown while live stale
+  transition and costmap checks remain;
+* CPU/RSS history remains live observer-process measurement.  Post-run replay
+  cannot recreate the process’s resource samples, so removing it would change
+  the measurement rather than relocate it;
+* the two summary/mission-result writes remain intentional.  The first creates
+  the files needed by the artifact contract; the second records the final
+  contract result after all replay and required-artifact checks complete.
+
+The next runtime step requires a clean, provenance-correct Webots controller
+stack using the current driver and generator.  It must not be represented as a
+successful complete-evidence validation until the driver startup failure is
+resolved; no source migration is being inferred from the invalid attempts.

@@ -588,3 +588,28 @@ replayed zero pair-decision messages in this fixed short horizon and the summary
 correctly contained an empty `round_outcomes` mapping. Agreement replay also
 remained deferred-authoritative over `55` distributed-event messages. This is a
 functional checkpoint, not a mission-completion or RTF acceptance run.
+
+## Action/path raw-evidence enabling checkpoint
+
+`c4d3799` extended the existing native scientific raw contract from version
+`1.2` to `1.3` with optional action/path streams needed for a future exact
+navigation replay: NavigateToPose feedback, FollowPath status, ComputePathToPose
+status, and `/plan` for each robot. This commit intentionally left every live
+navigation callback and output authoritative; it only made the raw source
+available and updated the contract/topic-set tests.
+
+Validation used the rebuilt project install and the same canonical C world,
+seed, MODE_B/frontier-cost-only configuration, 20 ms GT/contact settings, and
+120 s simulation horizon:
+
+```text
+results/legacy_salvage_action_raw_20260906/
+  fast_trial_20260906T195222Z/
+```
+
+The run reached `SIM_TIME_COMPLETE` at `120.06 s` with no horizon overrun,
+complete observer finalization, and complete native raw export. The newly
+captured streams contained: robot1/robot2 NavigateToPose feedback `3043/3401`,
+ComputePathToPose status `272/232`, FollowPath status `89/68`, and `/plan`
+`134/114` messages. This is an enabling checkpoint only; action/path semantic
+replay has not yet been switched to deferred authority.

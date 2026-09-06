@@ -1,6 +1,6 @@
 """Pure deterministic metrics for the passive cooperative observer."""
 from __future__ import annotations
-import json, math, os, re, tempfile
+import csv, json, math, os, re, tempfile
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -155,6 +155,51 @@ class LocalTrajectory:
             'distance_travelled_m': dict(self.total_distance),
             'sample_count_by_robot': dict(self.samples),
         }
+
+
+def replay_local_trajectory_csv(path, robot, bin_size=.05,
+                                exclusion_radius=.15):
+    """Replay the legacy local trajectory metric from forensic odometry.
+
+    The live observer feeds ``LocalTrajectory.add`` in odometry callback
+    order.  ``ForensicEvidenceWriter.record_odom`` writes the same callback
+    order to one CSV per robot, so the deferred path deliberately preserves
+    file order instead of sorting by message timestamps.  No metric logic is
+    duplicated: the replay uses the same ``LocalTrajectory`` implementation.
+
+    Missing or malformed rows fail closed rather than being silently skipped.
+    That preserves the distinction between an empty valid stream and damaged
+    evidence before this result is allowed to replace the live accumulator.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    trajectory = LocalTrajectory(
+        bin_size=bin_size, exclusion_radius=exclusion_radius)
+    with path.open(newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        required = {'robot_id', 'pose_x', 'pose_y'}
+        if not required.issubset(set(reader.fieldnames or ())):
+            missing = sorted(required - set(reader.fieldnames or ()))
+            raise ValueError(
+                f'local trajectory evidence missing columns: {missing}')
+        for row_number, row in enumerate(reader, start=2):
+            if str(row.get('robot_id', '')) != str(robot):
+                raise ValueError(
+                    f'local trajectory robot mismatch at row {row_number}')
+            try:
+                x = float(row['pose_x'])
+                y = float(row['pose_y'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'invalid local trajectory pose at row {row_number}') from exc
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError(
+                    f'non-finite local trajectory pose at row {row_number}')
+            trajectory.add(robot, x, y)
+    return trajectory
+
+
 def equivalent_frontiers(a,b,centroid_tolerance=.15,bbox_margin=.05):
     centroid=math.hypot(a['centroid_x']-b['centroid_x'],a['centroid_y']-b['centroid_y']); overlap=not(a['max_x']+bbox_margin<b['min_x'] or b['max_x']+bbox_margin<a['min_x'] or a['max_y']+bbox_margin<b['min_y'] or b['max_y']+bbox_margin<a['min_y']); return centroid<=centroid_tolerance and overlap
 def duplicate_goal(a,b,tolerance=.15): return math.hypot(a[0]-b[0],a[1]-b[1])<=tolerance

@@ -357,3 +357,42 @@ justified until the discrepancy is explained. Coverage migration is rejected
 at this checkpoint; live map conversion, counting, attribution, and
 `coverage.csv` authority remain unchanged. No protocol or later family was
 started on top of this unproven state.
+
+## Map-parity correction and deferred coverage authority
+
+The preceding blocker text described the first replay implementation, not the
+final result for this responsibility. `d2c9e35` corrected two replay defects
+in the deferred implementation itself:
+
+1. local known-cell counts now use `free + occupied`, matching the legacy
+   `map_counts()` contract rather than free cells alone;
+2. a map receipt with the same simulation timestamp as a coverage timer is
+   excluded (`receipt_time < request_time`), matching the observed ROS callback
+   order in the legacy logger.
+
+Replaying the preserved
+`results/legacy_salvage_map_parity_20260906/fast_trial_20260906T183007Z`
+artifact after those corrections produced 51/51 semantic rows with zero
+differences. The original `coverage_replay_parity.json` in that artifact is
+intentionally not overwritten; it records the pre-correction run state. The
+post-correction result is an offline recheck of the same raw bag, map receipts,
+and live coverage evidence.
+
+`c177b4a` then switched the coverage summary's final authority to the deferred
+result only after that exact parity. This did not yet remove live conversion or
+counting from the raw-enabled mission path.
+
+The next isolated migration is the authority-preserving removal of that live
+map-derived work. Raw-enabled runs now keep the exact timer request boundary in
+`coverage_requests.jsonl`; finalization replays the closed native bag through
+the existing map/count/attribution primitives and materializes the established
+`coverage.csv` schema. The default non-scientific-raw legacy path still runs
+the original live `sample_coverage()` implementation unchanged. The raw
+contract requires `coverage_requests.jsonl`, `coverage.csv`, and
+`coverage_replay_parity.json`.
+
+Focused validation for the current migration: `107 passed in 24.47s` across
+deferred coverage, logger runtime, metrics, passive rosbag, and TF/trajectory
+replay tests. No runtime validation has yet been run for this latest removal;
+the next required check is a fresh short complete raw-evidence Condition-C run
+after rebuilding the isolated salvage install.

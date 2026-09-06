@@ -74,10 +74,13 @@ def test_coverage_replay_uses_causal_receipts_and_legacy_semantics(
                 'received_wall_elapsed_s': 2.0,
                 'data_sha256': digest,
             }) + '\n')
-    coverage_path = tmp_path / 'coverage.csv'
-    coverage_path.write_text(
-        'ros_time_sec,ros_time_nanosec,wall_elapsed_s\n2,0,2.0\n',
-        encoding='utf-8')
+    coverage_path = tmp_path / 'coverage_requests.jsonl'
+    coverage_path.write_text(json.dumps({
+        'run_id': 'fixture', 'wall_time_utc': 'now',
+        'ros_time_sec': 2, 'ros_time_nanosec': 0,
+        'elapsed_s': 1.0, 'wall_elapsed_s': 2.0,
+        'event_sequence': 7,
+    }) + '\n', encoding='utf-8')
     result = replay_module.replay_coverage_from_bag(
         bag, receipt_path, coverage_path, ('robot1', 'robot2'),
         'shared_map', 0.03, (0.0, 0.0, 0.0), 2.0)
@@ -86,3 +89,4 @@ def test_coverage_replay_uses_causal_receipts_and_legacy_semantics(
     assert semantic['robot1_shared_known'] == 2
     assert semantic['known_area_m2'] == 2 * 0.03 ** 2
     assert semantic['total_known_union_cells'] == 2
+    assert result['rows'][0]['request']['event_sequence'] == 7

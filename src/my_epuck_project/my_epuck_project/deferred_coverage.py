@@ -38,7 +38,7 @@ def _grid(message):
 
 
 def replay_coverage_from_bag(
-        bag_directory: Path, receipt_path: Path, coverage_path: Path,
+        bag_directory: Path, receipt_path: Path, coverage_request_path: Path,
         robots, coverage_source: str, coverage_resolution: float,
         known_relative_transform, simultaneous_window_s: float):
     """Reconstruct coverage samples at the legacy timer request times.
@@ -54,8 +54,8 @@ def replay_coverage_from_bag(
 
     bag_directory = Path(bag_directory)
     receipt_path = Path(receipt_path)
-    coverage_path = Path(coverage_path)
-    for path in (bag_directory, receipt_path, coverage_path):
+    coverage_request_path = Path(coverage_request_path)
+    for path in (bag_directory, receipt_path, coverage_request_path):
         if not path.exists():
             raise FileNotFoundError(path)
     robots = tuple(str(robot) for robot in robots)
@@ -116,8 +116,12 @@ def replay_coverage_from_bag(
     for identity in visible:
         visible[identity].sort(key=lambda row: row[0])
 
-    with coverage_path.open(newline='', encoding='utf-8') as stream:
-        coverage_rows = list(csv.DictReader(stream))
+    if coverage_request_path.suffix == '.jsonl':
+        with coverage_request_path.open(encoding='utf-8') as stream:
+            coverage_rows = [json.loads(line) for line in stream if line.strip()]
+    else:
+        with coverage_request_path.open(newline='', encoding='utf-8') as stream:
+            coverage_rows = list(csv.DictReader(stream))
     if not coverage_rows:
         raise ValueError('coverage evidence is empty')
 
@@ -224,6 +228,7 @@ def replay_coverage_from_bag(
             'row_number': row_number,
             'query_ros_time_s': query_ros,
             'semantic': semantic,
+            'request': dict(row),
         })
     return {
         'rows': output_rows,

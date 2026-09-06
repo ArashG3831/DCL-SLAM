@@ -432,7 +432,7 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.map_receipt_file=None; self._map_receipt_sequence=0; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
         if bool(self.p.get('enable_scientific_raw_capture', False)):
             self.map_receipt_file=open(
                 self.directory / 'map_receipts.jsonl', 'a', encoding='utf-8',
@@ -561,7 +561,12 @@ class CooperativeExperimentLogger(Node):
             robot: RollingTimestampIndex(self._direct_tf_sample_limit)
             for robot in self.robots}
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
-        self.coverage=self.csv_file('coverage.csv',COVERAGE); self.health=self.csv_file('topic_health.csv',HEALTH)
+        self.coverage=self.csv_file('coverage.csv',COVERAGE); self.coverage_stream=self.files[-1]; self.health=self.csv_file('topic_health.csv',HEALTH)
+        if bool(self.p.get('enable_scientific_raw_capture', False)):
+            self.coverage_request_file=open(
+                self.directory / 'coverage_requests.jsonl', 'a',
+                encoding='utf-8', buffering=1)
+            self.files.append(self.coverage_request_file)
         (self.directory/'README.txt').write_text('Passive data; schema and formulas: my_epuck_project/docs/cooperative_experiment_logging.md\n',encoding='utf-8')
         self.write_manifest(False,'running'); self.event('RUN_START','experiment run started',console=True)
         if self.passive_bag_enabled:
@@ -3180,6 +3185,15 @@ class CooperativeExperimentLogger(Node):
                 if d.get('navigation_active') and row['elapsed_s']-self.last_progress.get(r,-99)>=5:
                     self.last_progress[r]=row['elapsed_s']; self.event('NAVIGATION_PROGRESS','periodic low-rate progress sample',r,distance_remaining_m=d.get('distance_remaining'),pose_x=pose[0],pose_y=pose[1],distance_travelled_m=self.local_trajectory.total_distance.get(r,0.),recoveries=d.get('recoveries',0))
     def sample_coverage(self):
+        if self.coverage_request_file is not None:
+            # Raw-enabled canonical runs defer all map conversion, counting,
+            # ownership, and attribution.  Keep only the exact timer request
+            # boundary needed to reproduce the legacy CSV after shutdown.
+            request = self.row_time()
+            with self._io_lock:
+                self.coverage_request_file.write(
+                    json.dumps(finite(request), separators=(',', ':')) + '\n')
+            return
         shared=[self.map_snapshot(r,'shared_map') for r in self.robots]
         local=[self.map_snapshot(r,'map') for r in self.robots]
         local_union = self.coverage_source == 'local_map_union'
@@ -3419,6 +3433,8 @@ class CooperativeExperimentLogger(Node):
         if bool(self.p.get('enable_scientific_raw_capture', False)):
             required.extend([
                 self.directory / 'map_receipts.jsonl',
+                self.directory / 'coverage_requests.jsonl',
+                self.directory / 'coverage.csv',
                 self.directory / 'coverage_replay_parity.json',
             ])
         if include_campaign_files:
@@ -3968,7 +3984,14 @@ class CooperativeExperimentLogger(Node):
         }
 
     def _replay_coverage_for_parity(self):
-        """Compare raw-map replay against the legacy coverage CSV semantics."""
+        """Replay coverage and, when enabled, replace live map-derived rows.
+
+        Scientific-raw runs retain only the timer request boundary during the
+        mission.  The closed raw map bag and causal receipt ledger then
+        regenerate the established ``coverage.csv`` schema during
+        finalization.  The default non-raw path continues to compare against
+        the live CSV exactly as before.
+        """
         if not (self.passive_bag_enabled and
                 bool(self.p.get('enable_scientific_raw_capture', False))):
             return {
@@ -3976,16 +3999,22 @@ class CooperativeExperimentLogger(Node):
                 'equal': None,
             }
         self.flush()
+        request_path = self.directory / 'coverage_requests.jsonl'
+        use_deferred_authority = request_path.is_file() and request_path.stat().st_size > 0
+        if not use_deferred_authority:
+            request_path = self.directory / 'coverage.csv'
         try:
             from .deferred_coverage import replay_coverage_from_bag
             replay = replay_coverage_from_bag(
                 self.directory / 'passive_rosbag',
                 self.directory / 'map_receipts.jsonl',
-                self.directory / 'coverage.csv', self.robots,
+                request_path, self.robots,
                 self.coverage_source,
                 self.p['coverage_attribution_resolution'],
                 self.p['known_relative_transform'],
                 self.p['simultaneous_coverage_window_s'])
+            if use_deferred_authority:
+                self._write_deferred_coverage_csv(replay)
             with (self.directory / 'coverage.csv').open(
                     newline='', encoding='utf-8') as stream:
                 live_rows = list(csv.DictReader(stream))
@@ -3994,6 +4023,16 @@ class CooperativeExperimentLogger(Node):
                 'status': 'DEFERRED_REPLAY_FAILED',
                 'equal': False,
                 'error': f'{type(exc).__name__}:{exc}',
+            }
+        if use_deferred_authority:
+            self._deferred_coverage_authority = replay['final_state']
+            return {
+                'status': 'DEFERRED_AUTHORITATIVE',
+                'equal': None,
+                'sample_count': replay['sample_count'],
+                'source': 'native_bag_payload_plus_causal_map_receipts',
+                'authority': 'deferred',
+                'live_rows_during_mission': 0,
             }
         semantic_fields = (
             'robot1_local_known', 'robot2_local_known',
@@ -4047,6 +4086,35 @@ class CooperativeExperimentLogger(Node):
         if not differences:
             self._deferred_coverage_authority = replay['final_state']
         return result
+
+    def _write_deferred_coverage_csv(self, replay):
+        """Materialize the legacy coverage schema from deferred rows."""
+        if self.coverage_stream is not None:
+            with self._io_lock:
+                self.coverage_stream.flush()
+                self.coverage_stream.close()
+            try:
+                self.files.remove(self.coverage_stream)
+            except ValueError:
+                pass
+            self.coverage_stream = None
+        with (self.directory / 'coverage.csv').open(
+                'w', newline='', encoding='utf-8') as stream:
+            writer = csv.DictWriter(stream, fieldnames=COVERAGE)
+            writer.writeheader()
+            for item in replay['rows']:
+                request = item['request']
+                row = {
+                    'run_id': request.get('run_id', self.run_id),
+                    'wall_time_utc': request.get('wall_time_utc', utc_now()),
+                    'ros_time_sec': int(float(request['ros_time_sec'])),
+                    'ros_time_nanosec': int(float(request['ros_time_nanosec'])),
+                    'elapsed_s': float(request['elapsed_s']),
+                    'wall_elapsed_s': float(request['wall_elapsed_s']),
+                    'event_sequence': int(float(request['event_sequence'])),
+                    **item['semantic'],
+                }
+                writer.writerow(finite(row))
 
     def summary(self,clean):
         elapsed=time.monotonic()-self.start

@@ -2447,7 +2447,11 @@ class CooperativeExperimentLogger(Node):
         self.mark(r,'pair_decision',msg)
         if not self.distributed_changed((r,'decision'),(msg.round_id,msg.union_hash,msg.decision_hash)):return
         outcome, diagnostics = pair_decision_outcome(msg)
-        self.round_outcomes[outcome] += 1
+        deferred_pair_enabled = (
+            self.passive_bag_enabled and
+            bool(self.p.get('enable_scientific_raw_capture', False)))
+        if not deferred_pair_enabled:
+            self.round_outcomes[outcome] += 1
         self.event('DISTRIBUTED_PAIR_DECISION','replicated complete pair decision',r,f'/{r}/pair_decision',source_stamp=stamp(msg),source_session_id=self.uuid_text(msg.source_session_id),round_id=msg.round_id,union_hash=msg.union_hash,robot1_snapshot_epoch=msg.robot1_snapshot_epoch,robot2_snapshot_epoch=msg.robot2_snapshot_epoch,robot1_bid_fingerprint=msg.robot1_bid_fingerprint,robot2_bid_fingerprint=msg.robot2_bid_fingerprint,robot1_task=msg.robot1_canonical_task_id or 'IDLE',robot2_task=msg.robot2_canonical_task_id or 'IDLE',decision_hash=msg.decision_hash,total_team_score=msg.total_team_score,team_visible_gain=msg.team_visible_gain,combined_path_cost=msg.combined_path_cost,nearby_goal_penalty=msg.nearby_goal_penalty,route_overlap_penalty=msg.route_overlap_penalty,hard_failure_penalty=msg.hard_failure_penalty,sensing_overlap_penalty=msg.sensing_overlap_penalty,workload_imbalance_penalty=msg.workload_imbalance_penalty,coordinator_state=msg.coordinator_state,decision_diagnostics_json=msg.diagnostics_json,decision_outcome=outcome,decision_idle_reason=diagnostics.get('idle_reason'),decision_availability_reason=diagnostics.get('availability_reason'))
     def distributed_status(self,r,msg):
         self.mark(r,'distributed_status',msg)
@@ -3528,6 +3532,11 @@ class CooperativeExperimentLogger(Node):
                 'agreement_replay_parity.json:deferred_replay_failed')
             result['complete'] = False
             result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
+        if getattr(self, '_pair_decision_replay_failed', False):
+            result['missing'].append(
+                'pair_decision_replay_parity.json:deferred_replay_failed')
+            result['complete'] = False
+            result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
         return result
 
     def finalize_passive_rosbag(self):
@@ -4115,6 +4124,16 @@ class CooperativeExperimentLogger(Node):
                 'deferred': None,
                 'error': f'{type(exc).__name__}:{exc}',
             }
+        if (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'status': 'DEFERRED_AUTHORITATIVE',
+                'equal': None,
+                'live': None,
+                'deferred': deferred['round_outcomes'],
+                'record_count': len(deferred['records']),
+                'deserialized_messages': deferred['deserialized_messages'],
+            }
         equal = live == deferred['round_outcomes']
         return {
             'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
@@ -4426,7 +4445,11 @@ class CooperativeExperimentLogger(Node):
             selected_round_outcomes, outcome_source = (
                 select_pair_decision_outcomes(
                     self.round_outcomes, self._pair_decision_parity))
-            self._pair_decision_live_round_outcomes = dict(self.round_outcomes)
+            if self._pair_decision_parity.get('status') not in (
+                    'PARITY_PASS', 'DEFERRED_AUTHORITATIVE',
+                    'NO_SCIENTIFIC_RAW_BAG'):
+                self.write_failures += 1
+                self._pair_decision_replay_failed = True
             self.round_outcomes = Counter(selected_round_outcomes)
             self._pair_decision_outcome_source = outcome_source
             self.flush()

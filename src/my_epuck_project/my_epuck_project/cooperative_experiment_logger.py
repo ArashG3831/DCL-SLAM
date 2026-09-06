@@ -2492,7 +2492,10 @@ class CooperativeExperimentLogger(Node):
             self.mission_completion_time = self.ros_seconds() - self.start_ros
     def distributed_event(self,r,msg):
         self.mark(r,'distributed_event',msg)
-        if msg.event_type == 'DECISION_AGREED':
+        deferred_agreement_enabled = (
+            self.passive_bag_enabled and
+            bool(self.p.get('enable_scientific_raw_capture', False)))
+        if msg.event_type == 'DECISION_AGREED' and not deferred_agreement_enabled:
             self.agreement_publications += 1
             self.unique_agreed_rounds.add(msg.round_id)
             if msg.decision_hash:
@@ -3520,6 +3523,11 @@ class CooperativeExperimentLogger(Node):
             result['missing'] = missing
             result['complete'] = not missing
             result['status'] = 'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS'
+        if getattr(self, '_agreement_replay_failed', False):
+            result['missing'].append(
+                'agreement_replay_parity.json:deferred_replay_failed')
+            result['complete'] = False
+            result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
         return result
 
     def finalize_passive_rosbag(self):
@@ -4124,8 +4132,9 @@ class CooperativeExperimentLogger(Node):
             'unique_agreed_rounds': len(self.unique_agreed_rounds),
             'unique_agreed_decisions': len(self.unique_agreed_decisions),
         }
-        if not (self.passive_bag_enabled and
-                bool(self.p.get('enable_scientific_raw_capture', False))):
+        deferred_mode = (self.passive_bag_enabled and
+                         bool(self.p.get('enable_scientific_raw_capture', False)))
+        if not deferred_mode:
             return {
                 'status': 'NO_SCIENTIFIC_RAW_BAG',
                 'equal': None,
@@ -4154,6 +4163,14 @@ class CooperativeExperimentLogger(Node):
             for key in ('agreement_publications',
                         'unique_agreed_rounds',
                         'unique_agreed_decisions')}
+        if deferred_mode:
+            return {
+                'status': 'DEFERRED_AUTHORITATIVE',
+                'equal': None,
+                'live': None,
+                'deferred': deferred_values,
+                'deserialized_messages': deferred['deserialized_messages'],
+            }
         equal = live == comparison_values
         return {
             'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
@@ -4401,6 +4418,10 @@ class CooperativeExperimentLogger(Node):
                 self.unique_agreed_decisions = set(
                     deferred_agreement.get('decision_hashes',
                                            self.unique_agreed_decisions))
+            elif self._agreement_parity.get('status') not in (
+                    'NO_SCIENTIFIC_RAW_BAG',):
+                self.write_failures += 1
+                self._agreement_replay_failed = True
             from .deferred_protocol import select_pair_decision_outcomes
             selected_round_outcomes, outcome_source = (
                 select_pair_decision_outcomes(

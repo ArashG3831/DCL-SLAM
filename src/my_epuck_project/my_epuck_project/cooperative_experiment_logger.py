@@ -2645,6 +2645,58 @@ class CooperativeExperimentLogger(Node):
             'artifact_finalization':self._artifact_finalization,
         }
         atomic_json(self.directory/'run_manifest.json',value)
+    def _replay_local_trajectory_for_parity(self):
+        """Replay forensic odometry without changing the live authority.
+
+        This is the first odometry salvage checkpoint: finalization computes
+        the deferred result from the already-recorded forensic rows and keeps
+        the existing live ``LocalTrajectory`` result authoritative until the
+        two semantic summaries are equal on real artifacts.
+        """
+        live = self.local_trajectory.summary()
+        if self.forensic is None:
+            return {
+                'live': live,
+                'deferred': None,
+                'equal': None,
+                'status': 'NO_FORENSIC_ODOMETRY',
+            }
+        from .experiment_metrics import replay_local_trajectory_csv
+        try:
+            replayed = LocalTrajectory(
+                self.p['trajectory_bin_size_m'],
+                self.p['initial_overlap_exclusion_radius_m'])
+            for robot in self.robots:
+                source = self.directory / 'forensic' / f'{robot}_odom.csv'
+                robot_replay = replay_local_trajectory_csv(
+                    source, robot,
+                    bin_size=self.p['trajectory_bin_size_m'],
+                    exclusion_radius=self.p[
+                        'initial_overlap_exclusion_radius_m'])
+                for replay_robot, samples in robot_replay.samples.items():
+                    replayed.samples[replay_robot] = samples
+                replayed.bins.update(robot_replay.bins)
+                replayed.starts.update(robot_replay.starts)
+                replayed.repeated_distance.update(
+                    robot_replay.repeated_distance)
+                replayed.total_distance.update(robot_replay.total_distance)
+                replayed.last.update(robot_replay.last)
+            deferred = replayed.summary()
+        except (OSError, ValueError) as exc:
+            return {
+                'live': live,
+                'deferred': None,
+                'equal': False,
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'error': str(exc),
+            }
+        return {
+            'live': live,
+            'deferred': deferred,
+            'equal': live == deferred,
+            'status': 'PARITY_PASS' if live == deferred else 'PARITY_FAIL',
+        }
+
     def summary(self,clean):
         elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
@@ -2800,6 +2852,14 @@ class CooperativeExperimentLogger(Node):
                 # This is a post-run file join only.  It reads the passive
                 # Supervisor/TF artifacts and never enters the ROS graph.
                 self._write_physical_gt_evaluation()
+            # First odometry salvage checkpoint: retain the existing live
+            # summary as authority while recording a semantic comparison with
+            # the deferred replay of the closed forensic odometry streams.
+            self._odometry_trajectory_parity = (
+                self._replay_local_trajectory_for_parity())
+            atomic_json(
+                self.directory / 'odometry_trajectory_parity.json',
+                self._odometry_trajectory_parity)
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]

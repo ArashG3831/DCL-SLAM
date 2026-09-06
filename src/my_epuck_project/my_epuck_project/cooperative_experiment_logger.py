@@ -432,7 +432,12 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.map_receipt_file=None; self._map_receipt_sequence=0; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        if bool(self.p.get('enable_scientific_raw_capture', False)):
+            self.map_receipt_file=open(
+                self.directory / 'map_receipts.jsonl', 'a', encoding='utf-8',
+                buffering=1)
+            self.files.append(self.map_receipt_file)
         if self.frontier_query_forensics:
             forensic_root=self.directory/'nav2_frontier_rejection_forensic'
             for name in ('local_costmap_crops','global_costmap_crops','shared_map_crops'):
@@ -2206,6 +2211,33 @@ class CooperativeExperimentLogger(Node):
         except Exception:
             self.get_logger().error(f'logger internal error reporting failed in {subsystem}',throttle_duration_sec=10.)
         finally:self._reporting_internal_error=False
+    def _record_map_receipt(self, robot, key, message, received_ros,
+                            received_wall):
+        """Record only causal map identity metadata for exact replay joins."""
+        if self.map_receipt_file is None:
+            return
+        info = message.info
+        data = np.asarray(message.data, dtype=np.int8)
+        stamp_sec, stamp_nanosec = stamp(message)
+        with self._io_lock:
+            self._map_receipt_sequence += 1
+            row = {
+                'sequence': self._map_receipt_sequence,
+                'robot_id': str(robot),
+                'map_key': str(key),
+                'received_ros_time_s': float(received_ros),
+                'received_wall_elapsed_s': float(received_wall),
+                'header_stamp_s': float(stamp_sec) + float(stamp_nanosec) * 1e-9,
+                'width': int(info.width),
+                'height': int(info.height),
+                'resolution': float(info.resolution),
+                'origin_x': float(info.origin.position.x),
+                'origin_y': float(info.origin.position.y),
+                'origin_yaw': float(yaw(info.origin.orientation)),
+                'data_sha256': hashlib.sha256(data.tobytes()).hexdigest(),
+            }
+            self.map_receipt_file.write(
+                json.dumps(finite(row), separators=(',', ':')) + '\n')
     def mark(self,r,key,msg):
         now=self.ros_seconds()
         with self._state_lock:
@@ -2227,6 +2259,9 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None and key == 'peer_map':
             self.forensic.record_peer_map(
                 r, msg, now, time.monotonic() - self.start)
+        if key in ('map', 'shared_map'):
+            self._record_map_receipt(
+                r, key, msg, now, time.monotonic() - self.start)
         if self.forensic is not None and self.scan_matching_enabled and key == 'map':
             self.record_scan_correction_at_map_update(r, now)
 
@@ -3381,6 +3416,8 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'passive_rosbag_export.json',
                 self.directory / 'passive_rosbag_qos_overrides.yaml',
             ])
+        if bool(self.p.get('enable_scientific_raw_capture', False)):
+            required.append(self.directory / 'map_receipts.jsonl')
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
         if self.scan_matching_enabled:

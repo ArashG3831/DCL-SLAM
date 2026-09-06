@@ -387,6 +387,7 @@ class CooperativeExperimentLogger(Node):
             # local-map union path.
             'coverage_source': 'auto',
             'enable_passive_rosbag': False,
+            'enable_scientific_raw_capture': False,
         })
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_ros=self.get_clock().now().nanoseconds*1e-9; self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
@@ -564,7 +565,9 @@ class CooperativeExperimentLogger(Node):
                  self.passive_bag_command,
                  self.passive_bag_log_path) = start_recorder(
                     self.directory / 'passive_rosbag', self.robots,
-                    include_offloaded=self.passive_sensor_offload_enabled)
+                    include_offloaded=self.passive_sensor_offload_enabled,
+                    include_scientific_raw=bool(
+                        self.p.get('enable_scientific_raw_capture', False)))
                 self.event(
                     'PASSIVE_ROSBAG_STARTED',
                     'standard rosbag2 recorder started for observer-only topics',
@@ -3485,7 +3488,9 @@ class CooperativeExperimentLogger(Node):
         try:
             exported = export_index_with_bounded_retry(
                 bag_directory, export_path, self.robots,
-                include_offloaded=self.passive_sensor_offload_enabled)
+                include_offloaded=self.passive_sensor_offload_enabled,
+                include_scientific_raw=bool(
+                    self.p.get('enable_scientific_raw_capture', False)))
             metadata.update(exported)
             if return_code != 0:
                 metadata['complete'] = False

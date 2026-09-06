@@ -128,6 +128,14 @@ def test_c_logger_removes_only_bag_owned_sensor_entities():
     assert 'include_offloaded=self.passive_sensor_offload_enabled' in source
 
 
+def test_legacy_logger_exposes_opt_in_scientific_raw_capture():
+    source = (Path(__file__).parents[1] / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert "'enable_scientific_raw_capture': False" in source
+    assert 'include_scientific_raw=bool(' in source
+    assert "self.p.get('enable_scientific_raw_capture', False)" in source
+
+
 def test_missing_clock_or_sensor_rows_remain_detectable():
     # The finalizer's required-topic contract includes /clock and every
     # offloaded stream; this guards against silently treating an empty export

@@ -227,3 +227,71 @@ exclude build, install, log, ROS-log, temporary, raw simulation-output, and
 other generated directories unless the user explicitly requests them. If the
 Windows Desktop is not accessible, report the exact handoff failure instead of
 silently skipping it.
+
+## Legacy Observer Salvage / Incremental Migration Protocol
+
+The old observer remains the behavioral reference while observer salvage is
+being proven. The objective is the same scientific observer capability and
+outputs with less mission-time work, no silent feature loss, and no duplicate
+implementations.
+
+1. Never perform multiple observer responsibility-family migrations in one
+   unverified batch.
+
+2. Change one logically isolated responsibility at a time. Examples include:
+   synchronized map-frame processing; odometry trajectory/distance;
+   coverage/ownership; protocol/event accounting; warning/rosout processing;
+   health processing; and map conversion/counting.
+
+3. Before each change:
+   - identify the exact old behavior;
+   - identify its inputs;
+   - identify every output, artifact, and consumer;
+   - identify exact timing and missing/zero/error semantics;
+   - record the relevant baseline tests and parity evidence.
+
+4. After each change:
+   - run the narrowest tests/parity checks that fully exercise that
+     responsibility;
+   - compare old-versus-new observable outputs;
+   - verify that no metric, artifact, evidence source, schema, timestamp
+     semantic, fidelity, branch, or validity behavior was lost;
+   - verify that production behavior outside that responsibility did not
+     change.
+
+5. Do not proceed to the next responsibility while the current one has failing
+   tests, unexplained output differences, unproven parity, missing evidence,
+   or unresolved semantic differences.
+
+6. Commit each verified logical change separately. Each commit must contain
+   only that logical change and its directly required tests. Never combine
+   several observer migrations into one commit.
+
+7. If a change breaks parity, diagnose that single change and fix or revert it.
+   Do not pile additional changes on top of a broken state.
+
+8. Keep checkpoints fine-grained enough that git history can answer exactly
+   which change caused a behavior or performance regression.
+
+9. Do not commit unrelated dirty-worktree files.
+
+10. When a runtime-affecting migration is accepted, record before/after
+    runtime evidence when practical so performance regressions can be
+    attributed to the exact commit.
+
+11. Prefer extending the old observer's existing passive rosbag capture, raw
+    forensic evidence, deferred reconstruction, finalization/replay
+    mechanisms, and metric primitives rather than creating a second
+    independent evaluator.
+
+12. Never remove live computation until its required raw inputs are preserved
+    and its replacement path has demonstrated parity.
+
+13. During migration, maintain one authoritative implementation of each
+    scientific calculation wherever practical. Do not maintain separate live
+    and offline algorithms that can drift; extract or reuse existing
+    calculation logic when necessary.
+
+14. The final goal is the same scientific observer capability and outputs,
+    less mission-time work, no silent feature loss, and no duplicate
+    implementations.

@@ -229,3 +229,42 @@ Focused validation after the wiring change:
 ```
 
 Commit: `e266623` (`observer: enable lossless scientific raw evidence capture`).
+
+## Shared trajectory / overlap replay checkpoint
+
+The complete raw-bag replay path is now implemented in the isolated module
+`src/my_epuck_project/my_epuck_project/deferred_tf_trajectory.py`. It reads the
+native `/tf`, `/tf_static`, and per-robot `/odom` streams in rosbag arrival
+order, inserts dynamic/static transforms into the same `tf2_ros.Buffer` API
+used by the live observer, performs the same zero-timeout timestamped lookup,
+and feeds the existing `TrajectoryOverlap` primitive. It therefore does not
+introduce a second overlap or distance definition. Missing/mistyped required
+streams and malformed/non-finite poses fail closed.
+
+The legacy logger now emits
+`shared_trajectory_parity.json` at finalization when opt-in scientific raw
+capture is enabled. It records the live summary beside the deferred summary,
+accepted/skipped sample counts, deserialization count, errors, and an explicit
+`PARITY_PASS`, `PARITY_FAIL`, or fail-closed status. Live trajectory/overlap
+remains authoritative; no runtime behavior or output authority was switched in
+this checkpoint.
+
+Focused tests after the implementation and finalization-wiring correction:
+
+```text
+82 passed in 23.27s
+```
+
+Two unrelated pre-existing tests in the broader selected set still fail because
+the active installed interface artifacts do not expose fields already present
+in dirty source message definitions (`costmap_revision` and
+`feasible_work_available`). They are not exercised by this replay checkpoint.
+
+Checkpoint commit: `22bf48f`
+(`observer: add rosbag tf2 trajectory parity replay`).
+
+The next required evidence is a fresh run with
+`enable_scientific_raw_capture=true`; exact live-vs-bag parity cannot be claimed
+from the older sparse forensic artifact. Until that run proves parity, the
+authority switch and removal of live shared trajectory/overlap accumulation are
+intentionally not performed.

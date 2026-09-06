@@ -2682,6 +2682,7 @@ class CooperativeExperimentLogger(Node):
                 replayed.total_distance.update(robot_replay.total_distance)
                 replayed.last.update(robot_replay.last)
             deferred = replayed.summary()
+            self._deferred_local_trajectory = replayed
         except (OSError, ValueError) as exc:
             return {
                 'live': live,
@@ -2860,6 +2861,9 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'odometry_trajectory_parity.json',
                 self._odometry_trajectory_parity)
+            if self._odometry_trajectory_parity.get('equal') is True:
+                self._odometry_trajectory_live = self.local_trajectory
+                self.local_trajectory = self._deferred_local_trajectory
             self._artifact_finalization=self.required_artifact_status(False)
             clean=bool(clean and self._artifact_finalization['complete'])
             with self._state_lock:warning_records=[asdict(r) for r in self.warns.records.values()]

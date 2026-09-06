@@ -776,3 +776,35 @@ The replay was run offline against the preserved complete-evidence bag from
 `248` planner paths, `23` recovery transitions, and complete per-robot
 NavigateToPose status streams.  Focused replay, protocol, and logger tests
 passed: `66` tests.  No Webots runtime was run for this checkpoint.
+
+## Raw-backed health-history checkpoint
+
+`00df2f7` moves the historical `topic_health.csv` row path to finalization for
+raw-enabled runs.  The live `sample_health()` callback still performs the
+existing TF availability and stale-transition checks, preserving runtime
+validity/event semantics; it buffers the same timestamped rows rather than
+serializing them during the mission.  Finalization reconstructs ages and
+10-second rates from the existing bag-to-`/clock` timing index for odometry,
+joint/scans, maps, peer maps, shared maps, frontier/task/status streams,
+NavigateToPose feedback, and `cmd_vel`.  Costmap rows remain live because
+costmap streams are not in the scientific raw contract.
+
+Headerless raw messages are now retained in the timing index using their
+mapped simulation receipt time; headered streams preserve their header stamp.
+The legacy CSV schema, row ordering, timer cadence, stale thresholds, and
+missing-data behavior are unchanged.  The existing non-raw/passive path is
+unchanged.  Focused replay, protocol, passive, navigation, and logger tests
+passed: `85` tests.  No runtime validation was run for this checkpoint.
+
+## Current open salvage work
+
+The remaining open families are action/path authority integration beyond the
+new normalized evidence artifact, resource-history ownership, and final
+summary/finalization cleanup.  The action/path artifact is currently
+authoritative for the raw action/path evidence itself, while the established
+claim/distributed-event lifecycle remains authoritative for the existing
+navigation outcome summary; replacing that summary would change its semantic
+owner without a proven parity definition.  CPU/RSS history remains live
+observer measurement because post-run replay cannot recreate the observer's
+process-resource history; any change requires an explicit measurement-owner
+decision and a separate parity/validity checkpoint.

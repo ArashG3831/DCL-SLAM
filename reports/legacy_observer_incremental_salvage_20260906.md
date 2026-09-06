@@ -632,3 +632,41 @@ is raw-source enablement only; no warning/diagnostic authority switch has been
 claimed. Exact legacy warning parity still requires preserving the observer's
 wall-receipt timestamps and event ordering; the current bag alone does not
 prove those fields.
+
+## Rosout receipt-ledger checkpoint
+
+`f9a9116` adds a compact `rosout_receipts.jsonl` ledger to raw-enabled legacy
+runs. It preserves the observer-side receipt sequence, Python receipt wall time,
+observer ROS time, source message stamp, severity, logger name, and message text.
+This is an evidence-enabling change only: the existing live warning normalization,
+diagnostic counters, `events.jsonl`, and validity behavior remain authoritative.
+The ledger is required by the raw artifact contract so a future warning/diagnostic
+replay can compare legacy callback receipt semantics instead of assuming that
+native bag timestamps reproduce Python callback receipt time.
+
+The bounded validation used the rebuilt install
+`install_legacy_salvage_rosout_receipts_20260906` with the canonical C,
+frontier-cost-only, MODE_B, 20 ms, fast/headless configuration and a 120 s
+simulation horizon:
+
+```text
+results/legacy_salvage_rosout_receipts_20260906/
+  fast_trial_20260906T200246Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.06 s` with simulation-horizon overrun
+`false`, launch return code `0`, observer finalization `COMPLETE`, and no missing
+required artifacts. The run produced `1,820` sequential receipt rows
+(`receipt_sequence` 0 through 1,819), while the native `/rosout` bag stream
+contained `1,882` messages. The difference is expected because the compact
+observer ledger intentionally excludes messages filtered by the existing logger
+policy (and the native bag remains the complete raw source); it is not used as a
+replacement for the bag. Receipt rows covered simulation receipt times from
+`0.0` through `120.62 s`, with no recorded receipt-write failure. The native bag
+also retained the required `/rosout` payload stream.
+
+`pair_decision_replay_parity.json` and `agreement_replay_parity.json` remained
+`DEFERRED_AUTHORITATIVE`, and the final artifact contract was complete. No
+warning/diagnostic authority switch is claimed by this checkpoint; the next
+isolated work must add and validate warning replay against the bag plus this
+receipt ledger before disabling any live warning-derived work.

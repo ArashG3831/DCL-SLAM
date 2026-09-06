@@ -4036,7 +4036,7 @@ class CooperativeExperimentLogger(Node):
                     differences.append({
                         'row': deferred_row['row_number'],
                         'field': field, 'live': actual, 'deferred': proposed})
-        return {
+        result = {
             'status': 'PARITY_PASS' if not differences else 'PARITY_FAIL',
             'equal': not differences,
             'sample_count': replay['sample_count'],
@@ -4044,9 +4044,26 @@ class CooperativeExperimentLogger(Node):
             'difference_count': len(differences),
             'source': 'native_bag_payload_plus_causal_map_receipts',
         }
+        if not differences:
+            self._deferred_coverage_authority = replay['final_state']
+        return result
 
     def summary(self,clean):
-        elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=getattr(self, '_deferred_shared_trajectory_summary', self.trajectory.summary()); records=list(self.warns.records.values()); rss=0
+        elapsed=time.monotonic()-self.start
+        deferred_coverage = getattr(self, '_deferred_coverage_authority', None)
+        if deferred_coverage is None:
+            a = self.attribution.summary()
+            initial_known = self.initial_known
+            previous_known = self.previous_known
+        else:
+            a = deferred_coverage['attribution']
+            initial_known = deferred_coverage['initial_known']
+            previous_known = deferred_coverage['previous_known']
+        motion=self.local_trajectory.summary()
+        shared_motion=getattr(
+            self, '_deferred_shared_trajectory_summary',
+            self.trajectory.summary())
+        records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
         except OSError:pass
         cpu=sorted(self._cpu_samples); rss_values=self._rss_samples or [rss]
@@ -4054,18 +4071,18 @@ class CooperativeExperimentLogger(Node):
         robot_states={r:{'claim_state':self.latest[r].get('claim_state','UNKNOWN'),'claim_id':self.latest[r].get('claim_id'),'frontier_id':self.latest[r].get('frontier_id'),'navigation_active':self.latest[r].get('navigation_active',False)} for r in self.robots}
         continuous={r:{'exploration_cycles':self.robot_counts[r]['EXPLORATION_CYCLE_STARTED'],'completed_goals':self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'failed_goals':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED'],'average_cycle_duration_s':statistics.fmean(self.cycle_durations[r]) if self.cycle_durations[r] else 0.,'suppression_creations':self.robot_counts[r]['FAILURE_SUPPRESSION_CREATED']+self.robot_counts[r]['SUCCESS_COOLDOWN_CREATED'],'repeated_region_attempts':sum(max(0,n-1) for n in self.region_attempts[r].values()),'maximum_equivalent_region_attempt_count':max(self.region_attempts[r].values(),default=0),'locally_exhausted_duration_s':self.exhausted_duration[r]+((time.monotonic()-self.exhausted_since[r]) if self.exhausted_since[r] is not None else 0.)} for r in self.robots}
         total_distance=sum(motion.get('distance_travelled_m',{}).values())
-        shared_coverage_available=self.previous_known is not None
-        coverage_gain=(self.previous_known-self.initial_known
-                       if self.initial_known is not None and
-                       self.previous_known is not None else None)
+        shared_coverage_available=previous_known is not None
+        coverage_gain=(previous_known-initial_known
+                       if initial_known is not None and
+                       previous_known is not None else None)
         mapping={
             'available': shared_coverage_available,
             'source': self.coverage_source,
             'reason': (f'runtime {self.coverage_source} samples'
                        if shared_coverage_available else
                        f'no runtime {self.coverage_source} samples; coverage is unavailable'),
-            'initial_known_cells': self.initial_known,
-            'final_known_cells': self.previous_known,
+            'initial_known_cells': initial_known,
+            'final_known_cells': previous_known,
             'coverage_gain_cells': coverage_gain,
             'coverage_gain_per_metre_travelled': (
                 coverage_gain/total_distance
@@ -4075,12 +4092,12 @@ class CooperativeExperimentLogger(Node):
         if self.coverage_source == 'local_map':
             mapping.update({
                 'unique_first_seen_cells': {
-                    'robot1': self.previous_known or 0,
+                    'robot1': previous_known or 0,
                     'robot2': 0,
                 },
                 'later_duplicated_cells': {'robot1': 0, 'robot2': 0},
                 'simultaneously_observed_cells': 0,
-                'total_known_union_cells': self.previous_known,
+                'total_known_union_cells': previous_known,
                 'duplicated_known_fraction': 0.0,
             })
         return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'per_robot_odom','shared_trajectory_source_frame':'global_frame (only when transform is available)','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':mapping,'motion':motion,'shared_frame_motion':shared_motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'goal_accounting':self.goal_accounting_summary(),'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'callback_timing_enabled':self._callback_timing_enabled,'callback_timing':self._callback_timing,'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}

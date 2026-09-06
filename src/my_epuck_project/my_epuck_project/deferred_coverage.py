@@ -225,4 +225,12 @@ def replay_coverage_from_bag(
             'query_ros_time_s': query_ros,
             'semantic': semantic,
         })
-    return {'rows': output_rows, 'sample_count': len(output_rows)}
+    return {
+        'rows': output_rows,
+        'sample_count': len(output_rows),
+        'final_state': {
+            'initial_known': initial_known,
+            'previous_known': previous_known,
+            'attribution': attribution.summary(),
+        },
+    }

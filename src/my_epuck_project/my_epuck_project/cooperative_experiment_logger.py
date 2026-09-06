@@ -3177,12 +3177,16 @@ class CooperativeExperimentLogger(Node):
             row=self.common('/rosout:'+msg.name,source_stamp=source_stamp)
             row.update(severity='ERROR' if msg.level>=Log.ERROR else ('WARN' if msg.level>=Log.WARN else 'INFO'),category=diagnostic_category,message=msg.msg,node=msg.name)
             diagnostic_record = row
-            key=(msg.name,diagnostic_category,msg.msg); previous=self._diagnostic_last.get(key); now=row['elapsed_s']
-            if (previous is None or now-previous>=0.25) and self.nav2_diagnostic_count<10000:
-                self._diagnostic_last[key]=now; self.nav2_diagnostic_count+=1
-                try:
-                    with self._io_lock:self.nav2_diagnostics.write(json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n')
-                except (OSError,TypeError,ValueError) as exc:self.write_failures+=1; self.get_logger().error(f'Nav2 diagnostic write failed: {exc}',throttle_duration_sec=10.)
+            raw_replay_authority = (
+                self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False)))
+            if not raw_replay_authority:
+                key=(msg.name,diagnostic_category,msg.msg); previous=self._diagnostic_last.get(key); now=row['elapsed_s']
+                if (previous is None or now-previous>=0.25) and self.nav2_diagnostic_count<10000:
+                    self._diagnostic_last[key]=now; self.nav2_diagnostic_count+=1
+                    try:
+                        with self._io_lock:self.nav2_diagnostics.write(json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n')
+                    except (OSError,TypeError,ValueError) as exc:self.write_failures+=1; self.get_logger().error(f'Nav2 diagnostic write failed: {exc}',throttle_duration_sec=10.)
         if msg.level<Log.WARN:
             self._write_rosout_receipt(receipt_row, diagnostic_record)
             return
@@ -4377,6 +4381,22 @@ class CooperativeExperimentLogger(Node):
             )
             deferred = replay_nav2_diagnostics_from_receipts(
                 self.directory / 'rosout_receipts.jsonl')
+            raw_replay_authority = (
+                self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False)))
+            if raw_replay_authority:
+                return {
+                    'status': 'DEFERRED_AUTHORITATIVE',
+                    'equal': None,
+                    'live': None,
+                    'deferred': diagnostic_record_semantics(
+                        deferred['records']),
+                    'deferred_records': deferred['records'],
+                    'receipt_count': deferred['receipt_count'],
+                    'diagnostic_record_count': len(deferred['records']),
+                    'authority_ready': deferred['authority_ready'],
+                    'timestamp_comparison': 'replayed_from_receipts',
+                }
             self.nav2_diagnostics.flush()
             live = []
             path = self.directory / 'nav2_diagnostics.jsonl'
@@ -4679,7 +4699,8 @@ class CooperativeExperimentLogger(Node):
                     'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
                 self.write_failures += 1
                 self._nav2_diagnostic_replay_failed = True
-            elif (self._nav2_diagnostic_parity.get('status') == 'PARITY_PASS'
+            elif (self._nav2_diagnostic_parity.get('status') in
+                  ('PARITY_PASS', 'DEFERRED_AUTHORITATIVE')
                   and self._nav2_diagnostic_parity.get('authority_ready',
                                                         False)):
                 self._write_replayed_jsonl(

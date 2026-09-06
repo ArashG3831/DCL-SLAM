@@ -763,6 +763,16 @@ def test_controller_error_after_info_does_not_change_call_site_severity(observer
     assert diagnostics[-1]["message"] == "Failed to make progress"
 
 
+def test_raw_mode_defers_nav2_diagnostic_serialization(observer):
+    """Raw receipts, rather than a duplicate live file, own raw-mode replay."""
+    observer.passive_bag_enabled = True
+    observer.p['enable_scientific_raw_capture'] = True
+    observer.rosout(controller_error())
+    observer.nav2_diagnostics.flush()
+    assert (observer.directory / 'nav2_diagnostics.jsonl').read_text(
+        encoding='utf-8') == ''
+
+
 def test_csv_timing_schema_accepts_wall_and_sim_elapsed_fields(observer):
     """Every CSV writer accepts the dual-clock row emitted by the logger."""
     observer.sample_telemetry()

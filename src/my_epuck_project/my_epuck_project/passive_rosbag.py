@@ -241,19 +241,32 @@ def raw_bag_contract_status(type_map, counts, selected_topics,
     }
 
 
-def stop_recorder(process, log, timeout_s=8.0):
-    """Stop rosbag2 normally, escalating only for a genuinely stuck recorder."""
+def stop_recorder(process, log, timeout_s=30.0):
+    """Stop rosbag2 and its private process group before exporting the bag.
+
+    The recorder is started in its own session.  Signalling only the ros2 CLI
+    wrapper can leave a recorder/storage child running while finalization tries
+    to open the SQLite database.  Signal the private group so the recorder
+    receives the shutdown request, then allow its cache flush to complete.
+    This changes shutdown robustness only; it does not add mission-time work.
+    """
     if process is not None and process.poll() is None:
         try:
-            process.send_signal(signal.SIGINT)
+            process_group = os.getpgid(process.pid)
+            os.killpg(process_group, signal.SIGINT)
             process.wait(timeout=float(timeout_s))
         except (OSError, subprocess.TimeoutExpired):
             try:
                 if process.poll() is None:
-                    process.kill()
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
                 process.wait(timeout=3.0)
             except (OSError, subprocess.TimeoutExpired):
-                pass
+                try:
+                    if process.poll() is None:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    process.wait(timeout=3.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
     if log is not None:
         try:
             log.flush()

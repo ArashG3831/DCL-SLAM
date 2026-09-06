@@ -241,6 +241,35 @@ def test_export_does_not_retry_unrelated_type_error(monkeypatch):
     assert len(calls) == 1
 
 
+def test_stop_recorder_signals_private_process_group(monkeypatch):
+    signals = []
+
+    class Process:
+        pid = 1234
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+
+    class Log:
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(passive_rosbag.os, 'getpgid', lambda pid: 5678)
+    monkeypatch.setattr(
+        passive_rosbag.os, 'killpg',
+        lambda pgid, signum: signals.append((pgid, signum)))
+    process = Process()
+    assert passive_rosbag.stop_recorder(process, Log()) == 0
+    assert signals == [(5678, passive_rosbag.signal.SIGINT)]
+
+
 def test_rosbag_migration_does_not_remove_runtime_control_entities():
     source = (Path(__file__).parents[1] / 'my_epuck_project' /
               'cooperative_experiment_logger.py').read_text(encoding='utf-8')

@@ -629,23 +629,6 @@ results/legacy_salvage_rosout_raw_20260906/
 It reached `SIM_TIME_COMPLETE` at `120.06 s`, with no horizon overrun, complete
 raw export/finalization, and `1,995` `/rosout` messages in the native bag. This
 is raw-source enablement only; no warning/diagnostic authority switch has been
-claimed.
-
-`d473067` added `/rosout` to the version `1.4` scientific raw contract as an
-optional native bag stream. This is an enabling change for a future warning and
-diagnostic replay; the live `/rosout` subscription, normalization, warning
-artifacts, and validity behavior remain unchanged.
-
-The validation run was:
-
-```text
-results/legacy_salvage_rosout_raw_20260906/
-  fast_trial_20260906T195542Z/
-```
-
-It reached `SIM_TIME_COMPLETE` at `120.06 s`, with no horizon overrun, complete
-raw export/finalization, and `1,995` `/rosout` messages in the native bag. This
-is raw-source enablement only; no warning/diagnostic authority switch has been
 claimed. Exact legacy warning parity still requires preserving the observer's
 wall-receipt timestamps and event ordering; the current bag alone does not
 prove those fields.

@@ -670,3 +670,35 @@ also retained the required `/rosout` payload stream.
 warning/diagnostic authority switch is claimed by this checkpoint; the next
 isolated work must add and validate warning replay against the bag plus this
 receipt ledger before disabling any live warning-derived work.
+
+## Warning/rosout semantic replay checkpoint
+
+`76f7516` adds the next isolated parity step. The existing warning-category
+classification is now owned by the shared `warning_category()` helper used by
+both the live callback and replay. `replay_warning_records_from_receipts()`
+feeds the recorded receipt rows through the same `WarningDeduplicator` and
+produces a semantic comparison containing node, severity, representative and
+normalized message, occurrence count, and category. Wall timestamps are
+intentionally not treated as equal yet: the old live callback calls `utc_now()`
+when adding the warning, while the receipt ledger records the earlier observer
+receipt time. The live warning artifact therefore remains authoritative; this
+checkpoint only proves the non-time warning semantics.
+
+Focused syntax/logger/protocol/passive tests passed (`79`). The affected package
+was rebuilt as `install_legacy_salvage_warning_replay_20260906`.
+
+The clean canonical validation was:
+
+```text
+results/legacy_salvage_warning_replay_20260906/
+  fast_trial_20260906T201450Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.06 s`, with horizon overrun `false`,
+launch return code `0`, observer finalization `COMPLETE`, and no missing required
+artifacts. `warning_replay_parity.json` reported `PARITY_PASS` with `59` live
+and `59` deferred warning records, from `1,893` receipt rows (`133` warning or
+error rows). No live warning/diagnostic work was disabled by this checkpoint.
+The next warning migration, if pursued, must separately preserve or explicitly
+approve the live warning timestamp/event-order semantics before switching final
+warning artifacts to deferred authority.

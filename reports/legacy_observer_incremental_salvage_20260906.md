@@ -543,3 +543,26 @@ The agreement checkpoint has not yet been given a new Webots runtime run; the
 next validation must confirm the new parity artifact is included in the final
 artifact contract. No claim is made here that the runtime finalization contract
 has already been exercised with this latest commit.
+
+`8f05a15` completed the agreement subfamily's live-work removal. In raw-enabled
+legacy C runs, `distributed_event()` still records the complete event payload,
+but no longer maintains the redundant live agreement counters/sets; the old
+counter path remains unchanged when scientific raw capture is disabled. A
+deferred replay failure now fails the raw artifact contract rather than silently
+publishing empty agreement statistics.
+
+The clean validation for that authority/removal checkpoint was:
+
+```text
+results/legacy_salvage_agreement_authority_20260906/
+  fast_trial_20260906T194242Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.06 s` simulated time with no horizon
+overrun, `94.6743 s` reported wall runtime, clean observer finalization, and
+complete native raw export. `agreement_replay_parity.json` was
+`DEFERRED_AUTHORITATIVE`; it deserialized `96` distributed-event messages and
+reconstructed `0` agreement publications, `0` unique rounds, and `0` unique
+decisions. The summary contained those deferred values and the artifact contract
+was `COMPLETE`. The fixed-horizon run is a functional checkpoint, not a mission
+completion or RTF acceptance run.

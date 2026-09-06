@@ -214,7 +214,7 @@ def test_export_retries_only_the_shutdown_conversion_error(monkeypatch):
 
     def flaky_export(*args, **kwargs):
         calls.append((args, kwargs))
-        if len(calls) == 1:
+        if len(calls) < 4:
             raise TypeError(
                 'Unable to convert function return value to a Python type! '
                 'The signature was (arg0: bytes, arg1: object) -> object')
@@ -224,7 +224,7 @@ def test_export_retries_only_the_shutdown_conversion_error(monkeypatch):
     result = export_index_with_bounded_retry(
         Path('/tmp/bag'), Path('/tmp/export.jsonl'), ('robot1',))
     assert result['complete'] is True
-    assert len(calls) == 2
+    assert len(calls) == 4
 
 
 def test_export_does_not_retry_unrelated_type_error(monkeypatch):

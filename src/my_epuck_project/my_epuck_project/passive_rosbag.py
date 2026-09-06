@@ -381,13 +381,15 @@ def export_index_with_bounded_retry(bag_directory: Path, output_path: Path,
                                     robots, include_offloaded=False,
                                     include_scientific_raw=False,
                                     required_topics=None):
-    """Export once, retrying one transient rosbag2 type-conversion failure.
+    """Export with bounded backoff for transient rosbag2 conversion failures.
 
     rosbag2 may return from the recorder process while its final storage flush
-    is still becoming readable.  A single bounded retry lets that flush settle
-    without hiding any other exporter error or dropping a raw bag message.
+    is still becoming readable.  Four bounded attempts with short exponential
+    backoff let that flush settle without hiding any other exporter error or
+    dropping a raw bag message.  This is post-run finalization only and does
+    not change the observer's mission-time workload.
     """
-    for attempt in range(2):
+    for attempt in range(4):
         try:
             return export_index(
                 bag_directory, output_path, robots,
@@ -398,9 +400,9 @@ def export_index_with_bounded_retry(bag_directory: Path, output_path: Path,
             transient = (
                 'Unable to convert function return value to a Python type'
                 in str(exc))
-            if attempt or not transient:
+            if attempt >= 3 or not transient:
                 raise
-            time.sleep(0.5)
+            time.sleep(0.5 * (2 ** attempt))
     raise AssertionError('bounded rosbag export retry did not return')
 
 

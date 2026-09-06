@@ -729,3 +729,27 @@ error rows). No live warning/diagnostic work was disabled by this checkpoint.
 The next warning migration, if pursued, must separately preserve or explicitly
 approve the live warning timestamp/event-order semantics before switching final
 warning artifacts to deferred authority.
+
+## Warning/Nav2 final-artifact authority checkpoint
+
+`c81ae5a` completes the warning/Nav2 standalone-artifact authority step.  The
+rosout receipt ledger now retains the warning timestamp used by the legacy
+deduplicator and the complete diagnostic record metadata (event sequence,
+timestamps, source and severity fields).  Replay therefore produces the same
+final warning and Nav2 diagnostic records from the preserved receipt stream,
+including the fields that were previously excluded from semantic-only parity.
+
+For raw-enabled runs, finalization selects replayed warning records after a
+successful warning parity check and rewrites `warnings.jsonl`; the summary's
+warning occurrence total uses the same deferred records.  Nav2 diagnostic
+records are selected only when replay has all required record metadata and are
+written after the live diagnostic handle is closed.  If raw capture is
+disabled, or replay is unavailable/incomplete, the established live path
+remains in force and the artifact contract fails closed for raw-enabled runs.
+
+The rosout event/category and planner-query counters remain live in this
+checkpoint because their global event ordering and query attribution are still
+consumers of the legacy callback.  No robot, allocator, certificate, Nav2,
+sampling, or protocol behavior changed.  The focused deferred-protocol and
+logger tests passed: `64` tests.  No runtime validation was run for this
+checkpoint.

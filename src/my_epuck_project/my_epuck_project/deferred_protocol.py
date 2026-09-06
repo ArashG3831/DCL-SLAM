@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
+import re
 
-from .experiment_metrics import WarningDeduplicator, warning_category
+from .experiment_metrics import (
+    WarningDeduplicator, rosout_diagnostic_category, warning_category)
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
@@ -167,6 +169,21 @@ def warning_record_semantics(records):
         item['node_name'], item['severity'], item['normalized_message']))
 
 
+def diagnostic_record_semantics(records):
+    """Return Nav2 diagnostic fields independent of callback timing."""
+    result = []
+    for record in records:
+        value = record if isinstance(record, dict) else record.__dict__
+        result.append({key: value.get(key) for key in (
+            'node', 'severity', 'category', 'message') } | {
+            'source_stamp_sec': value.get(
+                'source_stamp_sec', value.get('ros_time_sec')),
+            'source_stamp_nanosec': value.get(
+                'source_stamp_nanosec', value.get('ros_time_nanosec')),
+        })
+    return result
+
+
 def replay_warning_records_from_receipts(receipt_path: Path):
     """Replay the legacy WarningDeduplicator from observer receipt rows."""
     receipt_path = Path(receipt_path)
@@ -202,3 +219,47 @@ def replay_warning_records_from_receipts(receipt_path: Path):
         'warning_receipt_count': warning_receipt_count,
         'records': records,
     }
+
+
+def replay_nav2_diagnostics_from_receipts(receipt_path: Path):
+    """Replay the legacy rate-limited Nav2 diagnostic stream."""
+    receipt_path = Path(receipt_path)
+    if not receipt_path.is_file():
+        raise FileNotFoundError(receipt_path)
+    records = []
+    previous = {}
+    receipt_count = 0
+    with receipt_path.open(encoding='utf-8') as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                level = int(row['level'])
+                name = str(row['name'])
+                message = str(row['message'])
+                now = float(row['elapsed_s'])
+                source_sec = int(row['source_stamp_sec'])
+                source_nanosec = int(row['source_stamp_nanosec'])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f'invalid rosout receipt at line {line_number}: {exc}') from exc
+            receipt_count += 1
+            category = rosout_diagnostic_category(f'{name} {message}')
+            if category is None:
+                continue
+            key = (name, category, message)
+            last = previous.get(key)
+            if (last is not None and now - last < 0.25) or len(records) >= 10000:
+                continue
+            previous[key] = now
+            records.append({
+                'node': name,
+                'severity': 'ERROR' if level >= 40 else (
+                    'WARN' if level >= 30 else 'INFO'),
+                'category': category,
+                'message': message,
+                'source_stamp_sec': source_sec,
+                'source_stamp_nanosec': source_nanosec,
+            })
+    return {'receipt_count': receipt_count, 'records': records}

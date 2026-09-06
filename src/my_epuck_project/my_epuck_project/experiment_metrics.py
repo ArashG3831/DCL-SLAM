@@ -47,6 +47,29 @@ def warning_category(message):
         ('transform', 'TF_WARNING'),
         (' tf', 'TF_WARNING'),
     ) if key in lower), 'PROCESS_WARNING')
+
+
+def rosout_diagnostic_category(message):
+    """Return the legacy Nav2/rosout diagnostic category, if any."""
+    lower = str(message).lower()
+    rules = (
+        ('TF_FAILURE', r'unable to transform robot pose into global plan|'
+         r'transform.*global plan|tf error|lookup would require'),
+        ('MISSED_RATE_WARNING', r'missed its desired rate|current loop rate'),
+        ('FOLLOW_PATH', r'\[follow_path\]|followpath'),
+        ('COMPUTE_PATH', r'compute_path_to_pose|computepathtopose'),
+        ('RECOVERY', r'recovery|clear_(local|global|entirely)|\bspin\b|'
+         r'back.?up|\bwait\b'),
+        ('COLLISION_MONITOR', r'collision.?monitor|stop.?zone|emergency stop'),
+    )
+    category = next((name for name, pattern in rules
+                     if re.search(pattern, lower)), None)
+    controller_or_planner = (
+        re.search(r'controller|planner', lower) and
+        re.search(r'failed|failure|abort|progress checker|no valid control|'
+                  r'timeout', lower))
+    return category or ('CONTROLLER_OR_PLANNER_ERROR'
+                        if controller_or_planner else None)
 @dataclass
 class WarningRecord:
     node_name:str; severity:str; representative_message:str; normalized_message:str; first_occurrence:str; last_occurrence:str; occurrence_count:int=1; category:str='PROCESS_WARNING'

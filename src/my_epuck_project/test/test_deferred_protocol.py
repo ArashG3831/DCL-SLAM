@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -164,3 +165,24 @@ def test_warning_replay_rejects_corrupt_receipt(tmp_path):
     receipts.write_text('{not-json}\n', encoding='utf-8')
     with pytest.raises(ValueError, match='invalid rosout receipt'):
         replay_module.replay_warning_records_from_receipts(receipts)
+
+
+def test_nav2_diagnostic_replay_preserves_rate_limit_and_category(tmp_path):
+    receipts = tmp_path / 'rosout_receipts.jsonl'
+    rows = [
+        {'level': 30, 'name': 'planner_server',
+         'message': 'missed its desired rate 10.0', 'elapsed_s': 1.0,
+         'source_stamp_sec': 1, 'source_stamp_nanosec': 2},
+        {'level': 30, 'name': 'planner_server',
+         'message': 'missed its desired rate 10.0', 'elapsed_s': 1.1,
+         'source_stamp_sec': 1, 'source_stamp_nanosec': 3},
+        {'level': 40, 'name': 'planner_server',
+         'message': 'missed its desired rate 10.0', 'elapsed_s': 1.4,
+         'source_stamp_sec': 1, 'source_stamp_nanosec': 4},
+    ]
+    receipts.write_text(
+        ''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+    replay = replay_module.replay_nav2_diagnostics_from_receipts(receipts)
+    assert replay['receipt_count'] == 3
+    assert len(replay['records']) == 2
+    assert replay['records'][0]['category'] == 'MISSED_RATE_WARNING'

@@ -38,7 +38,7 @@ from my_epuck_interfaces.msg import (
     TaskBidArray,
     TaskSnapshot,
 )
-from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now, warning_category
+from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, rosout_diagnostic_category, utc_now, warning_category
 from .forensic_evidence import ForensicEvidenceWriter
 from .deferred_protocol import pair_decision_outcome
 from .passive_rosbag import (
@@ -3131,15 +3131,7 @@ class CooperativeExperimentLogger(Node):
                 self.record_internal_error('rosout_receipt', exc)
         text=msg.name+' '+msg.msg
         lower=text.lower()
-        diagnostic_rules=(
-            ('TF_FAILURE',r'unable to transform robot pose into global plan|transform.*global plan|tf error|lookup would require'),
-            ('MISSED_RATE_WARNING',r'missed its desired rate|current loop rate'),
-            ('FOLLOW_PATH',r'\[follow_path\]|followpath'),
-            ('COMPUTE_PATH',r'compute_path_to_pose|computepathtopose'),
-            ('RECOVERY',r'recovery|clear_(local|global|entirely)|\bspin\b|\bback.?up\b|\bwait\b'),
-            ('COLLISION_MONITOR',r'collision.?monitor|stop.?zone|emergency stop'),
-        )
-        diagnostic_category=next((category for category,pattern in diagnostic_rules if re.search(pattern,lower)),None)
+        diagnostic_category=rosout_diagnostic_category(text)
         if 'COMPUTE_PATH_REUSED' in msg.msg:
             source_match = re.search(r'source=([A-Z0-9_]+)', msg.msg)
             source = source_match.group(1) if source_match else 'UNKNOWN'
@@ -3472,6 +3464,7 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'agreement_replay_parity.json',
                 self.directory / 'rosout_receipts.jsonl',
                 self.directory / 'warning_replay_parity.json',
+                self.directory / 'nav2_diagnostic_replay_parity.json',
             ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
@@ -3571,6 +3564,11 @@ class CooperativeExperimentLogger(Node):
         if getattr(self, '_warning_replay_failed', False):
             result['missing'].append(
                 'warning_replay_parity.json:deferred_replay_failed')
+            result['complete'] = False
+            result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
+        if getattr(self, '_nav2_diagnostic_replay_failed', False):
+            result['missing'].append(
+                'nav2_diagnostic_replay_parity.json:deferred_replay_failed')
             result['complete'] = False
             result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
         return result
@@ -4274,6 +4272,43 @@ class CooperativeExperimentLogger(Node):
             'timestamp_comparison': 'semantic_only',
         }
 
+    def _replay_nav2_diagnostics_for_parity(self):
+        """Compare Nav2 diagnostic records with the receipt-ledger replay."""
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {'status': 'NO_SCIENTIFIC_RAW_BAG', 'equal': None}
+        try:
+            from .deferred_protocol import (
+                diagnostic_record_semantics,
+                replay_nav2_diagnostics_from_receipts,
+            )
+            deferred = replay_nav2_diagnostics_from_receipts(
+                self.directory / 'rosout_receipts.jsonl')
+            self.nav2_diagnostics.flush()
+            live = []
+            path = self.directory / 'nav2_diagnostics.jsonl'
+            if path.is_file():
+                with path.open(encoding='utf-8') as stream:
+                    live = [json.loads(line) for line in stream if line.strip()]
+            live_semantics = diagnostic_record_semantics(live)
+            deferred_semantics = diagnostic_record_semantics(deferred['records'])
+            equal = live_semantics == deferred_semantics
+            return {
+                'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
+                'equal': equal,
+                'live': live_semantics,
+                'deferred': deferred_semantics,
+                'receipt_count': deferred['receipt_count'],
+                'diagnostic_record_count': len(deferred['records']),
+                'timestamp_comparison': 'semantic_only',
+            }
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            return {
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'equal': False,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+
     def _write_deferred_coverage_csv(self, replay):
         """Materialize the legacy coverage schema from deferred rows."""
         if self.coverage_stream is not None:
@@ -4509,6 +4544,15 @@ class CooperativeExperimentLogger(Node):
                     'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
                 self.write_failures += 1
                 self._warning_replay_failed = True
+            self._nav2_diagnostic_parity = (
+                self._replay_nav2_diagnostics_for_parity())
+            atomic_json(
+                self.directory / 'nav2_diagnostic_replay_parity.json',
+                self._nav2_diagnostic_parity)
+            if self._nav2_diagnostic_parity.get('status') not in (
+                    'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
+                self.write_failures += 1
+                self._nav2_diagnostic_replay_failed = True
             if self._agreement_parity.get('status') in (
                     'PARITY_PASS', 'DEFERRED_AUTHORITATIVE'):
                 deferred_agreement = self._agreement_parity.get('deferred', {})

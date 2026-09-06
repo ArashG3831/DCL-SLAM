@@ -3433,6 +3433,7 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'coverage.csv',
                 self.directory / 'coverage_replay_parity.json',
                 self.directory / 'pair_decision_replay_parity.json',
+                self.directory / 'agreement_replay_parity.json',
             ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
@@ -4116,6 +4117,52 @@ class CooperativeExperimentLogger(Node):
             'deserialized_messages': deferred['deserialized_messages'],
         }
 
+    def _replay_agreement_counters_for_parity(self):
+        """Compare raw event agreement counters with live accounting."""
+        live = {
+            'agreement_publications': self.agreement_publications,
+            'unique_agreed_rounds': len(self.unique_agreed_rounds),
+            'unique_agreed_decisions': len(self.unique_agreed_decisions),
+        }
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'status': 'NO_SCIENTIFIC_RAW_BAG',
+                'equal': None,
+                'live': live,
+            }
+        try:
+            from .deferred_protocol import replay_agreement_counters_from_bag
+            deferred = replay_agreement_counters_from_bag(
+                self.directory / 'passive_rosbag', self.robots)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'equal': False,
+                'live': live,
+                'deferred': None,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        deferred_values = {
+            key: deferred[key]
+            for key in ('agreement_publications',
+                        'unique_agreed_rounds',
+                        'unique_agreed_decisions', 'round_ids',
+                        'decision_hashes')}
+        comparison_values = {
+            key: deferred_values[key]
+            for key in ('agreement_publications',
+                        'unique_agreed_rounds',
+                        'unique_agreed_decisions')}
+        equal = live == comparison_values
+        return {
+            'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
+            'equal': equal,
+            'live': live,
+            'deferred': deferred_values,
+            'deserialized_messages': deferred['deserialized_messages'],
+        }
+
     def _write_deferred_coverage_csv(self, replay):
         """Materialize the legacy coverage schema from deferred rows."""
         if self.coverage_stream is not None:
@@ -4338,6 +4385,22 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'pair_decision_replay_parity.json',
                 self._pair_decision_parity)
+            self._agreement_parity = (
+                self._replay_agreement_counters_for_parity())
+            atomic_json(
+                self.directory / 'agreement_replay_parity.json',
+                self._agreement_parity)
+            if self._agreement_parity.get('status') in (
+                    'PARITY_PASS', 'DEFERRED_AUTHORITATIVE'):
+                deferred_agreement = self._agreement_parity.get('deferred', {})
+                self.agreement_publications = deferred_agreement.get(
+                    'agreement_publications', self.agreement_publications)
+                self.unique_agreed_rounds = set(
+                    deferred_agreement.get('round_ids',
+                                           self.unique_agreed_rounds))
+                self.unique_agreed_decisions = set(
+                    deferred_agreement.get('decision_hashes',
+                                           self.unique_agreed_decisions))
             from .deferred_protocol import select_pair_decision_outcomes
             selected_round_outcomes, outcome_source = (
                 select_pair_decision_outcomes(

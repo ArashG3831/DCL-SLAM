@@ -104,3 +104,33 @@ def test_pair_decision_replay_preserves_live_duplicate_suppression(
     }
     assert replay['deserialized_messages'] == 3
     assert len(replay['records']) == 2
+
+
+def test_agreement_replay_counts_only_agreement_events(monkeypatch, tmp_path):
+    bag = tmp_path / 'bag'
+    bag.mkdir()
+    messages = [
+        ('/robot1/distributed_event', SimpleNamespace(
+            event_type='DECISION_AGREED', round_id='r1', decision_hash='d1'), 1),
+        ('/robot2/distributed_event', SimpleNamespace(
+            event_type='STATE_TRANSITION', round_id='r1', decision_hash='d1'), 2),
+        ('/robot1/distributed_event', SimpleNamespace(
+            event_type='DECISION_AGREED', round_id='r1', decision_hash='d1'), 3),
+        ('/robot2/distributed_event', SimpleNamespace(
+            event_type='DECISION_AGREED', round_id='r2', decision_hash=''), 4),
+    ]
+    class FakeRosbag:
+        SequentialReader = staticmethod(lambda: _Reader(messages))
+        StorageOptions = staticmethod(lambda **kwargs: kwargs)
+        ConverterOptions = staticmethod(lambda **kwargs: kwargs)
+    monkeypatch.setitem(__import__('sys').modules, 'rosbag2_py', FakeRosbag())
+    monkeypatch.setattr(replay_module, 'get_message', lambda _name: object())
+    monkeypatch.setattr(replay_module, 'deserialize_message',
+                        lambda serialized, _type: serialized)
+
+    replay = replay_module.replay_agreement_counters_from_bag(
+        bag, ('robot1', 'robot2'))
+    assert replay['agreement_publications'] == 3
+    assert replay['unique_agreed_rounds'] == 2
+    assert replay['unique_agreed_decisions'] == 1
+    assert replay['deserialized_messages'] == 4

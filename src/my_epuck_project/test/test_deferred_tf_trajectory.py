@@ -100,3 +100,42 @@ def test_replay_fails_closed_when_required_tf_stream_is_missing(
     with pytest.raises(ValueError, match='raw trajectory topics missing'):
         replay_module.replay_shared_trajectory_from_bag(
             bag, ('robot1',), 'shared_map')
+
+
+def test_forensic_replay_preserves_causal_tf_odom_order(
+        monkeypatch, tmp_path):
+    forensic = tmp_path / 'forensic'
+    forensic.mkdir()
+    (forensic / 'raw_tf.csv').write_text(
+        'topic,static,received_ros_time_s,received_wall_elapsed_s,'
+        'transform_stamp,parent_frame,child_frame,translation_x,'
+        'translation_y,translation_z,rotation_x,rotation_y,rotation_z,'
+        'rotation_w\n'
+        '/tf_static,True,0.0,0.1,0.0,shared_map,robot1/odom,'
+        '1.0,2.0,0.0,0.0,0.0,0.0,1.0\n',
+        encoding='utf-8')
+    (forensic / 'robot1_odom.csv').write_text(
+        'received_ros_time_s,received_wall_elapsed_s,header_stamp,'
+        'pose_x,pose_y,orientation_z,orientation_w,frame_id\n'
+        '0.0,0.2,0.0,3.0,4.0,0.0,1.0,robot1/odom\n',
+        encoding='utf-8')
+
+    class _Buffer:
+        def set_transform(self, *_args):
+            return None
+
+        def set_transform_static(self, *_args):
+            return None
+
+        def lookup_transform(self, *_args, **_kwargs):
+            return SimpleNamespace(transform=SimpleNamespace(
+                translation=SimpleNamespace(x=1.0, y=2.0, z=0.0),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)))
+
+    monkeypatch.setattr(replay_module, 'Buffer', _Buffer)
+    result = replay_module.replay_shared_trajectory_from_forensic_capture(
+        forensic, ('robot1',), 'shared_map')
+    assert result['source'] == 'forensic_callback_ordered_tf_odom'
+    assert result['accepted_samples'] == 1
+    assert result['skipped_transform_samples'] == 0
+    assert result['summary']['distance_travelled_m'] == {'robot1': 0.0}

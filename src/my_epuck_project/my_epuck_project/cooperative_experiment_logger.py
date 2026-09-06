@@ -3859,7 +3859,14 @@ class CooperativeExperimentLogger(Node):
         }
 
     def _replay_shared_trajectory_for_parity(self):
-        """Compare complete rosbag tf2 replay with live overlap evidence."""
+        """Compare causal TF2 replay with live overlap evidence.
+
+        The native bag remains the complete payload source and is replayed as
+        an integrity diagnostic.  The legacy metric's exact callback boundary
+        is cross-topic causal order, which rosbag2 does not guarantee; the
+        preserved forensic receipt-order rows are therefore the parity source
+        for the authority comparison.
+        """
         live = self.trajectory.summary()
         if not (self.passive_bag_enabled and
                 bool(self.p.get('enable_scientific_raw_capture', False))):
@@ -3871,9 +3878,16 @@ class CooperativeExperimentLogger(Node):
             }
         try:
             from .deferred_tf_trajectory import (
-                replay_shared_trajectory_from_bag)
-            replay = replay_shared_trajectory_from_bag(
+                replay_shared_trajectory_from_bag,
+                replay_shared_trajectory_from_forensic_capture)
+            bag_replay = replay_shared_trajectory_from_bag(
                 self.directory / 'passive_rosbag', self.robots,
+                self.p['global_frame'],
+                bin_size=self.p['trajectory_bin_size_m'],
+                exclusion_radius=self.p[
+                    'initial_overlap_exclusion_radius_m'])
+            causal_replay = replay_shared_trajectory_from_forensic_capture(
+                self.directory / 'forensic', self.robots,
                 self.p['global_frame'],
                 bin_size=self.p['trajectory_bin_size_m'],
                 exclusion_radius=self.p[
@@ -3886,17 +3900,25 @@ class CooperativeExperimentLogger(Node):
                 'status': 'DEFERRED_REPLAY_FAILED',
                 'error': f'{type(exc).__name__}:{exc}',
             }
-        deferred = replay['summary']
+        deferred = causal_replay['summary']
         return {
             'live': live,
             'deferred': deferred,
             'equal': live == deferred,
             'status': 'PARITY_PASS' if live == deferred else 'PARITY_FAIL',
-            'accepted_samples': replay['accepted_samples'],
-            'skipped_transform_samples': replay[
+            'source': causal_replay['source'],
+            'accepted_samples': causal_replay['accepted_samples'],
+            'skipped_transform_samples': causal_replay[
                 'skipped_transform_samples'],
-            'deserialized_messages': replay['deserialized_messages'],
-            'errors': replay['errors'],
+            'causal_event_count': causal_replay['event_count'],
+            'native_bag_integrity': {
+                'summary': bag_replay['summary'],
+                'accepted_samples': bag_replay['accepted_samples'],
+                'skipped_transform_samples': bag_replay[
+                    'skipped_transform_samples'],
+                'deserialized_messages': bag_replay['deserialized_messages'],
+                'errors': bag_replay['errors'],
+            },
         }
 
     def summary(self,clean):

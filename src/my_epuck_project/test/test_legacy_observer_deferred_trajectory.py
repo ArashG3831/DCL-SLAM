@@ -8,6 +8,9 @@ from my_epuck_project.experiment_metrics import (
     LocalTrajectory,
     replay_local_trajectory_csv,
 )
+from my_epuck_project.cooperative_experiment_logger import (
+    CooperativeExperimentLogger,
+)
 
 
 def _write_odom(path, robot, points):
@@ -51,3 +54,30 @@ def test_deferred_local_trajectory_fails_closed_for_malformed_rows(tmp_path):
 
     with pytest.raises(ValueError):
         replay_local_trajectory_csv(path, 'robot1')
+
+
+def test_logger_finalization_helper_reports_live_deferred_parity(tmp_path):
+    points = [(0.0, 0.0), (0.2, 0.0), (0.2, 0.2)]
+    forensic = tmp_path / 'forensic'
+    forensic.mkdir()
+    path = forensic / 'robot1_odom.csv'
+    _write_odom(path, 'robot1', points)
+
+    node = object.__new__(CooperativeExperimentLogger)
+    node.robots = ['robot1']
+    node.directory = tmp_path
+    node.forensic = object()
+    node.p = {
+        'trajectory_bin_size_m': 0.05,
+        'initial_overlap_exclusion_radius_m': 0.0,
+    }
+    node.local_trajectory = LocalTrajectory(bin_size=0.05,
+                                            exclusion_radius=0.0)
+    for x, y in points:
+        node.local_trajectory.add('robot1', x, y)
+
+    result = node._replay_local_trajectory_for_parity()
+
+    assert result['status'] == 'PARITY_PASS'
+    assert result['equal'] is True
+    assert result['live'] == result['deferred']

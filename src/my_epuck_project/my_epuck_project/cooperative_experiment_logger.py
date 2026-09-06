@@ -2375,7 +2375,7 @@ class CooperativeExperimentLogger(Node):
                        zero_linear_epsilon_mps=self.p['cmd_vel_zero_linear_epsilon_mps'],
                        zero_angular_epsilon_radps=self.p['cmd_vel_zero_angular_epsilon_radps'])
         self.latest[r]['cmd_vel_effectively_zero']=zero
-    def plan(self,r,msg): self.mark(r,'plan',msg); self.latest[r]['path_length']=sum(math.hypot(b.pose.position.x-a.pose.position.x,b.pose.position.y-a.pose.position.y) for a,b in zip(msg.poses,msg.poses[1:]))
+    def plan(self,r,msg): self.mark(r,'plan',msg)
     def action_status(self,r,action,msg):
         self.mark(r,action.lower(),msg)
         names={0:'UNKNOWN',1:'ACCEPTED',2:'EXECUTING',3:'CANCELING',4:'SUCCEEDED',5:'CANCELED',6:'ABORTED'}

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
 import os
 import signal
 import sys
+import threading
 import time
 
 
@@ -44,6 +46,41 @@ def _write_runtime_metrics(path, metrics):
         json.dump(metrics, stream, indent=2, sort_keys=True)
         stream.write('\n')
     os.replace(temporary, path)
+
+
+class _BufferedCsvSink:
+    """Bounded buffering for raw Supervisor CSV evidence."""
+
+    def __init__(self, stream, fieldnames, max_buffer_bytes=256 * 1024):
+        self.stream = stream
+        self.max_buffer_bytes = int(max_buffer_bytes)
+        self.buffer = io.StringIO()
+        self.writer = csv.DictWriter(self.buffer, fieldnames=fieldnames)
+        self.writer.writeheader()
+        self.rows = 0
+        self.flushes = 0
+        self.max_buffer_bytes_seen = 0
+
+    def writerow(self, row):
+        self.writer.writerow(row)
+        self.rows += 1
+        size = self.buffer.tell()
+        self.max_buffer_bytes_seen = max(self.max_buffer_bytes_seen, size)
+        if size >= self.max_buffer_bytes:
+            self.flush()
+
+    def flush(self):
+        payload = self.buffer.getvalue()
+        if payload:
+            self.stream.write(payload)
+            self.buffer.seek(0)
+            self.buffer.truncate(0)
+        self.stream.flush()
+        self.flushes += 1
+
+    def close(self):
+        self.flush()
+        self.stream.close()
 
 
 def _find_named_node(supervisor, name):
@@ -91,11 +128,17 @@ def _connect(Supervisor, attempts=120):
     raise RuntimeError(f'Webots Supervisor connection failed: {last_error}')
 
 
+def _enable_contact_tracking(robots, period_ms):
+    """Enable read-only Webots contact tracking for every active robot."""
+    for node in robots.values():
+        node.enableContactPointsTracking(period_ms, True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True)
     parser.add_argument('--robot-def', action='append', required=True)
-    parser.add_argument('--sample-period-s', type=float, default=0.10)
+    parser.add_argument('--sample-period-s', type=float, default=0.02)
     parser.add_argument('--ready-file', default='')
     parser.add_argument('--connect-attempts', type=int, default=240)
     parser.add_argument('--contact-output', default='')
@@ -163,22 +206,19 @@ def main(argv=None):
         timestep, args.sample_period_s,
         args.contact_sampling_period_ms if args.contact_output else 0)
     contact_stream = None
-    contact_writer = None
+    contact_sink = None
     if args.contact_output:
         contact_path = os.path.abspath(args.contact_output)
         os.makedirs(os.path.dirname(contact_path), exist_ok=True)
         contact_stream = open(contact_path, 'w',
                               newline='', encoding='utf-8')
-        contact_writer = csv.DictWriter(contact_stream, fieldnames=[
+        contact_sink = _BufferedCsvSink(contact_stream, [
             'sim_time_s', 'robot_id', 'contact_count', 'point_x_m',
             'point_y_m', 'point_z_m', 'contacted_node_id',
             'contacted_node_def', 'contacted_node_name',
         ])
-        contact_writer.writeheader()
-        contact_stream.flush()
         period_ms = max(timestep, int(args.contact_sampling_period_ms))
-        for node in robots.values():
-            node.enableContactPointsTracking(period_ms, True)
+        _enable_contact_tracking(robots, period_ms)
 
     output = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output), exist_ok=True)
@@ -199,46 +239,91 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, request_stop)
     step_calls = 0
     sample_rows = 0
-    rows_since_flush = 0
+    contact_queries = 0
+    contact_rows = 0
     observer_start_wall = time.monotonic()
     observer_start_sim = supervisor.getTime()
     last_sim_time = observer_start_sim
+    pose_sample_period_s = max(
+        float(args.sample_period_s), float(timestep) / 1000.0)
+    next_pose_sample_s = observer_start_sim
     exit_reason = 'completed'
     metrics_path = os.path.join(
         os.path.abspath(args.runtime_directory)
         if args.runtime_directory else os.path.dirname(output),
         'runtime_metrics.json')
+    shutdown_request_path = os.path.join(
+        os.path.abspath(args.runtime_directory)
+        if args.runtime_directory else os.path.dirname(output),
+        'shutdown.requested')
+    metrics_lock = threading.Lock()
 
     def save_metrics(reason, end_sim, end_wall, finalized=False):
         wall_elapsed = max(0.0, end_wall - observer_start_wall)
         sim_elapsed = max(0.0, end_sim - observer_start_sim)
-        _write_runtime_metrics(metrics_path, {
-            'observer': 'cooperative_ground_truth_observer',
-            'basic_time_step_ms': timestep,
-            'requested_sample_period_s': float(args.sample_period_s),
-            'contact_sampling_period_ms': (
-                int(args.contact_sampling_period_ms)
-                if args.contact_output else None),
-            'effective_step_period_ms': effective_step_period_ms,
-            'step_calls': step_calls,
-            'sample_rows': sample_rows,
-            'sim_start_s': observer_start_sim,
-            'sim_end_s': end_sim,
-            'sim_elapsed_s': sim_elapsed,
-            'monotonic_wall_start_s': observer_start_wall,
-            'monotonic_wall_end_s': end_wall,
-            'monotonic_wall_elapsed_s': wall_elapsed,
-            'simulation_seconds_per_wall_second': (
-                sim_elapsed / wall_elapsed if wall_elapsed > 0.0 else None),
-            'exit_reason': reason,
-            'finalized': finalized,
-            'output': output,
-        })
+        with metrics_lock:
+            _write_runtime_metrics(metrics_path, {
+                'observer': 'cooperative_ground_truth_observer',
+                'basic_time_step_ms': timestep,
+                'requested_sample_period_s': float(args.sample_period_s),
+                'contact_sampling_period_ms': (
+                    int(args.contact_sampling_period_ms)
+                    if args.contact_output else None),
+                'effective_step_period_ms': effective_step_period_ms,
+                'step_calls': step_calls,
+                'sample_rows': sample_rows,
+                'pose_sample_period_s': pose_sample_period_s,
+                'contact_queries': contact_queries,
+                'contact_rows': contact_rows,
+                'gt_buffer_flushes': gt_sink.flushes,
+                'contact_buffer_flushes': (
+                    contact_sink.flushes if contact_sink is not None else 0),
+                'gt_max_buffer_bytes': gt_sink.max_buffer_bytes_seen,
+                'contact_max_buffer_bytes': (
+                    contact_sink.max_buffer_bytes_seen
+                    if contact_sink is not None else 0),
+                'sim_start_s': observer_start_sim,
+                'sim_end_s': end_sim,
+                'sim_elapsed_s': sim_elapsed,
+                'monotonic_wall_start_s': observer_start_wall,
+                'monotonic_wall_end_s': end_wall,
+                'monotonic_wall_elapsed_s': wall_elapsed,
+                'simulation_seconds_per_wall_second': (
+                    sim_elapsed / wall_elapsed if wall_elapsed > 0.0 else None),
+                'exit_reason': reason,
+                'finalized': finalized,
+                'output': output,
+            })
+
+    shutdown_monitor_stop = threading.Event()
+
+    def monitor_shutdown_request():
+        """Finalize from a thread if the native Supervisor call is wedged."""
+        while not shutdown_monitor_stop.is_set():
+            if os.path.isfile(shutdown_request_path):
+                gt_sink.close()
+                if contact_sink is not None:
+                    contact_sink.close()
+                save_metrics(
+                    'shutdown_requested', last_sim_time, time.monotonic(), True)
+                print(
+                    f'FORENSIC_RUNTIME_METRICS path={metrics_path}',
+                    flush=True)
+                print(
+                    f'FORENSIC_SUPERVISOR_COMPLETE path={output}',
+                    flush=True)
+                # The controller binding may crash during interpreter
+                # teardown after a remote Webots shutdown.  At this point all
+                # observer files and final metrics are durable, so exit the
+                # diagnostic child cleanly without re-entering that binding.
+                os._exit(0)
+            shutdown_monitor_stop.wait(0.02)
 
     with open(output, 'w', newline='', encoding='utf-8') as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        stream.flush()
+        gt_sink = _BufferedCsvSink(stream, fields)
+        threading.Thread(
+            target=monitor_shutdown_request,
+            name='forensic-shutdown-monitor', daemon=True).start()
         while not stop['value']:
             if (args.max_runtime_s > 0.0
                     and time.monotonic() - observer_start_wall
@@ -252,42 +337,39 @@ def main(argv=None):
                 break
             now = supervisor.getTime()
             last_sim_time = now
-            rows = []
-            for robot_id, node in robots.items():
-                position = node.getPosition()
-                orientation = node.getOrientation()
-                velocity = node.getVelocity()
-                heading_x, heading_y, heading_z = (
-                    orientation[0], orientation[3], orientation[6])
-                rows.append({
-                    'sim_time_s': now, 'robot_id': robot_id,
-                    'world_x_m': position[0], 'world_y_m': position[1],
-                    'world_z_m': position[2], 'heading_x': heading_x,
-                    'heading_y': heading_y, 'heading_z': heading_z,
-                    'planar_yaw_rad': math.atan2(heading_y, heading_x),
-                    'linear_velocity_x_mps': velocity[0],
-                    'linear_velocity_y_mps': velocity[1],
-                    'linear_velocity_z_mps': velocity[2],
-                    'ground_speed_mps': math.hypot(velocity[0], velocity[1]),
-                    'angular_velocity_x_rps': velocity[3],
-                    'angular_velocity_y_rps': velocity[4],
-                    'angular_velocity_z_rps': velocity[5],
-                })
-            writer.writerows(rows)
-            sample_rows += 1
-            rows_since_flush += 1
-            if rows_since_flush >= 10:
-                stream.flush()
-                rows_since_flush = 0
-                save_metrics('running', now, time.monotonic())
-            if contact_writer is not None:
+            if now + 1.0e-9 >= next_pose_sample_s:
+                for robot_id, node in robots.items():
+                    position = node.getPosition()
+                    orientation = node.getOrientation()
+                    velocity = node.getVelocity()
+                    heading_x, heading_y, heading_z = (
+                        orientation[0], orientation[3], orientation[6])
+                    gt_sink.writerow({
+                        'sim_time_s': now, 'robot_id': robot_id,
+                        'world_x_m': position[0], 'world_y_m': position[1],
+                        'world_z_m': position[2], 'heading_x': heading_x,
+                        'heading_y': heading_y, 'heading_z': heading_z,
+                        'planar_yaw_rad': math.atan2(heading_y, heading_x),
+                        'linear_velocity_x_mps': velocity[0],
+                        'linear_velocity_y_mps': velocity[1],
+                        'linear_velocity_z_mps': velocity[2],
+                        'ground_speed_mps': math.hypot(velocity[0], velocity[1]),
+                        'angular_velocity_x_rps': velocity[3],
+                        'angular_velocity_y_rps': velocity[4],
+                        'angular_velocity_z_rps': velocity[5],
+                    })
+                sample_rows += 1
+                while next_pose_sample_s <= now + 1.0e-9:
+                    next_pose_sample_s += pose_sample_period_s
+            if contact_sink is not None:
+                contact_queries += len(robots)
                 for robot_id, node in robots.items():
                     try:
                         contacts = node.getContactPoints(True)
                     except Exception:
                         contacts = []
                     if not contacts:
-                        contact_writer.writerow({
+                        contact_sink.writerow({
                             'sim_time_s': now, 'robot_id': robot_id,
                             'contact_count': 0,
                             'point_x_m': '', 'point_y_m': '',
@@ -295,43 +377,25 @@ def main(argv=None):
                             'contacted_node_def': '',
                             'contacted_node_name': '',
                         })
+                        contact_rows += 1
                         continue
                     for contact in contacts:
-                        contacted = None
-                        try:
-                            contacted = supervisor.getFromId(
-                                contact.getNodeId())
-                        except Exception:
-                            pass
-                        contacted_def = ''
-                        contacted_name = ''
-                        if contacted is not None:
-                            try:
-                                contacted_def = contacted.getDef() or ''
-                            except Exception:
-                                pass
-                            try:
-                                name_field = contacted.getField('name')
-                                if name_field is not None:
-                                    contacted_name = name_field.getSFString()
-                            except Exception:
-                                pass
                         point = contact.getPoint()
-                        contact_writer.writerow({
+                        contact_sink.writerow({
                             'sim_time_s': now, 'robot_id': robot_id,
                             'contact_count': len(contacts),
                             'point_x_m': point[0], 'point_y_m': point[1],
                             'point_z_m': point[2],
                             'contacted_node_id': contact.getNodeId(),
-                            'contacted_node_def': contacted_def,
-                            'contacted_node_name': contacted_name,
+                            'contacted_node_def': '',
+                            'contacted_node_name': '',
                         })
-                if rows_since_flush == 0:
-                    contact_stream.flush()
-        stream.flush()
+                        contact_rows += 1
+        shutdown_monitor_stop.set()
+        gt_sink.close()
     if contact_stream is not None:
-        contact_stream.flush()
-        contact_stream.close()
+        if not contact_stream.closed:
+            contact_sink.close()
     observer_end_wall = time.monotonic()
     # Do not query a Supervisor connection after Webots has returned -1 from
     # step(): the controller binding may already have lost its socket.

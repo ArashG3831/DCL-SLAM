@@ -169,3 +169,36 @@ committed separately and its parity is proven.
 
 No source migration was accepted after `426b69b`; no raw-capture code remains
 uncommitted from this continuation attempt.
+
+## Inherited observer baseline checkpoint
+
+The current dirty observer/evidence state was pre-existing work from before this
+salvage continuation. It was validated before checkpointing with the focused
+legacy command:
+
+```text
+PYTHONPATH=src/my_epuck_project:$PYTHONPATH python3 -m pytest -q \
+  src/my_epuck_project/test/test_experiment_logger_runtime.py \
+  src/my_epuck_project/test/test_cooperative_ground_truth_observer.py \
+  src/my_epuck_project/test/test_passive_rosbag_offload.py
+79 passed in 23.05s
+```
+
+The baseline checkpoint contains only these observer/evidence files and this
+report:
+
+```text
+src/my_epuck_project/my_epuck_project/cooperative_experiment_logger.py
+src/my_epuck_project/my_epuck_project/cooperative_ground_truth_observer.py
+src/my_epuck_project/my_epuck_project/passive_rosbag.py
+src/my_epuck_project/my_epuck_project/raw_evidence_contract.py
+src/my_epuck_project/test/test_experiment_logger_runtime.py
+src/my_epuck_project/test/test_cooperative_ground_truth_observer.py
+src/my_epuck_project/test/test_passive_rosbag_offload.py
+reports/legacy_observer_incremental_salvage_20260906.md
+```
+
+This is a reference-state checkpoint, not a salvage optimization. It records
+the inherited implementation so subsequent raw-evidence and metric migrations
+can be isolated and bisected. Unrelated dirty files were deliberately not
+staged.

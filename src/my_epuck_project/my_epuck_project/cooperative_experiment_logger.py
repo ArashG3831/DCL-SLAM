@@ -1,4 +1,5 @@
 """Strictly passive structured observer for two-robot exploration experiments."""
+from bisect import bisect_left, bisect_right
 import csv, hashlib, json, math, os, re, signal, socket, statistics, subprocess, sys, threading, time, uuid
 from collections import Counter, deque
 from dataclasses import asdict
@@ -20,6 +21,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import JointState, LaserScan
+from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformException, TransformListener
 from my_epuck_interfaces.msg import (
@@ -38,6 +40,14 @@ from my_epuck_interfaces.msg import (
 )
 from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
 from .forensic_evidence import ForensicEvidenceWriter
+from .passive_rosbag import (
+    export_index_with_bounded_retry,
+    load_offloaded_timing,
+    offloaded_sensor_topics,
+    semantic_export_complete,
+    start_recorder,
+    stop_recorder,
+)
 
 SCHEMA='1.1.0'; STATES={0:'UNKNOWN',1:'PROPOSING',2:'NAVIGATING',3:'SUCCEEDED',4:'FAILED',5:'RELEASED',6:'CANCELED'}; STATUS_STATES={0:'STARTING',1:'ACTIVE',2:'NAVIGATING',3:'NO_ELIGIBLE_CANDIDATES',4:'COMPLETE',5:'STOPPED',6:'ERROR'}
 TIME_FIELDS=['run_id','wall_time_utc','ros_time_sec','ros_time_nanosec','elapsed_s','wall_elapsed_s','event_sequence']
@@ -63,6 +73,12 @@ def is_shutdown_conversion_error(error, shutdown_requested, context_valid):
             and str(error).startswith('Unable to convert call argument'))
 
 def yaw(q): return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+
+
+def yaw_from_row(rotation_z, rotation_w):
+    """Return planar yaw from raw CSV quaternion components."""
+    return math.atan2(2.0 * float(rotation_w) * float(rotation_z),
+                     1.0 - 2.0 * float(rotation_z) * float(rotation_z))
 def as_grid(m): return Grid(m.info.width,m.info.height,m.info.resolution,m.info.origin.position.x,m.info.origin.position.y,yaw(m.info.origin.orientation),np.asarray(m.data,dtype=np.int8))
 def stamp(m):
     s=getattr(getattr(m,'header',None),'stamp',None); return (int(s.sec),int(s.nanosec)) if s else (0,0)
@@ -154,10 +170,199 @@ def webots_controller_host_for_nat():
             return fields[fields.index('via') + 1]
     raise RuntimeError('No default-route gateway found for Webots')
 
+
+def supervisor_robot_arguments(robot_ids):
+    """Return Supervisor robot arguments for the configured active robots."""
+    arguments = []
+    for robot in robot_ids:
+        arguments.extend(['--robot-def', str(robot)])
+    return arguments
+
+
+class SupervisorTimestampIndex:
+    """Stable nearest-time index for dense Supervisor trajectory rows."""
+
+    def __init__(self, rows):
+        # ``sorted`` is stable, preserving the legacy first-row tie behavior
+        # for duplicate timestamps from unsorted input.
+        self.values = tuple(sorted(rows, key=lambda item: item[0]))
+        self.timestamps = tuple(item[0] for item in self.values)
+
+    def nearest(self, query_ros):
+        if not self.values:
+            return None
+        query_ros = float(query_ros)
+        insertion = bisect_left(self.timestamps, query_ros)
+        if insertion == 0:
+            selected_timestamp = self.timestamps[0]
+        elif insertion == len(self.timestamps):
+            selected_timestamp = self.timestamps[-1]
+        else:
+            left_timestamp = self.timestamps[insertion - 1]
+            right_timestamp = self.timestamps[insertion]
+            if (abs(left_timestamp - query_ros) <=
+                    abs(right_timestamp - query_ros)):
+                selected_timestamp = left_timestamp
+            else:
+                selected_timestamp = right_timestamp
+        # Select the first row at the chosen timestamp.  This preserves the
+        # stable ``min`` result when multiple rows share that timestamp.
+        first_at_timestamp = bisect_left(
+            self.timestamps, selected_timestamp)
+        return self.values[first_at_timestamp]
+
+    def first_after(self, query_ros):
+        """Return the legacy interpolation right-hand row index."""
+        return bisect_right(self.timestamps, float(query_ros))
+
+
+class RollingTimestampIndex:
+    """Bounded, stable timestamp index for live odometry joins.
+
+    Odometry arrives in timestamp order in normal operation, but retaining
+    stable sorted insertion keeps the legacy behavior for delayed or
+    out-of-order samples as well.  Queries return immutable snapshots so the
+    callback and synchronized forensic timer can safely overlap.
+    """
+
+    def __init__(self, maxlen):
+        self.maxlen = int(maxlen)
+        self._entries = []
+        self._arrival = deque()
+        self._sequence = 0
+        self._lock = threading.RLock()
+
+    def append(self, timestamp, value):
+        timestamp = float(timestamp)
+        with self._lock:
+            sequence = self._sequence
+            self._sequence += 1
+            entry = (timestamp, sequence, value)
+            position = bisect_right(
+                self._entries, (timestamp, sequence))
+            self._entries.insert(position, entry)
+            self._arrival.append((timestamp, sequence))
+            if len(self._arrival) > self.maxlen:
+                old_timestamp, old_sequence = self._arrival.popleft()
+                old_position = bisect_left(
+                    self._entries, (old_timestamp, old_sequence))
+                del self._entries[old_position]
+
+    def snapshot(self):
+        with self._lock:
+            return (
+                tuple(entry[0] for entry in self._entries),
+                tuple((entry[0], entry[2]) for entry in self._entries),
+            )
+
+    def lookup_bounds(self, query_timestamp):
+        """Return the exact legacy interpolation bracket without copying it.
+
+        The synchronized-map callback only needs the first row, the last row,
+        or the two rows around a query.  ``snapshot()`` remains available for
+        callers that need the complete historical view, but copying every
+        odometry row for every forensic sample made that path unnecessarily
+        expensive.  Entries are still searched in the same stable sorted
+        order, so duplicate timestamps select the same rightmost row as
+        ``bisect_right`` over the legacy timestamp tuple.
+        """
+        query_timestamp = float(query_timestamp)
+        with self._lock:
+            if not self._entries:
+                return None
+            first = self._entries[0]
+            if query_timestamp < first[0]:
+                return 'before', first[0], first[2]
+            right_index = bisect_right(
+                self._entries, (query_timestamp, math.inf))
+            if right_index == len(self._entries):
+                last = self._entries[-1]
+                return 'after', last[0], last[2]
+            left = self._entries[right_index - 1]
+            right = self._entries[right_index]
+            return 'between', left[0], left[2], right[0], right[2]
+
+
+class RawTFSeriesIndex:
+    """Bounded arrival history with a lazy stable timestamp index.
+
+    Raw TF messages are appended at high frequency.  Sorting on every
+    synchronized-map query is unnecessarily expensive, while inserting into
+    a sorted structure on every message makes the hot subscription path
+    expensive.  This index keeps ingestion O(1) and builds one stable sorted
+    snapshot only when a query first needs it after an append.
+    """
+
+    def __init__(self, maxlen):
+        self._arrival = deque(maxlen=int(maxlen))
+        self._sorted_values = None
+        self._timestamps = None
+        self._monotonic = True
+        self._last_timestamp = None
+        self._lock = threading.RLock()
+
+    def append(self, timestamp, value):
+        with self._lock:
+            timestamp = float(timestamp)
+            if (self._last_timestamp is not None and
+                    timestamp < self._last_timestamp):
+                self._monotonic = False
+            self._last_timestamp = timestamp
+            self._arrival.append((timestamp, value))
+            self._sorted_values = None
+            self._timestamps = None
+
+    def lookup_bounds(self, query_timestamp):
+        """Return an exact legacy bracket without rebuilding a raw-TF graph.
+
+        Webots/ROS TF samples are normally timestamp-monotonic per edge.  In
+        that common case, the synchronized query is near the newest sample,
+        so walking the bounded arrival deque backwards is cheaper than
+        sorting/copying the whole series for each graph edge.  Any observed
+        out-of-order sample permanently selects the existing stable sorted
+        fallback, preserving the old duplicate/tie behavior exactly.
+        """
+        query_timestamp = float(query_timestamp)
+        with self._lock:
+            if not self._arrival:
+                return None
+            if not self._monotonic:
+                timestamps, values = self.sorted_snapshot()
+                if query_timestamp < timestamps[0]:
+                    return 'before', values[0][0], values[0][1]
+                right_index = bisect_right(timestamps, query_timestamp)
+                if right_index == len(values):
+                    return 'after', values[-1][0], values[-1][1]
+                left = values[right_index - 1]
+                right = values[right_index]
+                return ('between', left[0], left[1], right[0], right[1])
+
+            right = None
+            for item in reversed(self._arrival):
+                if item[0] > query_timestamp:
+                    right = item
+                    continue
+                if right is None:
+                    return 'after', item[0], item[1]
+                return ('between', item[0], item[1], right[0], right[1])
+            first = self._arrival[0]
+            return 'before', first[0], first[1]
+
+    def sorted_snapshot(self):
+        with self._lock:
+            if self._sorted_values is None:
+                # Python's sort is stable.  The arrival order therefore
+                # preserves the legacy tie behavior for duplicate timestamps.
+                values = list(self._arrival)
+                values.sort(key=lambda item: item[0])
+                self._sorted_values = tuple(values)
+                self._timestamps = tuple(item[0] for item in values)
+            return self._timestamps, self._sorted_values
+
 class CooperativeExperimentLogger(Node):
     def __init__(self, **node_kwargs):
         super().__init__('cooperative_experiment_logger', **node_kwargs)
-        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'enable_local_map_capture':True,'diagnostic_frontier_capture':False,'diagnostic_footprint_radius_m':.08,'forensic_snapshot_interval_s':5.,'forensic_sync_rate_hz':50.,'forensic_ground_truth_sample_period_s':0.02,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
+        defaults={'run_id':'','output_root':'/home/arash/webots_ws/results','launch_file':'two_robots_observed_single_goal_launch.py','experiment_condition':'','seed_provenance_json':'{}','robot_ids':['robot1','robot2'],'global_frame':'shared_map','telemetry_rate_hz':1.,'coverage_rate_hz':.5,'topic_health_rate_hz':.2,'console_summary_period_s':5.,'warning_summary_period_s':30.,'progress_window_s':10.,'minimum_distance_remaining_improvement_m':.03,'minimum_robot_displacement_m':.02,'stuck_window_s':6.,'commanded_linear_threshold_mps':.02,'commanded_angular_threshold_radps':.15,'cmd_vel_zero_linear_epsilon_mps':.001,'cmd_vel_zero_angular_epsilon_radps':.001,'cmd_vel_no_command_timeout_s':1.5,'stuck_displacement_threshold_m':.015,'oscillation_window_s':10.,'angular_sign_change_threshold':4,'oscillation_displacement_threshold_m':.04,'simultaneous_coverage_window_s':2.,'trajectory_bin_size_m':.05,'initial_overlap_exclusion_radius_m':.15,'duplicate_goal_tolerance_m':.15,'shared_map_divergence_grace_s':3.,'enable_rosout_collection':True,'enable_coverage_attribution':True,'enable_trajectory_overlap':True,'enable_console_status':True,'odom_stale_s':2.,'scan_stale_s':2.,'map_stale_s':5.,'shared_map_stale_s':5.,'candidate_stale_s':5.,'claim_stale_s':4.,'status_stale_s':4.,'feedback_stale_s':3.,'costmap_stale_s':5.,'enable_forensic_capture':False,'enable_local_map_capture':True,'diagnostic_frontier_capture':False,'diagnostic_footprint_radius_m':.08,'forensic_snapshot_interval_s':5.,'forensic_sync_rate_hz':50.,'forensic_ground_truth_sample_period_s':0.02,'enable_contact_capture':False,'contact_sampling_period_ms':20,'webots_port':23000,'terminal_small_frontier_length_m':0.20}
         defaults.update({
             'world_profile': 'small',
             'source_world_path': '',
@@ -176,6 +381,12 @@ class CooperativeExperimentLogger(Node):
             'initial_configuration_json': '{}',
             'world_sha256': '',
             'coverage_attribution_resolution': 0.01,
+            # ``auto`` preserves the established contract: A uses its local
+            # map and two-robot cooperative runs use the shared map.  The
+            # independent two-robot baseline explicitly selects the passive
+            # local-map union path.
+            'coverage_source': 'auto',
+            'enable_passive_rosbag': False,
         })
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.p={k:self.get_parameter(k).value for k in defaults}; self.robots=list(self.p['robot_ids']); self.start=time.monotonic(); self.start_ros=self.get_clock().now().nanoseconds*1e-9; self.start_utc=utc_now(); self.sequence=0; self.finalized=False; self._finalizing=False; self._closed=False; self.write_failures=0; self.dropped_samples=0
@@ -183,7 +394,36 @@ class CooperativeExperimentLogger(Node):
             raise ValueError('known_relative_transform must be explicit (physical) or world-derived')
         self._state_lock=threading.RLock(); self._io_lock=threading.RLock(); self._lifecycle_lock=threading.Lock(); self.internal_errors=Counter(); self._reporting_internal_error=False; self._observer_timers=[]
         self._map_cache={}; self._transformed_cache={}; self._last_attributed={}; self._cpu_samples=[]; self._rss_samples=[]; self._cpu_previous=None
+        self._callback_timing_enabled = os.environ.get(
+            'MY_EPUCK_CALLBACK_TIMING', '',
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+        self._callback_timing = {}
+        self._sync_map_profile_enabled = os.environ.get(
+            'MY_EPUCK_SYNC_MAP_PROFILE', '',
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+        self._sync_map_profile = {}
+        # Synchronized map frames are passive derived evidence.  When the
+        # runner enables the offline path, retain the exact request metadata
+        # live and perform the existing TF/odom reconstruction after the
+        # scientific horizon.  Raw TF, odometry, maps, and all runtime event
+        # streams remain captured through their existing subscriptions.
+        self._defer_synchronized_map_frames = os.environ.get(
+            'MY_EPUCK_DEFER_SYNC_MAP_FRAMES', '').strip().lower() in (
+                '1', 'true', 'yes', 'on')
+        self._deferred_sync_map_requests = []
         self.run_id,self.directory=allocate_run_directory(Path(self.p['output_root']),self.p['run_id'] or default_run_id())
+        passive_bag_enabled = self.p.get('enable_passive_rosbag', False)
+        if isinstance(passive_bag_enabled, str):
+            passive_bag_enabled = passive_bag_enabled.lower() == 'true'
+        self.passive_bag_enabled = bool(passive_bag_enabled)
+        # The existing C passive-bag path owns the high-rate sensor evidence.
+        # No live control component consumes these observer-only messages.
+        self.passive_sensor_offload_enabled = self.passive_bag_enabled
+        self.passive_bag_process = None
+        self.passive_bag_log = None
+        self.passive_bag_command = None
+        self.passive_bag_log_path = None
+        self.passive_bag_export = None
         self._artifact_finalization = {
             'complete': False,
             'status': 'NOT_FINALIZED',
@@ -208,6 +448,21 @@ class CooperativeExperimentLogger(Node):
         self.agreement_publications=0; self.dispatch_attempts=0; self.goals_terminal=0; self.goal_accounting=[]; self._accepted_before_send=set()
         self.detectors={r:MotionDetector(self.p['progress_window_s'],self.p['minimum_distance_remaining_improvement_m'],self.p['minimum_robot_displacement_m'],self.p['stuck_window_s'],self.p['commanded_linear_threshold_mps'],self.p['commanded_angular_threshold_radps'],self.p['stuck_displacement_threshold_m'],self.p['oscillation_window_s'],int(self.p['angular_sign_change_threshold']),self.p['oscillation_displacement_threshold_m']) for r in self.robots}
         self.attribution=CoverageAttribution(self.p['simultaneous_coverage_window_s']); self.trajectory=TrajectoryOverlap(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.local_trajectory=LocalTrajectory(self.p['trajectory_bin_size_m'],self.p['initial_overlap_exclusion_radius_m']); self.initial_known=None; self.previous_known=None; self.writers={}
+        configured_coverage_source = str(
+            self.p.get('coverage_source', 'auto')).strip()
+        if configured_coverage_source == 'auto':
+            # Two-robot campaigns retain the established shared-map coverage
+            # contract.  A is a true single-robot run, so its only valid
+            # coverage source is robot1's local SLAM OccupancyGrid.
+            self.coverage_source = (
+                'local_map' if len(self.robots) == 1 else 'shared_map')
+        elif configured_coverage_source in (
+                'local_map', 'local_map_union', 'shared_map'):
+            self.coverage_source = configured_coverage_source
+        else:
+            raise ValueError(
+                'coverage_source must be auto, local_map, '
+                'local_map_union, or shared_map')
         forensic_enabled = self.p['enable_forensic_capture']
         if isinstance(forensic_enabled, str):
             forensic_enabled = forensic_enabled.lower() == 'true'
@@ -268,7 +523,13 @@ class CooperativeExperimentLogger(Node):
             }
             for r in self.robots}
         self.scan_pipeline_warning_emitted = False
-        self.tf_buffer=Buffer(); self.tf_listener=TransformListener(self.tf_buffer,self)
+        self.tf_buffer=Buffer()
+        # The passive raw-TF subscriptions below also feed this buffer.  A
+        # separate TransformListener would subscribe to /tf and /tf_static a
+        # second time, duplicating deserialization and callback dispatch while
+        # adding no evidence.  Keep one subscription per TF channel and retain
+        # the same tf2 buffer semantics in the combined callbacks.
+        self.tf_listener = None
         # tf2's graph lookup is the preferred path.  Keep a bounded passive
         # copy of the actual /tf streams as a fallback for exact-time
         # forensic joins when a composed lookup reports an unconnected tree or
@@ -277,13 +538,43 @@ class CooperativeExperimentLogger(Node):
         self._direct_tf_samples = {}
         self._direct_tf_static = {}
         self._direct_tf_sample_limit = 4096
+        self._direct_tf_graph_lock = threading.RLock()
+        self._direct_tf_graph_keys = set()
+        self._direct_tf_adjacency = {}
+        self._direct_tf_adjacency_snapshot = None
+        # Only these dynamic edges are queried by the logger's live passive
+        # evidence paths.  Raw TF remains complete in the direct index and
+        # forensic CSV; unrelated wheel/sensor edges do not need tf2 buffer
+        # insertion for any live logger consumer.
+        self._tf_buffer_live_dynamic_edges = {
+            (f'{robot}/map', f'{robot}/odom') for robot in self.robots}
+        self._tf_buffer_live_dynamic_edges.update(
+            (f'{robot}/odom', f'{robot}/base_footprint')
+            for robot in self.robots)
         self._odom_samples = {
-            robot: deque(maxlen=self._direct_tf_sample_limit)
+            robot: RollingTimestampIndex(self._direct_tf_sample_limit)
             for robot in self.robots}
         for r in self.robots: self.writers[r]=self.csv_file(f'{r}_timeseries.csv',TELEMETRY)
         self.coverage=self.csv_file('coverage.csv',COVERAGE); self.health=self.csv_file('topic_health.csv',HEALTH)
         (self.directory/'README.txt').write_text('Passive data; schema and formulas: my_epuck_project/docs/cooperative_experiment_logging.md\n',encoding='utf-8')
-        self.write_manifest(False,'running'); self.event('RUN_START','experiment run started',console=True); self.subscribe()
+        self.write_manifest(False,'running'); self.event('RUN_START','experiment run started',console=True)
+        if self.passive_bag_enabled:
+            try:
+                (self.passive_bag_process, self.passive_bag_log,
+                 self.passive_bag_command,
+                 self.passive_bag_log_path) = start_recorder(
+                    self.directory / 'passive_rosbag', self.robots,
+                    include_offloaded=self.passive_sensor_offload_enabled)
+                self.event(
+                    'PASSIVE_ROSBAG_STARTED',
+                    'standard rosbag2 recorder started for observer-only topics',
+                    command=self.passive_bag_command,
+                    allow_during_shutdown=True,
+                )
+            except (OSError, RuntimeError) as exc:
+                self.event('PASSIVE_ROSBAG_START_FAILED', str(exc),
+                           severity='ERROR', allow_during_shutdown=True)
+        self.subscribe()
         self._observer_timers.append(self.create_timer(1/self.p['telemetry_rate_hz'],lambda:self.safe_call('telemetry',self.sample_telemetry)))
         self._observer_timers.append(self.create_timer(1/self.p['coverage_rate_hz'],lambda:self.safe_call('coverage',self.sample_coverage)))
         self._observer_timers.append(self.create_timer(1/self.p['topic_health_rate_hz'],lambda:self.safe_call('topic_health',self.sample_health)))
@@ -351,12 +642,13 @@ class CooperativeExperimentLogger(Node):
             'ForensicGroundTruthSupervisor')
         command = [sys.executable, '-m',
                    'my_epuck_project.cooperative_ground_truth_observer',
-                   '--output', str(output), '--robot-def', 'robot1',
-                   '--robot-def', 'robot2', '--sample-period-s', str(float(
+                   '--output', str(output)]
+        command.extend(supervisor_robot_arguments(self.robots))
+        command.extend(['--sample-period-s', str(float(
                        self.p['forensic_ground_truth_sample_period_s'])),
                    '--ready-file', str(ready_file),
                    '--controller-url', environment['WEBOTS_CONTROLLER_URL'],
-                   '--runtime-directory', str(forensic_dir / 'runtime')]
+                   '--runtime-directory', str(forensic_dir / 'runtime')])
         if self.contact_capture:
             command.extend([
                 '--contact-output', str(contact_output),
@@ -417,19 +709,32 @@ class CooperativeExperimentLogger(Node):
             return
         if process.poll() is None:
             try:
-                # The Webots controller binding can be inside Supervisor.step
-                # while launch is shutting down.  Give the observer its
-                # normal signal handler first; SIGTERM can tear down the
-                # binding asynchronously and leave a misleading -11 exit.
-                process.send_signal(signal.SIGINT)
+                request_path = (self.directory / 'forensic' / 'runtime' /
+                                'shutdown.requested')
+                request_path.parent.mkdir(parents=True, exist_ok=True)
+                request_path.write_text('shutdown_requested\n', encoding='utf-8')
+                # Request an observer-owned shutdown before the launch group
+                # is torn down.  The observer's monitor can then flush and
+                # finalize even if its native Supervisor.step() call does
+                # not return promptly; the signal below remains the normal
+                # fallback for a responsive controller binding.
                 process.wait(timeout=8.0)
             except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
                 try:
                     if process.poll() is None:
-                        process.kill()
-                    process.wait(timeout=3.0)
+                        # Fallback for an observer whose Webots connection
+                        # did not close during the normal launch shutdown.
+                        # Keep the existing bounded signal/kill contract;
+                        # the normal path above is the lifecycle fix.
+                        process.send_signal(signal.SIGINT)
+                        process.wait(timeout=3.0)
                 except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
-                    pass
+                    try:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait(timeout=3.0)
+                    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+                        pass
         if self.ground_truth_log is not None:
             try:
                 self.ground_truth_log.flush()
@@ -477,8 +782,9 @@ class CooperativeExperimentLogger(Node):
             child = self._normal_frame(item.child_frame_id)
             if not parent or not child:
                 continue
-            stamp_value = (int(item.header.stamp.sec) +
-                           int(item.header.stamp.nanosec) * 1.0e-9)
+            stamp = item.header.stamp
+            stamp_value = (int(stamp.sec) +
+                           int(stamp.nanosec) * 1.0e-9)
             translation = item.transform.translation
             rotation = item.transform.rotation
             value = (float(translation.x), float(translation.y),
@@ -486,26 +792,127 @@ class CooperativeExperimentLogger(Node):
             if not all(math.isfinite(part) for part in value):
                 continue
             key = (parent, child)
+            # TF publishers repeat the same frame edge on nearly every
+            # message.  The graph is immutable after an edge is registered;
+            # avoid reacquiring its lock for those repeated evidence rows.
+            # The raw sample is still appended below without alteration.
+            if key not in self._direct_tf_graph_keys:
+                self._register_direct_tf_key(key)
             if static:
                 store[key] = (stamp_value, value)
                 continue
             samples = store.setdefault(
-                key, deque(maxlen=self._direct_tf_sample_limit))
-            samples.append((stamp_value, value))
+                key, RawTFSeriesIndex(self._direct_tf_sample_limit))
+            if isinstance(samples, RawTFSeriesIndex):
+                samples.append(stamp_value, value)
+            else:
+                # Compatibility for a test or an older in-memory observer
+                # object that still carries a plain deque.
+                samples.append((stamp_value, value))
+
+    def _register_direct_tf_key(self, key):
+        """Add a TF edge to the cached undirected traversal graph once."""
+        with self._direct_tf_graph_lock:
+            if key in self._direct_tf_graph_keys:
+                return
+            self._direct_tf_graph_keys.add(key)
+            parent, child = key
+            self._direct_tf_adjacency.setdefault(child, []).append(
+                (parent, False))
+            self._direct_tf_adjacency.setdefault(parent, []).append(
+                (child, True))
+            self._direct_tf_adjacency[child].sort()
+            self._direct_tf_adjacency[parent].sort()
+            self._direct_tf_adjacency_snapshot = None
+
+    def _direct_tf_graph(self):
+        """Return an immutable cached graph snapshot for TF traversal."""
+        with self._direct_tf_graph_lock:
+            if self._direct_tf_adjacency_snapshot is None:
+                # This compatibility path is used only by offline/unit-test
+                # objects that populate the dictionaries directly rather than
+                # through _record_direct_tf_message().
+                for key in set(self._direct_tf_samples) | set(
+                        self._direct_tf_static):
+                    self._register_direct_tf_key(key)
+                self._direct_tf_adjacency_snapshot = {
+                    frame: tuple(neighbours)
+                    for frame, neighbours in self._direct_tf_adjacency.items()
+                }
+            return self._direct_tf_adjacency_snapshot
+
+    def _direct_tf_series(self, key):
+        """Return sorted values/timestamps with legacy stable ordering."""
+        samples = self._direct_tf_samples.get(key)
+        if samples is None:
+            return (), ()
+        if isinstance(samples, RawTFSeriesIndex):
+            timestamps, values = samples.sorted_snapshot()
+            return values, timestamps
+        values = list(samples)
+        values.sort(key=lambda item: item[0])
+        return tuple(values), tuple(item[0] for item in values)
+
+    def _record_sync_map_timing(self, stage, elapsed):
+        if not getattr(self, '_sync_map_profile_enabled', False):
+            return
+        entry = self._sync_map_profile.setdefault(str(stage), [])
+        entry.append(float(max(0.0, elapsed)))
+
+    def _sync_map_timing_summary(self):
+        if not getattr(self, '_sync_map_profile_enabled', False):
+            return {'enabled': False, 'stages': {}}
+        summary = {}
+        for stage, values in self._sync_map_profile.items():
+            if not values:
+                summary[stage] = {
+                    'calls': 0, 'total_wall_s': 0.0,
+                    'median_wall_s': 0.0, 'p95_wall_s': 0.0,
+                    'max_wall_s': 0.0,
+                }
+                continue
+            ordered = sorted(values)
+            p95_index = min(len(ordered) - 1,
+                            max(0, int(math.ceil(0.95 * len(ordered))) - 1))
+            summary[stage] = {
+                'calls': len(values),
+                'total_wall_s': float(sum(values)),
+                'median_wall_s': float(statistics.median(values)),
+                'p95_wall_s': float(ordered[p95_index]),
+                'max_wall_s': float(max(values)),
+            }
+        return {'enabled': True, 'stages': summary}
 
     def _direct_tf_message(self, message):
-        self._record_direct_tf_message(message, static=False)
+        # This is the single /tf subscription for the logger.  Feed the
+        # existing tf2 buffer before recording the identical raw message so
+        # online lookup behavior and raw-TF evidence remain available without
+        # a duplicate TransformListener subscription.
+        for transform in getattr(message, 'transforms', ()):
+            key = (self._normal_frame(transform.header.frame_id),
+                   self._normal_frame(transform.child_frame_id))
+            live_edges = getattr(self, '_tf_buffer_live_dynamic_edges', None)
+            if live_edges is None or key in live_edges:
+                self.tf_buffer.set_transform(
+                    transform, 'default_authority')
         if self.forensic is not None:
+            self._record_direct_tf_message(message, static=False)
             self.forensic.record_raw_tf(
                 '/tf', message, self.ros_seconds(),
                 time.monotonic() - self.start, static=False)
+        else:
+            self._record_direct_tf_message(message, static=False)
 
     def _direct_tf_static_message(self, message):
-        self._record_direct_tf_message(message, static=True)
+        for transform in getattr(message, 'transforms', ()):
+            self.tf_buffer.set_transform_static(transform, 'default_authority')
         if self.forensic is not None:
+            self._record_direct_tf_message(message, static=True)
             self.forensic.record_raw_tf(
                 '/tf_static', message, self.ros_seconds(),
                 time.monotonic() - self.start, static=True)
+        else:
+            self._record_direct_tf_message(message, static=True)
 
     def _direct_tf_edge(self, parent, child, query_ros,
                         allow_latest_before=False):
@@ -520,15 +927,85 @@ class CooperativeExperimentLogger(Node):
                 'interpolation_span_s': 0.0,
                 'lookup_mode': 'raw_tf_static',
             }
-        values = list(self._direct_tf_samples.get(key, ()))
+        series = self._direct_tf_samples.get(key)
+        if isinstance(series, RawTFSeriesIndex):
+            bounds = series.lookup_bounds(query_ros)
+            if bounds is None:
+                return None
+            kind = bounds[0]
+            if allow_latest_before and kind != 'before':
+                sample_timestamp, transform = bounds[1:3]
+                return transform, {
+                    'sample_age_s': max(0.0, float(query_ros) -
+                                        float(sample_timestamp)),
+                    'interpolation_used': False,
+                    'interpolation_age_s': max(
+                        0.0, float(query_ros) - float(sample_timestamp)),
+                    'interpolation_span_s': 0.0,
+                    'lookup_mode': 'raw_tf_latest_valid_before_query',
+                }
+            if kind == 'before':
+                sample_timestamp, transform = bounds[1:3]
+                if float(sample_timestamp) - float(query_ros) > 0.10:
+                    return None
+                return transform, {
+                    'sample_age_s': abs(float(sample_timestamp) -
+                                       float(query_ros)),
+                    'interpolation_used': False,
+                    'interpolation_age_s': abs(
+                        float(sample_timestamp) - float(query_ros)),
+                    'interpolation_span_s': 0.0,
+                    'lookup_mode': 'raw_tf_bounded_nearest',
+                }
+            if kind == 'after':
+                sample_timestamp, transform = bounds[1:3]
+                delta = abs(float(sample_timestamp) - float(query_ros))
+                if delta <= 1.0e-9:
+                    mode = 'raw_tf_exact'
+                elif delta > 0.10:
+                    return None
+                else:
+                    mode = 'raw_tf_bounded_nearest'
+                return transform, {
+                    'sample_age_s': delta,
+                    'interpolation_used': False,
+                    'interpolation_age_s': delta,
+                    'interpolation_span_s': 0.0,
+                    'lookup_mode': mode,
+                }
+            _, left_timestamp, left_transform, right_timestamp, right_transform = bounds
+            if abs(float(left_timestamp) - float(query_ros)) <= 1.0e-9:
+                return left_transform, {
+                    'sample_age_s': 0.0,
+                    'interpolation_used': False,
+                    'interpolation_age_s': 0.0,
+                    'interpolation_span_s': 0.0,
+                    'lookup_mode': 'raw_tf_exact',
+                }
+            span = float(right_timestamp - left_timestamp)
+            if span <= 0.0 or span > 0.10:
+                return None
+            fraction = (float(query_ros) - float(left_timestamp)) / span
+            return _interpolate_planar(left_transform, right_transform,
+                                       fraction), {
+                'sample_age_s': max(
+                    abs(float(query_ros) - float(left_timestamp)),
+                    abs(float(right_timestamp) - float(query_ros))),
+                'interpolation_used': True,
+                'interpolation_age_s': max(
+                    abs(float(query_ros) - float(left_timestamp)),
+                    abs(float(right_timestamp) - float(query_ros))),
+                'interpolation_span_s': span,
+                'lookup_mode': 'raw_tf_tightly_interpolated',
+            }
+        values, timestamps = self._direct_tf_series(key)
         if not values:
             return None
-        values.sort(key=lambda item: item[0])
         query_ros = float(query_ros)
         if allow_latest_before:
-            before = [item for item in values if item[0] <= query_ros]
-            if before:
-                latest = before[-1]
+            right_index = bisect_right(timestamps, query_ros)
+            if right_index:
+                latest = values[right_index - 1]
                 return latest[1], {
                     'sample_age_s': max(0.0, query_ros - latest[0]),
                     'interpolation_used': False,
@@ -536,7 +1013,17 @@ class CooperativeExperimentLogger(Node):
                     'interpolation_span_s': 0.0,
                     'lookup_mode': 'raw_tf_latest_valid_before_query',
                 }
-        exact = min(values, key=lambda item: abs(item[0] - query_ros))
+        insertion = bisect_left(timestamps, query_ros)
+        if insertion == 0:
+            nearest_index = 0
+        elif insertion == len(values):
+            nearest_index = len(values) - 1
+        elif (abs(timestamps[insertion - 1] - query_ros) <=
+              abs(timestamps[insertion] - query_ros)):
+            nearest_index = insertion - 1
+        else:
+            nearest_index = insertion
+        exact = values[nearest_index]
         if abs(exact[0] - query_ros) <= 1.0e-9:
             return exact[1], {
                 'sample_age_s': 0.0,
@@ -555,9 +1042,7 @@ class CooperativeExperimentLogger(Node):
                 'interpolation_span_s': 0.0,
                 'lookup_mode': 'raw_tf_bounded_nearest',
             }
-        right_index = next(
-            index for index, item in enumerate(values)
-            if item[0] > query_ros)
+        right_index = bisect_right(timestamps, query_ros)
         left = values[right_index - 1]
         right = values[right_index]
         span = float(right[0] - left[0])
@@ -585,57 +1070,76 @@ class CooperativeExperimentLogger(Node):
                 'interpolation_age_s': 0.0, 'interpolation_span_s': 0.0,
                 'lookup_mode': 'raw_tf_identity', 'path': [source],
             }
-        keys = set(self._direct_tf_samples) | set(self._direct_tf_static)
-        adjacency = {}
-        for parent, child in keys:
-            adjacency.setdefault(child, []).append((parent, False))
-            adjacency.setdefault(parent, []).append((child, True))
+        graph_started = (time.perf_counter()
+                         if getattr(self, '_sync_map_profile_enabled', False)
+                         else None)
+        adjacency = self._direct_tf_graph()
+        if graph_started is not None:
+            self._record_sync_map_timing(
+                'raw_tf_graph_snapshot', time.perf_counter() - graph_started)
+        traversal_started = (time.perf_counter()
+                             if getattr(self, '_sync_map_profile_enabled', False)
+                             else None)
         queue = deque([(source, (0.0, 0.0, 0.0), 0.0, False, 0.0,
                         [source])])
         visited = {source}
-        while queue:
-            current, accumulated, max_age, interpolated, max_span, path = (
-                queue.popleft())
-            neighbours = sorted(adjacency.get(current, ()))
-            for neighbour, inverse in neighbours:
-                if neighbour in visited:
-                    continue
-                parent, child = ((neighbour, current) if not inverse else
-                                 (current, neighbour))
-                edge = self._direct_tf_edge(
-                    parent, child, query_ros,
-                    allow_latest_before=allow_latest_before)
-                if edge is None:
-                    continue
-                edge_transform, edge_meta = edge
-                if inverse:
-                    edge_transform = _invert_planar(edge_transform)
-                composed = _compose_planar(edge_transform, accumulated)
-                edge_age = float(edge_meta.get('sample_age_s', 0.0))
-                edge_span = float(edge_meta.get('interpolation_span_s', 0.0))
-                next_path = path + [neighbour]
-                if neighbour == target:
-                    return composed, {
-                        'sample_age_s': max(max_age, edge_age),
-                        'interpolation_used': bool(
-                            interpolated or edge_meta.get(
-                                'interpolation_used', False)),
-                        'interpolation_age_s': max(max_age, edge_age),
-                        'interpolation_span_s': max(max_span, edge_span),
-                        'lookup_mode': 'raw_tf_bounded_composed',
-                        'path': next_path,
-                    }
-                visited.add(neighbour)
-                queue.append((
-                    neighbour, composed, max(max_age, edge_age),
-                    bool(interpolated or edge_meta.get(
-                        'interpolation_used', False)),
-                    max(max_span, edge_span), next_path))
-        return None, {
-            'lookup_mode': 'raw_tf_unavailable',
-            'path': [source],
-            'error': f'no bounded raw TF path {target} <- {source}',
-        }
+        try:
+            while queue:
+                current, accumulated, max_age, interpolated, max_span, path = (
+                    queue.popleft())
+                neighbours = adjacency.get(current, ())
+                for neighbour, inverse in neighbours:
+                    if neighbour in visited:
+                        continue
+                    parent, child = ((neighbour, current) if not inverse else
+                                     (current, neighbour))
+                    edge = self._direct_tf_edge(
+                        parent, child, query_ros,
+                        allow_latest_before=allow_latest_before)
+                    if edge is None:
+                        continue
+                    edge_transform, edge_meta = edge
+                    if inverse:
+                        edge_transform = _invert_planar(edge_transform)
+                    compose_started = (time.perf_counter()
+                                       if getattr(
+                                           self, '_sync_map_profile_enabled',
+                                           False) else None)
+                    composed = _compose_planar(edge_transform, accumulated)
+                    if compose_started is not None:
+                        self._record_sync_map_timing(
+                            'raw_tf_transform_composition',
+                            time.perf_counter() - compose_started)
+                    edge_age = float(edge_meta.get('sample_age_s', 0.0))
+                    edge_span = float(edge_meta.get('interpolation_span_s', 0.0))
+                    next_path = path + [neighbour]
+                    if neighbour == target:
+                        return composed, {
+                            'sample_age_s': max(max_age, edge_age),
+                            'interpolation_used': bool(
+                                interpolated or edge_meta.get(
+                                    'interpolation_used', False)),
+                            'interpolation_age_s': max(max_age, edge_age),
+                            'interpolation_span_s': max(max_span, edge_span),
+                            'lookup_mode': 'raw_tf_bounded_composed',
+                            'path': next_path,
+                        }
+                    visited.add(neighbour)
+                    queue.append((
+                        neighbour, composed, max(max_age, edge_age),
+                        bool(interpolated or edge_meta.get(
+                            'interpolation_used', False)),
+                        max(max_span, edge_span), next_path))
+            return None, {
+                'lookup_mode': 'raw_tf_unavailable',
+                'path': [source],
+                'error': f'no bounded raw TF path {target} <- {source}',
+            }
+        finally:
+            if traversal_started is not None:
+                self._record_sync_map_timing(
+                    'raw_tf_graph_traversal',
+                    time.perf_counter() - traversal_started)
 
     @staticmethod
     def _planar_tf_observation(transform, target, source, query_ros, metadata):
@@ -702,59 +1206,55 @@ class CooperativeExperimentLogger(Node):
 
     def _lookup_odom_pose(self, robot, query_ros):
         """Return the local ^odom T_base from native odometry samples."""
-        values = list(self._odom_samples.get(robot, ()))
-        if not values:
+        index = self._odom_samples.get(robot)
+        if index is None:
             return self._tf_observation(None, query_ros)
-        values.sort(key=lambda item: item[0])
+        bounds = index.lookup_bounds(query_ros)
+        if bounds is None:
+            return self._tf_observation(None, query_ros)
         query_ros = float(query_ros)
-        if query_ros < values[0][0]:
-            nearest = values[0]
-            if nearest[0] - query_ros > 0.10:
+        if bounds[0] == 'before':
+            nearest_timestamp, pose = bounds[1:]
+            if nearest_timestamp - query_ros > 0.10:
                 return self._tf_observation(None, query_ros)
-            pose = nearest[1]
             metadata = {
-                'sample_age_s': nearest[0] - query_ros,
+                'sample_age_s': nearest_timestamp - query_ros,
                 'interpolation_used': False,
-                'interpolation_age_s': nearest[0] - query_ros,
+                'interpolation_age_s': nearest_timestamp - query_ros,
                 'interpolation_span_s': 0.0,
                 'lookup_mode': 'native_odom_bounded_nearest',
                 'path': [pose[3], pose[4]],
             }
+        elif bounds[0] == 'after':
+            sample_timestamp, pose = bounds[1:]
+            age = max(0.0, query_ros - sample_timestamp)
+            if age > 0.10:
+                return self._tf_observation(None, query_ros)
+            metadata = {
+                'sample_age_s': age, 'interpolation_used': False,
+                'interpolation_age_s': age, 'interpolation_span_s': 0.0,
+                'lookup_mode': 'native_odom_latest_before_query',
+                'path': [pose[3], pose[4]],
+            }
         else:
-            right_index = next(
-                (index for index, item in enumerate(values)
-                 if item[0] > query_ros), None)
-            if right_index is None:
-                pose = values[-1][1]
-                age = max(0.0, query_ros - values[-1][0])
-                if age > 0.10:
-                    return self._tf_observation(None, query_ros)
-                metadata = {
-                    'sample_age_s': age, 'interpolation_used': False,
-                    'interpolation_age_s': age, 'interpolation_span_s': 0.0,
-                    'lookup_mode': 'native_odom_latest_before_query',
-                    'path': [pose[3], pose[4]],
-                }
-            else:
-                left = values[right_index - 1]
-                right = values[right_index]
-                span = float(right[0] - left[0])
-                if span <= 0.0 or span > 0.10:
-                    return self._tf_observation(None, query_ros)
-                fraction = (query_ros - left[0]) / span
-                interpolated = _interpolate_planar(
-                    left[1][:3], right[1][:3], fraction)
-                pose = (*interpolated, left[1][3], left[1][4])
-                metadata = {
-                    'sample_age_s': max(query_ros - left[0],
-                                       right[0] - query_ros),
-                    'interpolation_used': True,
-                    'interpolation_age_s': max(query_ros - left[0],
-                                               right[0] - query_ros),
-                    'interpolation_span_s': span,
-                    'lookup_mode': 'native_odom_tightly_interpolated',
-                    'path': [pose[3], pose[4]],
-                }
+            _, left_timestamp, left_pose, right_timestamp, right_pose = bounds
+            span = float(right_timestamp - left_timestamp)
+            if span <= 0.0 or span > 0.10:
+                return self._tf_observation(None, query_ros)
+            fraction = (query_ros - left_timestamp) / span
+            interpolated = _interpolate_planar(
+                left_pose[:3], right_pose[:3], fraction)
+            pose = (*interpolated, left_pose[3], left_pose[4])
+            metadata = {
+                'sample_age_s': max(query_ros - left_timestamp,
+                                   right_timestamp - query_ros),
+                'interpolation_used': True,
+                'interpolation_age_s': max(query_ros - left_timestamp,
+                                           right_timestamp - query_ros),
+                'interpolation_span_s': span,
+                'lookup_mode': 'native_odom_tightly_interpolated',
+                'path': [pose[3], pose[4]],
+            }
         return self._planar_tf_observation(
             pose[:3], pose[3], pose[4],
             query_ros, metadata)
@@ -762,11 +1262,21 @@ class CooperativeExperimentLogger(Node):
     def _lookup_sync_tf(self, target, source, query_ros,
                         allow_latest_before=False):
         lookup_error = ''
+        tf2_started = (time.perf_counter()
+                       if getattr(self, '_sync_map_profile_enabled', False)
+                       else None)
         try:
             lookup_time = Time(
                 seconds=float(query_ros), clock_type=ClockType.ROS_TIME)
             transform = self.tf_buffer.lookup_transform(
-                target, source, lookup_time, timeout=Duration(seconds=0.01))
+                # This callback is passive evidence collection.  The direct
+                # raw-TF stream below is already maintained for exact-time
+                # fallback, so waiting here can block the logger executor on
+                # every synchronized sample without improving estimator or
+                # navigation behavior.  Preserve the same tf2 result when it
+                # is immediately available, then use the existing bounded raw
+                # fallback when it is not.
+                target, source, lookup_time, timeout=Duration(seconds=0.0))
             result = self._tf_observation(transform, query_ros)
             result['target_frame'] = target
             result['source_frame'] = source
@@ -780,7 +1290,14 @@ class CooperativeExperimentLogger(Node):
             lookup_error = str(exc)
         except (RuntimeError, TypeError, ValueError) as exc:
             lookup_error = str(exc)
+        finally:
+            if tf2_started is not None:
+                self._record_sync_map_timing(
+                    'tf2_lookup', time.perf_counter() - tf2_started)
 
+        raw_started = (time.perf_counter()
+                       if getattr(self, '_sync_map_profile_enabled', False)
+                       else None)
         planar, metadata = self._direct_sync_tf(
             target, source, query_ros,
             allow_latest_before=allow_latest_before)
@@ -789,6 +1306,9 @@ class CooperativeExperimentLogger(Node):
                 planar, target, source, query_ros, metadata)
             result['synchronization_valid'] = bool(
                 float(result.get('age_s', 0.0)) <= 0.10)
+            if raw_started is not None:
+                self._record_sync_map_timing(
+                    'raw_tf_fallback_lookup', time.perf_counter() - raw_started)
             return result
         result = self._tf_observation(None, query_ros)
         result['target_frame'] = target
@@ -799,16 +1319,46 @@ class CooperativeExperimentLogger(Node):
         result['path'] = list(metadata.get('path', ()))
         result['error'] = '; '.join(value for value in (
             lookup_error, metadata.get('error', '')) if value)
+        if raw_started is not None:
+            self._record_sync_map_timing(
+                'raw_tf_fallback_lookup', time.perf_counter() - raw_started)
         return result
 
+    def _lookup_sync_tf_direct_only(self, target, source, query_ros):
+        """Capture only an immediately available tf2 result.
+
+        This is the small live portion retained by deferred forensic capture.
+        It preserves the legacy tf2 result when it exists, but deliberately
+        does not construct the bounded raw-TF graph or compose fallback edges
+        on the simulation executor.  A missing/unsynchronized result is
+        reconstructed from the preserved raw stream after the run.
+        """
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                target, source,
+                Time(seconds=float(query_ros), clock_type=ClockType.ROS_TIME),
+                timeout=Duration(seconds=0.0))
+            result = self._tf_observation(transform, query_ros)
+            result['target_frame'] = target
+            result['source_frame'] = source
+            if (result.get('available') and
+                    abs(float(result.get('returned_stamp_delta_s', 0.0)))
+                    <= 0.10):
+                result['synchronization_valid'] = True
+                return result
+        except (TransformException, RuntimeError, TypeError, ValueError):
+            pass
+        return None
+
     @staticmethod
-    def _supervisor_pose_at(rows, query_ros):
+    def _supervisor_pose_at(rows, query_ros, timestamp_index=None):
         """Join a dense Supervisor trajectory at one simulation timestamp."""
-        if not rows:
+        index = timestamp_index or SupervisorTimestampIndex(rows)
+        nearest = index.nearest(query_ros)
+        if nearest is None:
             return None
+        values = index.values
         query_ros = float(query_ros)
-        values = sorted(rows, key=lambda item: item[0])
-        nearest = min(values, key=lambda item: abs(item[0] - query_ros))
         if abs(nearest[0] - query_ros) <= 1.0e-9:
             return {
                 'pose': nearest[1], 'alignment_error_s': 0.0,
@@ -916,11 +1466,13 @@ class CooperativeExperimentLogger(Node):
             (row for row in supervisor_rows
              if isinstance(row, tuple) and len(row) == 2),
             key=lambda item: float(item[0]))
+        supervisor_index = SupervisorTimestampIndex(supervisor_rows)
         initial_pose = supervisor_values[0][1] if supervisor_values else None
         pre_motion_candidates = []
         for row in ordered:
             query_ros = float(row['query_ros_time_s'])
-            supervisor = cls._supervisor_pose_at(supervisor_rows, query_ros)
+            supervisor = cls._supervisor_pose_at(
+                supervisor_rows, query_ros, supervisor_index)
             if supervisor is None or supervisor['alignment_error_s'] > 0.10:
                 continue
             map_to_base, observation = cls._map_base_from_sync_row(row)
@@ -994,6 +1546,13 @@ class CooperativeExperimentLogger(Node):
                 result['reason'] = 'NO_ACCEPTED_CANONICAL_HANDOFF'
                 atomic_json(output_path, result)
                 return result
+            if len(self.robots) < 2:
+                result.update({
+                    'reason': 'SINGLE_ROBOT_NOT_APPLICABLE',
+                    'robot_ids': list(self.robots),
+                })
+                atomic_json(output_path, result)
+                return result
             accepted = next((item[2] for item in summaries
                              if item[2].get('source_robot_id') == 'robot1'),
                             summaries[0][2])
@@ -1052,9 +1611,13 @@ class CooperativeExperimentLogger(Node):
                 _invert_planar(anchors['robot2']['world_to_map']),
                 anchors['robot1']['world_to_map'])
             joins = {}
+            supervisor_indexes = {
+                robot: SupervisorTimestampIndex(supervisor_rows[robot])
+                for robot in self.robots}
             for robot in self.robots:
                 supervisor = self._supervisor_pose_at(
-                    supervisor_rows[robot], query_ros)
+                    supervisor_rows[robot], query_ros,
+                    supervisor_indexes[robot])
                 joins[robot] = {
                     'supervisor_at_acceptance': supervisor,
                     'initialization_anchor': anchors[robot],
@@ -1105,19 +1668,59 @@ class CooperativeExperimentLogger(Node):
         return result
 
     def _synchronized_map_frame_row(self, robot, query_ros, query_wall,
-                                    sample_kind):
-        evidence = self.latest_evidence.get(robot)
-        odom_message = self.latest[robot].get('odom')
-        map_message = self.latest[robot].get('map')
-        map_frame = (str(map_message.header.frame_id)
-                     if map_message is not None and
-                     map_message.header.frame_id else f'{robot}/map')
-        odom_frame = (str(odom_message.header.frame_id)
-                      if odom_message is not None and
-                      odom_message.header.frame_id else f'{robot}/odom')
-        base_frame = (str(getattr(odom_message, 'child_frame_id', ''))
-                      if odom_message is not None else '')
-        base_frame = base_frame or f'{robot}/base_footprint'
+                                    sample_kind, request=None):
+        map_started = (time.perf_counter()
+                       if getattr(self, '_sync_map_profile_enabled', False)
+                       else None)
+        if request is None:
+            evidence = self.latest_evidence.get(robot)
+            odom_message = self.latest[robot].get('odom')
+            map_message = self.latest[robot].get('map')
+            map_frame = (str(map_message.header.frame_id)
+                         if map_message is not None and
+                         map_message.header.frame_id else f'{robot}/map')
+            odom_frame = (str(odom_message.header.frame_id)
+                          if odom_message is not None and
+                          odom_message.header.frame_id else f'{robot}/odom')
+            base_frame = (str(getattr(odom_message, 'child_frame_id', ''))
+                          if odom_message is not None else '')
+            base_frame = base_frame or f'{robot}/base_footprint'
+        else:
+            # These values are captured at the original timer/callback time;
+            # using them during the post-run reconstruction preserves the
+            # legacy frame/evidence join rather than consulting a later map
+            # or odometry message.
+            evidence = request.get('evidence')
+            map_frame = str(request.get('map_frame') or f'{robot}/map')
+            odom_frame = str(request.get('odom_frame') or f'{robot}/odom')
+            base_frame = str(request.get('base_frame') or
+                             f'{robot}/base_footprint')
+        live_lookup = request.get('live_lookup') if request else None
+        if map_started is not None:
+            self._record_sync_map_timing(
+                'map_acquisition_reference', time.perf_counter() - map_started)
+        map_to_base = (
+            live_lookup.get('map_to_base')
+            if isinstance(live_lookup, dict) and
+            live_lookup.get('map_to_base') is not None else
+            self._lookup_sync_tf(map_frame, base_frame, query_ros))
+        odom_started = (time.perf_counter()
+                        if getattr(self, '_sync_map_profile_enabled', False)
+                        else None)
+        odom_to_base = (
+            live_lookup.get('odom_to_base')
+            if isinstance(live_lookup, dict) and
+            'odom_to_base' in live_lookup else
+            self._lookup_odom_pose(robot, query_ros))
+        if odom_started is not None:
+            self._record_sync_map_timing(
+                'odometry_join', time.perf_counter() - odom_started)
+        map_to_odom = (
+            live_lookup.get('map_to_odom')
+            if isinstance(live_lookup, dict) and
+            live_lookup.get('map_to_odom') is not None else
+            self._lookup_sync_tf(map_frame, odom_frame, query_ros,
+                                 allow_latest_before=True))
         return {
             'schema_version': 'synchronized_map_frame_1.0',
             'sample_kind': sample_kind,
@@ -1140,12 +1743,9 @@ class CooperativeExperimentLogger(Node):
             # and map->odom are queried as (target map/odom, source child).
             # The target/source fields in each nested observation make the
             # tf2 direction explicit for the offline composition.
-            'map_to_base': self._lookup_sync_tf(
-                map_frame, base_frame, query_ros),
-            'odom_to_base': self._lookup_odom_pose(robot, query_ros),
-            'map_to_odom': self._lookup_sync_tf(
-                map_frame, odom_frame, query_ros,
-                allow_latest_before=True),
+            'map_to_base': map_to_base,
+            'odom_to_base': odom_to_base,
+            'map_to_odom': map_to_odom,
             'evidence': evidence,
         }
 
@@ -1155,10 +1755,201 @@ class CooperativeExperimentLogger(Node):
             return
         query_ros = self.ros_seconds()
         query_wall = time.monotonic() - self.start
+        if self._defer_synchronized_map_frames:
+            for robot in self.robots:
+                odom_message = self.latest[robot].get('odom')
+                map_message = self.latest[robot].get('map')
+                map_frame = (
+                    str(map_message.header.frame_id)
+                    if map_message is not None and
+                    map_message.header.frame_id else f'{robot}/map')
+                odom_frame = (
+                    str(odom_message.header.frame_id)
+                    if odom_message is not None and
+                    odom_message.header.frame_id else f'{robot}/odom')
+                base_frame = (
+                    str(getattr(odom_message, 'child_frame_id', ''))
+                    if odom_message is not None else '') or \
+                    f'{robot}/base_footprint'
+                self._deferred_sync_map_requests.append({
+                    'robot_id': robot,
+                    'query_ros_time_s': float(query_ros),
+                    'query_wall_elapsed_s': float(query_wall),
+                    'sample_kind': str(sample_kind),
+                    'map_frame': map_frame,
+                    'odom_frame': odom_frame,
+                    'base_frame': base_frame,
+                    'evidence': self.latest_evidence.get(robot),
+                    # Preserve the cheap, immediately available tf2/odom
+                    # result exactly.  Only the expensive raw fallback graph
+                    # is deferred to the post-run reconstruction.
+                    'live_lookup': {
+                        'map_to_base': self._lookup_sync_tf_direct_only(
+                            map_frame, base_frame, query_ros),
+                        'odom_to_base': self._lookup_odom_pose(
+                            robot, query_ros),
+                        'map_to_odom': self._lookup_sync_tf_direct_only(
+                            map_frame, odom_frame, query_ros),
+                    },
+                })
+            return
         for robot in self.robots:
-            self.forensic.record_synchronized_map_frame(
-                finite(self._synchronized_map_frame_row(
-                    robot, query_ros, query_wall, sample_kind)))
+            row = self._synchronized_map_frame_row(
+                robot, query_ros, query_wall, sample_kind)
+            write_started = (time.perf_counter()
+                             if getattr(self, '_sync_map_profile_enabled', False)
+                             else None)
+            self.forensic.record_synchronized_map_frame(finite(row))
+            if write_started is not None:
+                self._record_sync_map_timing(
+                    'serialization_write', time.perf_counter() - write_started)
+
+    def _reconstruct_deferred_synchronized_map_frames(self):
+        """Recreate the exact synchronized rows after live simulation.
+
+        The live path only records the timer/evidence request and therefore
+        avoids per-sample graph traversal and TF composition while Webots is
+        advancing.  The existing bounded TF lookup methods, raw TF index, and
+        odometry interpolation are deliberately reused here so row schemas,
+        validity decisions, and tie behavior remain unchanged.
+        """
+        if not self._defer_synchronized_map_frames:
+            return
+        if self.forensic is None:
+            return
+        self.flush()
+        raw_path = self.directory / 'forensic' / 'raw_tf.csv'
+        if not raw_path.is_file():
+            raise RuntimeError('deferred synchronized-map reconstruction is '
+                               'missing forensic/raw_tf.csv')
+
+        # Live bounded indexes are intentionally small.  Rebuild a complete
+        # stable index from the already-preserved raw file for old samples so
+        # the post-run computation is not limited by the live cache horizon.
+        dynamic = {}
+        static = {}
+        raw_tf_events = []
+        with raw_path.open(newline='', encoding='utf-8') as stream:
+            for sequence, row in enumerate(csv.DictReader(stream)):
+                try:
+                    key = (self._normal_frame(row['parent_frame']),
+                           self._normal_frame(row['child_frame']))
+                    value = (
+                        float(row['translation_x']),
+                        float(row['translation_y']),
+                        yaw_from_row(float(row['rotation_z']),
+                                     float(row['rotation_w'])),
+                    )
+                    timestamp = float(row['transform_stamp'])
+                    if not all(math.isfinite(part)
+                               for part in (*value, timestamp)):
+                        continue
+                    received_wall = float(row['received_wall_elapsed_s'])
+                    received_ros = float(row['received_ros_time_s'])
+                    if not all(math.isfinite(part)
+                               for part in (received_wall, received_ros)):
+                        continue
+                except (KeyError, TypeError, ValueError):
+                    continue
+                raw_tf_events.append((received_wall, received_ros, sequence,
+                                      str(row.get('static', '')).lower() ==
+                                      'true', key, timestamp, value))
+                if str(row.get('static', '')).lower() == 'true':
+                    static[key] = (timestamp, value)
+                else:
+                    dynamic.setdefault(key, []).append((timestamp, value))
+
+        # Rebuild the stores empty and replay them in receipt order below.
+        # This is important: a post-run query must not see a future TF sample
+        # or odometry message that was not available to the live callback.
+        raw_tf_events.sort(key=lambda item: (item[0], item[1], item[2]))
+        self._deferred_raw_tf_events = raw_tf_events
+        self._direct_tf_samples = {
+            key: RawTFSeriesIndex(max(1, len(values)))
+            for key, values in dynamic.items()}
+        self._direct_tf_static = {}
+        self._direct_tf_graph_keys = set()
+        self._direct_tf_adjacency = {}
+        self._direct_tf_adjacency_snapshot = None
+
+        odom_events = []
+        self._odom_samples = {}
+        for robot in self.robots:
+            path = self.directory / 'forensic' / f'{robot}_odom.csv'
+            if not path.is_file():
+                continue
+            with path.open(newline='', encoding='utf-8') as stream:
+                for sequence, row in enumerate(csv.DictReader(stream)):
+                    try:
+                        received_wall = float(row['received_wall_elapsed_s'])
+                        received_ros = float(row['received_ros_time_s'])
+                        timestamp = float(row['header_stamp'])
+                        z = float(row['orientation_z'])
+                        w = float(row['orientation_w'])
+                        pose = (
+                            float(row['pose_x']), float(row['pose_y']),
+                            yaw_from_row(z, w), str(row['frame_id']),
+                            f'{robot}/base_footprint')
+                        if not all(math.isfinite(part) for part in
+                                    (received_wall, received_ros,
+                                     timestamp, pose[0], pose[1], pose[2])):
+                            continue
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    odom_events.append((received_wall, received_ros,
+                                        sequence, robot, timestamp, pose))
+            # The rolling index is populated causally as requests are replayed.
+            self._odom_samples[robot] = RollingTimestampIndex(
+                max(1, sum(1 for event in odom_events
+                           if event[3] == robot)))
+        odom_events.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        def received_before(event_wall, event_ros, request):
+            request_wall = float(request.get('query_wall_elapsed_s', 0.0))
+            request_ros = float(request.get('query_ros_time_s', 0.0))
+            # Wall elapsed time is the causal ordering clock for callbacks;
+            # retain ROS time as a fallback for old artifacts without it.
+            if math.isfinite(request_wall) and math.isfinite(event_wall):
+                return event_wall <= request_wall
+            return event_ros <= request_ros
+
+        indexed_requests = sorted(
+            enumerate(self._deferred_sync_map_requests),
+            key=lambda item: (float(item[1].get('query_wall_elapsed_s', 0.0)),
+                              float(item[1].get('query_ros_time_s', 0.0)),
+                              item[0]))
+        rows = [None] * len(self._deferred_sync_map_requests)
+        raw_index = 0
+        odom_index = 0
+        for request_index, request in indexed_requests:
+            while raw_index < len(self._deferred_raw_tf_events):
+                event = self._deferred_raw_tf_events[raw_index]
+                if not received_before(event[0], event[1], request):
+                    break
+                _, _, _, is_static, key, timestamp, value = event
+                if is_static:
+                    self._direct_tf_static[key] = (timestamp, value)
+                else:
+                    self._direct_tf_samples[key].append(timestamp, value)
+                self._register_direct_tf_key(key)
+                raw_index += 1
+            while odom_index < len(odom_events):
+                event = odom_events[odom_index]
+                if not received_before(event[0], event[1], request):
+                    break
+                _, _, _, robot, timestamp, pose = event
+                self._odom_samples[robot].append(timestamp, pose)
+                odom_index += 1
+            robot = str(request['robot_id'])
+            query_ros = float(request['query_ros_time_s'])
+            rows[request_index] = self._synchronized_map_frame_row(
+                robot, query_ros,
+                float(request['query_wall_elapsed_s']),
+                str(request['sample_kind']), request=request)
+
+        for row in rows:
+            self.forensic.record_synchronized_map_frame(finite(row))
+
 
     def evidence_descriptor(self, message):
         """Remember descriptor metadata and snapshot TF at its arrival.
@@ -1196,8 +1987,13 @@ class CooperativeExperimentLogger(Node):
             self.observe(Odometry,f'/{r}/odom',lambda m,x=r:self.odom(x,m),qos_profile_sensor_data,f'{r}.odom')
             # Passive controller-health evidence; it never gates or commands
             # the running stack.
-            self.observe(JointState,f'/{r}/joint_states',lambda m,x=r:self.mark(x,'joint_states',m),qos_profile_sensor_data,f'{r}.joint_states')
-            for s in ('scan_d500_fixed','scan_d500_slam','scan_d500_nav'): self.observe(LaserScan,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),qos_profile_sensor_data,f'{r}.{s}')
+            # When the existing rosbag2 path is enabled, retain every raw
+            # message in the bag and remove these passive entities from the
+            # Python executor.  Finalization reconstructs their existing
+            # cadence/age artifacts from the bag and /clock.
+            if not self.passive_sensor_offload_enabled:
+                self.observe(JointState,f'/{r}/joint_states',lambda m,x=r:self.mark(x,'joint_states',m),qos_profile_sensor_data,f'{r}.joint_states')
+                for s in ('scan_d500_fixed','scan_d500_slam','scan_d500_nav'): self.observe(LaserScan,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),qos_profile_sensor_data,f'{r}.{s}')
             for s in ('map','shared_map','local_costmap/costmap','global_costmap/costmap'): self.observe(OccupancyGrid,f'/{r}/{s}',lambda m,x=r,k=s:self.mark(x,k,m),self.qos(True,True,1),f'{r}.{s}')
             self.observe(PeerMap,f'/cslam/{r}/local_map',lambda m,x=r:self.mark(x,'peer_map',m),self.qos(True,True,1),f'{r}.peer_map')
             self.observe(FrontierCandidateArray,f'/{r}/frontier_candidates',lambda m,x=r:self.candidates(x,m),self.qos(True,False,1),f'{r}.candidates')
@@ -1210,11 +2006,12 @@ class CooperativeExperimentLogger(Node):
             self.observe(DistributedExplorationStatus,f'/{r}/distributed_status',lambda m,x=r:self.distributed_status(x,m),self.qos(True,True,1),f'{r}.distributed_status')
             self.observe(DistributedExplorationEvent,f'/{r}/distributed_event',lambda m,x=r:self.distributed_event(x,m),self.qos(True,False,50),f'{r}.distributed_event')
             self.observe(ExplorationFailure,f'/{r}/exploration_failure',lambda m,x=r:self.distributed_failure(x,m),self.qos(True,True,10),f'{r}.exploration_failure')
-            self.observe(NavigateToPose_FeedbackMessage,f'/{r}/navigate_to_pose/_action/feedback',lambda m,x=r:self.feedback(x,m),self.qos(),f'{r}.feedback')
-            self.observe(GoalStatusArray,f'/{r}/navigate_to_pose/_action/status',lambda m,x=r:self.mark(x,'navigate_status',m),self.qos(True,True,1),f'{r}.navigate_status')
-            self.observe(GoalStatusArray,f'/{r}/follow_path/_action/status',lambda m,x=r:self.action_status(x,'FOLLOW_PATH',m),self.qos(True,True,1),f'{r}.follow_path_status')
-            self.observe(GoalStatusArray,f'/{r}/compute_path_to_pose/_action/status',lambda m,x=r:self.action_status(x,'COMPUTE_PATH_TO_POSE',m),self.qos(True,True,1),f'{r}.compute_path_status')
-            self.observe(NavPath,f'/{r}/plan',lambda m,x=r:self.plan(x,m),self.qos(),f'{r}.plan')
+            if not self.passive_bag_enabled:
+                self.observe(NavigateToPose_FeedbackMessage,f'/{r}/navigate_to_pose/_action/feedback',lambda m,x=r:self.feedback(x,m),self.qos(),f'{r}.feedback')
+                self.observe(GoalStatusArray,f'/{r}/navigate_to_pose/_action/status',lambda m,x=r:self.mark(x,'navigate_status',m),self.qos(True,True,1),f'{r}.navigate_status')
+                self.observe(GoalStatusArray,f'/{r}/follow_path/_action/status',lambda m,x=r:self.action_status(x,'FOLLOW_PATH',m),self.qos(True,True,1),f'{r}.follow_path_status')
+                self.observe(GoalStatusArray,f'/{r}/compute_path_to_pose/_action/status',lambda m,x=r:self.action_status(x,'COMPUTE_PATH_TO_POSE',m),self.qos(True,True,1),f'{r}.compute_path_status')
+                self.observe(NavPath,f'/{r}/plan',lambda m,x=r:self.plan(x,m),self.qos(),f'{r}.plan')
             self.observe(Twist,f'/{r}/cmd_vel_nav',lambda m,x=r:self.command(x,m,'cmd_vel_nav'),self.qos(),f'{r}.cmd_vel_nav')
             self.observe(TwistStamped,f'/{r}/cmd_vel',lambda m,x=r:self.command(x,m.twist,'cmd_vel'),self.qos(),f'{r}.cmd_vel')
         # Mirror the raw TF channels with their normal ROS QoS.  The listener
@@ -1222,15 +2019,43 @@ class CooperativeExperimentLogger(Node):
         # evaluator able to reconstruct a tightly timestamped local chain
         # when Buffer.lookup_transform cannot compose it during a busy run.
         self.observe(TFMessage, '/tf', self._direct_tf_message,
-                     self.qos(False, False, 1000), 'forensic.tf')
+                     self.qos(True, False, 1000), 'forensic.tf')
         self.observe(TFMessage, '/tf_static', self._direct_tf_static_message,
                      self.qos(True, True, 100), 'forensic.tf_static')
+        # One low-rate authoritative startup marker.  It is control-neutral
+        # evidence for the common two-robot release barrier.
+        self.observe(
+            String, '/cslam/unknown_pose/start_release',
+            self.start_release, self.qos(True, True, 1),
+            'startup.start_release')
         if self.forensic_sync_enabled:
             self.observe(
                 LocalMapDescriptor, '/cslam/relative_pose/descriptors',
                 self.evidence_descriptor, self.qos(True, False, 100),
                 'relative_pose.descriptor')
         if self.p['enable_rosout_collection']: self.observe(Log,'/rosout',self.rosout,self.qos(True,True,1000),'rosout')
+
+    def start_release(self, message):
+        """Record the single simulation-time release marker verbatim."""
+        try:
+            payload = json.loads(str(message.data))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.event('START_RELEASE_INVALID', 'malformed START_RELEASE payload',
+                       severity='ERROR', allow_during_shutdown=True)
+            return
+        if str(payload.get('event', '')) != 'START_RELEASE':
+            return
+        self.event(
+            'START_RELEASE', 'common two-robot exploration release',
+            source='/cslam/unknown_pose/start_release',
+            release_sim_time_s=float(payload.get('release_sim_time_s', 0.0)),
+            traffic_scheduler_ready=bool(
+                payload.get('traffic_scheduler_ready', False)),
+            accepted_handoff=bool(payload.get('accepted_handoff', False)),
+            shared_nav2_ready=bool(payload.get('shared_nav2_ready', False)),
+            ready_robots=payload.get('ready_robots', []),
+            allow_during_shutdown=True,
+        )
     def ros_seconds(self): return self.get_clock().now().nanoseconds*1e-9
     def ros_now(self): n=self.get_clock().now().nanoseconds; return n//1000000000,n%1000000000
     def common(self,source='/cooperative_experiment_logger',robot=None,source_stamp=None):
@@ -1351,9 +2176,21 @@ class CooperativeExperimentLogger(Node):
     def safe_call(self,subsystem,operation,*args):
         if self._finalizing or self._closed:
             self.dropped_samples+=1; return None
+        started = time.perf_counter() if self._callback_timing_enabled else None
         try:return operation(*args)
         except Exception as exc:
             self.record_internal_error(subsystem,exc); return None
+        finally:
+            if started is not None:
+                elapsed = max(0.0, time.perf_counter() - started)
+                with self._state_lock:
+                    entry = self._callback_timing.setdefault(
+                        str(subsystem),
+                        {'calls': 0, 'total_wall_s': 0.0, 'max_wall_s': 0.0},
+                    )
+                    entry['calls'] += 1
+                    entry['total_wall_s'] += elapsed
+                    entry['max_wall_s'] = max(entry['max_wall_s'], elapsed)
     def record_internal_error(self,subsystem,exc):
         key=f'{subsystem}:{type(exc).__name__}:{exc}'
         with self._state_lock:
@@ -1420,20 +2257,45 @@ class CooperativeExperimentLogger(Node):
         self.latest[r]['speed']=(float(msg.twist.twist.linear.x),
                                  float(msg.twist.twist.angular.z))
         stamp_value = stamp(msg)[0] + stamp(msg)[1] * 1e-9
-        self._odom_samples[r].append((
+        self._odom_samples[r].append(
             stamp_value,
             (float(p.x), float(p.y), float(local_yaw),
              str(msg.header.frame_id or f'{r}/odom'),
-             str(getattr(msg, 'child_frame_id', '') or 'base_footprint'))))
+             str(getattr(msg, 'child_frame_id', '') or 'base_footprint')))
         self.local_trajectory.add(r,float(p.x),float(p.y))
         if self.forensic is not None:
             self.forensic.record_odom(
                 r, msg, self.ros_seconds(), time.monotonic() - self.start)
+        # The raw /tf callback receives the same authoritative transform
+        # samples as tf2.  When an exact direct sample is already indexed,
+        # use its planar projection for this passive trajectory evidence and
+        # avoid a second tf2 wait-set lookup.  Any missing, interpolated, or
+        # chained case retains the original tf2 path below.
+        direct = self._direct_tf_edge(
+            self.p['global_frame'], msg.header.frame_id, stamp_value)
+        if (direct is not None and
+                direct[1].get('lookup_mode') == 'raw_tf_exact'):
+            transform_xyyaw = direct[0]
+            t_x, t_y, heading = transform_xyyaw
+            cosine, sine = math.cos(heading), math.sin(heading)
+            shared_x = t_x + cosine * p.x - sine * p.y
+            shared_y = t_y + sine * p.x + cosine * p.y
+            shared_yaw = (heading + local_yaw + math.pi) % (2 * math.pi) - math.pi
+            self.latest[r]['shared_pose'] = (shared_x, shared_y, shared_yaw)
+            self.latest[r]['shared_pose_frame'] = self.p['global_frame']
+            if self.p['enable_trajectory_overlap']:
+                self.trajectory.add(r, shared_x, shared_y)
+            return
         try:
+            # This is passive evidence collection on the high-rate odometry
+            # path.  Waiting up to 50 ms here can stall the logger executor
+            # for every odometry message and therefore slow Webots/ROS time.
+            # Preserve the same transform when it is immediately available;
+            # the raw /tf stream is retained for offline cross-frame joins.
             transform=self.tf_buffer.lookup_transform(
                 self.p['global_frame'], msg.header.frame_id,
                 Time.from_msg(msg.header.stamp),
-                timeout=Duration(seconds=0.05))
+                timeout=Duration(seconds=0.0))
             t=transform.transform.translation
             heading=yaw(transform.transform.rotation)
             cosine, sine=math.cos(heading), math.sin(heading)
@@ -2280,11 +3142,41 @@ class CooperativeExperimentLogger(Node):
                 if d.get('navigation_active') and row['elapsed_s']-self.last_progress.get(r,-99)>=5:
                     self.last_progress[r]=row['elapsed_s']; self.event('NAVIGATION_PROGRESS','periodic low-rate progress sample',r,distance_remaining_m=d.get('distance_remaining'),pose_x=pose[0],pose_y=pose[1],distance_travelled_m=self.local_trajectory.total_distance.get(r,0.),recoveries=d.get('recoveries',0))
     def sample_coverage(self):
-        shared=[self.map_snapshot(r,'shared_map') for r in self.robots]; local=[self.map_snapshot(r,'map') for r in self.robots]
-        if not all(shared):return
-        counts=[snapshot[2] for snapshot in shared]; maps=[snapshot[4] for snapshot in shared]; known=[a+b for a,b,_ in counts]; current=max(known); self.initial_known=current if self.initial_known is None else self.initial_known; gain=current-(self.previous_known if self.previous_known is not None else current); self.previous_known=current
-        equivalent=(maps[0].info.width,maps[0].info.height,maps[0].info.resolution,maps[0].info.origin)==(maps[1].info.width,maps[1].info.height,maps[1].info.resolution,maps[1].info.origin) and shared[0][3]==shared[1][3]
-        if equivalent:self.divergence_since=None; self.divergence_reported=False
+        shared=[self.map_snapshot(r,'shared_map') for r in self.robots]
+        local=[self.map_snapshot(r,'map') for r in self.robots]
+        local_union = self.coverage_source == 'local_map_union'
+        coverage_maps = (
+            local if self.coverage_source in ('local_map', 'local_map_union')
+            else shared)
+        if not all(coverage_maps):
+            return
+        counts=[snapshot[2] for snapshot in coverage_maps]
+        maps=[snapshot[4] for snapshot in coverage_maps]
+        known=[a+b for a,b,_ in counts]
+        current=max(known)
+        if local_union:
+            transforms={
+                'robot1': (0., 0., 0.),
+                'robot2': tuple(self.p['known_relative_transform']),
+            }
+            if self.p['enable_coverage_attribution']:
+                for r,snapshot in zip(self.robots,local):
+                    if snapshot and self._last_attributed.get(r)!=snapshot[0]:
+                        transform=transforms.get(r,(0.,0.,0.)); transformed=self._transformed_cache.get(r)
+                        if transformed is None or transformed[0]!=snapshot[0]:
+                            transformed=(snapshot[0],known_world_cells(snapshot[1],self.p['coverage_attribution_resolution'],transform)); self._transformed_cache[r]=transformed
+                        self.attribution.observe(r,transformed[1],time.monotonic()-self.start); self._last_attributed[r]=snapshot[0]
+            current=self.attribution.summary()['total_known_union_cells']
+        self.initial_known=current if self.initial_known is None else self.initial_known
+        gain=current-(self.previous_known if self.previous_known is not None else current)
+        self.previous_known=current
+        if self.coverage_source in ('local_map', 'local_map_union'):
+            equivalent = None
+        else:
+            equivalent=(maps[0].info.width,maps[0].info.height,maps[0].info.resolution,maps[0].info.origin)==(maps[1].info.width,maps[1].info.height,maps[1].info.resolution,maps[1].info.origin) and shared[0][3]==shared[1][3]
+        if self.coverage_source in ('local_map', 'local_map_union'):
+            self.divergence_since=None; self.divergence_reported=False
+        elif equivalent:self.divergence_since=None; self.divergence_reported=False
         elif self.divergence_since is None:self.divergence_since=time.monotonic()
         elif not self.divergence_reported and time.monotonic()-self.divergence_since>=self.p['shared_map_divergence_grace_s']:
             self.divergence_reported=True; self.event('SHARED_MAP_DIVERGENCE','independent shared maps differ beyond grace period',severity='WARN')
@@ -2299,7 +3191,49 @@ class CooperativeExperimentLogger(Node):
                     if transformed is None or transformed[0]!=snapshot[0]:
                         transformed=(snapshot[0],known_world_cells(snapshot[1],self.p['coverage_attribution_resolution'],transform)); self._transformed_cache[r]=transformed
                     self.attribution.observe(r,transformed[1],time.monotonic()-self.start); self._last_attributed[r]=snapshot[0]
-        a=self.attribution.summary(); row=self.row_time(); row.update(robot1_local_known=self.map_counts('robot1','map')[0],robot2_local_known=self.map_counts('robot2','map')[0],robot1_shared_known=known[0],robot2_shared_known=known[1],shared_free_cells=counts[0][0],shared_occupied_cells=counts[0][1],shared_unknown_cells=counts[0][2],known_area_m2=known[0]*maps[0].info.resolution**2,coverage_gain_cells=gain,coverage_gain_since_start_cells=current-self.initial_known,unique_first_seen_robot1_cells=a['unique_first_seen_cells'].get('robot1',0),unique_first_seen_robot2_cells=a['unique_first_seen_cells'].get('robot2',0),later_duplicated_by_robot1_cells=a['later_duplicated_cells'].get('robot1',0),later_duplicated_by_robot2_cells=a['later_duplicated_cells'].get('robot2',0),simultaneously_observed_cells=a['simultaneously_observed_cells'],total_known_union_cells=a['total_known_union_cells'],duplicated_known_fraction=a['duplicated_known_fraction'],shared_maps_equivalent=equivalent); self.csv_row(self.coverage,row)
+        a=self.attribution.summary()
+        if self.coverage_source == 'local_map':
+            # A has no cross-robot ownership problem: report the raw local
+            # grid count so coverage.csv agrees with robot1_map_final.npz.
+            first_seen_robot1 = current
+            first_seen_robot2 = 0
+            later_duplicate_robot1 = 0
+            later_duplicate_robot2 = 0
+            simultaneous = 0
+            total_known_union = current
+            duplicate_fraction = 0.0
+        else:
+            first_seen_robot1 = a['unique_first_seen_cells'].get('robot1', 0)
+            first_seen_robot2 = a['unique_first_seen_cells'].get('robot2', 0)
+            later_duplicate_robot1 = a['later_duplicated_cells'].get('robot1', 0)
+            later_duplicate_robot2 = a['later_duplicated_cells'].get('robot2', 0)
+            simultaneous = a['simultaneously_observed_cells']
+            total_known_union = a['total_known_union_cells']
+            duplicate_fraction = a['duplicated_known_fraction']
+        local_known={r: self.map_counts(r,'map')[0] for r in self.robots}
+        row=self.row_time()
+        row.update(
+            robot1_local_known=local_known.get('robot1'),
+            robot2_local_known=local_known.get('robot2'),
+            robot1_shared_known=known[0] if len(known) > 0 else None,
+            robot2_shared_known=known[1] if len(known) > 1 else None,
+            shared_free_cells=counts[0][0],
+            shared_occupied_cells=counts[0][1],
+            shared_unknown_cells=counts[0][2],
+            known_area_m2=(
+                total_known_union * self.p['coverage_attribution_resolution']**2
+                if local_union else known[0]*maps[0].info.resolution**2),
+            coverage_gain_cells=gain,
+            coverage_gain_since_start_cells=current-self.initial_known,
+            unique_first_seen_robot1_cells=first_seen_robot1,
+            unique_first_seen_robot2_cells=first_seen_robot2,
+            later_duplicated_by_robot1_cells=later_duplicate_robot1,
+            later_duplicated_by_robot2_cells=later_duplicate_robot2,
+            simultaneously_observed_cells=simultaneous,
+            total_known_union_cells=total_known_union,
+            duplicated_known_fraction=duplicate_fraction,
+            shared_maps_equivalent=equivalent)
+        self.csv_row(self.coverage,row)
     def sample_health(self):
         limits={'odom':self.p['odom_stale_s'],'joint_states':self.p['odom_stale_s'],'scan_d500_fixed':self.p['scan_stale_s'],'scan_d500_slam':self.p['scan_stale_s'],'scan_d500_nav':self.p['scan_stale_s'],'map':self.p['map_stale_s'],'peer_map':self.p['map_stale_s'],'shared_map':self.p['shared_map_stale_s'],'frontier_candidates':self.p['candidate_stale_s'],'exploration_claim':self.p['claim_stale_s'],'exploration_status':self.p['status_stale_s'],'navigate_feedback':self.p['feedback_stale_s'],'local_costmap/costmap':self.p['costmap_stale_s'],'global_costmap/costmap':self.p['costmap_stale_s'],'cmd_vel':2.}
         now=time.monotonic()
@@ -2437,6 +3371,13 @@ class CooperativeExperimentLogger(Node):
     def required_artifact_status(self, include_campaign_files=True):
         """Return the fail-closed artifact contract for this validation."""
         required=[]
+        if self.passive_bag_enabled:
+            required.extend([
+                self.directory / 'passive_rosbag' / 'metadata.yaml',
+                self.directory / 'passive_rosbag_export.jsonl',
+                self.directory / 'passive_rosbag_export.json',
+                self.directory / 'passive_rosbag_qos_overrides.yaml',
+            ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
         if self.scan_matching_enabled:
@@ -2444,25 +3385,29 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None:
             required.extend([
                 self.directory/'forensic'/'transforms.csv',
-                self.directory/'forensic'/'maps'/'robot1_map_final.npz',
-                self.directory/'forensic'/'maps'/'robot2_map_final.npz',
             ])
+            required.extend(
+                self.directory/'forensic'/'maps'/f'{robot}_map_final.npz'
+                for robot in self.robots)
             if self.forensic_supervisor_enabled:
                 required.append(
                     self.directory/'forensic'/'supervisor_ground_truth.csv')
             if self.forensic_sync_enabled:
                 required.append(
                     self.directory/'forensic'/'synchronized_map_frame.jsonl')
+            if self.contact_capture:
+                required.append(
+                    self.directory/'forensic'/'contact_points.csv')
             # Shared-map exports are a post-handoff contract.  A valid
             # no-handoff run must not be marked incomplete merely because
             # those files correctly do not exist.  If either shared-map topic
             # was observed, require both final shared exports so a partial
             # handoff still fails closed.
             if self.shared_map_seen:
-                required.extend([
-                    self.directory/'forensic'/'maps'/'robot1_shared_map_final.npz',
-                    self.directory/'forensic'/'maps'/'robot2_shared_map_final.npz',
-                ])
+                required.extend(
+                    self.directory/'forensic'/'maps'/
+                    f'{robot}_shared_map_final.npz'
+                    for robot in self.robots)
         try:
             unknown_pose = bool(json.loads(
                 self.p['initial_configuration_json']).get(
@@ -2486,6 +3431,11 @@ class CooperativeExperimentLogger(Node):
             except ValueError:
                 return str(path)
         missing=[logical_name(path) for path in required if not path.is_file()]
+        if (self.passive_bag_enabled and
+                not semantic_export_complete(
+                    self.passive_bag_export,
+                    include_offloaded=self.passive_sensor_offload_enabled)):
+            missing.append('passive_rosbag_export:semantic-incomplete')
         result = {
             'complete': not missing,
             'status': 'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS',
@@ -2504,11 +3454,196 @@ class CooperativeExperimentLogger(Node):
                 f'{robot}_corrections.jsonl' for robot in self.robots])
             missing = [logical_name(path) for path in required
                        if not path.is_file()]
+            if (self.passive_bag_enabled and
+                    not semantic_export_complete(
+                        self.passive_bag_export,
+                        include_offloaded=self.passive_sensor_offload_enabled)):
+                missing.append('passive_rosbag_export:semantic-incomplete')
             result['required'] = [logical_name(path) for path in required]
             result['missing'] = missing
             result['complete'] = not missing
             result['status'] = 'COMPLETE' if not missing else 'MISSING_REQUIRED_ARTIFACTS'
         return result
+
+    def finalize_passive_rosbag(self):
+        """Close the standard bag and materialize its deterministic index."""
+        if not self.passive_bag_enabled:
+            return None
+        return_code = stop_recorder(
+            self.passive_bag_process, self.passive_bag_log)
+        bag_directory = self.directory / 'passive_rosbag'
+        export_path = self.directory / 'passive_rosbag_export.jsonl'
+        metadata = {
+            'schema_version': 'passive_rosbag_finalization_1.0',
+            'command': self.passive_bag_command,
+            'recorder_return_code': return_code,
+            'qos_profile_overrides_path': str(
+                self.directory / 'passive_rosbag_qos_overrides.yaml'),
+            'log_path': (None if self.passive_bag_log_path is None else
+                         str(self.passive_bag_log_path)),
+        }
+        try:
+            exported = export_index_with_bounded_retry(
+                bag_directory, export_path, self.robots,
+                include_offloaded=self.passive_sensor_offload_enabled)
+            metadata.update(exported)
+            if return_code != 0:
+                metadata['complete'] = False
+                metadata['error'] = (
+                    f'recorder exited with return code {return_code}')
+            if (self.passive_sensor_offload_enabled and
+                    metadata.get('complete')):
+                timing = load_offloaded_timing(export_path)
+                self._restore_offloaded_artifacts(timing)
+                metadata['offloaded_reconstruction'] = {
+                    'complete': True,
+                    'topics': list(offloaded_sensor_topics(self.robots)),
+                    'artifacts': [
+                        'scan_pipeline_diagnostic.json',
+                        'topic_health.csv',
+                        'robot*_timeseries.csv',
+                    ],
+                }
+            elif self.passive_sensor_offload_enabled:
+                metadata['offloaded_reconstruction'] = {
+                    'complete': False,
+                    'reason': 'raw_export_incomplete',
+                    'topics': list(offloaded_sensor_topics(self.robots)),
+                }
+        except Exception as exc:  # fail the artifact contract, never hide loss
+            metadata.update({
+                'complete': False,
+                'error': f'{type(exc).__name__}:{exc}',
+            })
+            self.write_failures += 1
+        atomic_json(self.directory / 'passive_rosbag_export.json', metadata)
+        self.passive_bag_export = metadata
+        if not metadata.get('complete', False):
+            self.event('PASSIVE_ROSBAG_EXPORT_FAILED',
+                       metadata.get('error', 'incomplete export'),
+                       severity='ERROR', allow_during_shutdown=True)
+        else:
+            self.event('PASSIVE_ROSBAG_FINALIZED',
+                       'raw passive navigation evidence indexed',
+                       message_counts=metadata.get('message_counts', {}),
+                       allow_during_shutdown=True)
+        return metadata
+
+    @staticmethod
+    def _offloaded_topic_records(timing, topic):
+        values = [item for item in timing.get(topic, ())
+                  if item.get('received_sim_s') is not None]
+        values.sort(key=lambda item: float(item['received_sim_s']))
+        return values
+
+    @staticmethod
+    def _record_received_times(records):
+        return [float(item['received_sim_s']) for item in records]
+
+    @staticmethod
+    def _last_received(records, sim_time):
+        received = CooperativeExperimentLogger._record_received_times(records)
+        index = bisect_right(received, float(sim_time)) - 1
+        return (None if index < 0 else float(received[index]))
+
+    def _restore_offloaded_artifacts(self, timing):
+        """Rebuild the old live-derived sensor fields from lossless bag rows."""
+        for robot in self.robots:
+            fixed_topic = f'/{robot}/scan_d500_fixed'
+            nav_topic = f'/{robot}/scan_d500_nav'
+            fixed = self._offloaded_topic_records(timing, fixed_topic)
+            nav = self._offloaded_topic_records(timing, nav_topic)
+            if not fixed or not nav:
+                raise ValueError(
+                    f'missing reconstructed scan rows for {robot}')
+            values = self.scan_pipeline[robot]
+            values['scan_d500_fixed_stamps'].clear()
+            values['scan_d500_fixed_stamps'].extend(
+                float(item['header_stamp_s']) for item in fixed)
+            values['scan_d500_nav_stamps'].clear()
+            values['scan_d500_nav_stamps'].extend(
+                float(item['header_stamp_s']) for item in nav)
+            values['scan_d500_nav_ages_s'].clear()
+            for item in nav:
+                age = max(0.0, float(item['received_sim_s']) -
+                          float(item['header_stamp_s']))
+                values['scan_d500_nav_ages_s'].append(age)
+
+        self._repair_offloaded_timeseries(timing)
+        self._repair_offloaded_health(timing)
+
+    def _repair_offloaded_timeseries(self, timing):
+        for robot in self.robots:
+            path = self.directory / f'{robot}_timeseries.csv'
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            topic = f'/{robot}/scan_d500_slam'
+            records = self._offloaded_topic_records(timing, topic)
+            rows = []
+            with path.open(newline='', encoding='utf-8') as stream:
+                reader = csv.DictReader(stream)
+                fieldnames = list(reader.fieldnames or [])
+                rows.extend(reader)
+            if 'scan_age_s' not in fieldnames:
+                raise ValueError('timeseries schema lacks scan_age_s')
+            for row in rows:
+                sim_time = (float(row['ros_time_sec']) +
+                            float(row['ros_time_nanosec']) * 1.0e-9)
+                received = self._last_received(records, sim_time)
+                row['scan_age_s'] = '' if received is None else str(
+                    max(0.0, sim_time - received))
+            temporary = path.with_suffix('.csv.offload.tmp')
+            with temporary.open('w', newline='', encoding='utf-8') as stream:
+                writer = csv.DictWriter(stream, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(temporary, path)
+
+    def _repair_offloaded_health(self, timing):
+        path = self.directory / 'topic_health.csv'
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        limits = {
+            'joint_states': float(self.p['odom_stale_s']),
+            'scan_d500_fixed': float(self.p['scan_stale_s']),
+            'scan_d500_slam': float(self.p['scan_stale_s']),
+            'scan_d500_nav': float(self.p['scan_stale_s']),
+        }
+        rows = []
+        with path.open(newline='', encoding='utf-8') as stream:
+            reader = csv.DictReader(stream)
+            fieldnames = list(reader.fieldnames or [])
+            rows.extend(reader)
+        records_by_topic = {
+            f'/{robot}/{key}': self._offloaded_topic_records(
+                timing, f'/{robot}/{key}')
+            for robot in self.robots
+            for key in limits
+        }
+        for row in rows:
+            topic = str(row.get('topic_name', ''))
+            parts = topic.strip('/').split('/', 1)
+            if len(parts) != 2 or parts[1] not in limits:
+                continue
+            records = records_by_topic.get(topic, ())
+            sim_time = (float(row['ros_time_sec']) +
+                        float(row['ros_time_nanosec']) * 1.0e-9)
+            received = self._last_received(records, sim_time)
+            age = None if received is None else max(0.0, sim_time - received)
+            limit = limits[parts[1]]
+            rate = sum(
+                1 for item in records
+                if sim_time - 10.0 <= float(item['received_sim_s']) <= sim_time
+            ) / 10.0
+            row['topic_rate_hz'] = str(rate)
+            row['topic_age_s'] = '' if age is None else str(age)
+            row['stale'] = str(age is None or age > limit)
+        temporary = path.with_suffix('.csv.offload.tmp')
+        with temporary.open('w', newline='', encoding='utf-8') as stream:
+            writer = csv.DictWriter(stream, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(temporary, path)
 
     def frontend_diagnostic_directory(self):
         """Resolve frontend artifacts from the manifest-owned run directory.
@@ -2604,6 +3739,10 @@ class CooperativeExperimentLogger(Node):
         except Exception:
             return default
     def write_manifest(self,clean,status):
+        try:
+            seed_provenance = json.loads(self.p['seed_provenance_json'] or '{}')
+        except (TypeError, ValueError):
+            seed_provenance = {'invalid_seed_provenance_json': True}
         value={
             'schema_version':SCHEMA,'run_id':self.run_id,
             'utc_start_time':self.start_utc,
@@ -2615,6 +3754,8 @@ class CooperativeExperimentLogger(Node):
                 ['symbolic-ref','--short','-q','HEAD'], 'DETACHED'),
             'worktree_dirty':bool(self.git_value(['status','--porcelain'],'')),
             'launch_file':self.p['launch_file'],
+            'experiment_condition': self.p['experiment_condition'],
+            'seed_provenance': seed_provenance,
             'launch_arguments':'recorded in logger parameters',
             'world_profile':self.p['world_profile'],
             'world_resource':self.p['installed_world_path'],
@@ -2727,9 +3868,10 @@ class CooperativeExperimentLogger(Node):
                        self.previous_known is not None else None)
         mapping={
             'available': shared_coverage_available,
-            'reason': ('runtime shared-map samples'
+            'source': self.coverage_source,
+            'reason': (f'runtime {self.coverage_source} samples'
                        if shared_coverage_available else
-                       'no runtime shared-map samples; shared coverage is unavailable'),
+                       f'no runtime {self.coverage_source} samples; coverage is unavailable'),
             'initial_known_cells': self.initial_known,
             'final_known_cells': self.previous_known,
             'coverage_gain_cells': coverage_gain,
@@ -2738,7 +3880,18 @@ class CooperativeExperimentLogger(Node):
                 if coverage_gain is not None and total_distance > 0 else None),
             **a,
         }
-        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'per_robot_odom','shared_trajectory_source_frame':'global_frame (only when transform is available)','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':mapping,'motion':motion,'shared_frame_motion':shared_motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'goal_accounting':self.goal_accounting_summary(),'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}
+        if self.coverage_source == 'local_map':
+            mapping.update({
+                'unique_first_seen_cells': {
+                    'robot1': self.previous_known or 0,
+                    'robot2': 0,
+                },
+                'later_duplicated_cells': {'robot1': 0, 'robot2': 0},
+                'simultaneously_observed_cells': 0,
+                'total_known_union_cells': self.previous_known,
+                'duplicated_known_fraction': 0.0,
+            })
+        return {'schema_version':SCHEMA,'run':{'run_id':self.run_id,'start_time':self.start_utc,'end_time':utc_now(),'elapsed_duration_s':elapsed,'clean_shutdown':clean},'frames':{'global_frame':self.p['global_frame'],'trajectory_source_frame':'per_robot_odom','shared_trajectory_source_frame':'global_frame (only when transform is available)','coverage_source_frame':'robot_local_map','coverage_target_frame':'robot1_initial','initial_transform_source':self.p['transform_source'],'known_initial_relative_transform':list(self.p['known_relative_transform'])},'mapping':mapping,'motion':motion,'shared_frame_motion':shared_motion,'events':dict(self.counts),'coordination':{'agreement_publications':self.agreement_publications,'unique_agreed_rounds':len(self.unique_agreed_rounds),'unique_agreed_decisions':len(self.unique_agreed_decisions),'dispatch_attempts':self.dispatch_attempts,'goals_terminal':self.goals_terminal,'goal_accounting':self.goal_accounting_summary(),'round_outcomes':dict(self.round_outcomes),'planner_query_attribution':dict(self.planner_query_counts),'planner_query_duration_s':dict(self.planner_query_duration_s)},'continuous_exploration':continuous,'mission':{'terminal':bool(self.mission_terminal_reason),'terminal_reason':self.mission_terminal_reason,'terminal_time_s':self.mission_completion_time,'shutdown_clean':clean},'mission_completion_time_s':self.mission_completion_time,'robot_terminal_state':robot_states,'navigation':{'goals_sent':self.counts['NAV_GOAL_SENT'],'goals_accepted':self.counts['NAV_GOAL_ACCEPTED'],'successes':self.counts['NAVIGATION_SUCCEEDED'],'failures':self.counts['NAVIGATION_FAILED'],'cancellations':self.counts['NAVIGATION_CANCELED'],'recoveries':self.counts['RECOVERY_COUNT_CHANGED'],'timeouts':self.counts['NAVIGATION_TIMEOUT']},'anomalies':{'no_progress_episodes':self.counts['NO_PROGRESS_STARTED'],'stuck_episodes':self.counts['STUCK_STARTED'],'stale_topic_episodes':self.counts['TOPIC_STALE'],'warning_occurrences':sum(r.occurrence_count for r in records)},'system':{'logger_pid':os.getpid(),'cpu_measurement':{'scope':'logger process only','normalization':'one CPU core equals 100 percent','sampling_interval_s':1.,'warmup_s':10.,'sample_count':len(cpu),'mean_percent':statistics.fmean(cpu) if cpu else 0.,'median_percent':statistics.median(cpu) if cpu else 0.,'p95_percent':percentile(cpu,.95),'peak_percent':max(cpu,default=0.)},'logger_cpu_percent':statistics.fmean(cpu) if cpu else 0.,'logger_rss_bytes':rss,'rss_mean_bytes':statistics.fmean(rss_values),'rss_peak_bytes':max(rss_values,default=rss),'callback_timing_enabled':self._callback_timing_enabled,'callback_timing':self._callback_timing,'output_file_sizes':{p.name:p.stat().st_size for p in self.directory.iterdir() if p.is_file()},'dropped_logger_samples':self.dropped_samples,'write_failures':self.write_failures,'internal_logger_error_count':sum(self.internal_errors.values()),'internal_logger_errors':dict(self.internal_errors)},'artifact_finalization':self._artifact_finalization}
 
     def write_mission_result(self, clean):
         """Write one compact process-facing terminal result beside summary.json."""
@@ -2780,7 +3933,7 @@ class CooperativeExperimentLogger(Node):
                 'actionable_reachable_count',
             )
         }
-        atomic_json(self.directory / 'mission_result.json', {
+        mission_result = {
             'mission_status': status,
             'terminal_reason': reason or 'MISSION_NOT_TERMINATED',
             'simulated_duration_s': self.ros_seconds() - self.start_ros,
@@ -2794,13 +3947,12 @@ class CooperativeExperimentLogger(Node):
             'final_known_cells': self.previous_known,
             'final_known_cells_available': self.previous_known is not None,
             'mapping_metric_reason': (
-                'runtime shared-map samples'
+                f'runtime {self.coverage_source} samples'
                 if self.previous_known is not None else
-                'no runtime shared-map samples; shared coverage is unavailable'),
+                f'no runtime {self.coverage_source} samples; coverage is unavailable'),
             'semantic_agreement': bool(self.unique_agreed_rounds),
             'terminal_agreement': len(terminal_reasons) == 1,
-            'robot1_final_state': robot_states['robot1'],
-            'robot2_final_state': robot_states['robot2'],
+            'robot_final_states': robot_states,
             'remaining_frontier_count': evidence['remaining_frontier_count'],
             'remaining_small_frontier_count': evidence[
                 'remaining_small_frontier_count'],
@@ -2828,7 +3980,15 @@ class CooperativeExperimentLogger(Node):
             'shutdown_clean': bool(clean),
             'recommended_exit_code': exit_code,
             'artifact_finalization': self._artifact_finalization,
-        })
+        }
+        # Keep the established two-robot field for B/C/D while allowing the
+        # true single-robot A observer to finalize without manufacturing a
+        # robot2 state.
+        if 'robot1' in robot_states:
+            mission_result['robot1_final_state'] = robot_states['robot1']
+        if 'robot2' in robot_states:
+            mission_result['robot2_final_state'] = robot_states['robot2']
+        atomic_json(self.directory / 'mission_result.json', mission_result)
     def finalize(self,clean=True):
         with self._lifecycle_lock:
             if self.finalized or self._finalizing:return False
@@ -2841,6 +4001,12 @@ class CooperativeExperimentLogger(Node):
         if self.forensic is not None or self.contact_capture:
             if self.forensic is not None:
                 self.forensic_snapshot(force=True)
+                if self._defer_synchronized_map_frames:
+                    # The live request ledger is complete before shutdown;
+                    # reconstruct every derived row while the raw TF/odom
+                    # streams are still open, then commit the normal writer
+                    # manifest below.
+                    self._reconstruct_deferred_synchronized_map_frames()
             self.stop_forensic_ground_truth()
             if self.forensic is not None:
                 # Evidence streams must be closed before their manifest is
@@ -2848,6 +4014,8 @@ class CooperativeExperimentLogger(Node):
                 self.forensic.close()
                 atomic_json(self.directory / 'forensic' / 'manifest.json',
                             self.forensic.manifest())
+        if self.passive_bag_enabled:
+            self.finalize_passive_rosbag()
         self.flush()
         successful=False
         try:
@@ -2857,6 +4025,20 @@ class CooperativeExperimentLogger(Node):
             # independent transport diagnostic.
             if self.scan_matching_enabled:
                 self.write_scan_pipeline_diagnostic()
+            if self._callback_timing_enabled:
+                atomic_json(
+                    self.directory / 'callback_timing.json',
+                    {
+                        'enabled': True,
+                        'scope': 'cooperative_experiment_logger safe_call callbacks',
+                        'timers_and_subscriptions': self._callback_timing,
+                    },
+                )
+            if self._sync_map_profile_enabled:
+                atomic_json(
+                    self.directory / 'sync_map_timing.json',
+                    self._sync_map_timing_summary(),
+                )
             # ROS launch signals all children concurrently.  Frontend
             # finalizers therefore get a bounded opportunity to close their
             # JSON/JSONL streams before this observer freezes the artifact
@@ -2943,6 +4125,14 @@ def main(args=None):
                signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = None
+    profiler = None
+    profile_path = os.environ.get('MY_EPUCK_CPROFILE_PATH', '').strip()
+    if profile_path:
+        # Diagnostic-only hook.  It is deliberately opt-in and is never
+        # enabled by campaign/acceptance launch configuration.
+        import cProfile
+        profiler = cProfile.Profile()
+        profiler.enable()
     clean = True
     shutdown_requested = {'value': False}
     previous_handlers = {}
@@ -2980,5 +4170,8 @@ def main(args=None):
                 executor.shutdown()
             if node.context.ok():
                 node.destroy_node()
+        if profiler is not None:
+            profiler.disable()
+            profiler.dump_stats(profile_path)
         if context.ok():
             context.shutdown()

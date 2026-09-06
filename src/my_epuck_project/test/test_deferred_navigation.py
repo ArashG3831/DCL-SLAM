@@ -132,3 +132,30 @@ def test_replay_navigation_evidence_fails_closed_without_robot_status(
         bag, ('robot1',))
     assert result['complete'] is False
     assert result['status'] == 'MISSING_NAVIGATION_STATUS'
+
+
+def test_replay_navigation_evidence_accepts_present_not_invoked_status(
+        monkeypatch, tmp_path):
+    bag = tmp_path / 'bag'
+    bag.mkdir()
+    topics = {
+        '/robot1/navigate_to_pose/_action/status':
+            'action_msgs/msg/GoalStatusArray',
+    }
+
+    class FakeRosbag:
+        SequentialReader = staticmethod(lambda: _Reader([], topics))
+        StorageOptions = staticmethod(lambda **kwargs: kwargs)
+        ConverterOptions = staticmethod(lambda **kwargs: kwargs)
+
+    monkeypatch.setitem(__import__('sys').modules, 'rosbag2_py', FakeRosbag())
+    monkeypatch.setattr(replay_module, 'get_message', lambda name: name)
+    monkeypatch.setattr(replay_module, 'deserialize_message',
+                        lambda serialized, _type: serialized)
+
+    result = replay_module.replay_navigation_evidence_from_bag(
+        bag, ('robot1',))
+    assert result['complete'] is True
+    assert result['status'] == 'COMPLETE'
+    assert result['navigate_to_pose_invoked'] == {'robot1': False}
+    assert result['status_transitions'] == []

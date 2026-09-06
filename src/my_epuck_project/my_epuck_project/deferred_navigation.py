@@ -166,13 +166,29 @@ def replay_navigation_evidence_from_bag(bag_directory: Path, robots):
         status_counts[key] = status_counts.get(key, 0) + 1
     required_status_topics = [
         f'/{robot}/navigate_to_pose/_action/status' for robot in robots]
-    complete = all(message_counts[topic] > 0 for topic in required_status_topics)
+    # A present action status channel with no messages is valid evidence that
+    # NavigateToPose was not invoked during this run.  Completeness is about
+    # the channel being present and correctly typed; event occurrence is a
+    # separate fact and must not be collapsed into missing evidence.
+    required_status_topics_present = [
+        topic for topic in required_status_topics if topic in present]
+    missing_required_status_topics = [
+        topic for topic in required_status_topics if topic not in present]
+    complete = not missing_required_status_topics
     return {
         'schema_version': 'navigation_action_replay_1.0',
         'robots': list(robots),
         'complete': complete,
         'status': 'COMPLETE' if complete else 'MISSING_NAVIGATION_STATUS',
         'missing_optional_topics': missing,
+        'required_status_topics': required_status_topics,
+        'required_status_topics_present': required_status_topics_present,
+        'missing_required_status_topics': missing_required_status_topics,
+        'navigate_to_pose_invoked': {
+            robot: message_counts[
+                f'/{robot}/navigate_to_pose/_action/status'] > 0
+            for robot in robots
+        },
         'message_counts': message_counts,
         'deserialized_messages': deserialized_messages,
         'status_counts': status_counts,

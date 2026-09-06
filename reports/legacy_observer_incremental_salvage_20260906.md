@@ -202,3 +202,30 @@ This is a reference-state checkpoint, not a salvage optimization. It records
 the inherited implementation so subsequent raw-evidence and metric migrations
 can be isolated and bisected. Unrelated dirty files were deliberately not
 staged.
+
+Baseline checkpoint commit: `4429f2c`.
+
+## Lossless scientific raw capture enabling checkpoint
+
+The inherited passive rosbag implementation already provided the authoritative
+`scientific_raw_topics()` set and contract validation. This checkpoint exposes
+it through the legacy logger as an opt-in parameter:
+
+```text
+enable_scientific_raw_capture: false  # default remains unchanged
+```
+
+When enabled, the existing native rosbag recorder and its existing finalization
+export receive `include_scientific_raw=True`. The selected streams include
+`/clock`, `/tf`, `/tf_static`, common START_RELEASE, both robots' odometry,
+commands, local/shared maps, frontier/task/cooperation protocol streams and
+navigation action status. No live metric, subscription, sampling rate,
+classification, or artifact authority was removed in this checkpoint.
+
+Focused validation after the wiring change:
+
+```text
+80 passed in 24.59s
+```
+
+Commit: `e266623` (`observer: enable lossless scientific raw evidence capture`).

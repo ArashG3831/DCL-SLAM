@@ -671,6 +671,29 @@ warning/diagnostic authority switch is claimed by this checkpoint; the next
 isolated work must add and validate warning replay against the bag plus this
 receipt ledger before disabling any live warning-derived work.
 
+`6f6708f` adds the adjacent Nav2 diagnostic replay parity path. The diagnostic
+category rules and rate-limit boundary are shared with the live rosout callback;
+the replay compares the legacy diagnostic fields, including the source stamp
+stored in the legacy `ros_time_sec/ros_time_nanosec` columns. It does not switch
+the live diagnostic file or planner-query counters to deferred authority.
+
+Focused syntax/logger/protocol/passive tests passed (`80`), and the affected
+package was rebuilt as `install_legacy_salvage_nav2_diag_replay_fix_20260906`.
+The clean validation was:
+
+```text
+results/legacy_salvage_nav2_diag_replay_fix_20260906/
+  fast_trial_20260906T202153Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.06 s`, with horizon overrun `false`,
+launch return code `0`, finalization `COMPLETE`, and no missing artifacts.
+Warning replay passed (`81` live/deferred records from `2,165` receipts), and
+Nav2 diagnostic replay passed (`227` live/deferred diagnostic records). The
+comparison remains semantic-only for receipt wall time and global event
+sequence; those legacy timing fields still require live authority until an
+explicitly approved replacement is established.
+
 ## Warning/rosout semantic replay checkpoint
 
 `76f7516` adds the next isolated parity step. The existing warning-category

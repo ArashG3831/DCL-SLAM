@@ -4338,6 +4338,13 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'pair_decision_replay_parity.json',
                 self._pair_decision_parity)
+            from .deferred_protocol import select_pair_decision_outcomes
+            selected_round_outcomes, outcome_source = (
+                select_pair_decision_outcomes(
+                    self.round_outcomes, self._pair_decision_parity))
+            self._pair_decision_live_round_outcomes = dict(self.round_outcomes)
+            self.round_outcomes = Counter(selected_round_outcomes)
+            self._pair_decision_outcome_source = outcome_source
             self.flush()
             # The scan-age artifact is observer-owned and must not depend on
             # a frontend summary that may be delayed by ROS shutdown.  Emit it

@@ -37,6 +37,14 @@ def pair_decision_outcome(message):
     return outcome, diagnostics
 
 
+def select_pair_decision_outcomes(live, replay):
+    """Select deferred outcomes only after the live parity gate passes."""
+    if (replay.get('status') in ('PARITY_PASS', 'DEFERRED_AUTHORITATIVE') and
+            replay.get('deferred') is not None):
+        return dict(replay['deferred']), 'deferred'
+    return dict(live), 'live'
+
+
 def replay_pair_decisions_from_bag(bag_directory: Path, robots):
     """Replay pair-decision callbacks with legacy duplicate suppression."""
     import rosbag2_py

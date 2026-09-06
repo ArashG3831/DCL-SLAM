@@ -58,6 +58,23 @@ def test_pair_decision_outcome_reuses_legacy_classification():
     assert outcome == 'DISPATCHABLE_ASSIGNMENT'
 
 
+def test_pair_decision_authority_switch_requires_parity():
+    live = {'IDLE_BY_DETERMINISTIC_ASSIGNMENT': 2}
+    replay = {
+        'status': 'PARITY_PASS',
+        'deferred': {'DISPATCHABLE_ASSIGNMENT': 1},
+    }
+    assert replay_module.select_pair_decision_outcomes(live, replay) == (
+        {'DISPATCHABLE_ASSIGNMENT': 1}, 'deferred')
+
+    failed = {
+        'status': 'DEFERRED_REPLAY_FAILED',
+        'deferred': {'DISPATCHABLE_ASSIGNMENT': 1},
+    }
+    assert replay_module.select_pair_decision_outcomes(live, failed) == (
+        live, 'live')
+
+
 def test_pair_decision_replay_preserves_live_duplicate_suppression(
         monkeypatch, tmp_path):
     bag = tmp_path / 'bag'

@@ -70,7 +70,7 @@ def test_coverage_replay_uses_causal_receipts_and_legacy_semantics(
                 ('robot1', 'shared_map'), ('robot2', 'shared_map')), 1):
             stream.write(json.dumps({
                 'sequence': sequence, 'robot_id': robot, 'map_key': key,
-                'received_ros_time_s': 2.0,
+                'received_ros_time_s': 1.0,
                 'received_wall_elapsed_s': 2.0,
                 'data_sha256': digest,
             }) + '\n')
@@ -86,4 +86,3 @@ def test_coverage_replay_uses_causal_receipts_and_legacy_semantics(
     assert semantic['robot1_shared_known'] == 2
     assert semantic['known_area_m2'] == 2 * 0.03 ** 2
     assert semantic['total_known_union_cells'] == 2
-

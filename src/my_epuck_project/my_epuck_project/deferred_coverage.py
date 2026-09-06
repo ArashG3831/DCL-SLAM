@@ -139,7 +139,7 @@ def replay_coverage_from_bag(
         for identity, records in visible.items():
             cursor = cursors[identity]
             while (cursor < len(records) and
-                   records[cursor][0] <= query_ros):
+                   records[cursor][0] < query_ros):
                 latest[identity] = records[cursor]
                 cursor += 1
             cursors[identity] = cursor
@@ -154,6 +154,9 @@ def replay_coverage_from_bag(
         counts = [known_counts(grid) for grid in chosen_grids]
         known = [free + occupied for free, occupied, _unknown in counts]
         local_grids = [_grid(record[3]) if record else None for record in local]
+        local_counts = [known_counts(grid) for grid in local_grids]
+        local_known = [free + occupied for free, occupied, _unknown in
+                       local_counts]
         transforms = {
             'robot1': (0.0, 0.0, 0.0),
             'robot2': tuple(float(value) for value in known_relative_transform),
@@ -191,8 +194,8 @@ def replay_coverage_from_bag(
              chosen_grids[1].origin_y) and shared[0][2] == shared[1][2]
         ) if len(robots) > 1 else None
         semantic = {
-            'robot1_local_known': known_counts(local_grids[0])[0] if len(robots) > 0 else None,
-            'robot2_local_known': known_counts(local_grids[1])[0] if len(robots) > 1 else None,
+            'robot1_local_known': local_known[0] if len(robots) > 0 else None,
+            'robot2_local_known': local_known[1] if len(robots) > 1 else None,
             'robot1_shared_known': known[0] if len(robots) > 0 else None,
             'robot2_shared_known': known[1] if len(robots) > 1 else None,
             'shared_free_cells': counts[0][0],

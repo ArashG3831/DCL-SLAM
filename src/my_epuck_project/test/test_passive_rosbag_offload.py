@@ -65,17 +65,18 @@ def test_thin_recorder_topic_command_contains_custom_raw_contract(tmp_path):
     assert '/tf_static' in command
     assert '/robot1/scan_d500_slam' not in command
     assert '/robot2/joint_states' not in command
-    assert '/robot1/plan' not in command
-    assert '/robot1/navigate_to_pose/_action/feedback' not in command
+    assert '/robot1/plan' in command
+    assert '/robot1/navigate_to_pose/_action/feedback' in command
     assert '/rosout' not in command
 
 
-def test_thin_recording_does_not_readd_legacy_passive_topics():
+def test_scientific_raw_recording_includes_action_path_evidence():
     selected = recorded_topics(
         ('robot1', 'robot2'), include_scientific_raw=True)
     assert '/robot1/navigate_to_pose/_action/status' in selected
-    assert '/robot1/plan' not in selected
-    assert '/robot1/follow_path/_action/status' not in selected
+    assert '/robot1/plan' in selected
+    assert '/robot1/follow_path/_action/status' in selected
+    assert '/robot1/compute_path_to_pose/_action/status' in selected
 
 
 def test_if_published_topics_do_not_invalidate_complete_required_contract():

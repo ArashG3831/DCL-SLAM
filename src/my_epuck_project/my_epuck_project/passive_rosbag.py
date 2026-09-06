@@ -61,6 +61,10 @@ def scientific_raw_topics(robots):
             f'{prefix}/pair_decision', f'{prefix}/distributed_status',
             f'{prefix}/distributed_event', f'{prefix}/exploration_failure',
             f'{prefix}/navigate_to_pose/_action/status',
+            f'{prefix}/navigate_to_pose/_action/feedback',
+            f'{prefix}/follow_path/_action/status',
+            f'{prefix}/compute_path_to_pose/_action/status',
+            f'{prefix}/plan',
             f'/cslam/unknown_pose/{robot}/exploration_status',
             f'/cslam/unknown_pose/{robot}/exploration_event',
         ])

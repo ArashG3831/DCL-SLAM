@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Iterable
 
 
-SCHEMA_VERSION = "thin_raw_evidence_contract_1.2"
+SCHEMA_VERSION = "thin_raw_evidence_contract_1.3"
 
 
 def _topic(specs, topic, message_type, semantic, required=False,
@@ -81,6 +81,14 @@ def topic_spec(robots: Iterable[str] = ("robot1", "robot2")) -> dict:
         for suffix, message_type, semantic in (
                 ("navigate_to_pose/_action/status",
                  "action_msgs/msg/GoalStatusArray", "nav_status"),
+                ("navigate_to_pose/_action/feedback",
+                 "nav2_msgs/action/NavigateToPose_FeedbackMessage",
+                 "nav_feedback"),
+                ("follow_path/_action/status",
+                 "action_msgs/msg/GoalStatusArray", "controller_status"),
+                ("compute_path_to_pose/_action/status",
+                 "action_msgs/msg/GoalStatusArray", "planner_status"),
+                ("plan", "nav_msgs/msg/Path", "planner_path"),
         ):
             _topic(specs, f"{prefix}/{suffix}", message_type, semantic,
                    expected_presence="if_published")

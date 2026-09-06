@@ -808,3 +808,34 @@ owner without a proven parity definition.  CPU/RSS history remains live
 observer measurement because post-run replay cannot recreate the observer's
 process-resource history; any change requires an explicit measurement-owner
 decision and a separate parity/validity checkpoint.
+
+## Warning/action/health build checkpoint
+
+The source state containing `c81ae5a`, `288357c`, and `00df2f7` was rebuilt
+without source changes in an isolated prefix:
+
+```text
+install_legacy_salvage_warning_action_health_20260907b
+```
+
+The initial colcon invocation was rejected before compilation because preserved
+result and scratch directories expose duplicate package names.  The successful
+invocation explicitly limited package discovery to `src/my_epuck_interfaces`
+and `src/my_epuck_project`; it finished both selected packages successfully.
+The duplicate preserved copies were not changed.
+
+Installed-package focused validation passed: `85 passed in 28.24s`, covering
+deferred navigation, protocol replay, passive-rosbag offload, and experiment
+logger runtime behavior.  No Webots run was performed for this checkpoint.
+
+The current salvage boundary is now evidence-defined: warning and Nav2
+standalone artifacts use replay authority; the action replay artifact is
+complete and authoritative for raw action/path evidence, but the existing
+navigation summary remains claim/distributed-event authority because those
+events define the coordinator lifecycle.  Health history is replayed for
+raw-backed streams while live stale-transition checks remain.  CPU/RSS history
+remains live because no exact post-run source can reproduce observer-process
+resource samples.  Finalization's two summary/mission-result writes remain
+necessary: the first creates the files used by the artifact contract, and the
+second records the final contract result after all required artifacts and
+replay checks are known.

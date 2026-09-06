@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import math
 import signal
@@ -905,6 +906,22 @@ def test_two_robot_coverage_keeps_shared_map_source(observer):
     assert len(rows) == 1
     assert rows[0]['shared_maps_equivalent'] == 'True'
     assert observer.summary(False)['mapping']['source'] == 'shared_map'
+
+
+def test_raw_coverage_requests_preserve_legacy_map_readiness_boundary(observer):
+    """Raw replay must not record timer ticks before selected maps exist."""
+    observer.coverage_request_file = io.StringIO()
+    observer.coverage_source = 'shared_map'
+    observer.sample_coverage()
+    assert observer.coverage_request_file.getvalue() == ''
+
+    observer.latest['robot1']['shared_map'] = object()
+    observer.latest['robot2']['shared_map'] = object()
+    observer.sample_coverage()
+    rows = [json.loads(line) for line in
+            observer.coverage_request_file.getvalue().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]['event_sequence'] >= 1
 
 
 def test_two_robot_independent_coverage_unions_transformed_local_maps(observer):

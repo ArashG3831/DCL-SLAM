@@ -3189,6 +3189,18 @@ class CooperativeExperimentLogger(Node):
             # Raw-enabled canonical runs defer all map conversion, counting,
             # ownership, and attribution.  Keep only the exact timer request
             # boundary needed to reproduce the legacy CSV after shutdown.
+            required_map_key = (
+                'map' if self.coverage_source in ('local_map', 'local_map_union')
+                else 'shared_map')
+            with self._state_lock:
+                maps_ready = all(
+                    self.latest[robot].get(required_map_key) is not None
+                    for robot in self.robots)
+            # Preserve the legacy callback's early return exactly: a timer
+            # callback before the selected map stream is complete is not a
+            # coverage sample and must not become a deferred request row.
+            if not maps_ready:
+                return
             request = self.row_time()
             with self._io_lock:
                 self.coverage_request_file.write(

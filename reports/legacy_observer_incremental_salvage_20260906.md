@@ -566,3 +566,25 @@ reconstructed `0` agreement publications, `0` unique rounds, and `0` unique
 decisions. The summary contained those deferred values and the artifact contract
 was `COMPLETE`. The fixed-horizon run is a functional checkpoint, not a mission
 completion or RTF acceptance run.
+
+`3e20f6c` completed the analogous pair-decision live-work removal. In
+raw-enabled runs the callback still computes the per-message outcome needed for
+the established `events.jsonl` payload, but no longer maintains the redundant
+live `round_outcomes` aggregate. The native-bag replay is now authoritative;
+non-raw legacy runs retain the original live counter path. Pair replay failure
+is fail-closed through the artifact contract.
+
+Validation:
+
+```text
+results/legacy_salvage_pair_authority_20260906/
+  fast_trial_20260906T194723Z/
+```
+
+The run reached `SIM_TIME_COMPLETE` at `120.06 s`, with no horizon overrun,
+`98.7974 s` reported wall runtime, complete raw export/finalization, and
+`pair_decision_replay_parity.json` marked `DEFERRED_AUTHORITATIVE`. The bag
+replayed zero pair-decision messages in this fixed short horizon and the summary
+correctly contained an empty `round_outcomes` mapping. Agreement replay also
+remained deferred-authoritative over `55` distributed-event messages. This is a
+functional checkpoint, not a mission-completion or RTF acceptance run.

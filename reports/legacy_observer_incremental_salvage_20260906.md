@@ -268,3 +268,92 @@ The next required evidence is a fresh run with
 from the older sparse forensic artifact. Until that run proves parity, the
 authority switch and removal of live shared trajectory/overlap accumulation are
 intentionally not performed.
+
+## Continuation checkpoints after the inherited baseline
+
+The raw-capture wiring was isolated from unrelated dirty source and committed
+as `55ecf4e` (`observer: expose opt-in scientific raw capture`). The affected
+Python package and current interface definitions were rebuilt together into
+`install_legacy_salvage_20260906/`. The current interface build was necessary
+because the inherited underlay did not contain message fields used by the
+current allocator source. Those interface changes remain pre-existing dirty
+work and were not staged by the salvage commits.
+
+Shared trajectory replay was corrected in two isolated commits:
+
+* `86b73bf` — the native bag remains the complete payload/integrity source, but
+  the exact legacy lookup boundary is replayed from the existing forensic
+  callback-order TF/odom rows through the same `tf2_ros.Buffer` semantics;
+* `8989e2b` — final `shared_frame_motion` authority switches only when that
+  causal replay equals the live `TrajectoryOverlap` summary.
+
+The native-bag replay is retained in the parity artifact as
+`native_bag_integrity`; it is not silently treated as equivalent because
+rosbag2 inter-topic recording order is not the legacy callback order. Focused
+legacy/replay tests passed `106/106` before the map checkpoint.
+
+## Map receipt enabling checkpoint
+
+`0ce7ced` (`observer: record causal map receipt evidence`) adds only an opt-in
+`map_receipts.jsonl` ledger and fail-closed artifact requirement when scientific
+raw capture is enabled. Each row records robot/key, simulation and receipt
+times, map metadata, sequence, and a digest of the OccupancyGrid payload. It
+does not change live coverage calculation or authority.
+
+`f8feaef` (`observer: add deferred coverage replay parity`) adds
+`deferred_coverage.py`, which joins native rosbag map payloads to the receipt
+ledger and reuses the existing `known_counts`, `known_world_cells`, and
+`CoverageAttribution` implementations. It emits
+`coverage_replay_parity.json`; no coverage authority switch was made.
+Focused tests passed `107/107`.
+
+## Fresh map-parity validation and blocker
+
+Fresh validation artifact:
+
+```text
+results/legacy_salvage_map_parity_20260906/
+  fast_trial_20260906T183007Z/
+```
+
+Validity:
+
+* Condition C, `frontier_cost_only`, MODE_B, seed 1001, canonical close-start
+  20 ms scan-matching world, full sensor profile, fast/no-rendering mode;
+* isolated install `install_legacy_salvage_20260906` plus current interface
+  overlay; Webots driver from `webots_ws_close_validation_2eb`;
+* simulation `0.02 -> 120.06 s`, termination `SIM_TIME_COMPLETE`, launch return
+  code 0, observer finalization complete, raw rosbag export complete;
+* GT/contact and all required legacy artifacts finalized; `map_receipts.jsonl`
+  contains 145 rows.
+
+Shared trajectory parity passed in this run:
+
+```text
+shared_trajectory_parity.json: PARITY_PASS, equal=true
+```
+
+Coverage parity did not pass:
+
+```text
+coverage_replay_parity.json: PARITY_FAIL
+sample_count: 51
+difference_count: 197
+```
+
+The failure is concrete, not an inferred timing difference. At the first
+coverage samples the live legacy `coverage.csv` reports robot1/robot2 local
+known counts `2637/2590`, while the exact joined native-bag payloads identified
+by the receipt ledger contain `2444/2431`. The bag has no robot1/map payload
+with 2637 known cells; the joined receipt digest for the live-visible early
+robot1 map is consistently the payload whose replay count is 2444. Later rows
+show the same class of divergence (for example live 5927 versus replay 5659).
+
+Therefore the raw payload/receipt contract is not yet sufficient to reproduce
+the old observer's live map-count result. The single-family diagnosis must next
+resolve the legacy in-memory `map_snapshot()` cache and its `id(message)` key
+against the logger/rosbag observation boundary. No authority switch is
+justified until the discrepancy is explained. Coverage migration is rejected
+at this checkpoint; live map conversion, counting, attribution, and
+`coverage.csv` authority remain unchanged. No protocol or later family was
+started on top of this unproven state.

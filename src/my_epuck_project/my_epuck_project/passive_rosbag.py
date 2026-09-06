@@ -61,6 +61,8 @@ def scientific_raw_topics(robots):
             f'{prefix}/pair_decision', f'{prefix}/distributed_status',
             f'{prefix}/distributed_event', f'{prefix}/exploration_failure',
             f'{prefix}/navigate_to_pose/_action/status',
+            f'/cslam/unknown_pose/{robot}/exploration_status',
+            f'/cslam/unknown_pose/{robot}/exploration_event',
         ])
     return tuple(dict.fromkeys(topics))
 

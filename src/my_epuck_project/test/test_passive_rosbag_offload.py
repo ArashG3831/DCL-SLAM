@@ -49,6 +49,8 @@ def test_thin_contract_is_explicit_and_raw_only():
     assert '/robot1/map' in required_nonempty_topics(robots)
     assert '/robot2/shared_map' in required_nonempty_topics(robots)
     assert '/robot1/task_snapshot' not in required_nonempty_topics(robots)
+    assert '/cslam/unknown_pose/robot1/exploration_status' in selected
+    assert '/cslam/unknown_pose/robot2/exploration_event' in selected
     assert len(selected) == len(set(selected))
 
 

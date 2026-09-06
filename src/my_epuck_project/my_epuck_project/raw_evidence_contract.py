@@ -62,6 +62,12 @@ def topic_spec(robots: Iterable[str] = ("robot1", "robot2")) -> dict:
         _topic(specs, f"{prefix}/frontier_candidates",
                "my_epuck_interfaces/msg/FrontierCandidateArray",
                "frontier_candidates", required=True)
+        _topic(specs, f"/cslam/unknown_pose/{robot}/exploration_status",
+               "my_epuck_interfaces/msg/ExplorationStatus",
+               "exploration_status", expected_presence="if_published")
+        _topic(specs, f"/cslam/unknown_pose/{robot}/exploration_event",
+               "my_epuck_interfaces/msg/ExplorationEvent",
+               "exploration_event", expected_presence="if_published")
         for name, message_type, semantic in (
                 ("task_snapshot", "my_epuck_interfaces/msg/TaskSnapshot", "task_snapshot"),
                 ("task_bids", "my_epuck_interfaces/msg/TaskBidArray", "task_bids"),

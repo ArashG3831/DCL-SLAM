@@ -41,6 +41,7 @@ from my_epuck_interfaces.msg import (
 from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, rosout_diagnostic_category, utc_now, warning_category
 from .forensic_evidence import ForensicEvidenceWriter
 from .deferred_protocol import pair_decision_outcome
+from .deferred_navigation import replay_navigation_evidence_from_bag
 from .passive_rosbag import (
     export_index_with_bounded_retry,
     load_offloaded_timing,
@@ -433,7 +434,7 @@ class CooperativeExperimentLogger(Node):
             'missing': [],
         }
         self.robot_counts={r:Counter() for r in self.robots}; self.cycle_durations={r:[] for r in self.robots}; self.cycle_starts={}; self.region_attempts={r:Counter() for r in self.robots}; self.exhausted_since={r:None for r in self.robots}; self.exhausted_duration={r:0. for r in self.robots}; self.mission_completion_time=None; self.mission_terminal_reason=''; self.statuses={}
-        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.rosout_receipt_file=None; self._rosout_receipt_sequence=0; self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self._deferred_warning_records=None; self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
+        self.files=[]; self.events=open(self.directory/'events.jsonl','a',encoding='utf-8',buffering=1); self.goal_decisions=open(self.directory/'goal_decision_ledger.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.goal_decisions); self.nav2_diagnostics=open(self.directory/'nav2_diagnostics.jsonl','a',encoding='utf-8',buffering=1); self.files.append(self.nav2_diagnostics); self.rosout_receipt_file=None; self._rosout_receipt_sequence=0; self.map_receipt_file=None; self._map_receipt_sequence=0; self.coverage_request_file=None; self.coverage_stream=None; self.frontier_regions_file=None; self.nav2_diagnostic_count=0; self._diagnostic_last={}; self.action_goal_states={}; self.warns=WarningDeduplicator(); self._deferred_warning_records=None; self._navigation_action_replay_failed=False; self.counts=Counter(); self.last={}; self.windows={}; self.stale={}; self.latest={r:{} for r in self.robots}; self.claims={}; self.distributed_last={}; self.frontier_metadata={r:{} for r in self.robots}; self.frontier_query_pending={}; self.frontier_query_forensics=bool(self.p.get('diagnostic_frontier_capture',False)); self.frontier_query_forensic_file=None; self.frontier_query_tf_file=None; self.frontier_query_crops={}
         if bool(self.p.get('enable_scientific_raw_capture', False)):
             self.rosout_receipt_file=open(
                 self.directory / 'rosout_receipts.jsonl', 'a',
@@ -3485,6 +3486,9 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'warning_replay_parity.json',
                 self.directory / 'nav2_diagnostic_replay_parity.json',
             ])
+            if str(self.p.get('experiment_condition', '')).upper() == 'C':
+                required.append(
+                    self.directory / 'navigation_action_replay.json')
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
         if self.scan_matching_enabled:
@@ -3590,6 +3594,11 @@ class CooperativeExperimentLogger(Node):
                 'nav2_diagnostic_replay_parity.json:deferred_replay_failed')
             result['complete'] = False
             result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
+        if getattr(self, '_navigation_action_replay_failed', False):
+            result['missing'].append(
+                'navigation_action_replay.json:deferred_replay_failed')
+            result['complete'] = False
+            result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
         return result
 
     def finalize_passive_rosbag(self):
@@ -3657,6 +3666,28 @@ class CooperativeExperimentLogger(Node):
                        message_counts=metadata.get('message_counts', {}),
                        allow_during_shutdown=True)
         return metadata
+
+    def _replay_navigation_actions(self):
+        """Materialize normalized action/path evidence from the closed bag."""
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {'status': 'NO_SCIENTIFIC_RAW_BAG', 'complete': True}
+        try:
+            result = replay_navigation_evidence_from_bag(
+                self.directory / 'passive_rosbag', self.robots)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.write_failures += 1
+            self._navigation_action_replay_failed = True
+            return {
+                'schema_version': 'navigation_action_replay_1.0',
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'complete': False,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        if not result.get('complete', False):
+            self.write_failures += 1
+            self._navigation_action_replay_failed = True
+        return result
 
     @staticmethod
     def _offloaded_topic_records(timing, topic):
@@ -4559,6 +4590,12 @@ class CooperativeExperimentLogger(Node):
                             self.forensic.manifest())
         if self.passive_bag_enabled:
             self.finalize_passive_rosbag()
+        self._navigation_action_replay = self._replay_navigation_actions()
+        if self._navigation_action_replay.get('status') not in (
+                'NO_SCIENTIFIC_RAW_BAG',):
+            atomic_json(
+                self.directory / 'navigation_action_replay.json',
+                self._navigation_action_replay)
         successful=False
         try:
             self._shared_trajectory_parity = (

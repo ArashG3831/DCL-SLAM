@@ -3901,6 +3901,12 @@ class CooperativeExperimentLogger(Node):
                 'error': f'{type(exc).__name__}:{exc}',
             }
         deferred = causal_replay['summary']
+        if live == deferred:
+            # Authority switches only after the complete causal replay has
+            # matched the live semantic result.  The live object remains
+            # available for the parity artifact and is not used as the final
+            # summary source after this point.
+            self._deferred_shared_trajectory_summary = deferred
         return {
             'live': live,
             'deferred': deferred,
@@ -3922,7 +3928,7 @@ class CooperativeExperimentLogger(Node):
         }
 
     def summary(self,clean):
-        elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=self.trajectory.summary(); records=list(self.warns.records.values()); rss=0
+        elapsed=time.monotonic()-self.start; a=self.attribution.summary(); motion=self.local_trajectory.summary(); shared_motion=getattr(self, '_deferred_shared_trajectory_summary', self.trajectory.summary()); records=list(self.warns.records.values()); rss=0
         try:rss=int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
         except OSError:pass
         cpu=sorted(self._cpu_samples); rss_values=self._rss_samples or [rss]

@@ -613,3 +613,20 @@ captured streams contained: robot1/robot2 NavigateToPose feedback `3043/3401`,
 ComputePathToPose status `272/232`, FollowPath status `89/68`, and `/plan`
 `134/114` messages. This is an enabling checkpoint only; action/path semantic
 replay has not yet been switched to deferred authority.
+
+`d473067` added `/rosout` to the version `1.4` scientific raw contract as an
+optional native bag stream. This is an enabling change for a future warning and
+diagnostic replay; the live `/rosout` subscription, normalization, warning
+artifacts, and validity behavior remain unchanged.
+
+The validation run was:
+
+```text
+results/legacy_salvage_rosout_raw_20260906/
+  fast_trial_20260906T195542Z/
+```
+
+It reached `SIM_TIME_COMPLETE` at `120.06 s`, with no horizon overrun, complete
+raw export/finalization, and `1,995` `/rosout` messages in the native bag. This
+is raw-source enablement only; no warning/diagnostic authority switch has been
+claimed.

@@ -36,6 +36,17 @@ def allocate_run_directory(root:Path,requested:str):
 
 _FLOAT=re.compile(r'(?<![\w.])[-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?'); _STAMP=re.compile(r'\b\d{10}(?:\.\d{1,9})?\b')
 def normalize_warning(message): return _FLOAT.sub('<num>',_STAMP.sub('<stamp>',message)).strip()
+def warning_category(message):
+    """Return the legacy warning category for a complete rosout message."""
+    lower = str(message).lower()
+    return next((value for key, value in (
+        ('costmap', 'COSTMAP_WARNING'),
+        ('controller', 'CONTROLLER_WARNING'),
+        ('slam', 'SLAM_WARNING'),
+        ('scan', 'SCAN_WARNING'),
+        ('transform', 'TF_WARNING'),
+        (' tf', 'TF_WARNING'),
+    ) if key in lower), 'PROCESS_WARNING')
 @dataclass
 class WarningRecord:
     node_name:str; severity:str; representative_message:str; normalized_message:str; first_occurrence:str; last_occurrence:str; occurrence_count:int=1; category:str='PROCESS_WARNING'

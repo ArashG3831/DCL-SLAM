@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import my_epuck_project.deferred_protocol as replay_module
 
 
@@ -134,3 +136,31 @@ def test_agreement_replay_counts_only_agreement_events(monkeypatch, tmp_path):
     assert replay['unique_agreed_rounds'] == 2
     assert replay['unique_agreed_decisions'] == 1
     assert replay['deserialized_messages'] == 4
+
+
+def test_warning_replay_reuses_legacy_deduplication_semantics(tmp_path):
+    receipts = tmp_path / 'rosout_receipts.jsonl'
+    receipts.write_text(
+        '\n'.join([
+            '{"level":30,"name":"costmap","message":"update 1.0",'
+            '"wall_time_utc":"t1"}',
+            '{"level":30,"name":"costmap","message":"update 2.0",'
+            '"wall_time_utc":"t2"}',
+            '{"level":20,"name":"ignored","message":"info",'
+            '"wall_time_utc":"t3"}',
+        ]) + '\n', encoding='utf-8')
+    replay = replay_module.replay_warning_records_from_receipts(receipts)
+    assert replay['receipt_count'] == 3
+    assert replay['warning_receipt_count'] == 2
+    assert len(replay['records']) == 1
+    record = replay['records'][0]
+    assert record['category'] == 'COSTMAP_WARNING'
+    assert record['occurrence_count'] == 2
+    assert record['normalized_message'] == 'update <num>'
+
+
+def test_warning_replay_rejects_corrupt_receipt(tmp_path):
+    receipts = tmp_path / 'rosout_receipts.jsonl'
+    receipts.write_text('{not-json}\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='invalid rosout receipt'):
+        replay_module.replay_warning_records_from_receipts(receipts)

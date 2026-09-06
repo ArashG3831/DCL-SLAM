@@ -10,6 +10,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from .experiment_metrics import WarningDeduplicator, warning_category
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
@@ -151,4 +152,53 @@ def replay_agreement_counters_from_bag(bag_directory: Path, robots):
         'decision_hashes': sorted(decisions),
         'deserialized_messages': deserialized_messages,
         'robots': list(robots),
+    }
+
+
+def warning_record_semantics(records):
+    """Return warning fields whose equality is independent of wall-clock time."""
+    result = []
+    for record in records:
+        value = record if isinstance(record, dict) else record.__dict__
+        result.append({key: value[key] for key in (
+            'node_name', 'severity', 'representative_message',
+            'normalized_message', 'occurrence_count', 'category')})
+    return sorted(result, key=lambda item: (
+        item['node_name'], item['severity'], item['normalized_message']))
+
+
+def replay_warning_records_from_receipts(receipt_path: Path):
+    """Replay the legacy WarningDeduplicator from observer receipt rows."""
+    receipt_path = Path(receipt_path)
+    if not receipt_path.is_file():
+        raise FileNotFoundError(receipt_path)
+    deduplicator = WarningDeduplicator()
+    receipt_count = 0
+    warning_receipt_count = 0
+    with receipt_path.open(encoding='utf-8') as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                level = int(row['level'])
+                name = str(row['name'])
+                message = str(row['message'])
+                wall_time = str(row['wall_time_utc'])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f'invalid rosout receipt at line {line_number}: {exc}') from exc
+            receipt_count += 1
+            if level < 30:
+                continue
+            warning_receipt_count += 1
+            severity = 'ERROR' if level >= 40 else 'WARN'
+            category = warning_category(f'{name} {message}')
+            deduplicator.add(name, severity, message, wall_time, category)
+    records = [record.__dict__.copy()
+               for record in deduplicator.records.values()]
+    return {
+        'receipt_count': receipt_count,
+        'warning_receipt_count': warning_receipt_count,
+        'records': records,
     }

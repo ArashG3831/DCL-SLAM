@@ -38,7 +38,7 @@ from my_epuck_interfaces.msg import (
     TaskBidArray,
     TaskSnapshot,
 )
-from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now
+from .experiment_metrics import CoverageAttribution, Grid, LocalTrajectory, MotionDetector, MotionSample, TrajectoryOverlap, WarningDeduplicator, allocate_run_directory, atomic_json, duplicate_goal, equivalent_frontiers, finite, known_counts, known_world_cells, utc_now, warning_category
 from .forensic_evidence import ForensicEvidenceWriter
 from .deferred_protocol import pair_decision_outcome
 from .passive_rosbag import (
@@ -3173,7 +3173,7 @@ class CooperativeExperimentLogger(Node):
                     with self._io_lock:self.nav2_diagnostics.write(json.dumps(finite(row),separators=(',',':'),allow_nan=False)+'\n')
                 except (OSError,TypeError,ValueError) as exc:self.write_failures+=1; self.get_logger().error(f'Nav2 diagnostic write failed: {exc}',throttle_duration_sec=10.)
         if msg.level<Log.WARN:return
-        severity='ERROR' if msg.level>=Log.ERROR else 'WARN'; category=next((v for k,v in [('costmap','COSTMAP_WARNING'),('controller','CONTROLLER_WARNING'),('slam','SLAM_WARNING'),('scan','SCAN_WARNING'),('transform','TF_WARNING'),(' tf','TF_WARNING')] if k in lower),'PROCESS_WARNING')
+        severity='ERROR' if msg.level>=Log.ERROR else 'WARN'; category=warning_category(text)
         with self._state_lock:record,new=self.warns.add(msg.name,severity,msg.msg,utc_now(),category)
         if new:self.event(category,msg.msg,source='/rosout:'+msg.name,severity=severity,source_stamp=(msg.stamp.sec,msg.stamp.nanosec),occurrence_count=1)
     def row_time(self):
@@ -3471,6 +3471,7 @@ class CooperativeExperimentLogger(Node):
                 self.directory / 'pair_decision_replay_parity.json',
                 self.directory / 'agreement_replay_parity.json',
                 self.directory / 'rosout_receipts.jsonl',
+                self.directory / 'warning_replay_parity.json',
             ])
         if include_campaign_files:
             required.extend([self.directory/'summary.json',self.directory/'mission_result.json',self.directory/'run_manifest.json'])
@@ -3565,6 +3566,11 @@ class CooperativeExperimentLogger(Node):
         if getattr(self, '_pair_decision_replay_failed', False):
             result['missing'].append(
                 'pair_decision_replay_parity.json:deferred_replay_failed')
+            result['complete'] = False
+            result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
+        if getattr(self, '_warning_replay_failed', False):
+            result['missing'].append(
+                'warning_replay_parity.json:deferred_replay_failed')
             result['complete'] = False
             result['status'] = 'MISSING_REQUIRED_ARTIFACTS'
         return result
@@ -4229,6 +4235,45 @@ class CooperativeExperimentLogger(Node):
             'deserialized_messages': deferred['deserialized_messages'],
         }
 
+    def _replay_warnings_for_parity(self):
+        """Compare warning semantics with the observer receipt-ledger replay."""
+        live_records = [asdict(record) for record in self.warns.records.values()]
+        if not (self.passive_bag_enabled and
+                bool(self.p.get('enable_scientific_raw_capture', False))):
+            return {
+                'status': 'NO_SCIENTIFIC_RAW_BAG',
+                'equal': None,
+                'live': live_records,
+                'timestamp_comparison': 'not_applicable',
+            }
+        try:
+            from .deferred_protocol import (
+                replay_warning_records_from_receipts,
+                warning_record_semantics,
+            )
+            deferred = replay_warning_records_from_receipts(
+                self.directory / 'rosout_receipts.jsonl')
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                'status': 'DEFERRED_REPLAY_FAILED',
+                'equal': False,
+                'live': live_records,
+                'deferred': None,
+                'error': f'{type(exc).__name__}:{exc}',
+            }
+        live_semantics = warning_record_semantics(live_records)
+        deferred_semantics = warning_record_semantics(deferred['records'])
+        equal = live_semantics == deferred_semantics
+        return {
+            'status': 'PARITY_PASS' if equal else 'PARITY_FAIL',
+            'equal': equal,
+            'live': live_semantics,
+            'deferred': deferred_semantics,
+            'receipt_count': deferred['receipt_count'],
+            'warning_receipt_count': deferred['warning_receipt_count'],
+            'timestamp_comparison': 'semantic_only',
+        }
+
     def _write_deferred_coverage_csv(self, replay):
         """Materialize the legacy coverage schema from deferred rows."""
         if self.coverage_stream is not None:
@@ -4456,6 +4501,14 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'agreement_replay_parity.json',
                 self._agreement_parity)
+            self._warning_parity = self._replay_warnings_for_parity()
+            atomic_json(
+                self.directory / 'warning_replay_parity.json',
+                self._warning_parity)
+            if self._warning_parity.get('status') not in (
+                    'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
+                self.write_failures += 1
+                self._warning_replay_failed = True
             if self._agreement_parity.get('status') in (
                     'PARITY_PASS', 'DEFERRED_AUTHORITATIVE'):
                 deferred_agreement = self._agreement_parity.get('deferred', {})

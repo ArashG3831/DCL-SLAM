@@ -396,3 +396,102 @@ deferred coverage, logger runtime, metrics, passive rosbag, and TF/trajectory
 replay tests. No runtime validation has yet been run for this latest removal;
 the next required check is a fresh short complete raw-evidence Condition-C run
 after rebuilding the isolated salvage install.
+
+## Coverage offload runtime closeout
+
+The first post-`4001ecc` runtime attempt was invalid before the mission because
+the runner rejected an unsupported ROS domain, and the corrected shell then
+failed preflight because it lacked the established frontier/SLAM underlay. No
+Webots process was started by either preflight failure. These attempts are not
+scientific runs.
+
+After restoring the exact prior underlay and rebuilding, the clean validation
+was:
+
+```text
+results/legacy_salvage_coverage_offload_20260906_retry2/
+  fast_trial_20260906T185304Z/
+```
+
+Configuration matched the prior C validation: canonical close-start 20 ms
+scan-matching world, seed 1001, Condition C, `frontier_cost_only`, MODE_B,
+full sensors, ideal encoders, fast/no-rendering Webots, forensic/contact
+capture, and scientific raw capture. The rebuilt project prefix was
+`install_legacy_salvage_20260906`; the Webots driver was
+`webots_ws_close_validation_2eb/install/webots_ros2_driver`.
+
+Runtime result:
+
+* simulation `0.02 -> 120.06 s`;
+* termination `SIM_TIME_COMPLETE`, no horizon overrun;
+* wall duration `100.9646 s` (runner wall duration, including readiness);
+* emergency 300 s watchdog armed and not fired;
+* launch return code `0` and observer finalization complete;
+* artifact contract `COMPLETE`, with no missing artifacts;
+* 20 ms GT/contact configuration retained: 12,087 GT data rows and 59,381
+  contact data rows after CSV headers;
+* 51 request-ledger rows and 51 materialized `coverage.csv` rows;
+* `coverage_replay_parity.json`: `DEFERRED_AUTHORITATIVE`, sample count 51,
+  `live_rows_during_mission=0`;
+* shared trajectory replay remained `PARITY_PASS`, `equal=true`;
+* native scientific bag export was complete and included `/clock`, `/tf`,
+  `/tf_static`, both odometry streams, local/shared maps, and the existing
+  protocol/navigation raw topics.
+
+The final run proves the latest coverage migration's contract. It does not
+claim an authoritative active-mission RTF measurement: the saved runner
+`wall_runtime_s` includes startup/readiness and this checkpoint was a functional
+salvage validation, not a performance acceptance run.
+
+## Salvage checkpoint history
+
+The isolated salvage history, in order, is:
+
+* `4429f2c` — inherited observer/evidence baseline checkpoint. Captured the
+  pre-existing authoritative dirty observer state only; explicitly not a
+  salvage optimization.
+* `e266623` — exposed the existing scientific raw-topic contract as an opt-in
+  passive-rosbag mode, without changing live metrics.
+* `22bf48f` — added native-bag TF2 trajectory replay and parity artifacts.
+* `746d325` — documented that trajectory checkpoint.
+* `55ecf4e` — wired the runner/launch opt-in scientific raw capture flag.
+* `86b73bf` — preserved exact legacy causal TF2 replay using forensic callback
+  ordering, because native rosbag inter-topic ordering alone was not equivalent.
+* `8989e2b` — switched shared-frame trajectory summary authority only after
+  causal replay matched the live summary.
+* `0ce7ced` — added the compact causal `map_receipts.jsonl` ledger, leaving live
+  coverage authoritative.
+* `f8feaef` — added deferred coverage replay using the existing grid/count and
+  `CoverageAttribution` primitives, initially as parity-only.
+* `c3ae8e6` — documented the first map-parity result and its then-open blocker.
+* `d2c9e35` — corrected deferred coverage to count free+occupied cells and to
+  use the strict legacy callback boundary at equal timestamps.
+* `c177b4a` — switched the final coverage summary authority to the deferred
+  result after the preserved artifact replay was exactly equal (51/51 rows).
+* `4001ecc` — removed map conversion/counting/ownership/attribution from the
+  scientific-raw mission path; records only coverage timer requests and
+  regenerates the established `coverage.csv` schema at finalization.
+* `e9b1a4d` — fixed the request ledger to preserve the legacy early return when
+  the selected map stream was not yet available; added the focused regression
+  test.
+
+The docs-only commits `245ae8d`, `c4853f7`, `426b69b`, `a4360db`, `85821dd`,
+and `c82e698` record earlier odometry/raw-evidence checkpoints in the same
+salvage history. The odometry work was deliberately staged as replay,
+comparison, authority switch, and live-state removal checkpoints; no later
+family was started before its parity gates.
+
+## Current state and remaining scope
+
+The old observer remains the behavioral reference and the default legacy path.
+Scientific raw capture is opt-in and now owns lossless ROS streams through the
+existing passive rosbag infrastructure. Shared trajectory and coverage have
+deferred authority only in that raw-enabled path after parity. GT/contact
+sampling, START_RELEASE/readiness, provenance, finalization, schemas, and the
+robot/coordinator behavior were not changed.
+
+No protocol/event, action-result, warning, health-history, summary, or resource
+family was migrated in this continuation. Those remain explicitly open rather
+than being represented as completed. The next salvage family would therefore
+require a new isolated raw/parity checkpoint; this task is intentionally stopped
+at the successful coverage checkpoint.

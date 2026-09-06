@@ -133,6 +133,23 @@ def test_offloaded_replay_preserves_counts_timestamps_and_clock_mapping(tmp_path
     assert len(first['/robot1/joint_states']) == 1
 
 
+def test_offloaded_replay_maps_headerless_receipts_for_health(tmp_path):
+    export = tmp_path / 'export.jsonl'
+    _write_rows(export, [
+        {'topic': '/clock', 'bag_time_ns': 100, 'clock_s': 10.0},
+        {'topic': '/robot1/navigate_to_pose/_action/feedback',
+         'bag_time_ns': 110},
+        {'topic': '/clock', 'bag_time_ns': 200, 'clock_s': 11.0},
+    ])
+    timing = load_offloaded_timing(export)
+    feedback = timing['/robot1/navigate_to_pose/_action/feedback']
+    assert feedback == [{
+        'bag_time_ns': 110,
+        'header_stamp_s': 10.0,
+        'received_sim_s': 10.0,
+    }]
+
+
 def test_c_logger_removes_only_bag_owned_sensor_entities():
     source = (Path(__file__).parents[1] / 'my_epuck_project' /
               'cooperative_experiment_logger.py').read_text(encoding='utf-8')

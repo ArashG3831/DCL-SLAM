@@ -422,6 +422,10 @@ class CooperativeExperimentLogger(Node):
         # The existing C passive-bag path owns the high-rate sensor evidence.
         # No live control component consumes these observer-only messages.
         self.passive_sensor_offload_enabled = self.passive_bag_enabled
+        self._defer_health_history = bool(
+            self.passive_bag_enabled and
+            self.p.get('enable_scientific_raw_capture', False))
+        self._deferred_health_rows = []
         self.passive_bag_process = None
         self.passive_bag_log = None
         self.passive_bag_command = None
@@ -3352,7 +3356,11 @@ class CooperativeExperimentLogger(Node):
                 while window and window[0]<now-10:window.popleft()
                 age=self.age(r,key); stale=age is None or age>limit; old=self.stale.get((r,key)); active=self.latest[r].get('navigation_active',False)
                 if old is not None and stale!=old and (key!='navigate_feedback' or active):self.event('TOPIC_STALE' if stale else 'TOPIC_RECOVERED',f'{key} age={age}',r,f'/{r}/{key}',severity='WARN' if stale else 'INFO',topic_name=f'/{r}/{key}',topic_age_s=age)
-                self.stale[(r,key)]=stale; row=self.row_time(); row.update(robot_id=r,topic_name=f'/{r}/{key}',topic_rate_hz=len(window)/10.,topic_age_s=age,expected_min_rate_hz=1/limit,stale=stale); self.csv_row(self.health,row)
+                self.stale[(r,key)]=stale; row=self.row_time(); row.update(robot_id=r,topic_name=f'/{r}/{key}',topic_rate_hz=len(window)/10.,topic_age_s=age,expected_min_rate_hz=1/limit,stale=stale)
+                if self._defer_health_history:
+                    self._deferred_health_rows.append(row)
+                else:
+                    self.csv_row(self.health,row)
             if (self.scan_matching_enabled and configured_throttle > 1.0
                     and not self.scan_pipeline_warning_emitted):
                 scan_window = self.windows.get((r, 'scan_d500_fixed'), ())
@@ -3764,33 +3772,57 @@ class CooperativeExperimentLogger(Node):
         if not path.is_file():
             raise FileNotFoundError(path)
         limits = {
+            'odom': float(self.p['odom_stale_s']),
             'joint_states': float(self.p['odom_stale_s']),
             'scan_d500_fixed': float(self.p['scan_stale_s']),
             'scan_d500_slam': float(self.p['scan_stale_s']),
             'scan_d500_nav': float(self.p['scan_stale_s']),
+            'map': float(self.p['map_stale_s']),
+            'peer_map': float(self.p['map_stale_s']),
+            'shared_map': float(self.p['shared_map_stale_s']),
+            'frontier_candidates': float(self.p['candidate_stale_s']),
+            'exploration_claim': float(self.p['claim_stale_s']),
+            'exploration_status': float(self.p['status_stale_s']),
+            'navigate_feedback': float(self.p['feedback_stale_s']),
+            'cmd_vel': 2.0,
         }
-        rows = []
-        with path.open(newline='', encoding='utf-8') as stream:
-            reader = csv.DictReader(stream)
-            fieldnames = list(reader.fieldnames or [])
-            rows.extend(reader)
-        records_by_topic = {
-            f'/{robot}/{key}': self._offloaded_topic_records(
-                timing, f'/{robot}/{key}')
-            for robot in self.robots
-            for key in limits
+        if self._defer_health_history:
+            rows = [dict(row) for row in self._deferred_health_rows]
+            fieldnames = list(HEALTH)
+        else:
+            rows = []
+            with path.open(newline='', encoding='utf-8') as stream:
+                reader = csv.DictReader(stream)
+                fieldnames = list(reader.fieldnames or [])
+                rows.extend(reader)
+        source_topics = {
+            'odom': lambda robot: f'/{robot}/odom',
+            'joint_states': lambda robot: f'/{robot}/joint_states',
+            'scan_d500_fixed': lambda robot: f'/{robot}/scan_d500_fixed',
+            'scan_d500_slam': lambda robot: f'/{robot}/scan_d500_slam',
+            'scan_d500_nav': lambda robot: f'/{robot}/scan_d500_nav',
+            'map': lambda robot: f'/{robot}/map',
+            'peer_map': lambda robot: f'/cslam/unknown_pose/{robot}/local_map',
+            'shared_map': lambda robot: f'/{robot}/shared_map',
+            'frontier_candidates': lambda robot: f'/{robot}/frontier_candidates',
+            'exploration_claim': lambda robot: f'/cslam/{robot}/exploration_claim',
+            'exploration_status': lambda robot: f'/cslam/{robot}/exploration_status',
+            'navigate_feedback': lambda robot: f'/{robot}/navigate_to_pose/_action/feedback',
+            'cmd_vel': lambda robot: f'/{robot}/cmd_vel',
         }
         for row in rows:
             topic = str(row.get('topic_name', ''))
             parts = topic.strip('/').split('/', 1)
             if len(parts) != 2 or parts[1] not in limits:
                 continue
-            records = records_by_topic.get(topic, ())
+            key = parts[1]
+            records = self._offloaded_topic_records(
+                timing, source_topics[key](parts[0]))
             sim_time = (float(row['ros_time_sec']) +
                         float(row['ros_time_nanosec']) * 1.0e-9)
             received = self._last_received(records, sim_time)
             age = None if received is None else max(0.0, sim_time - received)
-            limit = limits[parts[1]]
+            limit = limits[key]
             rate = sum(
                 1 for item in records
                 if sim_time - 10.0 <= float(item['received_sim_s']) <= sim_time
@@ -3799,6 +3831,16 @@ class CooperativeExperimentLogger(Node):
             row['topic_age_s'] = '' if age is None else str(age)
             row['stale'] = str(age is None or age > limit)
         temporary = path.with_suffix('.csv.offload.tmp')
+        for handle in list(self.files):
+            if str(getattr(handle, 'name', '')) != str(path):
+                continue
+            with self._io_lock:
+                try:
+                    handle.flush()
+                finally:
+                    handle.close()
+                self.files.remove(handle)
+            break
         with temporary.open('w', newline='', encoding='utf-8') as stream:
             writer = csv.DictWriter(stream, fieldnames=fieldnames)
             writer.writeheader()

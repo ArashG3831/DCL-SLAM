@@ -438,14 +438,19 @@ def load_offloaded_timing(export_path: Path):
     by_topic = {}
     for row in rows:
         topic = str(row.get('topic', ''))
-        if topic == '/clock' or 'header_stamp_s' not in row:
+        if topic == '/clock':
             continue
         index = bisect_right(clock_times, int(row['bag_time_ns'])) - 1
         received_sim_s = (
             clocks[index][1] if index >= 0 else None)
+        if received_sim_s is None:
+            continue
         by_topic.setdefault(topic, []).append({
             'bag_time_ns': int(row['bag_time_ns']),
-            'header_stamp_s': float(row['header_stamp_s']),
+            # Headerless streams use their mapped receipt time for health
+            # reconstruction. Headered streams retain their source stamp.
+            'header_stamp_s': float(
+                row.get('header_stamp_s', received_sim_s)),
             'received_sim_s': received_sim_s,
         })
     for values in by_topic.values():

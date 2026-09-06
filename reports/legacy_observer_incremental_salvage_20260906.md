@@ -839,3 +839,28 @@ resource samples.  Finalization's two summary/mission-result writes remain
 necessary: the first creates the files used by the artifact contract, and the
 second records the final contract result after all required artifacts and
 replay checks are known.
+
+## Nav2 diagnostic serialization migration
+
+`08bdaa4` removes the duplicate mission-time write path for
+`nav2_diagnostics.jsonl` when native raw capture and receipt replay are enabled.
+The callback still constructs the same diagnostic metadata row so the receipt
+ledger preserves its event sequence, timestamps, source stamp, category and
+message.  Replay applies the same 0.25-second/key rate limit and 10,000-record
+cap, and finalization writes the same output schema from the replayed records.
+Non-raw runs retain the original live rate-limit/write path.
+
+The raw-mode replay status is explicitly `DEFERRED_AUTHORITATIVE`; the legacy
+live file is not used as a second copy.  A focused regression verifies that raw
+mode leaves the mission-time diagnostic file empty while retaining the receipt
+path.  This is a diagnostic-output ownership change only: certificate,
+allocator, Nav2 and robot behavior are untouched.
+
+The affected packages were rebuilt successfully in:
+
+```text
+install_legacy_salvage_nav2_defer_20260907
+```
+
+Installed-package focused tests passed: `84 passed in 27.19s`.  No Webots
+runtime was run.

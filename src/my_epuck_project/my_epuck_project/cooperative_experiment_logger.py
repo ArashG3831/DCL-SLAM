@@ -2435,6 +2435,40 @@ class CooperativeExperimentLogger(Node):
                 self._record_high_rate_timing(
                     f'{r}.odom.shared_live_state', time.perf_counter() - started)
             return
+        # In the raw-evidence configuration the complete /tf stream already
+        # provides the same bounded, timestamped edges used by the existing
+        # deferred synchronizer.  Try that existing composition path before
+        # entering tf2 for the common chained shared-map <- odom lookup.  Keep
+        # tf2 as the fallback for missing/late/incompatible evidence so the
+        # legacy online semantics remain available outside this configuration.
+        if bool(self.p.get('enable_scientific_raw_capture', False)):
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
+            composed, metadata = self._direct_sync_tf(
+                self.p['global_frame'], msg.header.frame_id, stamp_value)
+            if started is not None:
+                self._record_high_rate_timing(
+                    f'{r}.odom.raw_tf_composed_lookup',
+                    time.perf_counter() - started)
+            if composed is not None:
+                started = (time.perf_counter()
+                           if getattr(self, '_high_rate_profile_enabled', False)
+                           else None)
+                t_x, t_y, heading = composed
+                cosine, sine = math.cos(heading), math.sin(heading)
+                shared_x = t_x + cosine * p.x - sine * p.y
+                shared_y = t_y + sine * p.x + cosine * p.y
+                shared_yaw = (heading + local_yaw + math.pi) % (2 * math.pi) - math.pi
+                self.latest[r]['shared_pose'] = (shared_x, shared_y, shared_yaw)
+                self.latest[r]['shared_pose_frame'] = self.p['global_frame']
+                if self.p['enable_trajectory_overlap']:
+                    self.trajectory.add(r, shared_x, shared_y)
+                if started is not None:
+                    self._record_high_rate_timing(
+                        f'{r}.odom.shared_live_state',
+                        time.perf_counter() - started)
+                return
         try:
             # This is passive evidence collection on the high-rate odometry
             # path.  Waiting up to 50 ms here can stall the logger executor

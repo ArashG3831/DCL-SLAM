@@ -1759,8 +1759,8 @@ class DistributedFrontierAssignment(Node):
         """Start existing fallback before another cooperative wait.
 
         This is a scheduler hint only. The fallback still performs current
-        source-local identity, TF, path, reservation, traffic, failure, and
-        final dispatch checks; no retained path is sent.
+        source-local identity, peer-liveness, TF, path, reservation, failure,
+        and final dispatch checks; no retained path is sent.
         """
         if not getattr(self, '_local_fallback_trigger_pending', False):
             return False
@@ -1801,25 +1801,39 @@ class DistributedFrontierAssignment(Node):
             return frozenset()
         return frozenset((task_id,))
 
+    def _peer_unavailable_for_degraded_solo(self, now: float) -> bool:
+        """Require bounded peer-loss evidence before cooperative solo dispatch."""
+        peer_status = self._peer_status
+        if peer_status is not None and peer_status.fresh(now):
+            return False
+        peer_snapshot = getattr(self, '_snapshots', {}).get(self._peer_id)
+        if peer_snapshot is not None and peer_snapshot.fresh(now):
+            return False
+        return self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO
+
     def _continue_local_work_while_waiting(
             self, snapshot: Optional[TaskSnapshot], reason: str) -> bool:
-        """Use the existing local fallback while cooperative evidence waits.
+        """Use local fallback only after bounded peer unavailability.
 
         This does not manufacture a pair decision or relax the certificate.
-        It only gives an otherwise free robot the already-supported
-        degraded-solo dispatch path.  The temporary task is published through
-        the normal status heartbeat and is excluded by
-        ``_temporary_peer_reservation_ids`` on the peer.
+        A responsive peer keeps selection on the paired path, where the
+        authoritative traffic scheduler has both routes.  After the existing
+        peer timeout, the temporary task is published through the normal status
+        heartbeat and excluded by ``_temporary_peer_reservation_ids`` on the
+        peer.
         """
         if (self._local_only or self._nav2.local_goal_active or
                 self._dispatch_in_progress):
+            return False
+        now = time.monotonic()
+        if not self._peer_unavailable_for_degraded_solo(now):
             return False
         # In the cooperative path, ignore the round's possibly expired
         # snapshot and select from the latest local seed that passed the
         # source-local candidate check.  Keep the argument for call-site and
         # test compatibility; it is only a fallback for ROS-free fixtures.
         if hasattr(self, '_snapshots'):
-            snapshot = self._local_fallback_snapshot(time.monotonic())
+            snapshot = self._local_fallback_snapshot(now)
         if snapshot is None:
             return False
         self._continue_degraded_solo(snapshot)
@@ -1836,27 +1850,20 @@ class DistributedFrontierAssignment(Node):
         return selected
 
     def _start_immediate_fallback_after_terminal(self) -> None:
-        """Start safe local continuation without waiting for the next tick.
+        """Start peer-loss continuation without waiting for the next tick.
 
         A terminal navigation callback already establishes that this robot is
         free.  A local candidate that arrived while this robot was busy is
-        already a safe scheduler trigger; consuming it here avoids waiting
-        for another cooperative tick.  When the peer still advertises an
-        active commitment, the peer reservation also prevents both replicas
-        from selecting the same task.  The fallback itself still performs
-        the normal current TF, path, traffic, reservation, and failure checks
-        before sending anything.
+        already a scheduler trigger; consuming it here avoids waiting for
+        another cooperative tick only when bounded liveness evidence has
+        established peer unavailability.  A responsive peer resumes through
+        the normal paired traffic path instead.
         """
         if self._local_only or self._terminal or self._nav2.local_goal_active:
             return
         if self._consume_local_fallback_trigger():
             return
         now = time.monotonic()
-        peer = self._peer_status
-        if (peer is None or not peer.fresh(now) or
-                not (peer.value.local_nav_goal_active or
-                     peer.value.state == DistributedExplorationStatus.NAVIGATING)):
-            return
         local = self._local_fallback_snapshot(now)
         if local is not None:
             self._continue_local_work_while_waiting(

@@ -1,17 +1,19 @@
 """Regression test for the multi-threaded coordinator round race."""
 
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from my_epuck_project.distributed_assignment.models import (
     Bounds,
+    CoordinatorState,
     FailureClass,
     PhysicalTask,
     TaskSnapshot,
 )
-from my_epuck_project.distributed_assignment.protocol import receive
+from my_epuck_project.distributed_assignment.protocol import PeerLiveness, receive
 from my_epuck_project.distributed_assignment.local_nav2 import (
     DispatchPreconditions,
     PathEvaluation,
@@ -26,6 +28,7 @@ from my_epuck_project.distributed_frontier_assignment import (
 )
 from my_epuck_project.passive_rosbag import passive_topics
 from my_epuck_project.distributed_assignment.scoring import rank_solo_tasks
+from my_epuck_project.distributed_assignment.traffic_scheduler import schedule_traffic
 
 SOURCE = Path(__file__).parents[1] / 'my_epuck_project' / (
     'distributed_frontier_assignment.py'
@@ -369,10 +372,11 @@ def test_peer_activity_is_not_a_global_assignment_barrier():
     assert 'active peer goal is not a global assignment barrier' in text
 
 
-def test_cooperative_waits_reuse_degraded_solo_without_relaxing_certificate():
-    """Evidence waits must offer the existing local fallback, not bypass policy."""
+def test_cooperative_waits_require_peer_loss_before_degraded_solo():
+    """Transient evidence waits must preserve pair traffic coordination."""
     source = SOURCE.read_text(encoding='utf-8')
     assert 'def _continue_local_work_while_waiting' in source
+    assert 'def _peer_unavailable_for_degraded_solo' in source
     assert "temporary local work while cost-only certificate is pending" in source
     assert "temporary local work while peer bid is pending" in source
     assert "temporary local work while peer agreement is pending" in source
@@ -390,6 +394,10 @@ def test_degraded_solo_selection_advertises_a_peer_reservation():
 def test_waiting_fallback_marks_selected_work_as_degraded_solo():
     node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
     node._local_only = False
+    node._peer_id = 'robot2'
+    node._peer_status = None
+    node._peer_liveness = PeerLiveness(timeout_s=0.0)
+    node._peer_liveness.observe('lost-peer', 0.0)
     node._nav2 = SimpleNamespace(local_goal_active=False)
     node._dispatch_in_progress = False
     node._active_task = None
@@ -409,6 +417,38 @@ def test_waiting_fallback_marks_selected_work_as_degraded_solo():
     assert transitions[0][0].value == 'DEGRADED_SOLO'
     assert published == [True]
     assert events[0][0] == 'DEGRADED_SOLO_COMMITMENT'
+
+
+def test_live_peer_conflict_cannot_dispatch_through_degraded_solo():
+    """A known peer keeps a conflicting pair on the traffic-scheduled path."""
+    conflict = schedule_traffic(
+        ((0.0, 0.0), (1.0, 0.0)),
+        ((0.5, -1.0), (0.5, 1.0)),
+        robot1_safe_radius_m=0.08,
+        robot2_safe_radius_m=0.08,
+        reference_speed_mps=0.13,
+    )
+    assert conflict.conflict
+
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    now = time.monotonic()
+    node._local_only = False
+    node._peer_id = 'robot2'
+    node._peer_liveness = PeerLiveness(timeout_s=6.0)
+    node._peer_liveness.observe('live-peer', now)
+    node._peer_status = receive(SimpleNamespace(), 3.0, now)
+    node._snapshots = {}
+    node._nav2 = SimpleNamespace(local_goal_active=False)
+    node._dispatch_in_progress = False
+    node._active_task = None
+    node._active_decision_hash = ''
+    attempted = []
+    node._continue_degraded_solo = attempted.append
+
+    assert not node._continue_local_work_while_waiting(
+        object(), 'peer bid pending')
+    assert attempted == []
+    assert node._peer_liveness.state == CoordinatorState.WAITING_FOR_INPUTS
 
 
 def _fallback_node(task, receipt=0.0, ttl=3.0):
@@ -469,12 +509,14 @@ def test_cooperative_pair_path_remains_the_normal_resume_path():
                   source.index('    def _traffic_for_decision')]
     assert 'build_canonical_union(' in tick
     assert 'choose_pair_assignment' in tick
+    assert 'traffic_compatible' in tick
+    assert 'self._traffic_for_bid_pair(' in tick
     assert 'if self._assignment_strategy == \'frontier_cost_only\':' in tick
     assert 'self._continue_local_work_while_waiting(' in tick
 
 
-def test_terminal_result_can_start_fallback_without_waiting_for_next_tick():
-    """A busy peer permits immediate, still-gated local continuation."""
+def test_terminal_result_resumes_pair_path_while_peer_is_live():
+    """Immediate fallback still passes through the peer-loss safety gate."""
     source = SOURCE.read_text(encoding='utf-8')
     navigation = source[source.index('    def _navigation_finished'):
                          source.index('    def _publish_failure')]
@@ -483,12 +525,12 @@ def test_terminal_result_can_start_fallback_without_waiting_for_next_tick():
     helper = source[source.index(
         '    def _start_immediate_fallback_after_terminal'):
         source.index('    @staticmethod\n    def _finite_path_samples')]
-    assert 'peer.value.local_nav_goal_active' in helper
     assert 'if self._consume_local_fallback_trigger():' in helper
     assert 'self._local_fallback_snapshot(now)' in helper
     assert 'self._continue_local_work_while_waiting(' in helper
-    # The normal degraded-solo path remains the safety gate: the immediate
-    # trigger only starts candidate evaluation; it never sends a saved path.
+    # The cooperative fallback boundary now requires peer loss before this
+    # helper can start candidate evaluation.
+    assert 'self._peer_unavailable_for_degraded_solo(now)' in source
     assert "caller='DEGRADED_SOLO_DISPATCH'" in source
 
 

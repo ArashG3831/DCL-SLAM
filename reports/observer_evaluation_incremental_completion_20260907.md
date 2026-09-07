@@ -96,8 +96,7 @@ ROS Python runtime in the validation environment.
 
 Commit:
 
-Pending until the item-1 source/docs checkpoint is created; the final hash is
-recorded in the follow-up checkpoint below.
+`4ab6da3` — `observer: complete offline idle and snappiness replay`.
 
 Remaining caveat:
 

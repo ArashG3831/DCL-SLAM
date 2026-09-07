@@ -175,8 +175,10 @@ independent.
 
 ### 1. Exact avoidable idle and snappiness timeline integration
 
-**Status: DONE** — implemented in the current working tree; checkpoint hash is
-recorded in `reports/observer_evaluation_incremental_completion_20260907.md`.
+**Status: DONE** — commit `4ab6da3`; focused pure-Python replay tests passed
+and the offline output is integrated into `thin_metrics.json` plus named
+sidecars. ROS-dependent replay execution remains environment-gated because
+this shell has no `rclpy` installation.
 
 **Required raw inputs:** authoritative work-availability/actionability state,
 robot identity, state transitions and reasons, simulation timestamps, terminal

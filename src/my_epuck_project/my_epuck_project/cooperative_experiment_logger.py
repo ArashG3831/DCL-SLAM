@@ -4700,14 +4700,16 @@ class CooperativeExperimentLogger(Node):
             atomic_json(
                 self.directory / 'nav2_diagnostic_replay_parity.json',
                 self._nav2_diagnostic_parity)
-            if self._nav2_diagnostic_parity.get('status') not in (
-                    'PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG'):
+            nav2_status = self._nav2_diagnostic_parity.get('status')
+            nav2_deferred_ready = (
+                nav2_status == 'DEFERRED_AUTHORITATIVE' and
+                self._nav2_diagnostic_parity.get('authority_ready', False))
+            if (nav2_status not in ('PARITY_PASS', 'NO_SCIENTIFIC_RAW_BAG')
+                    and not nav2_deferred_ready):
                 self.write_failures += 1
                 self._nav2_diagnostic_replay_failed = True
-            elif (self._nav2_diagnostic_parity.get('status') in
-                  ('PARITY_PASS', 'DEFERRED_AUTHORITATIVE')
-                  and self._nav2_diagnostic_parity.get('authority_ready',
-                                                        False)):
+            elif (nav2_status in ('PARITY_PASS', 'DEFERRED_AUTHORITATIVE')
+                  and (nav2_status == 'PARITY_PASS' or nav2_deferred_ready)):
                 self._write_replayed_jsonl(
                     self.directory / 'nav2_diagnostics.jsonl',
                     self._nav2_diagnostic_parity.get('deferred_records', ()),

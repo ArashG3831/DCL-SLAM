@@ -992,6 +992,36 @@ def test_summary_accepts_deferred_warning_mapping_records(observer):
     assert summary["anomalies"]["warning_occurrences"] == 3
 
 
+def test_ready_deferred_nav2_replay_satisfies_finalization_gate(observer):
+    observer._replay_navigation_actions = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_shared_trajectory_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_coverage_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_pair_decisions_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_agreement_counters_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_warnings_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer._replay_nav2_diagnostics_for_parity = lambda: {
+        "status": "DEFERRED_AUTHORITATIVE",
+        "authority_ready": True,
+        "deferred_records": [{"category": "PLANNER", "message": "warning"}],
+    }
+    observer._replay_local_trajectory_for_parity = (
+        lambda: {"status": "NO_SCIENTIFIC_RAW_BAG"})
+    observer.required_artifact_status = lambda include_campaign_files=True: {
+        "complete": True, "required": [], "missing": [],
+    }
+
+    assert observer.finalize(True)
+    assert getattr(observer, "_nav2_diagnostic_replay_failed", False) is False
+    assert read_json(observer.directory / "artifact_finalization.json")[
+        "complete"] is True
+
+
 def test_missing_forensic_artifact_fails_closed(observer):
     class FakeForensic:
         def flush(self):

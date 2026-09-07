@@ -76,6 +76,35 @@ def test_opt_in_callback_timing_records_existing_logger_callbacks(observer):
     assert entry['max_wall_s'] >= 0.0
 
 
+def test_opt_in_odom_tf_profile_records_internal_stages(observer):
+    observer._high_rate_profile_enabled = True
+
+    odom = Odometry()
+    odom.header.frame_id = 'robot1/odom'
+    observer.odom('robot1', odom)
+
+    transform = TransformStamped()
+    transform.header.frame_id = 'robot1/map'
+    transform.child_frame_id = 'robot1/odom'
+    transform.transform.rotation.w = 1.0
+    observer._direct_tf_message(TFMessage(transforms=[transform]))
+
+    profile = observer._high_rate_profile
+    expected = (
+        'robot1.odom.live_state',
+        'robot1.odom.index_maintenance',
+        'robot1.odom.live_motion_state',
+        'robot1.odom.direct_tf_lookup',
+        'robot1.odom.tf2_lookup',
+        'tf.tf2_buffer_update',
+        'tf.direct_index',
+    )
+    for component in expected:
+        assert profile[component]['calls'] == 1
+        assert profile[component]['total_wall_s'] >= 0.0
+        assert profile[component]['max_wall_s'] >= 0.0
+
+
 def test_deferred_synchronized_frames_record_requests_then_reconstruct(
         tmp_path):
     """Derived sync rows are not built on the live timer path."""

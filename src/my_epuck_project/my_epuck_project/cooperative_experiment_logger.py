@@ -401,6 +401,10 @@ class CooperativeExperimentLogger(Node):
             'MY_EPUCK_CALLBACK_TIMING', '',
         ).strip().lower() in ('1', 'true', 'yes', 'on')
         self._callback_timing = {}
+        self._high_rate_profile_enabled = os.environ.get(
+            'MY_EPUCK_ODOM_TF_PROFILE', '',
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+        self._high_rate_profile = {}
         self._sync_map_profile_enabled = os.environ.get(
             'MY_EPUCK_SYNC_MAP_PROFILE', '',
         ).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -906,11 +910,28 @@ class CooperativeExperimentLogger(Node):
             }
         return {'enabled': True, 'stages': summary}
 
+    def _record_high_rate_timing(self, component, elapsed):
+        """Record opt-in sub-timings for the odom/TF evidence callbacks."""
+        if not getattr(self, '_high_rate_profile_enabled', False):
+            return
+        with self._state_lock:
+            entry = self._high_rate_profile.setdefault(
+                str(component),
+                {'calls': 0, 'total_wall_s': 0.0, 'max_wall_s': 0.0},
+            )
+            elapsed = max(0.0, float(elapsed))
+            entry['calls'] += 1
+            entry['total_wall_s'] += elapsed
+            entry['max_wall_s'] = max(entry['max_wall_s'], elapsed)
+
     def _direct_tf_message(self, message):
         # This is the single /tf subscription for the logger.  Feed the
         # existing tf2 buffer before recording the identical raw message so
         # online lookup behavior and raw-TF evidence remain available without
         # a duplicate TransformListener subscription.
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         for transform in getattr(message, 'transforms', ()):
             key = (self._normal_frame(transform.header.frame_id),
                    self._normal_frame(transform.child_frame_id))
@@ -918,24 +939,63 @@ class CooperativeExperimentLogger(Node):
             if live_edges is None or key in live_edges:
                 self.tf_buffer.set_transform(
                     transform, 'default_authority')
+        if started is not None:
+            self._record_high_rate_timing(
+                'tf.tf2_buffer_update', time.perf_counter() - started)
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         if self.forensic is not None:
             self._record_direct_tf_message(message, static=False)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf.direct_index', time.perf_counter() - started)
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
             self.forensic.record_raw_tf(
                 '/tf', message, self.ros_seconds(),
                 time.monotonic() - self.start, static=False)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf.csv_serialization', time.perf_counter() - started)
         else:
             self._record_direct_tf_message(message, static=False)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf.direct_index', time.perf_counter() - started)
 
     def _direct_tf_static_message(self, message):
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         for transform in getattr(message, 'transforms', ()):
             self.tf_buffer.set_transform_static(transform, 'default_authority')
+        if started is not None:
+            self._record_high_rate_timing(
+                'tf_static.tf2_buffer_update', time.perf_counter() - started)
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         if self.forensic is not None:
             self._record_direct_tf_message(message, static=True)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf_static.direct_index', time.perf_counter() - started)
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
             self.forensic.record_raw_tf(
                 '/tf_static', message, self.ros_seconds(),
                 time.monotonic() - self.start, static=True)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf_static.csv_serialization', time.perf_counter() - started)
         else:
             self._record_direct_tf_message(message, static=True)
+            if started is not None:
+                self._record_high_rate_timing(
+                    'tf_static.direct_index', time.perf_counter() - started)
 
     def _direct_tf_edge(self, parent, child, query_ros,
                         allow_latest_before=False):
@@ -2298,6 +2358,9 @@ class CooperativeExperimentLogger(Node):
     def age(self,r,key):
         value=self.last.get((r,key)); return self.ros_seconds()-value if value else None
     def odom(self,r,msg):
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         self.mark(r,'odom',msg)
         p=msg.pose.pose.position
         local_yaw=yaw(msg.pose.pose.orientation)
@@ -2310,24 +2373,54 @@ class CooperativeExperimentLogger(Node):
         self.latest[r]['speed']=(float(msg.twist.twist.linear.x),
                                  float(msg.twist.twist.angular.z))
         stamp_value = stamp(msg)[0] + stamp(msg)[1] * 1e-9
+        if started is not None:
+            self._record_high_rate_timing(
+                f'{r}.odom.live_state', time.perf_counter() - started)
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         self._odom_samples[r].append(
             stamp_value,
             (float(p.x), float(p.y), float(local_yaw),
              str(msg.header.frame_id or f'{r}/odom'),
              str(getattr(msg, 'child_frame_id', '') or 'base_footprint')))
+        if started is not None:
+            self._record_high_rate_timing(
+                f'{r}.odom.index_maintenance', time.perf_counter() - started)
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         self.local_trajectory.add(r,float(p.x),float(p.y))
+        if started is not None:
+            self._record_high_rate_timing(
+                f'{r}.odom.live_motion_state', time.perf_counter() - started)
         if self.forensic is not None:
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
             self.forensic.record_odom(
                 r, msg, self.ros_seconds(), time.monotonic() - self.start)
+            if started is not None:
+                self._record_high_rate_timing(
+                    f'{r}.odom.csv_serialization', time.perf_counter() - started)
         # The raw /tf callback receives the same authoritative transform
         # samples as tf2.  When an exact direct sample is already indexed,
         # use its planar projection for this passive trajectory evidence and
         # avoid a second tf2 wait-set lookup.  Any missing, interpolated, or
         # chained case retains the original tf2 path below.
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         direct = self._direct_tf_edge(
             self.p['global_frame'], msg.header.frame_id, stamp_value)
+        if started is not None:
+            self._record_high_rate_timing(
+                f'{r}.odom.direct_tf_lookup', time.perf_counter() - started)
         if (direct is not None and
                 direct[1].get('lookup_mode') == 'raw_tf_exact'):
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
             transform_xyyaw = direct[0]
             t_x, t_y, heading = transform_xyyaw
             cosine, sine = math.cos(heading), math.sin(heading)
@@ -2338,6 +2431,9 @@ class CooperativeExperimentLogger(Node):
             self.latest[r]['shared_pose_frame'] = self.p['global_frame']
             if self.p['enable_trajectory_overlap']:
                 self.trajectory.add(r, shared_x, shared_y)
+            if started is not None:
+                self._record_high_rate_timing(
+                    f'{r}.odom.shared_live_state', time.perf_counter() - started)
             return
         try:
             # This is passive evidence collection on the high-rate odometry
@@ -2345,10 +2441,16 @@ class CooperativeExperimentLogger(Node):
             # for every odometry message and therefore slow Webots/ROS time.
             # Preserve the same transform when it is immediately available;
             # the raw /tf stream is retained for offline cross-frame joins.
+            started = (time.perf_counter()
+                       if getattr(self, '_high_rate_profile_enabled', False)
+                       else None)
             transform=self.tf_buffer.lookup_transform(
                 self.p['global_frame'], msg.header.frame_id,
                 Time.from_msg(msg.header.stamp),
                 timeout=Duration(seconds=0.0))
+            if started is not None:
+                self._record_high_rate_timing(
+                    f'{r}.odom.tf2_lookup', time.perf_counter() - started)
             t=transform.transform.translation
             heading=yaw(transform.transform.rotation)
             cosine, sine=math.cos(heading), math.sin(heading)
@@ -2356,11 +2458,20 @@ class CooperativeExperimentLogger(Node):
             shared_y=t.y+sine*p.x+cosine*p.y
             shared_yaw=(heading+local_yaw+math.pi)%(2*math.pi)-math.pi
         except TransformException:
+            if started is not None:
+                self._record_high_rate_timing(
+                    f'{r}.odom.tf2_lookup', time.perf_counter() - started)
             # Do not feed local-frame points to cross-robot metrics.
             return
+        started = (time.perf_counter()
+                   if getattr(self, '_high_rate_profile_enabled', False)
+                   else None)
         self.latest[r]['shared_pose']=(shared_x,shared_y,shared_yaw)
         self.latest[r]['shared_pose_frame']=self.p['global_frame']
         if self.p['enable_trajectory_overlap']: self.trajectory.add(r,shared_x,shared_y)
+        if started is not None:
+            self._record_high_rate_timing(
+                f'{r}.odom.shared_live_state', time.perf_counter() - started)
     def command(self,r,msg,source='cmd_vel'):
         self.mark(r,'cmd_vel',msg)
         now=self.ros_seconds(); linear=float(msg.linear.x); angular=float(msg.angular.z)
@@ -4748,13 +4859,15 @@ class CooperativeExperimentLogger(Node):
             # independent transport diagnostic.
             if self.scan_matching_enabled:
                 self.write_scan_pipeline_diagnostic()
-            if self._callback_timing_enabled:
+            if (self._callback_timing_enabled or
+                    getattr(self, '_high_rate_profile_enabled', False)):
                 atomic_json(
                     self.directory / 'callback_timing.json',
                     {
                         'enabled': True,
                         'scope': 'cooperative_experiment_logger safe_call callbacks',
                         'timers_and_subscriptions': self._callback_timing,
+                        'high_rate_components': self._high_rate_profile,
                     },
                 )
             if self._sync_map_profile_enabled:

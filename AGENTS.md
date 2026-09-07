@@ -1,5 +1,26 @@
 # Validation safety rules
 
+## CANONICAL THESIS EXPERIMENT LAUNCHER
+
+All normal thesis Webots/ROS experiments MUST use:
+
+```bash
+python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 180
+python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 600
+python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 1200
+```
+
+Never manually rebuild `env -i` launch commands or manually recreate NAT,
+driver, `RUN_OUT`, ROS-library, ROS-domain, port, or experiment-runner
+environment values. The launcher constructs one exact child environment,
+validates that same environment, records it, and passes that same environment
+to the existing runner. It preserves ROS Jazzy vendor libraries, WSL NAT,
+`WSL_INTEROP`, the approved driver prefix, and the result root.
+
+Historical manual launches failed because `LD_LIBRARY_PATH`, `RUN_OUT`, and
+`MY_EPUCK_WEBOTS_NETWORK_MODE` were omitted in different runs. If the launcher
+breaks, fix and test the launcher rather than bypassing it.
+
 This checkout is the only workspace authorized for Webots/ROS 2 validation.
 The original checkout at `/home/arash/webots_ws` is dirty and must never be
 sourced, built, or used as the runtime package prefix for this validation.

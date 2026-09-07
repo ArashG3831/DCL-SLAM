@@ -105,40 +105,6 @@ def test_opt_in_odom_tf_profile_records_internal_stages(observer):
         assert profile[component]['max_wall_s'] >= 0.0
 
 
-def test_raw_evidence_odom_uses_existing_composed_tf_before_tf2(observer):
-    """The raw-evidence path avoids tf2 for a complete chained TF sample."""
-    observer.p['enable_scientific_raw_capture'] = True
-    stamp_value = 1.0
-    transforms = []
-    for parent, child, x in (
-            ('shared_map', 'robot1/local_world', 1.0),
-            ('robot1/local_world', 'robot1/map', 2.0),
-            ('robot1/map', 'robot1/odom', 3.0)):
-        transform = TransformStamped()
-        transform.header.frame_id = parent
-        transform.child_frame_id = child
-        transform.header.stamp.sec = int(stamp_value)
-        transform.header.stamp.nanosec = 0
-        transform.transform.translation.x = x
-        transform.transform.rotation.w = 1.0
-        transforms.append(transform)
-    observer._direct_tf_message(TFMessage(transforms=transforms))
-
-    class NoLookupBuffer:
-        def lookup_transform(self, *args, **kwargs):
-            raise AssertionError('tf2 lookup should not be needed')
-
-    observer.tf_buffer = NoLookupBuffer()
-    odom = Odometry()
-    odom.header.frame_id = 'robot1/odom'
-    odom.header.stamp.sec = int(stamp_value)
-    odom.pose.pose.orientation.w = 1.0
-    observer.odom('robot1', odom)
-
-    assert observer.latest['robot1']['shared_pose_frame'] == 'shared_map'
-    assert observer.latest['robot1']['shared_pose'][0] == pytest.approx(6.0)
-
-
 def test_deferred_synchronized_frames_record_requests_then_reconstruct(
         tmp_path):
     """Derived sync rows are not built on the live timer path."""

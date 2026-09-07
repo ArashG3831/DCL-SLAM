@@ -175,6 +175,9 @@ independent.
 
 ### 1. Exact avoidable idle and snappiness timeline integration
 
+**Status: DONE** — implemented in the current working tree; checkpoint hash is
+recorded in `reports/observer_evaluation_incremental_completion_20260907.md`.
+
 **Required raw inputs:** authoritative work-availability/actionability state,
 robot identity, state transitions and reasons, simulation timestamps, terminal
 events, dispatches, handoff/release events, candidate/bid/agreement events, and

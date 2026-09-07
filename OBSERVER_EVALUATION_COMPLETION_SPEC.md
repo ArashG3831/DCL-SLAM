@@ -243,6 +243,17 @@ zero-anomaly runs and incomplete-stream failures.
 
 ### 4. Fairness metric definition and implementation
 
+**Status: DONE** — offline workload components and a thesis-facing Jain index
+over first-seen-cell contribution are implemented. Checkpoint details are in
+the incremental completion report.
+
+**Definition:** workload contribution is first-seen known-cell ownership. The
+reported scalar is Jain's index `(sum(x)^2)/(n*sum(x^2))`; component values and
+shares for duplicate cells, distance, dispatched/successful goals, feasible
+work, avoidable idle, and productive engagement are emitted alongside it. A
+zero total is a valid zero-work case and produces a null scalar, not a false
+perfect score.
+
 **Required raw inputs:** per-robot assignments, completed work/contribution,
 travel and productive exploration measures, and the chosen experiment scope.
 

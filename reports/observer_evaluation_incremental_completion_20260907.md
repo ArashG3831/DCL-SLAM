@@ -262,9 +262,74 @@ window, near-goal, and edge-trigger semantics.
 
 Commit:
 
-Pending source checkpoint.
+`2bdc0ff` — `observer: add offline motion anomaly replay`.
 
 Remaining caveat:
 
 Runs without telemetry CSVs are explicitly unavailable for this metric; no
 anomaly is inferred from the absence of a stream.
+
+## Item 4 — Fairness metric definition and implementation
+
+Status: DONE
+
+Legacy definition/source:
+
+The preserved outputs expose per-robot first-seen ownership, duplicate
+contribution, distance, assignments, successful terminals, feasible work, idle,
+and productive engagement. They do not define one authoritative fairness
+scalar, so the minimal thesis-facing definition was recorded in the
+specification before implementation.
+
+Current raw evidence:
+
+Coverage ownership, odometry/motion, protocol assignment/terminal records, and
+the exact idle replay are already available to the evaluator.
+
+Existing reusable implementation:
+
+`offline_fairness.summarize_fairness` consumes those existing evaluator results;
+it adds no live capture and does not recalculate coverage, distance, protocol,
+or idle semantics.
+
+Gap identified:
+
+The evaluator had no combined workload table or explicit scalar definition.
+
+Implementation:
+
+Defined workload as first-seen known-cell contribution and emitted Jain's
+index, per-robot component values, and component shares for duplicate cells,
+distance, goals, feasible work, avoidable idle, and productive engagement.
+Zero-work and missing ownership remain distinct.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_fairness.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_fairness.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline fairness/motion/timing/protocol/metric tests: **37 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic component data verified the Jain calculation, component reporting,
+and fail-closed ownership behavior.
+
+Parity/semantic result:
+
+The definition is explicit and uses the existing first-seen ownership meaning;
+no live behavior or scientific capture changed.
+
+Commit:
+
+Pending source checkpoint.
+
+Remaining caveat:
+
+Historical artifacts without complete ownership cannot produce the scalar; they
+remain unavailable rather than being assigned a fabricated fairness value.

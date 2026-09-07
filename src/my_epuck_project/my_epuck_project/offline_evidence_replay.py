@@ -788,6 +788,13 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     if cooperation_summary is None:
         from .offline_protocol_replay import protocol_summary
         cooperation_summary = protocol_summary(cooperation, tuple(robots))
+    from .offline_fairness import summarize_fairness
+    fairness = summarize_fairness({
+        'coverage': coverage,
+        'motion': bag['motion'],
+        'cooperation_summary': cooperation_summary,
+        'avoidable_idle': timing['avoidable_idle'],
+    }, tuple(robots))
     protocol_contract = {
         'payload_parse_complete': bool(cooperation.get('available')),
         'work_availability_complete': work_availability_complete,
@@ -836,6 +843,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'work_availability': timing['work_availability'],
         'snappiness': timing['snappiness'],
         'motion_anomalies': motion_anomalies,
+        'fairness': fairness,
         'protocol_contract': protocol_contract,
         'semantic_contract': semantic,
         'handoff': handoff if unknown_initial_pose else {
@@ -868,6 +876,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         encoding='utf-8')
     (destination.parent / 'motion_anomalies.json').write_text(
         json.dumps(motion_anomalies, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8')
+    (destination.parent / 'fairness.json').write_text(
+        json.dumps(fairness, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
     return evaluation
 

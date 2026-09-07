@@ -160,3 +160,81 @@ BLOCKED items: 2 (items 6 and 8).
 
 The unambiguous item-by-item list is: DONE = 1, 2, 3, 4, 5, 7; BLOCKED = 6,
 8. This report is included in the item-8 commit and the follow-up docs commit.
+
+## Closure update — 2026-09-07
+
+The earlier status above was written before the proper ROS-enabled replay and
+the approved map-quality source were available. This section is the current
+closure status and supersedes the earlier provisional blocker summary.
+
+### ROS-enabled native-bag replay
+
+Both preserved complete-evidence Condition-C artifacts were replayed with the
+current source from a shell containing:
+
+```text
+source /opt/ros/jazzy/setup.bash
+source /tmp/observer_interfaces_replay_build_UCB3gH/install/setup.bash
+export PYTHONPATH="$PWD/src/my_epuck_project:${PYTHONPATH:-}"
+```
+
+The temporary interface prefix was built from the current source so the replay
+used current `FrontierCandidateArray` and
+`DistributedExplorationStatus` definitions rather than the stale installed
+classes. Replay wrote only to temporary `/tmp/closure_replay_*.json` outputs;
+the preserved run directories were not overwritten.
+
+| Artifact | Evaluator complete | Protocol contract | Handoff | GT rows/robot | Contact rows/robot | Payload parse errors |
+|---|---:|---:|---:|---:|---:|---|
+| `observer_metric_completeness_smoke_20260907_final2` | true | true | true | 9,047 | 9,047 | `{}` |
+| `finalization_grace_validation_20260907` | true | true | true | 9,047 | 9,047 | `{}` |
+
+Both runs cover 180.86 simulation seconds. The GT/contact row counts preserve
+the 20 ms capture cadence.
+
+### Certificate closure
+
+The smoke artifact has no certificate event because its replayed event types
+show the pair certificate path was not entered; it is classified
+`NOT_INVOKED`, not as a missing payload and not as zero by inference. The
+finalization-grace artifact has one `OBSERVED` certificate record containing
+all required fields: evaluated count, DNU count, blocking count, selected
+assignment score, optimistic unqueried bound, dispatch certification, and
+reason. An actually invoked future event that omits any required field still
+fails closed as `OBSERVED_INCOMPLETE`.
+
+### Map-quality closure
+
+`offline_map_quality.py` now selects the existing approved
+`src/my_epuck_project/tools/analyze_cooperative_decision_offline.py` analyzer
+for these canonical artifacts. It uses the canonical 40 m × 10 m world
+geometry (96 segments and 23 solid boxes) plus all four saved final maps:
+robot1/robot2 local maps and robot1/robot2 shared maps. This produces the
+established direct geometry/local/shared quality outputs. The older
+`analyze_slam_map_quality.py` is a separate 6 m × 6 m motion-course analyzer,
+not the canonical-world reference for these runs. No external truth-occupancy
+IoU is claimed because no approved external occupancy raster exists in the
+artifacts.
+
+### Navigation comparison caveat
+
+The raw action-status replay reports 3 `NAVIGATE_TO_POSE.ABORTED` statuses in
+the grace artifact because goals still active at the scientific horizon are
+aborted during cleanup. The authoritative protocol ledger reports 13 goals
+sent, 10 successful, 1 real failure, 0 cancellations, and 2 still active at
+the horizon, matching the legacy summary's scientific accounting. The
+current raw action view and the legacy event-level summary therefore have
+different layers and must not be compared as identical flat dictionaries.
+The grace artifact also contains one recovery count in its protocol failure
+payload while the legacy summary's `RECOVERY_COUNT_CHANGED` counter is zero;
+that field remains an explicit semantic caveat rather than a fabricated exact
+parity claim.
+
+### Current closure verdict
+
+Items 1–8 are complete within the evidence scope documented above. The frozen
+live observer required no change. Offline scientific evaluation is ready for
+campaign preparation, subject to the explicit rule that future reports must
+fail closed for missing invoked certificate payloads and must not claim
+external-reference occupancy IoU without an approved raster. No Webots run,
+1200-second run, or A/B/D campaign was started by this closure.

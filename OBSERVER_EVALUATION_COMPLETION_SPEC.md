@@ -175,10 +175,11 @@ independent.
 
 ### 1. Exact avoidable idle and snappiness timeline integration
 
-**Status: DONE** — commit `4ab6da3`; focused pure-Python replay tests passed
-and the offline output is integrated into `thin_metrics.json` plus named
-sidecars. ROS-dependent replay execution remains environment-gated because
-this shell has no `rclpy` installation.
+**Status: DONE** — commit `4ab6da3`; focused replay tests passed and the
+offline output is integrated into `thin_metrics.json` plus named sidecars.
+The preserved complete-evidence artifacts were subsequently replayed in the
+ROS-enabled shell with a matching current interface build; both replays
+completed successfully.
 
 **Required raw inputs:** authoritative work-availability/actionability state,
 robot identity, state transitions and reasons, simulation timestamps, terminal
@@ -202,8 +203,9 @@ as proof that work was unavailable.
 **Status: DONE** — protocol payload reduction, certificate completeness, DNU
 series, and compact cooperation summaries are implemented in the offline
 evaluator. Checkpoint commit: `74e3912`, with the follow-up reducer correction
-recorded in the incremental completion report. Checkpoint details are in that
-report.
+recorded in the incremental completion report. Closure replay confirmed both
+valid certificate states: `NOT_INVOKED` when the certificate path was not
+entered, and `OBSERVED` with all required payload fields when it was entered.
 
 **Required raw inputs:** candidate/task generations, bids, pair decisions,
 assignments, agreements, continuations, status/events, certificate reason and
@@ -287,11 +289,13 @@ populated or explicitly marked unavailable for a justified evidence reason.
 
 ### 6. SLAM and map-quality reports
 
-**Status: BLOCKED** — the evaluator now exposes an existing map-quality or
-physical-GT quality artifact when present, but the preserved canonical evidence
-does not contain a complete approved reference-map/quality result for all
-required local/shared map metrics. No quality score is inferred from coverage.
-Checkpoint details are in the incremental completion report.
+**Status: DONE with scoped caveat** — the evaluator now reuses the existing
+approved cooperative world-geometry map-quality analyzer against the preserved
+canonical world and final local/shared occupancy maps. No quality score is
+inferred from coverage. The project has no approved external occupancy raster
+for a truth-occupancy IoU claim in these artifacts; that unprovided quantity is
+not silently reported as zero or as an external-reference IoU.
+Checkpoint and closure details are in the incremental completion report.
 
 **Required raw inputs:** complete required map streams/snapshots, map metadata,
 TF/odom, ground-truth joins, resolution/origin/frame information, and any
@@ -327,12 +331,16 @@ was not observable from the run.
 
 ### 8. Final legacy-versus-current report comparison
 
-**Status: BLOCKED** — the final offline comparison/report is generated with
-explicit semantic statuses, but the preserved evidence still contains the
-map-quality reference gap and conditional certificate-payload gaps documented
-above. The current shell also lacks the ROS Python runtime required to replay a
-native bag for a fresh end-to-end comparison. Checkpoint details are in the
-incremental completion report.
+**Status: DONE with explicit semantic caveats** — the final comparison/report
+is generated with explicit semantic statuses. Native-bag replay was executed in
+a ROS-enabled shell using a fresh matching interface build. Certificate
+invocation is now distinguished from valid non-invocation, and the existing
+approved map-quality path produces direct local/shared quality artifacts. The
+raw action-status view intentionally counts goals aborted during cleanup,
+whereas the authoritative protocol ledger preserves goals still active at the
+horizon; this is a documented source-authority distinction, not a lost
+navigation result. No external-reference IoU is claimed without an approved
+reference raster. Checkpoint details are in the incremental completion report.
 
 **Required raw inputs:** all sources consumed by the completed metric modules,
 the preserved legacy reference outputs, manifests, and finalization records.
@@ -385,8 +393,8 @@ finalization state.
 - Do not begin A/B/D campaigns or a 1200 s campaign until the 180 s pipeline,
   raw completeness, offline reconstruction, and finalization gates pass.
 
-Current commit: `83d2261`
+Current implementation checkpoint: `52f68ae`
 
-Current state: **Offline completion roadmap implemented where evidence permits;
-items 6 and 8 remain explicitly blocked as documented in the final completeness
-report.**
+Current state: **Offline completion roadmap closure replay validated in a
+ROS-enabled environment; items 1–8 are complete within their explicitly
+documented evidence scope. No live observer change was required.**

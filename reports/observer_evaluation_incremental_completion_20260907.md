@@ -611,3 +611,110 @@ Roadmap terminal statuses: DONE = items 1, 2, 3, 4, 5, and 7; BLOCKED = items
 6 and 8. The final completeness report records the exact blocked fields and
 the fact that no live observer change, Webots run, 1200-second run, or A/B/D
 campaign was performed.
+
+## Closure checks — 2026-09-07
+
+Status:
+
+DONE within the documented evidence scope. This closure used preserved
+artifacts only; no Webots run, observer change, or campaign was performed.
+
+Legacy definition/source:
+
+The legacy summaries remain the behavioral reference. The closure specifically
+checked the native-bag replay environment, certificate invocation semantics,
+and the existing project map-quality/reference path.
+
+Current raw evidence:
+
+The two preserved Condition-C artifacts were:
+
+- `results/observer_metric_completeness_smoke_20260907_final2/fast_trial_20260907T091349Z/observer/fast_trial_20260907T091349Z-01`
+- `results/finalization_grace_validation_20260907/fast_trial_20260907T080217Z/observer/fast_trial_20260907T080217Z-01`
+
+Replay was run from a ROS-enabled shell with `/opt/ros/jazzy/setup.bash`, plus
+a fresh current `my_epuck_interfaces` build at
+`/tmp/observer_interfaces_replay_build_UCB3gH/install`. This avoided the stale
+installed message classes that lacked current fields such as
+`costmap_revision` and work-availability payloads.
+
+Existing reusable implementation:
+
+- `offline_evidence_replay.evaluate_run()` for complete native-bag replay;
+- `offline_protocol_replay.py` for structured protocol/certificate semantics;
+- `offline_map_quality.py` for the existing cooperative map-quality analyzer;
+- `src/my_epuck_project/tools/analyze_cooperative_decision_offline.py` for
+  canonical world-geometry/local/shared map scoring;
+- `offline_final_comparison.compare_outputs()` for semantic comparison status.
+
+Gap identified:
+
+The old generic comparison view counts action-status `ABORTED` states produced
+during horizon cleanup, while the legacy protocol ledger distinguishes goals
+that were still active at the horizon. The finalization-grace artifact also
+shows one recovery payload in raw navigation evidence while the legacy summary
+counter is zero; this is an authority/definition difference that must remain
+explicit, not be collapsed into false exact parity.
+
+Implementation:
+
+No new live architecture was introduced. The closure source checkpoints were:
+
+- `9581ae6` — classify evidence-backed non-cooperative/degraded runs as
+  certificate `NOT_INVOKED`, accept that valid state in the contract, and make
+  equal-timestamp dispatch replay deterministic;
+- `52f68ae` — reuse the existing approved cooperative map-quality analyzer,
+  preferring canonical world metadata and final local/shared map artifacts.
+
+The stale documentation statuses were updated to reflect the closure replay,
+with explicit caveats for unsupported external-reference IoU and the
+action-status/protocol-ledger distinction.
+
+Files changed in the closure documentation update:
+
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`;
+- `reports/observer_evaluation_final_completeness_20260907.md`;
+- this progress report.
+
+Tests:
+
+- focused offline comparison tests: **2 passed**;
+- closure protocol/map/timing tests: **8 passed**;
+- ROS-interface payload/contract tests with the fresh matching interface build:
+  **13 passed**.
+
+Validation:
+
+Both native-bag replays returned `complete=True`, protocol contract complete,
+handoff complete, and empty payload parse errors. Each had 9,047 GT rows per
+robot and 9,047 contact samples per robot, preserving the 20 ms capture
+cadence. The smoke run had certificate state `NOT_INVOKED` with event evidence
+showing the pair certificate path was not entered. The finalization-grace run
+had state `OBSERVED`, one certificate record, and all required fields:
+evaluated count, DNU count, blocking count, selected score, optimistic bound,
+dispatch certification, and reason.
+
+Map replay selected the existing
+`src/my_epuck_project/tools/analyze_cooperative_decision_offline.py` source,
+using the canonical 40 m × 10 m world geometry (96 segments, 23 solid boxes)
+and all four saved final local/shared maps. No external truth-occupancy IoU was
+fabricated because no approved reference raster is present.
+
+Parity/semantic result:
+
+The conditional certificate blocker is closed: valid non-invocation is distinct
+from invoked-but-incomplete payload, and the invoked fixture is complete. The
+map-quality reference-path blocker is closed for the established project
+geometry/local/shared outputs. The remaining navigation counter nuance is
+documented and does not indicate missing evidence or a live observer defect.
+
+Commit:
+
+`59ad2a2` — `docs: record offline evaluation closure checks`; no unrelated
+files were staged.
+
+Remaining caveat:
+
+Campaign reports must continue to fail closed for an invoked certificate with
+missing fields, and must not claim external-reference occupancy IoU without an
+approved raster. No campaign was started by this closure.

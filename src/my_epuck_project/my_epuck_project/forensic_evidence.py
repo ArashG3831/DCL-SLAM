@@ -85,6 +85,7 @@ class ForensicEvidenceWriter:
     """Stream bounded maps, PeerMap records, raw odometry and TF evidence."""
 
     MAP_KEYS = ("map", "shared_map")
+    HIGH_RATE_CSV_BATCH_SIZE = 128
 
     def __init__(self, directory, robots, interval_s=15.0,
                  scan_matching_enabled=False):
@@ -118,6 +119,7 @@ class ForensicEvidenceWriter:
             writer.writerow(odom_fields)
             self._odom_files[robot] = stream
             self._odom_writers[robot] = writer
+        self._odom_row_buffers = {robot: [] for robot in self.robots}
         self.peer_file = (self.root / "peer_map_records.csv").open(
             "w", newline="", encoding="utf-8")
         self.peer_writer = csv.DictWriter(self.peer_file, fieldnames=[
@@ -146,6 +148,7 @@ class ForensicEvidenceWriter:
         ]
         self.raw_tf_writer = csv.writer(self.raw_tf_file)
         self.raw_tf_writer.writerow(raw_tf_fields)
+        self._raw_tf_row_buffer = []
         self.synchronized_file = (
             self.root / "synchronized_map_frame.jsonl").open(
                 "w", encoding="utf-8", buffering=1)
@@ -291,7 +294,8 @@ class ForensicEvidenceWriter:
             return
         pose = message.pose.pose
         twist = message.twist.twist
-        self._odom_writers[robot].writerow((
+        rows = self._odom_row_buffers[robot]
+        rows.append((
             robot, received_ros, received_wall,
             _stamp_text(message.header.stamp), message.header.frame_id,
             pose.position.x, pose.position.y, pose.position.z,
@@ -300,6 +304,9 @@ class ForensicEvidenceWriter:
             twist.linear.x, twist.linear.y, twist.linear.z,
             twist.angular.x, twist.angular.y, twist.angular.z,
         ))
+        if len(rows) >= self.HIGH_RATE_CSV_BATCH_SIZE:
+            self._odom_writers[robot].writerows(rows)
+            rows.clear()
 
     def record_transform(self, query_ros, query_wall, target, source,
                          transform=None, error=""):
@@ -326,17 +333,21 @@ class ForensicEvidenceWriter:
         """Persist raw TF edges for post-run map-frame evaluation."""
         if self._closed or message is None:
             return
+        rows = self._raw_tf_row_buffer
         for item in getattr(message, "transforms", ()):
             stamp = item.header.stamp
             t = item.transform.translation
             q = item.transform.rotation
-            self.raw_tf_writer.writerow((
+            rows.append((
                 str(topic), bool(static), float(received_ros),
                 float(received_wall), _stamp_text(stamp),
                 str(item.header.frame_id), str(item.child_frame_id),
                 float(t.x), float(t.y), float(t.z), float(q.x), float(q.y),
                 float(q.z), float(q.w),
             ))
+        if len(rows) >= self.HIGH_RATE_CSV_BATCH_SIZE:
+            self.raw_tf_writer.writerows(rows)
+            rows.clear()
 
     def record_synchronized_map_frame(self, row):
         """Write one passive, timestamped map-frame synchronization sample.
@@ -446,6 +457,13 @@ class ForensicEvidenceWriter:
     def flush(self):
         if self._closed:
             return
+        for robot, rows in self._odom_row_buffers.items():
+            if rows:
+                self._odom_writers[robot].writerows(rows)
+                rows.clear()
+        if self._raw_tf_row_buffer:
+            self.raw_tf_writer.writerows(self._raw_tf_row_buffer)
+            self._raw_tf_row_buffer.clear()
         streams = [*self._odom_files.values(), self.peer_file, self.tf_file,
                    self.raw_tf_file, self.synchronized_file,
                    *self._scan_files.values()]

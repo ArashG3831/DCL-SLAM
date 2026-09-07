@@ -653,6 +653,16 @@ def _handoff_metrics(run_directory, manifest, gt_rows):
     root = Path(run_directory)
     candidates = list(root.glob('frontend/*_unknown_pose_frontend.json'))
     candidates += list(root.glob('forensic/frontend/*_unknown_pose_frontend.json'))
+    # The canonical runner stores the frontend evidence beside the per-run
+    # observer directory (trial/frontend), while older fixtures may keep it
+    # inside the run directory.  Both are the same structured source.
+    candidates += list(root.parent.glob('frontend/*_unknown_pose_frontend.json'))
+    candidates += list(root.parent.parent.glob(
+        'frontend/*_unknown_pose_frontend.json'))
+    if root.name.endswith('-01'):
+        trial_root = root.parent / root.name[:-3]
+        candidates += list(trial_root.glob(
+            'frontend/*_unknown_pose_frontend.json'))
     records = []
     expected = manifest.get('known_initial_relative_transform')
     for path in sorted(set(candidates)):
@@ -769,8 +779,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'reason': 'certificate status absent from protocol replay',
     }
     certificate_complete = bool(
-        certificate_status.get('payload_complete') and
-        cooperation.get('certificate_records'))
+        (certificate_status.get('payload_complete') and
+         cooperation.get('certificate_records')) or
+        certificate_status.get('state') == 'NOT_INVOKED')
     releases = cooperation.get('start_release_records', [])
     valid_releases = [item for item in releases
                       if item.get('event') == 'START_RELEASE' and

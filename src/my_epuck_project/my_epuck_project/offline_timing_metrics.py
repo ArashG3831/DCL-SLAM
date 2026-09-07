@@ -297,7 +297,7 @@ def protocol_snappiness(protocol, ready_sim=None, end_sim=None):
     terminal_pairs = [(float(item['sim_time_s']), item) for item in terminals
                       if item.get('sim_time_s') is not None]
     dispatch_to_terminal = []
-    for start, dispatch in sorted(dispatch_pairs):
+    for start, dispatch in sorted(dispatch_pairs, key=lambda item: item[0]):
         matches = [end for end in terminal_pairs if end[0] > start and
                    end[1].get('robot') == dispatch.get('robot') and
                    end[1].get('task_id') == dispatch.get('task_id')]

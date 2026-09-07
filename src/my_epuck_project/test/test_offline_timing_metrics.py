@@ -92,3 +92,18 @@ def test_analyze_protocol_exposes_item_one_outputs():
     assert 'avoidable_idle' in result
     assert 'work_availability' in result
     assert result['work_availability']['available'] is True
+
+
+def test_protocol_snappiness_handles_equal_timestamp_dispatches():
+    protocol = {
+        'cooperation_events': [],
+        'dispatches': [
+            {'sim_time_s': 1.0, 'robot': 'robot1', 'task_id': 'a'},
+            {'sim_time_s': 1.0, 'robot': 'robot2', 'task_id': 'b'},
+        ],
+        'navigation_terminals': [],
+        'generation_records': [],
+        'certificate_records': [],
+    }
+    result = protocol_snappiness(protocol)
+    assert result['dispatch_to_terminal']['count'] == 0

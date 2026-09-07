@@ -55,6 +55,16 @@ def test_missing_certificate_payload_is_not_synthesized():
     assert status['payload_complete'] is False
 
 
+def test_degraded_bid_array_without_pair_round_is_not_certificate_invocation():
+    from my_epuck_project.offline_protocol_replay import _certificate_status
+
+    status = _certificate_status(
+        [], [{'robot': 'robot1'}], [],
+        [{'event_type': 'DEGRADED_SOLO_COMMITMENT'}])
+    assert status['state'] == 'NOT_INVOKED'
+    assert status['payload_complete'] is False
+
+
 def test_certificate_payload_without_pair_or_bid_is_not_complete():
     from my_epuck_project.offline_protocol_replay import _certificate_status
 

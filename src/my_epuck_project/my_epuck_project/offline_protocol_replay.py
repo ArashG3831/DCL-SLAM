@@ -116,6 +116,26 @@ def _certificate_status(certificate_records, bid_records, pair_decisions,
             "required_fields": list(required_fields),
             "missing_fields": missing,
         }
+    event_types = sorted({str(item.get("event_type", ""))
+                          for item in cooperation_events})
+    non_cooperative = {
+        "DEGRADED_SOLO_COMMITMENT", "ROUND_INVALIDATED",
+        "INITIAL_LOCAL_EXPLORATION_SKIPPED_DUE_TO_HANDOFF",
+    }
+    # A local/degraded run can publish a bid array for its own fallback work
+    # without ever entering the pair certificate path.  The authoritative
+    # event stream proves that distinction; do not turn that valid absence
+    # into a missing certificate observation.
+    if (bid_records and not pair_decisions and
+            set(event_types) & non_cooperative):
+        return {
+            "state": "NOT_INVOKED",
+            "payload_complete": False,
+            "observation_count": 0,
+            "reason": "authoritative local/degraded events show the pair "
+                       "certificate path was not entered",
+            "event_types": event_types,
+        }
     if bid_records or pair_decisions:
         return {
             "state": "MISSING_OBSERVATIONS",
@@ -123,12 +143,6 @@ def _certificate_status(certificate_records, bid_records, pair_decisions,
             "observation_count": 0,
             "reason": "bids/decision payloads exist but no certificate payload",
         }
-    event_types = sorted({str(item.get("event_type", ""))
-                          for item in cooperation_events})
-    non_cooperative = {
-        "DEGRADED_SOLO_COMMITMENT", "ROUND_INVALIDATED",
-        "INITIAL_LOCAL_EXPLORATION_SKIPPED_DUE_TO_HANDOFF",
-    }
     if cooperation_events and set(event_types) & non_cooperative:
         return {
             "state": "NOT_INVOKED",

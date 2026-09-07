@@ -45,6 +45,12 @@ def test_result_root_must_be_below_results(tmp_path):
         launcher.validate_launcher_values(env, '172.18.32.1', tmp_path)
 
 
+def test_stale_generated_interfaces_are_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, '_helper', lambda *args: '[]')
+    with pytest.raises(RuntimeError, match='stale generated ROS interfaces'):
+        launcher.validate_interface_schema(_env(tmp_path))
+
+
 def test_main_passes_the_validated_environment_to_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, 'WORKSPACE', tmp_path)
     monkeypatch.setattr(launcher, 'PROJECT_INSTALL', tmp_path / 'install')
@@ -53,6 +59,7 @@ def test_main_passes_the_validated_environment_to_runner(monkeypatch, tmp_path):
         'LD_LIBRARY_PATH': launcher.VENDOR_LIBRARY, 'WSL_INTEROP': '/run/WSL/test'})
     monkeypatch.setattr(launcher, '_helper', lambda env, code, *args:
                         '172.18.32.1' if '_resolve_controller_host' in code
+                        else json.dumps(list(('feasible_work_available', 'actionable_work_available', 'work_availability_reason', 'stationary_witness_scheme_version'))) if 'my_epuck_interfaces.msg' in code
                         else json.dumps(env))
     monkeypatch.setattr(launcher, '_ldd', lambda env: {'ldd': 'ok'})
     monkeypatch.setattr(launcher, 'existing_preflight', lambda *args: {
@@ -90,6 +97,7 @@ def test_dry_run_does_not_invoke_runner(monkeypatch, tmp_path):
         'LD_LIBRARY_PATH': launcher.VENDOR_LIBRARY, 'WSL_INTEROP': '/run/WSL/test'})
     monkeypatch.setattr(launcher, '_helper', lambda env, code, *args:
                         '172.18.32.1' if '_resolve_controller_host' in code
+                        else json.dumps(list(('feasible_work_available', 'actionable_work_available', 'work_availability_reason', 'stationary_witness_scheme_version'))) if 'my_epuck_interfaces.msg' in code
                         else json.dumps(env))
     monkeypatch.setattr(launcher, '_ldd', lambda env: {'ldd': 'ok'})
     monkeypatch.setattr(launcher, 'existing_preflight', lambda *args: {

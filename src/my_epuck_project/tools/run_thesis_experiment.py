@@ -15,7 +15,7 @@ import sys
 
 WORKSPACE = Path(__file__).resolve().parents[3]
 ROS_SETUP = Path('/opt/ros/jazzy/setup.bash')
-PROJECT_INSTALL = WORKSPACE / 'install'
+PROJECT_INSTALL = WORKSPACE / 'install_canonical_thesis_20260907'
 LOOPBACK_SETUP = WORKSPACE / 'scripts/ros2_wsl_cyclonedds_loopback.sh'
 DRIVER_PREFIX = Path('/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver')
 WORLD_PROFILE = 'large_unknown_pose_close_start_20ms_scan_matching'
@@ -37,18 +37,25 @@ LauncherError = RuntimeError
 
 
 def _positive(value: str) -> float:
-    try:
-        result = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError('expected a positive number') from exc
-    if result <= 0.0:
-        raise argparse.ArgumentTypeError('expected a positive number')
+    try: result = float(value)
+    except ValueError as exc: raise argparse.ArgumentTypeError('expected a positive number') from exc
+    if result <= 0.0: raise argparse.ArgumentTypeError('expected a positive number')
     return result
 
 
 def _parse_env0(data: bytes) -> dict[str, str]:
     return {item.split('=', 1)[0]: item.split('=', 1)[1]
             for item in data.decode().split('\0') if '=' in item}
+
+
+def validate_interface_schema(env: dict[str, str]) -> None:
+    code = ('import json;from my_epuck_interfaces.msg import DistributedExplorationStatus as S, RelativePoseHypothesis as H;print(json.dumps([*S.get_fields_and_field_types(), *H.get_fields_and_field_types()]))')
+    fields = set(json.loads(_helper(env, code).splitlines()[-1]))
+    required = ('feasible_work_available', 'actionable_work_available',
+                'work_availability_reason', 'stationary_witness_scheme_version')
+    missing = [field for field in required if field not in fields]
+    if missing: raise LauncherError('CANONICAL_THESIS_PREFLIGHT_FAIL\n' +
+                                    'stale generated ROS interfaces: ' + ', '.join(missing))
 
 
 def source_clean_environment() -> dict[str, str]:
@@ -66,14 +73,13 @@ def source_clean_environment() -> dict[str, str]:
     return _parse_env0(completed.stdout)
 
 
-def canonical_environment(base: dict[str, str], result_root: Path,
-                           domain: int, port: int) -> dict[str, str]:
+def canonical_environment(base: dict[str, str], result_root: Path, domain: int, port: int) -> dict[str, str]:
     env = dict(base)
     env.update({
         'MY_EPUCK_WORKSPACE': str(WORKSPACE),
         'MY_EPUCK_INSTALL_PREFIX': str(PROJECT_INSTALL / 'my_epuck_project'),
         'MY_EPUCK_FRONTIER_PREFIX': str(PROJECT_INSTALL / 'frontier_exploration_ros2'),
-        'MY_EPUCK_BUILD_BASE': str(WORKSPACE / 'build'),
+        'MY_EPUCK_BUILD_BASE': str(WORKSPACE / 'build_canonical_thesis_20260907'),
         'MY_EPUCK_WEBOTS_DRIVER_PREFIX': str(DRIVER_PREFIX),
         'MY_EPUCK_WEBOTS_NETWORK_MODE': 'nat',
         'MY_EPUCK_DEFER_SYNC_MAP_FRAMES': '1',
@@ -112,8 +118,7 @@ def _ldd(env: dict[str, str]) -> dict[str, str]:
     return reports
 
 
-def validate_launcher_values(env: dict[str, str], host: str,
-                             result_root: Path) -> None:
+def validate_launcher_values(env: dict[str, str], host: str, result_root: Path) -> None:
     root = result_root.resolve()
     results = (WORKSPACE / 'results').resolve()
     if env.get('MY_EPUCK_WEBOTS_NETWORK_MODE') != 'nat':
@@ -130,14 +135,7 @@ def validate_launcher_values(env: dict[str, str], host: str,
     if not env.get('WSL_INTEROP'): raise LauncherError('WSL_INTEROP was not preserved')
 
 
-def require_tracked_clean() -> None:
-    if subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--'],
-                      cwd=WORKSPACE, check=False).returncode:
-        raise LauncherError('tracked worktree is not clean')
-
-
-def existing_preflight(env: dict[str, str], result_root: Path, domain: int,
-                       port: int) -> dict[str, object]:
+def existing_preflight(env: dict[str, str], result_root: Path, domain: int, port: int) -> dict[str, object]:
     code = '''import json, os, sys
 from my_epuck_project.cooperative_trial_fast import package_prefix, webots_driver_provenance, port_is_free
 from my_epuck_project.ros_runtime_preflight import require_runtime_provenance, run_preflight
@@ -208,13 +206,15 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
-    require_tracked_clean()
+    if subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--'], cwd=WORKSPACE, check=False).returncode:
+        raise LauncherError('tracked worktree is not clean')
     if not 0 <= args.ros_domain_id <= 230: raise SystemExit('--ros-domain-id must be between 0 and 230')
     name = f'thesis_condition_{args.condition}_{args.horizon:g}s_' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     result_root = (args.results_root or WORKSPACE / 'results' / name).resolve()
     env = canonical_environment(source_clean_environment(), result_root,
                                 args.ros_domain_id, args.webots_port)
     apply_existing_filter(env)
+    validate_interface_schema(env)
     launch_file = WORKSPACE / 'src/my_epuck_project/launch/two_robots_namespaced_launch.py'
     host_code = ('import importlib.util, sys; s=importlib.util.spec_from_file_location('
                  '"canonical_launch", sys.argv[1]); m=importlib.util.module_from_spec(s); '

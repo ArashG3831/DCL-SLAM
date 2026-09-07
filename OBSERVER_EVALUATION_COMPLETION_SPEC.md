@@ -287,6 +287,12 @@ populated or explicitly marked unavailable for a justified evidence reason.
 
 ### 6. SLAM and map-quality reports
 
+**Status: BLOCKED** — the evaluator now exposes an existing map-quality or
+physical-GT quality artifact when present, but the preserved canonical evidence
+does not contain a complete approved reference-map/quality result for all
+required local/shared map metrics. No quality score is inferred from coverage.
+Checkpoint details are in the incremental completion report.
+
 **Required raw inputs:** complete required map streams/snapshots, map metadata,
 TF/odom, ground-truth joins, resolution/origin/frame information, and any
 accepted quality thresholds.

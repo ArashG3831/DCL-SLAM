@@ -803,6 +803,8 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'motion_anomalies': motion_anomalies,
     }
     scaling_windows = analyze_windows(window_evaluation)
+    from .offline_map_quality import map_quality_report
+    map_quality_report_value = map_quality_report(run_directory)
     protocol_contract = {
         'payload_parse_complete': bool(cooperation.get('available')),
         'work_availability_complete': work_availability_complete,
@@ -853,6 +855,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'motion_anomalies': motion_anomalies,
         'fairness': fairness,
         'scaling_windows': scaling_windows,
+        'map_quality_report': map_quality_report_value,
         'protocol_contract': protocol_contract,
         'semantic_contract': semantic,
         'handoff': handoff if unknown_initial_pose else {
@@ -891,6 +894,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         encoding='utf-8')
     (destination.parent / 'scaling_windows.json').write_text(
         json.dumps(scaling_windows, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8')
+    (destination.parent / 'map_quality_report.json').write_text(
+        json.dumps(map_quality_report_value, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
     return evaluation
 

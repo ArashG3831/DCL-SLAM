@@ -396,3 +396,70 @@ Remaining caveat:
 
 Per-window fields whose source artifact has no time series remain omitted rather
 than estimated from aggregate totals.
+
+## Item 6 — SLAM / map-quality reports
+
+Status: BLOCKED
+
+Legacy definition/source:
+
+The repository contains `tools/analyze_slam_map_quality.py` for the established
+known-arena geometric report and the legacy physical-GT finalization artifact.
+These are not interchangeable with a general local/shared map quality suite.
+
+Current raw evidence:
+
+Coverage replay has map snapshots and the evaluator can load
+`forensic/physical_gt_evaluation.json`. A complete approved reference-map
+artifact and all required local/shared occupancy comparison inputs are not
+present in the preserved evidence used by this roadmap.
+
+Existing reusable implementation:
+
+`offline_map_quality.map_quality_report` loads an existing `map_quality.json`
+or physical-GT artifact and preserves its payload. It does not fabricate IoU,
+agreement, or alignment values from coverage counts.
+
+Gap identified:
+
+The full thesis-facing map-quality family cannot be completed from the current
+preserved raw contract without an approved reference map/quality source and its
+semantic definition for each required local/shared comparison.
+
+Implementation:
+
+Added an explicit availability adapter and sidecar
+`map_quality_report.json`; missing reference evidence is reported as blocked.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_map_quality.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_map_quality.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline map-quality/window/fairness/motion/timing/protocol/metric
+  tests: **41 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic tests verified reuse of existing artifacts and fail-closed missing
+reference behavior.
+
+Parity/semantic result:
+
+No new quality definition was introduced. The available established artifact is
+preserved; the unsupported portion is explicitly blocked rather than reported
+as a numerical zero.
+
+Commit:
+
+Pending source checkpoint.
+
+Remaining caveat:
+
+This item requires an approved reference-map/quality evidence source before a
+complete thesis report can be claimed.

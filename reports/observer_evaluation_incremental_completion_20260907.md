@@ -333,3 +333,66 @@ Remaining caveat:
 
 Historical artifacts without complete ownership cannot produce the scalar; they
 remain unavailable rather than being assigned a fabricated fairness value.
+
+## Item 5 — Scaling-window analyzer
+
+Status: DONE
+
+Legacy definition/source:
+
+The specification fixes five simulation-time windows: 0–180, 180–360,
+360–600, 600–900, and 900–1200 seconds. Existing metrics are already computed
+in their authoritative modules and are not reimplemented here.
+
+Current raw evidence:
+
+The evaluator exposes simulation-time coverage samples, protocol records,
+avoidable-idle segments, and replayed motion anomaly events.
+
+Existing reusable implementation:
+
+`offline_window_metrics.analyze_windows` slices those parsed representations,
+uses half-open `[start,end)` boundaries, and clips idle segments to the window.
+
+Gap identified:
+
+No reusable report gave consistent window boundaries or distinguished a window
+beyond the recorded horizon from a valid zero-activity window.
+
+Implementation:
+
+Added window summaries for coverage samples/gain/AUC, protocol event counts,
+idle/productive values, and anomaly events. A window whose end is not reached
+by the artifact clock is `NOT_AVAILABLE`, never zero-filled.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_window_metrics.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_window_metrics.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline window/fairness/motion/timing/protocol/metric tests: **39 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic boundary data verified that an event at exactly 180 seconds belongs
+to the next window and that horizons shorter than a configured window are
+explicitly unavailable.
+
+Parity/semantic result:
+
+Windowing is an analysis/reporting layer only; it does not alter any underlying
+metric definition or include samples after a boundary.
+
+Commit:
+
+Pending source checkpoint.
+
+Remaining caveat:
+
+Per-window fields whose source artifact has no time series remain omitted rather
+than estimated from aggregate totals.

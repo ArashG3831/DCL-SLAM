@@ -795,6 +795,14 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'cooperation_summary': cooperation_summary,
         'avoidable_idle': timing['avoidable_idle'],
     }, tuple(robots))
+    from .offline_window_metrics import analyze_windows
+    window_evaluation = {
+        'clock': bag['clock'], 'coverage': coverage,
+        'cooperation': cooperation,
+        'avoidable_idle': timing['avoidable_idle'],
+        'motion_anomalies': motion_anomalies,
+    }
+    scaling_windows = analyze_windows(window_evaluation)
     protocol_contract = {
         'payload_parse_complete': bool(cooperation.get('available')),
         'work_availability_complete': work_availability_complete,
@@ -844,6 +852,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'snappiness': timing['snappiness'],
         'motion_anomalies': motion_anomalies,
         'fairness': fairness,
+        'scaling_windows': scaling_windows,
         'protocol_contract': protocol_contract,
         'semantic_contract': semantic,
         'handoff': handoff if unknown_initial_pose else {
@@ -879,6 +888,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         encoding='utf-8')
     (destination.parent / 'fairness.json').write_text(
         json.dumps(fairness, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8')
+    (destination.parent / 'scaling_windows.json').write_text(
+        json.dumps(scaling_windows, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
     return evaluation
 

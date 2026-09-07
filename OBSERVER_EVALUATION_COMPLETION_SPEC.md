@@ -269,6 +269,10 @@ zero-denominator behavior, and explicit handling of empty or non-invoked work.
 
 ### 5. Scaling-window analyzer
 
+**Status: DONE** — reusable half-open simulation-time windows and explicit
+`NOT_AVAILABLE` horizon handling are implemented. Checkpoint details are in
+the incremental completion report.
+
 **Required raw inputs:** simulation-time boundaries, coverage/motion/protocol /
 reliability streams, and the authoritative window cut rules.
 

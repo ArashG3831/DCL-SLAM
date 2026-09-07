@@ -70,3 +70,45 @@ The preserved failed 1200 s run cannot demonstrate the finalized request-time
 CSV because shutdown interrupted finalization. A fresh run with normal
 finalization must prove that the request-time coverage artifact is generated and
 that the [360,600) and later windows remain evaluable.
+
+## Fix family 2 — bounded offloaded finalization
+
+Status: IMPLEMENTED — focused long-input tests pass; runtime confirmation is
+deferred to the authorized 600 s validation.
+
+### Root cause
+
+`_repair_offloaded_health()` repeatedly called `_offloaded_topic_records()` for
+each health row. That operation filtered and sorted the complete per-topic
+receipt history, then `_last_received()` rebuilt a timestamp list for the same
+row. The rolling ten-second rate then scanned the same records a third time.
+At long horizons this made finalization grow with the product of health rows and
+receipt history, and it was the operation active when shutdown escalation
+interrupted finalization.
+
+### Implementation
+
+The finalizer now builds one sorted record list and one sorted receipt-time tuple
+per topic. Timeseries age joins use binary search over the tuple. Health age and
+the legacy inclusive `[sim_time - 10, sim_time]` rate window use
+`bisect_left`/`bisect_right` over the same tuple. Existing one-argument helper
+entry points remain compatible and construct the same indexes when called
+directly. No raw rows, CSV fields, rates, stale thresholds, or timestamp
+semantics were changed.
+
+### Tests
+
+The focused logger/offload/coverage/window suite passed: **85 passed**. The
+long-input regression exercises 12,001 receipt records, headerless receipts,
+last-receipt joins, and both endpoints of the ten-second rate window.
+
+### Commit
+
+Pending in this working checkpoint; this family will be committed separately
+after the report update.
+
+### Remaining caveat
+
+The optimization is a finalization-only change. A fresh 600 s run must verify
+that normal shutdown writes all final artifacts without escalation and that the
+indexed output remains semantically equivalent on a real long evidence history.

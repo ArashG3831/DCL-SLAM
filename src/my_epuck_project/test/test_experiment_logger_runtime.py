@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from types import SimpleNamespace
 
 import pytest
@@ -103,6 +103,38 @@ def test_opt_in_odom_tf_profile_records_internal_stages(observer):
         assert profile[component]['calls'] == 1
         assert profile[component]['total_wall_s'] >= 0.0
         assert profile[component]['max_wall_s'] >= 0.0
+
+
+def test_offloaded_finalization_indexes_preserve_receipt_join_boundaries():
+    """Health repair indexing has the same inclusive timestamp semantics."""
+    timing = {
+        '/robot1/odom': [
+            {'received_sim_s': float(index), 'sequence': index}
+            for index in range(12000, -1, -1)
+        ] + [{'received_sim_s': None, 'sequence': 'headerless'}],
+        '/robot1/cmd_vel': [
+            {'received_sim_s': 100.0},
+            {'received_sim_s': 110.0},
+            {'received_sim_s': 120.0},
+        ],
+    }
+    records, times = CooperativeExperimentLogger._offloaded_topic_indexes(
+        timing)
+
+    assert len(records['/robot1/odom']) == 12001
+    assert times['/robot1/odom'][0] == 0.0
+    assert times['/robot1/odom'][-1] == 12000.0
+    assert CooperativeExperimentLogger._last_received_from_times(
+        times['/robot1/odom'], 12000.0) == 12000.0
+    assert CooperativeExperimentLogger._last_received_from_times(
+        times['/robot1/odom'], -1.0) is None
+
+    # The historical health implementation counted both endpoints in this
+    # ten-second window.  The indexed implementation must do the same.
+    received = times['/robot1/cmd_vel']
+    left = bisect_left(received, 110.0 - 10.0)
+    right = bisect_right(received, 110.0)
+    assert right - left == 2
 
 
 def test_deferred_synchronized_frames_record_requests_then_reconstruct(

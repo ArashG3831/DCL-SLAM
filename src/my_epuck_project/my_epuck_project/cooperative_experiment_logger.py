@@ -3820,22 +3820,49 @@ class CooperativeExperimentLogger(Node):
         return values
 
     @staticmethod
+    def _offloaded_topic_indexes(timing):
+        """Build the deferred receipt indexes once for finalization.
+
+        The previous repair path filtered and sorted the complete receipt
+        history for every health row.  Keep the same records and ordering, but
+        materialize each topic once and retain a parallel timestamp sequence
+        for binary-search joins.  This changes only finalization work, not the
+        receipt evidence or any health boundary semantics.
+        """
+        records_by_topic = {}
+        received_times_by_topic = {}
+        for topic, values in timing.items():
+            records = [item for item in values
+                       if item.get('received_sim_s') is not None]
+            records.sort(key=lambda item: float(item['received_sim_s']))
+            records_by_topic[topic] = records
+            received_times_by_topic[topic] = tuple(
+                float(item['received_sim_s']) for item in records)
+        return records_by_topic, received_times_by_topic
+
+    @staticmethod
     def _record_received_times(records):
         return [float(item['received_sim_s']) for item in records]
 
     @staticmethod
+    def _last_received_from_times(received_times, sim_time):
+        index = bisect_right(received_times, float(sim_time)) - 1
+        return (None if index < 0 else float(received_times[index]))
+
+    @staticmethod
     def _last_received(records, sim_time):
         received = CooperativeExperimentLogger._record_received_times(records)
-        index = bisect_right(received, float(sim_time)) - 1
-        return (None if index < 0 else float(received[index]))
+        return CooperativeExperimentLogger._last_received_from_times(
+            received, sim_time)
 
     def _restore_offloaded_artifacts(self, timing):
         """Rebuild the old live-derived sensor fields from lossless bag rows."""
+        topic_records, topic_times = self._offloaded_topic_indexes(timing)
         for robot in self.robots:
             fixed_topic = f'/{robot}/scan_d500_fixed'
             nav_topic = f'/{robot}/scan_d500_nav'
-            fixed = self._offloaded_topic_records(timing, fixed_topic)
-            nav = self._offloaded_topic_records(timing, nav_topic)
+            fixed = topic_records.get(fixed_topic, ())
+            nav = topic_records.get(nav_topic, ())
             if not fixed or not nav:
                 raise ValueError(
                     f'missing reconstructed scan rows for {robot}')
@@ -3852,16 +3879,19 @@ class CooperativeExperimentLogger(Node):
                           float(item['header_stamp_s']))
                 values['scan_d500_nav_ages_s'].append(age)
 
-        self._repair_offloaded_timeseries(timing)
-        self._repair_offloaded_health(timing)
+        self._repair_offloaded_timeseries(timing, topic_records, topic_times)
+        self._repair_offloaded_health(timing, topic_records, topic_times)
 
-    def _repair_offloaded_timeseries(self, timing):
+    def _repair_offloaded_timeseries(self, timing, topic_records=None,
+                                     topic_times=None):
+        if topic_records is None or topic_times is None:
+            topic_records, topic_times = self._offloaded_topic_indexes(timing)
         for robot in self.robots:
             path = self.directory / f'{robot}_timeseries.csv'
             if not path.is_file():
                 raise FileNotFoundError(path)
             topic = f'/{robot}/scan_d500_slam'
-            records = self._offloaded_topic_records(timing, topic)
+            records = topic_records.get(topic, ())
             rows = []
             with path.open(newline='', encoding='utf-8') as stream:
                 reader = csv.DictReader(stream)
@@ -3872,7 +3902,8 @@ class CooperativeExperimentLogger(Node):
             for row in rows:
                 sim_time = (float(row['ros_time_sec']) +
                             float(row['ros_time_nanosec']) * 1.0e-9)
-                received = self._last_received(records, sim_time)
+                received = self._last_received_from_times(
+                    topic_times.get(topic, ()), sim_time)
                 row['scan_age_s'] = '' if received is None else str(
                     max(0.0, sim_time - received))
             temporary = path.with_suffix('.csv.offload.tmp')
@@ -3882,7 +3913,10 @@ class CooperativeExperimentLogger(Node):
                 writer.writerows(rows)
             os.replace(temporary, path)
 
-    def _repair_offloaded_health(self, timing):
+    def _repair_offloaded_health(self, timing, topic_records=None,
+                                 topic_times=None):
+        if topic_records is None or topic_times is None:
+            topic_records, topic_times = self._offloaded_topic_indexes(timing)
         path = self.directory / 'topic_health.csv'
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -3931,17 +3965,16 @@ class CooperativeExperimentLogger(Node):
             if len(parts) != 2 or parts[1] not in limits:
                 continue
             key = parts[1]
-            records = self._offloaded_topic_records(
-                timing, source_topics[key](parts[0]))
+            source_topic = source_topics[key](parts[0])
+            received_times = topic_times.get(source_topic, ())
             sim_time = (float(row['ros_time_sec']) +
                         float(row['ros_time_nanosec']) * 1.0e-9)
-            received = self._last_received(records, sim_time)
+            received = self._last_received_from_times(received_times, sim_time)
             age = None if received is None else max(0.0, sim_time - received)
             limit = limits[key]
-            rate = sum(
-                1 for item in records
-                if sim_time - 10.0 <= float(item['received_sim_s']) <= sim_time
-            ) / 10.0
+            left = bisect_left(received_times, sim_time - 10.0)
+            right = bisect_right(received_times, sim_time)
+            rate = (right - left) / 10.0
             row['topic_rate_hz'] = str(rate)
             row['topic_age_s'] = '' if age is None else str(age)
             row['stale'] = str(age is None or age > limit)

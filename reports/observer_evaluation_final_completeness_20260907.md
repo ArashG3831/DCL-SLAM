@@ -84,8 +84,8 @@ Ordered commits after `db0f890`:
 7. `cd5b8a5` — `observer: add offline scaling windows`
 8. `de7a198` — `observer: expose offline map quality status`
 9. `d0592b4` — `observer: add offline reciprocal handoff verification`
-10. final documentation/comparison checkpoint: recorded after this report is
-    committed.
+10. `83d2261` — `observer: record final offline evaluation completeness`;
+    documentation status metadata is closed in the follow-up docs commit.
 
 Each functional change was isolated and followed by focused pure-Python tests.
 No unrelated dirty files were staged.
@@ -158,6 +158,5 @@ conditional payload blocking is intentionally described below).
 
 BLOCKED items: 2 (items 6 and 8).
 
-The count sentence above intentionally follows the roadmap statuses table's
-semantic convention; the unambiguous item-by-item list is: DONE = 1, 2, 3, 4,
-5, 7; BLOCKED = 6, 8.
+The unambiguous item-by-item list is: DONE = 1, 2, 3, 4, 5, 7; BLOCKED = 6,
+8. This report is included in the item-8 commit and the follow-up docs commit.

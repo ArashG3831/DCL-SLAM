@@ -594,10 +594,20 @@ in the final completeness report.
 
 Commit:
 
-Pending final documentation checkpoint.
+`83d2261` — `observer: record final offline evaluation completeness`; this
+documentation follow-up closes the status metadata.
 
 Remaining caveat:
 
 The offline layer is not marked campaign-ready until a ROS-enabled replay can
 validate the current bag and the reference-map/certificate evidence blockers
 are resolved or formally approved as replacements.
+
+## Final roadmap checkpoint
+
+Final source/report commit: `83d2261`.
+
+Roadmap terminal statuses: DONE = items 1, 2, 3, 4, 5, and 7; BLOCKED = items
+6 and 8. The final completeness report records the exact blocked fields and
+the fact that no live observer change, Webots run, 1200-second run, or A/B/D
+campaign was performed.

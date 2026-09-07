@@ -385,7 +385,8 @@ finalization state.
 - Do not begin A/B/D campaigns or a 1200 s campaign until the 180 s pipeline,
   raw completeness, offline reconstruction, and finalization gates pass.
 
-Current commit: `9d76768`
+Current commit: `83d2261`
 
-Current state: **Specification created; implementation not started from this
-roadmap.**
+Current state: **Offline completion roadmap implemented where evidence permits;
+items 6 and 8 remain explicitly blocked as documented in the final completeness
+report.**

@@ -48,12 +48,6 @@ def _float(value, default=0.0):
 
 
 def _state_name(value):
-    failure_by_class = {}
-    for robot in robots:
-        for key, value in protocol.get("robots", {}).get(
-                robot, {}).get("failure_classes", {}).items():
-            failure_by_class[key] = failure_by_class.get(key, 0) + int(value)
-
     return {
         0: "WAITING_FOR_INPUTS", 1: "BIDDING",
         2: "WAITING_FOR_MATCHING_DECISION", 3: "NAVIGATING",

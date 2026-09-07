@@ -187,8 +187,14 @@ explicitly incomplete under the existing contract.
 
 Commit:
 
-Pending until the item-2 source/docs checkpoint is created; the final hash is
-recorded in the follow-up checkpoint below.
+`74e3912` — `observer: complete offline cooperation and certificate summaries`.
+
+The post-commit focused replay check also found and corrected a local reducer
+aggregation defect before this checkpoint was finalized; the amended checkpoint
+hash is recorded in the spec and git history.
+
+This checkpoint contains only the item-2 evaluator/replay integration, its
+focused tests, and the corresponding roadmap/progress status.
 
 Remaining caveat:
 

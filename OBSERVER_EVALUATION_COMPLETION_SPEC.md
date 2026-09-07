@@ -201,7 +201,9 @@ as proof that work was unavailable.
 
 **Status: DONE** — protocol payload reduction, certificate completeness, DNU
 series, and compact cooperation summaries are implemented in the offline
-evaluator. Checkpoint details are in the incremental completion report.
+evaluator. Checkpoint commit: `74e3912`, with the follow-up reducer correction
+recorded in the incremental completion report. Checkpoint details are in that
+report.
 
 **Required raw inputs:** candidate/task generations, bids, pair decisions,
 assignments, agreements, continuations, status/events, certificate reason and

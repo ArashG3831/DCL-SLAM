@@ -979,6 +979,19 @@ def test_finalization_writes_explicit_complete_artifact_contract(observer):
         "artifact_finalization"]["complete"] is True
 
 
+def test_summary_accepts_deferred_warning_mapping_records(observer):
+    observer._deferred_warning_records = [{
+        "node_name": "/planner",
+        "severity": "WARN",
+        "normalized_message": "planner warning",
+        "occurrence_count": 3,
+    }]
+
+    summary = observer.summary(False)
+
+    assert summary["anomalies"]["warning_occurrences"] == 3
+
+
 def test_missing_forensic_artifact_fails_closed(observer):
     class FakeForensic:
         def flush(self):

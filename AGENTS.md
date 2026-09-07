@@ -216,6 +216,11 @@ Before preserving or extending custom infrastructure, verify:
 
 Do not solve bugs in custom layers by adding more custom layers unless the existing architecture and requirements justify it.
 
+## Observer/evaluation completion specification
+
+The single source of truth for observer/evaluation completion requirements is
+`OBSERVER_EVALUATION_COMPLETION_SPEC.md`.
+
 ## Completed-task report handoff
 
 After completing a full Codex task and providing its summary, if the task

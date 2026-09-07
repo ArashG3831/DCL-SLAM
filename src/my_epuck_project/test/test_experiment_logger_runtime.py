@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from bisect import bisect_left, bisect_right
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1038,6 +1039,15 @@ def test_finalization_writes_explicit_complete_artifact_contract(observer):
     assert status["missing"] == []
     assert read_json(observer.directory / "summary.json")[
         "artifact_finalization"]["complete"] is True
+
+
+def test_signal_handler_is_restored_only_after_logger_finalization():
+    source = Path(
+        "src/my_epuck_project/my_epuck_project/cooperative_experiment_logger.py"
+    ).read_text(encoding="utf-8")
+    finalize = source.index("node.finalize(clean)")
+    restore = source.index("signal.signal(signum, handler)", finalize)
+    assert finalize < restore
 
 
 def test_summary_accepts_deferred_warning_mapping_records(observer):

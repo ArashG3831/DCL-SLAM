@@ -81,7 +81,11 @@ LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
     '/robot2/unknown_pose_frontend',
 )
 SHUTDOWN_GRACE_S = 20.0
-OBSERVER_FINALIZATION_GRACE_S = 60.0
+# The legacy observer performs bounded native-bag export and deferred replay
+# after the scientific horizon.  The 600 s acceptance artifact measured this
+# path at just over the old 60 s barrier; keep the barrier finite, but do not
+# signal the logger again while its expected finalization is still running.
+OBSERVER_FINALIZATION_GRACE_S = 120.0
 SHUTDOWN_TERM_S = 10.0
 WATCHDOG_TERM_GRACE_S = 3.0
 

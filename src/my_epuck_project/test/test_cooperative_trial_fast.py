@@ -331,7 +331,7 @@ def test_observer_shutdown_uses_dedicated_bounded_finalization_grace(monkeypatch
     assert selected == [7]
     assert sent == [fast.signal.SIGINT]
     assert len(waits) == 1
-    assert waits[0][1] == fast.OBSERVER_FINALIZATION_GRACE_S == 60.0
+    assert waits[0][1] == fast.OBSERVER_FINALIZATION_GRACE_S == 120.0
 
 
 def test_launch_group_escalation_waits_for_observer_barrier(monkeypatch):

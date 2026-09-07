@@ -5034,15 +5034,25 @@ def main(args=None):
             raise
     except BaseException: clean=False; raise
     finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
         if node is not None:
-            node.finalize(clean)
+            # Keep the shutdown handler installed until the complete artifact
+            # finalizer returns.  The runner has a finite observer barrier and
+            # may deliver a second SIGINT after that barrier expires; restoring
+            # Python's default handler before finalize() turns that expected
+            # escalation into KeyboardInterrupt inside native-bag replay.
+            try:
+                node.finalize(clean)
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
             if executor is not None:
                 executor.remove_node(node)
                 executor.shutdown()
             if node.context.ok():
                 node.destroy_node()
+        else:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
         if profiler is not None:
             profiler.disable()
             profiler.dump_stats(profile_path)

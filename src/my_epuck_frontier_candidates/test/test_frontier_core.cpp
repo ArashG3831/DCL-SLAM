@@ -141,15 +141,15 @@ TEST(AsyncRequests,OldGenerationCannotTouchReplacement){
   EXPECT_FALSE(async_request_is_current(7,7,11,12,true));
   EXPECT_FALSE(async_request_is_current(7,7,12,12,false));
 }
-TEST(FairEvaluation, SixteenStableFrontiersWithBudgetFiveEventuallyAllQueried){
+TEST(FairEvaluation, SixteenStableFrontiersWithBudgetEightEventuallyAllQueried){
   std::vector<FrontierEvaluationRecord> records;
   for (uint64_t id = 1; id <= 16; ++id) {
     records.push_back(FrontierEvaluationRecord{id, true, false, false, 0, 0});
   }
   std::vector<uint64_t> queried;
-  for (int cycle = 0; cycle < 4; ++cycle) {
-    const auto selected = fair_frontier_query_order(records, 8, 5);
-    ASSERT_LE(selected.size(), 5U);
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    const auto selected = fair_frontier_query_order(records, 8, 8);
+    ASSERT_LE(selected.size(), 8U);
     for (const auto index : selected) {
       queried.push_back(records[index].id);
       records[index].never_queried = false;

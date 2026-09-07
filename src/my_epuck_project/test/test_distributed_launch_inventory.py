@@ -42,6 +42,16 @@ def test_full_launch_enables_only_the_common_local_dispatch_boundary():
     assert "'maximum_union_tasks': 10" in assignment_text
 
 
+def test_frontier_query_budget_matches_candidate_selection_bound():
+    """Keep the production C frontier drain aligned with its selection cap."""
+    for name in (
+            'two_robots_frontier_candidates_launch.py',
+            'two_robots_decentralized_exploration_launch.py'):
+        text = (LAUNCH / name).read_text()
+        assert "'maximum_candidates_before_path_check': 8" in text
+        assert "'maximum_path_queries_per_cycle': 8" in text
+
+
 def test_legacy_baseline_remains_explicitly_reachable():
     """Preserve the old claim-only launch for thesis comparison."""
     text = (LAUNCH / 'two_robots_legacy_claim_baseline_launch.py').read_text()

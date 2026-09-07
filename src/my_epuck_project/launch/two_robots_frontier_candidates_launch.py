@@ -33,7 +33,7 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'approach_clearance_m': approach_clearance,
             'minimum_robot_distance_m': 0.08,
             'maximum_candidates_before_path_check': 8,
-            'maximum_path_queries_per_cycle': 5,
+            'maximum_path_queries_per_cycle': 8,
             'path_query_timeout_s': 1.0,
             # Mirrors the authoritative shared RPP profiles: desired_linear_vel
             # 0.13 m/s and rotate_to_heading_angular_vel 0.35 rad/s.  These

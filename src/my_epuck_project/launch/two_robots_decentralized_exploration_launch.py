@@ -363,7 +363,7 @@ def launch_setup(context):
                         'approach_clearance_m': 0.15,
                         'minimum_robot_distance_m': 0.08,
                         'maximum_candidates_before_path_check': 8,
-                        'maximum_path_queries_per_cycle': 5,
+                        'maximum_path_queries_per_cycle': 8,
                         'path_query_timeout_s': 1.0,
                         # Mirrors nav2_robot{1,2}_shared_map.yaml RPP motion
                         # references; not controller tuning or an ETA model.

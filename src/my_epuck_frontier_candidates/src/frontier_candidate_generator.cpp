@@ -208,7 +208,7 @@ public:
     P(double, planner_tolerance_m, .5);
     P(double, minimum_robot_distance_m, .08);
     P(int, maximum_candidates_before_path_check, 8);
-    P(int, maximum_path_queries_per_cycle, 5);
+    P(int, maximum_path_queries_per_cycle, 8);
     P(double, path_query_timeout_s, 1.0);
     P(std::string, planner_id, "GridBased");
     P(std::string, selection_policy, "frontier_mrtsp");

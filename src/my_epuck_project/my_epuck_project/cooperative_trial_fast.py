@@ -76,6 +76,7 @@ LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
     '/robot2/unknown_pose_frontend',
 )
 SHUTDOWN_GRACE_S = 20.0
+OBSERVER_FINALIZATION_GRACE_S = 60.0
 SHUTDOWN_TERM_S = 10.0
 WATCHDOG_TERM_GRACE_S = 3.0
 
@@ -861,6 +862,106 @@ def stop_process(process: subprocess.Popen, sig: int):
         pass
 
 
+def _logger_processes(launch):
+    """Return passive experiment logger processes below this launch only."""
+    try:
+        root = psutil.Process(launch.pid)
+        descendants = root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+    result = []
+    for process in descendants:
+        try:
+            command = process.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if any('cooperative_experiment_logger' in part
+               for part in command):
+            result.append(process)
+    return result
+
+
+def _mission_processes(launch):
+    """Return launch descendants that must stop before logger finalization.
+
+    The Webots process and paced Supervisor stay alive while ROS mission
+    children (including unknown-pose frontends) flush their terminal files.
+    The experiment logger and external forensic observer are handled by their
+    own ordered barriers below.
+    """
+    try:
+        root = psutil.Process(launch.pid)
+        descendants = root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+    result = []
+    for process in descendants:
+        try:
+            command = ' '.join(process.cmdline()).lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if any(token in command for token in (
+                'cooperative_experiment_logger',
+                'cooperative_ground_truth_observer',
+                'webots.exe',
+                'paced_ros2_supervisor')):
+            continue
+        result.append(process)
+    return result
+
+
+def shutdown_mission_before_logger(launch, absolute_deadline=None) -> list[int]:
+    """Stop mission/front-end children before freezing logger artifacts."""
+    processes = _mission_processes(launch)
+    pids = [process.pid for process in processes]
+    for process in processes:
+        try:
+            process.send_signal(signal.SIGINT)
+        except (OSError, psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if processes:
+        timeout = SHUTDOWN_GRACE_S
+        if absolute_deadline is not None:
+            timeout = max(0.0, min(timeout, absolute_deadline - time.monotonic()))
+        try:
+            psutil.wait_procs(processes, timeout=timeout)
+        except (OSError, psutil.Error):
+            pass
+    return pids
+
+
+def shutdown_observer_before_launch(launch, absolute_deadline=None) -> list[int]:
+    """Finalize the passive logger/observer before stopping Webots.
+
+    The launch process group contains Webots and the ROS logger, while the
+    forensic Supervisor observer is a separate session owned by the logger.
+    Signal the logger directly, not the process group: it then signals the
+    observer while Webots is still advancing, allowing the observer's next
+    Supervisor.step() to return and its final metrics to be written.  Only
+    after this barrier is it safe to stop Webots and the remaining launch.
+    """
+    processes = _logger_processes(launch)
+    pids = [process.pid for process in processes]
+    for process in processes:
+        try:
+            process.send_signal(signal.SIGINT)
+        except (OSError, psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if processes:
+        # The legacy logger closes the 30-second rosbag recorder and then
+        # materializes deferred artifacts before it exits.  Keep this
+        # observer-only barrier separate from the launch teardown grace so a
+        # still-finalizing logger is not killed with the launch process group.
+        timeout = OBSERVER_FINALIZATION_GRACE_S
+        if absolute_deadline is not None:
+            timeout = max(0.0, min(timeout, absolute_deadline - time.monotonic()))
+        try:
+            psutil.wait_procs(processes, timeout=timeout)
+        except (OSError, psutil.Error):
+            pass
+    return pids
+
+
 def wait_process(process: subprocess.Popen, timeout: float,
                  absolute_deadline: float | None = None) -> bool:
     deadline = time.monotonic() + max(0.0, float(timeout))
@@ -886,6 +987,10 @@ def wait_process(process: subprocess.Popen, timeout: float,
 
 
 def shutdown_processes(launch, rviz=None, absolute_deadline=None) -> dict:
+    mission_pids = shutdown_mission_before_logger(
+        launch, absolute_deadline=absolute_deadline)
+    observer_logger_pids = shutdown_observer_before_launch(
+        launch, absolute_deadline=absolute_deadline)
     stop_process(launch, signal.SIGINT)
     if rviz is not None:
         stop_process(rviz, signal.SIGINT)

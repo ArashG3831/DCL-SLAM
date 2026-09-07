@@ -1,5 +1,6 @@
 from pathlib import Path
 import inspect
+import threading
 from types import SimpleNamespace
 
 from my_epuck_project import cooperative_trial_fast as fast
@@ -234,6 +235,94 @@ def test_wait_process_continues_cleanup_after_sigint(monkeypatch):
     process = InterruptOnceProcess()
     assert fast.wait_process(process, 1.0) is True
     assert process.calls == 2
+
+
+def test_observer_shutdown_uses_dedicated_bounded_finalization_grace(monkeypatch):
+    sent = []
+    waits = []
+
+    class Logger:
+        pid = 7
+
+        def cmdline(self):
+            return ['/install/cooperative_experiment_logger']
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+    class Root:
+        def children(self, recursive=False):
+            assert recursive is True
+            return [Logger()]
+
+    monkeypatch.setattr(fast.psutil, 'Process', lambda pid: Root())
+    monkeypatch.setattr(
+        fast.psutil, 'wait_procs',
+        lambda processes, timeout: waits.append((processes, timeout)))
+
+    selected = fast.shutdown_observer_before_launch(
+        SimpleNamespace(pid=42))
+
+    assert selected == [7]
+    assert sent == [fast.signal.SIGINT]
+    assert len(waits) == 1
+    assert waits[0][1] == fast.OBSERVER_FINALIZATION_GRACE_S == 60.0
+
+
+def test_launch_group_escalation_waits_for_observer_barrier(monkeypatch):
+    events = []
+    observer_started = threading.Event()
+    release_observer = threading.Event()
+    result = {}
+
+    class Launch:
+        pid = 99
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def observer_barrier(launch, absolute_deadline=None):
+        del launch, absolute_deadline
+        events.append('observer_started')
+        observer_started.set()
+        assert release_observer.wait(1.0)
+        events.append('observer_finished')
+        return [7]
+
+    def record_signal(process, sig):
+        events.append(('launch_signal', process.pid, sig))
+
+    def bounded_wait(process, timeout, absolute_deadline=None):
+        del process, absolute_deadline
+        events.append(('launch_wait', timeout))
+        return False
+
+    monkeypatch.setattr(fast, 'shutdown_mission_before_logger',
+                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(fast, 'shutdown_observer_before_launch',
+                        observer_barrier)
+    monkeypatch.setattr(fast, 'stop_process', record_signal)
+    monkeypatch.setattr(fast, 'wait_process', bounded_wait)
+
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            'cleanup', fast.shutdown_processes(Launch())))
+    thread.start()
+    assert observer_started.wait(1.0)
+    assert not any(
+        isinstance(event, tuple) and event[0] == 'launch_signal'
+        for event in events)
+
+    release_observer.set()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert events[:2] == ['observer_started', 'observer_finished']
+    signals = [event[2] for event in events
+               if isinstance(event, tuple) and event[0] == 'launch_signal']
+    assert signals == [fast.signal.SIGINT, fast.signal.SIGTERM,
+                       fast.signal.SIGKILL]
+    assert result['cleanup']['graceful'] is False
 
 
 def test_ready_probe_horizon_uses_live_clock_not_observer_files():

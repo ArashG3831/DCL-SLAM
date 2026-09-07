@@ -193,3 +193,43 @@ focused test will be committed separately.
 The 1200 s artifact has the four maps but was finalized incompletely. The fresh
 600 s run must demonstrate that normal finalization and the provenance-resolved
 analyzer produce `map_quality_report.json` with the approved metrics.
+
+## Fix family 5 — output-root and clean-provenance boundary
+
+Status: VERIFIED — no production source change required.
+
+### Root cause
+
+The failed 1200 s invocation constructed a clean child environment but did not
+pass its intended `RUN_ROOT` variable through that boundary. The runner then
+received its default output root (`.`), so generated result files appeared under
+the source workspace and were reflected as `worktree_dirty` in the run
+manifest. This was an invocation/wrapper defect, independent of observer
+semantics and independent of source changes.
+
+### Verification and correction
+
+The tracked runner already passes an explicit absolute `output_root` and
+`run_id` in its launch argument list, and `prepare_attempt()` derives the
+attempt directory from the explicit `--results-directory` argument. The clean
+launch procedure for the next run will therefore pass the absolute results
+directory as a command-line argument inside the `env -i` child, rather than
+depending on an unexported `RUN_ROOT`. The existing environment filter remains
+responsible for removing only the excluded old workspace while preserving ROS
+vendor paths and the approved driver prefix.
+
+Existing runner tests cover filtered environments and explicit output-root
+launch arguments. No source modification is justified for this external
+wrapper mistake.
+
+### Commit
+
+This verification is recorded in the remediation report; no source commit is
+needed for this family.
+
+### Remaining caveat
+
+The next preflight must print and verify the exact absolute results directory,
+the generated attempt path, and the manifest's `runtime_worktree` separately
+from its output directory. Any result that resolves to the repository root
+instead of the requested results directory must be rejected before launch.

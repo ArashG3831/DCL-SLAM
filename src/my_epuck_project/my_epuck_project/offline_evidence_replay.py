@@ -206,6 +206,7 @@ def _read_bag(run_directory: Path, robots, retain_map_data=False):
             'aborted': terminals.count(6),
         }
     return {
+        'run_directory': str(Path(run_directory)),
         'clock': {
             'message_count': len(clock_rows),
             'start_s': clock_rows[0][1] if clock_rows else None,
@@ -499,8 +500,13 @@ def _coverage(bag, robots, condition, manifest):
     # A is explicitly robot1-local; C is explicitly robot1-shared.  Keep the
     # peer curve as a diagnostic, never silently merge it into the main curve.
     canonical_robot = robots[0] if robots else 'robot1'
-    selected = _dedupe_series(
-        bag['map_series'].get(canonical_robot, {}).get(source_kind, []))
+    selected = None
+    if condition == 'C':
+        selected = _load_finalized_coverage_series(
+            Path(bag.get('run_directory', '')), canonical_robot)
+    if selected is None:
+        selected = _dedupe_series(
+            bag['map_series'].get(canonical_robot, {}).get(source_kind, []))
     peer = {
         robot: _dedupe_series(bag['map_series'][robot][source_kind])
         for robot in robots if robot != canonical_robot
@@ -528,6 +534,71 @@ def _coverage(bag, robots, condition, manifest):
                 (peer_series[-1]['known_cells'] if peer_series else 0)),
         }
     return _coverage_milestones(result, manifest)
+
+
+def _load_finalized_coverage_series(run_directory, canonical_robot):
+    """Load the observer's authoritative request-time coverage artifact.
+
+    Condition-C fusion publishes a new ``OccupancyGrid`` only when its payload
+    changes.  Once exploration has reached a fixed map state, the native
+    shared-map topic is therefore intentionally sparse even though the map
+    state remains valid.  The legacy finalizer already materializes the exact
+    request-time coverage rows from that payload plus the causal map receipts.
+    Prefer that artifact for the offline curve so a change-only ROS stream is
+    not mistaken for the end of the scientific time series.
+
+    A present-but-empty or malformed artifact is an error, not a signal to
+    fall back to the sparse map stream.  This keeps finalization fail-closed.
+    """
+    if not run_directory:
+        return None
+    path = Path(run_directory) / 'coverage.csv'
+    if not path.is_file():
+        return None
+    required = {
+        'ros_time_sec', 'ros_time_nanosec', 'known_area_m2',
+        f'{canonical_robot}_shared_known', 'shared_occupied_cells',
+        'shared_unknown_cells',
+    }
+    series = []
+    with path.open(newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = set(reader.fieldnames or ())
+        missing = sorted(required - fieldnames)
+        if missing:
+            raise ValueError(
+                f'coverage.csv missing authoritative fields: {missing}')
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                sim_time = (float(row['ros_time_sec']) +
+                            float(row['ros_time_nanosec']) * 1.0e-9)
+                known_cells = int(float(row[
+                    f'{canonical_robot}_shared_known']))
+                occupied_cells = int(float(row['shared_occupied_cells']))
+                unknown_cells = int(float(row['shared_unknown_cells']))
+                area_m2 = float(row['known_area_m2'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'invalid authoritative coverage row {row_number}') from exc
+            if not all(math.isfinite(value) for value in (
+                    sim_time, area_m2)) or known_cells < 0:
+                raise ValueError(
+                    f'invalid authoritative coverage values row {row_number}')
+            series.append({
+                'sim_time_s': sim_time,
+                'known_cells': known_cells,
+                'occupied_cells': occupied_cells,
+                'unknown_cells': unknown_cells,
+                'area_m2': area_m2,
+                'topic': f'/{canonical_robot}/shared_map',
+            })
+    if not series:
+        raise ValueError('coverage.csv is present but contains no rows')
+    ordered = sorted(series, key=lambda item: item['sim_time_s'])
+    for previous, current in zip(ordered, ordered[1:]):
+        if current['sim_time_s'] <= previous['sim_time_s']:
+            raise ValueError('coverage.csv simulation times are not increasing')
+    return ordered
 
 
 def _coverage_milestones(result, manifest):

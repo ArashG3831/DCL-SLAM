@@ -106,3 +106,92 @@ silently claimed by item 1. The existing legacy idle merge semantics may need a
 separate scientific-definition decision if future parity evidence demonstrates
 that goal-active transitions must split adjacent feasible intervals; no such
 definition change is made here.
+
+## Item 2 — Cooperation, assignment, agreement, certificate, and DNU summaries
+
+Status: DONE
+
+Legacy definition/source:
+
+The legacy observer's distributed message callbacks and final coordination
+summary define candidate/task batches, bids, pair decisions, agreement and
+continuation events, dispatch/terminal accounting, failure classes, and
+cost-only certificate fields. Native raw message payloads are authoritative;
+no decision is inferred from a missing message.
+
+Current raw evidence:
+
+`offline_protocol_replay.replay_protocol` reads the current FrontierCandidateArray,
+TaskSnapshot, TaskBidArray, PairDecision, DistributedExplorationStatus,
+DistributedExplorationEvent, ExplorationFailure, and START_RELEASE streams.
+It preserves source robot, simulation/header time, generation/round/session
+identity, payload values, and the complete certificate JSON payload when the
+certificate event exists.
+
+Existing reusable implementation:
+
+The existing parsed record lists remain the single payload representation.
+`protocol_summary` is a compact reduction over those records; it does not
+deserialize or store a second copy of full messages. Existing `_state_name`,
+`_failure_name`, `_bound_entry_count`, and dispatch/terminal event streams are
+reused.
+
+Gap identified:
+
+The prior evaluator exposed raw lists and small robot counters but no final
+cooperation summary, per-round reduction, certificate field-completeness
+classification, or DNU time-series artifact.
+
+Implementation:
+
+- added `protocol_summary` with candidate/task/bid/pair/agreement/continuation /
+  claim/assignment/terminal/failure/certificate/DNU and per-round summaries;
+- retained explicit zero counts only where the corresponding raw stream was
+  read, and retained `NOT_INVOKED`/`NO_EVIDENCE` distinctions for certificates;
+- made certificate payload completeness require the actual audited fields:
+  evaluated count, DNU count, blocking count, selected score, optimistic
+  score, dispatch certification, and reason;
+- integrated `cooperation_summary` into `thin_metrics.json` and emitted the
+  compact `cooperation_summary.json` sidecar;
+- added focused summary and fail-closed certificate tests.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_protocol_replay.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_protocol_payload.py`
+- `src/my_epuck_project/test/test_offline_protocol_summary.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline timing/protocol/metric tests: **33 passed**;
+- Python syntax compilation for changed offline modules: **PASS**;
+- ROS-dependent native message fixture execution remains unavailable in this
+  shell because `rclpy` is not installed; the existing test collection error
+  is recorded, not reclassified as a protocol result.
+
+Validation:
+
+No Webots run was needed. Synthetic parsed payloads proved compact summary
+counts, per-round identity handling, valid zero pair-decision semantics, and
+fail-closed incomplete certificate payload handling.
+
+Parity/semantic result:
+
+The raw parsed records remain available for exact comparison, while summaries
+are derived only from those records. Certificate absence is never synthesized
+as a certified zero. The final evaluator now exposes the required item-2
+summary surfaces; any run lacking a required certificate payload remains
+explicitly incomplete under the existing contract.
+
+Commit:
+
+Pending until the item-2 source/docs checkpoint is created; the final hash is
+recorded in the follow-up checkpoint below.
+
+Remaining caveat:
+
+The raw source cannot prove a certificate field that was not published by the
+allocator. Such fields remain `OBSERVED_INCOMPLETE`/blocked rather than being
+reconstructed from bids, pair decisions, or dispatches.

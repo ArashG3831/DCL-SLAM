@@ -48,6 +48,12 @@ def _float(value, default=0.0):
 
 
 def _state_name(value):
+    failure_by_class = {}
+    for robot in robots:
+        for key, value in protocol.get("robots", {}).get(
+                robot, {}).get("failure_classes", {}).items():
+            failure_by_class[key] = failure_by_class.get(key, 0) + int(value)
+
     return {
         0: "WAITING_FOR_INPUTS", 1: "BIDDING",
         2: "WAITING_FOR_MATCHING_DECISION", 3: "NAVIGATING",
@@ -99,12 +105,22 @@ def _certificate_status(certificate_records, bid_records, pair_decisions,
     contract.  Only an actual ``COST_ONLY_DISPATCH_CERTIFICATE`` payload is
     an observed certificate; absence is never converted into a fake record.
     """
+    required_fields = (
+        "evaluated_candidate_count", "detected_not_queried_count",
+        "blocking_unqueried_candidates",
+        "current_evaluated_assignment_score",
+        "best_optimistic_unqueried_score", "dispatch_certified", "reason")
     if certificate_records:
+        missing = sorted({field for field in required_fields
+                          if any(field not in record
+                                 for record in certificate_records)})
         return {
-            "state": "OBSERVED",
-            "payload_complete": True,
+            "state": "OBSERVED" if not missing else "OBSERVED_INCOMPLETE",
+            "payload_complete": not missing,
             "observation_count": len(certificate_records),
             "reason": "certificate payloads replayed",
+            "required_fields": list(required_fields),
+            "missing_fields": missing,
         }
     if bid_records or pair_decisions:
         return {
@@ -134,6 +150,180 @@ def _certificate_status(certificate_records, bid_records, pair_decisions,
         "observation_count": 0,
         "reason": "no certificate, bid, pair, or explanatory protocol event",
         "event_types": event_types,
+    }
+
+
+def _per_robot_records(records, robots):
+    return {
+        robot: [item for item in records if item.get("robot") == robot]
+        for robot in robots
+    }
+
+
+def protocol_summary(protocol, robots=("robot1", "robot2")):
+    """Reduce parsed raw protocol records into thesis-facing summaries.
+
+    The complete payload records remain available in ``protocol``.  This
+    function stores only counts, explicit zero states, and compact time-series
+    rows needed by the final report.
+    """
+    robots = tuple(str(robot) for robot in robots)
+    events = list(protocol.get("cooperation_events", []))
+    event_types = {}
+    for event in events:
+        name = str(event.get("event_type", ""))
+        _increment(event_types, name)
+
+    def event_subset(names):
+        return [event for event in events
+                if event.get("event_type") in set(names)]
+
+    agreement_events = event_subset(("DECISION_AGREED",))
+    continuation_events = [event for event in events
+                           if "CONTINUATION" in str(
+                               event.get("event_type", "")).upper()]
+    claims = [event for event in events
+              if "CLAIM" in str(event.get("event_type", "")).upper()]
+    failures = list(protocol.get("failure_records", []))
+    terminals = list(protocol.get("navigation_terminals", []))
+    dispatches = list(protocol.get("dispatches", []))
+    dnu_series = []
+    for item in protocol.get("generation_records", []):
+        if item.get("kind") == "candidate":
+            dnu_series.append({
+                "robot": item.get("robot"),
+                "sim_time_s": item.get("sim_time_s"),
+                "source": "candidate",
+                "detected_not_queried_count": item.get(
+                    "detected_not_queried_count", 0),
+                "candidate_generation_id": item.get(
+                    "candidate_generation_id", 0),
+            })
+    for item in protocol.get("status_records", []):
+        dnu_series.append({
+            "robot": item.get("robot"),
+            "sim_time_s": item.get("sim_time_s"),
+            "source": "distributed_status",
+            "detected_not_queried_count": item.get(
+                "detected_not_queried_count", 0),
+            "actionable_reachable_count": item.get(
+                "actionable_reachable_count", 0),
+        })
+    dnu_series.sort(key=lambda item: (
+        float(item.get("sim_time_s") or 0.0), str(item.get("robot", ""))))
+
+    terminal_by_robot = _per_robot_records(terminals, robots)
+    dispatch_by_robot = _per_robot_records(dispatches, robots)
+    terminal_summary = {}
+    for robot in robots:
+        values = terminal_by_robot[robot]
+        terminal_summary[robot] = {
+            "count": len(values),
+            "succeeded": sum(event.get("event_type") ==
+                              "NAVIGATION_SUCCEEDED" for event in values),
+            "failed": sum(event.get("event_type") ==
+                           "NAVIGATION_FAILED" for event in values),
+            "cancelled": sum(event.get("event_type") in
+                              ("NAVIGATION_CANCELED", "NAVIGATION_CANCELLED")
+                              for event in values),
+        }
+
+    round_ids = sorted({str(item.get("round_id", "")) for item in events
+                        if item.get("round_id")})
+    rounds = []
+    for round_id in round_ids:
+        round_events = [item for item in events
+                        if str(item.get("round_id", "")) == round_id]
+        rounds.append({
+            "round_id": round_id,
+            "event_count": len(round_events),
+            "event_types": sorted({str(item.get("event_type", ""))
+                                    for item in round_events}),
+            "bid_count": sum(item.get("round_id") == round_id
+                              for item in protocol.get("bid_records", [])),
+            "pair_decision_count": sum(item.get("round_id") == round_id
+                                        for item in protocol.get(
+                                            "pair_decisions", [])),
+            "dispatch_count": sum(item.get("round_id") == round_id
+                                   for item in dispatches),
+        })
+
+    certificate_status = protocol.get("certificate_status", {
+        "state": "NO_EVIDENCE", "payload_complete": False,
+    })
+    failure_by_class = {}
+    for robot in robots:
+        for key, value in protocol.get("robots", {}).get(
+                robot, {}).get("failure_classes", {}).items():
+            failure_by_class[key] = failure_by_class.get(key, 0) + int(value)
+    return {
+        "available": bool(protocol.get("available")),
+        "event_types": event_types,
+        "candidate_batches": {
+            "total": sum(item.get("kind") == "candidate" for item in
+                          protocol.get("generation_records", [])),
+            "by_robot": {
+                robot: sum(item.get("kind") == "candidate" and
+                           item.get("robot") == robot for item in
+                           protocol.get("generation_records", []))
+                for robot in robots},
+        },
+        "task_snapshots": {
+            "total": sum(item.get("kind") == "task_snapshot" for item in
+                          protocol.get("generation_records", [])),
+        },
+        "bids": {
+            "batches": sum(int(protocol.get("robots", {}).get(
+                robot, {}).get("bid_batches", 0)) for robot in robots),
+            "records": len(protocol.get("bid_records", [])),
+            "valid_records": sum(bool(item.get("path_valid")) for item in
+                                  protocol.get("bid_records", [])),
+        },
+        "pair_decisions": {
+            "records": len(protocol.get("pair_decisions", [])),
+            "unique_decision_hashes": len({item.get("decision_hash") for item
+                                           in protocol.get("pair_decisions", [])
+                                           if item.get("decision_hash")}),
+        },
+        "agreements": {
+            "publications": len(agreement_events),
+            "unique_rounds": len({item.get("round_id") for item in
+                                  agreement_events if item.get("round_id")}),
+            "unique_decisions": len({item.get("decision_hash") for item in
+                                     agreement_events if item.get(
+                                         "decision_hash")}),
+        },
+        "continuations": {"records": len(continuation_events)},
+        "claims": {"records": len(claims)},
+        "assignments": {"dispatches": len(dispatches),
+                         "by_robot": {robot: len(dispatch_by_robot[robot])
+                                       for robot in robots}},
+        "terminals": terminal_summary,
+        "failures": {
+            "records": len(failures),
+            "by_class": failure_by_class,
+            "by_robot": {
+                robot: protocol.get("robots", {}).get(robot, {}).get(
+                    "failure_classes", {}) for robot in robots},
+        },
+        "certificate": {
+            "status": certificate_status,
+            "observations": len(protocol.get("certificate_records", [])),
+        },
+        "dnu": {
+            "series": dnu_series,
+            "observations": len(dnu_series),
+            "by_robot": {
+                robot: [item for item in dnu_series
+                        if item.get("robot") == robot]
+                for robot in robots},
+        },
+        "rounds": rounds,
+        "zero_event_semantics": {
+            "pair_decisions": "observed_zero_only_if_topic_was_read",
+            "agreements": "observed_zero_only_if_event_stream_was_read",
+            "certificates": "NOT_INVOKED or MISSING_EVIDENCE, never implicit zero",
+        },
     }
 
 

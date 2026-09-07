@@ -199,6 +199,10 @@ as proof that work was unavailable.
 
 ### 2. Cooperation, assignment, agreement, certificate, and DNU summaries
 
+**Status: DONE** — protocol payload reduction, certificate completeness, DNU
+series, and compact cooperation summaries are implemented in the offline
+evaluator. Checkpoint details are in the incremental completion report.
+
 **Required raw inputs:** candidate/task generations, bids, pair decisions,
 assignments, agreements, continuations, status/events, certificate reason and
 counts, DNU state, dispatches, terminals, source/session/epoch identity, and

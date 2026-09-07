@@ -782,6 +782,10 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     from .offline_timing_metrics import analyze_protocol
     timing = analyze_protocol(
         cooperation, ready_sim=release_time, end_sim=bag['clock'].get('end_s'))
+    cooperation_summary = cooperation.get('summary')
+    if cooperation_summary is None:
+        from .offline_protocol_replay import protocol_summary
+        cooperation_summary = protocol_summary(cooperation, tuple(robots))
     protocol_contract = {
         'payload_parse_complete': bool(cooperation.get('available')),
         'work_availability_complete': work_availability_complete,
@@ -825,6 +829,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'efficiency': _efficiency_metrics(coverage, bag['motion']),
         'navigation': bag['navigation'],
         'cooperation': cooperation,
+        'cooperation_summary': cooperation_summary,
         'avoidable_idle': timing['avoidable_idle'],
         'work_availability': timing['work_availability'],
         'snappiness': timing['snappiness'],
@@ -855,6 +860,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
             'snappiness': timing['snappiness'],
             'work_availability': timing['work_availability'],
         }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    (destination.parent / 'cooperation_summary.json').write_text(
+        json.dumps(cooperation_summary, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8')
     return evaluation
 
 

@@ -224,6 +224,10 @@ diagnosis.
 
 ### 3. Motion anomaly replay
 
+**Status: DONE** — the offline replay invokes the existing `MotionDetector`
+implementation against legacy telemetry rows and preserves edge-triggered
+episode semantics. Checkpoint details are in the incremental completion report.
+
 **Required raw inputs:** timestamped poses/odometry, velocity/cmd streams,
 dispatches, terminals, state transitions, map/context evidence where required,
 and the existing anomaly thresholds/definitions.

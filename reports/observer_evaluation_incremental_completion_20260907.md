@@ -201,3 +201,70 @@ Remaining caveat:
 The raw source cannot prove a certificate field that was not published by the
 allocator. Such fields remain `OBSERVED_INCOMPLETE`/blocked rather than being
 reconstructed from bids, pair decisions, or dispatches.
+
+## Item 3 — Motion anomaly replay
+
+Status: DONE
+
+Legacy definition/source:
+
+`experiment_metrics.MotionDetector` is the existing authority for windowed,
+edge-triggered `NO_PROGRESS`, `STUCK`, and `OSCILLATION` detection. The live
+observer feeds it from each robot's telemetry row, with a near-goal exclusion.
+
+Current raw evidence:
+
+The legacy telemetry streams `robot*_timeseries.csv` retain the same simulation
+time, pose, command, navigation-active, and distance-remaining fields supplied
+to the detector. A valid empty stream is distinct from an absent or malformed
+stream.
+
+Existing reusable implementation:
+
+`offline_motion_metrics.replay_timeseries` calls the existing
+`MotionDetector.update` directly. It does not copy the thresholds or implement
+a parallel detector. It reconstructs edge events and pairs STARTED/CLEARED
+events into open or closed episodes.
+
+Gap identified:
+
+The evaluator had no deferred anomaly artifact; anomaly counts were previously
+available only in the live summary/events output.
+
+Implementation:
+
+Added `offline_motion_metrics.py`, integrated `motion_anomalies` into
+`thin_metrics.json`, and emitted `motion_anomalies.json`. Missing and valid
+zero-event streams remain explicitly different.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_motion_metrics.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_motion_metrics.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline motion/timing/protocol/metric tests: **35 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic telemetry proved parity of detector thresholds and edge transitions,
+including clearing an episode and an empty-valid stream.
+
+Parity/semantic result:
+
+The same `MotionDetector` class remains the sole anomaly algorithm. The replay
+uses the legacy row order and simulation-time values, preserving threshold,
+window, near-goal, and edge-trigger semantics.
+
+Commit:
+
+Pending source checkpoint.
+
+Remaining caveat:
+
+Runs without telemetry CSVs are explicitly unavailable for this metric; no
+anomaly is inferred from the absence of a stream.

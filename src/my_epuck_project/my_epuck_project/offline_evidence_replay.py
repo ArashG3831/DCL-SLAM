@@ -782,6 +782,8 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     from .offline_timing_metrics import analyze_protocol
     timing = analyze_protocol(
         cooperation, ready_sim=release_time, end_sim=bag['clock'].get('end_s'))
+    from .offline_motion_metrics import replay_run
+    motion_anomalies = replay_run(run_directory, tuple(robots))
     cooperation_summary = cooperation.get('summary')
     if cooperation_summary is None:
         from .offline_protocol_replay import protocol_summary
@@ -833,6 +835,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         'avoidable_idle': timing['avoidable_idle'],
         'work_availability': timing['work_availability'],
         'snappiness': timing['snappiness'],
+        'motion_anomalies': motion_anomalies,
         'protocol_contract': protocol_contract,
         'semantic_contract': semantic,
         'handoff': handoff if unknown_initial_pose else {
@@ -862,6 +865,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
         }, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     (destination.parent / 'cooperation_summary.json').write_text(
         json.dumps(cooperation_summary, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8')
+    (destination.parent / 'motion_anomalies.json').write_text(
+        json.dumps(motion_anomalies, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
     return evaluation
 

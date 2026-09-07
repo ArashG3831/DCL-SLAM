@@ -17,3 +17,10 @@ def test_map_quality_does_not_invent_missing_reference(tmp_path):
     result = map_quality_report(tmp_path)
     assert not result["available"]
     assert "map-quality artifact or reference map" in result["missing"]
+
+
+def test_map_quality_preserves_missing_reference_when_world_maps_are_absent(
+        tmp_path):
+    result = map_quality_report(
+        tmp_path, {"source_world_path": str(tmp_path / "missing.wbt")})
+    assert not result["available"]

@@ -818,7 +818,7 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     }
     scaling_windows = analyze_windows(window_evaluation)
     from .offline_map_quality import map_quality_report
-    map_quality_report_value = map_quality_report(run_directory)
+    map_quality_report_value = map_quality_report(run_directory, manifest)
     protocol_contract = {
         'payload_parse_complete': bool(cooperation.get('available')),
         'work_availability_complete': work_availability_complete,

@@ -718,3 +718,29 @@ Remaining caveat:
 Campaign reports must continue to fail closed for an invoked certificate with
 missing fields, and must not claim external-reference occupancy IoU without an
 approved raster. No campaign was started by this closure.
+
+## Long-horizon Condition C validation — 2026-09-07
+
+Status: **BLOCKED / PIPELINE FAIL**
+
+The one authorized 1200 s Condition C run reached `SIM_TIME_COMPLETE` at exactly
+1200 s with no watchdog termination. Native rosbag export, semantic raw-contract
+validation, protocol replay, certificate payload replay, START_RELEASE, and
+20 ms GT/contact capture passed. The authoritative active RTF was 1.8287203x.
+
+The run is not an accepted long-horizon artifact because the legacy observer was
+interrupted in `_repair_offloaded_health()` during finalization after the horizon;
+`artifact_finalization.complete=false`, and `summary.json`/`mission_result.json`
+were not produced. The wrapper also failed to export `RUN_ROOT`, so generated
+results were placed under the workspace root and made the run manifest report
+`worktree_dirty=true` after launch. The current evaluator nevertheless generated
+its sidecars and self-reported `complete=true`; that does not override the
+missing finalization contract.
+
+Coverage replay had 109 Condition-C shared-map samples only through 263.54 s,
+so coverage/scaling evidence for later windows is explicitly unavailable rather
+than zero. Warning normalization and the approved map-quality output were also
+not produced. Certificate evidence was observed and complete (three records).
+
+The full self-contained record is:
+`reports/observer_offline_1200s_condition_C_end_to_end_validation_20260907.md`.

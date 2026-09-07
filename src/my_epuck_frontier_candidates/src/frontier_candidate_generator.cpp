@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cerrno>
 #include <fcntl.h>
 #include <iomanip>
 #include <limits>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <signal.h>
 #include <string>
 #include <sys/file.h>
 #include <unistd.h>
@@ -261,6 +263,7 @@ public:
     if (path_query_lock_path_.empty()) {
       path_query_lock_path_ = "/tmp/my_epuck_" + robot_id_ + "_compute_path.lock";
     }
+    path_priority_path_ = path_query_lock_path_ + ".fallback_priority";
     auto grid_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     if (grid_subscription_durability_ == "volatile") {
       grid_qos.durability_volatile();
@@ -441,6 +444,12 @@ private:
           stats.total_wall_s, mean, stats.max_wall_s);
       }
     }
+    RCLCPP_WARN(
+      get_logger(),
+      "FRONTIER_GENERATOR_LEASE_SUMMARY robot=%s acquire_attempts=%lu retry_count=%lu wait_total_wall_s=%.9f wait_max_wall_s=%.9f hold_count=%lu hold_total_wall_s=%.9f hold_max_wall_s=%.9f priority_yields=%lu",
+      robot_id_.c_str(), path_lock_acquire_attempts_, path_lock_retry_count_,
+      path_lock_wait_total_s_, path_lock_wait_max_s_, path_lock_hold_count_,
+      path_lock_hold_total_s_, path_lock_hold_max_s_, path_priority_yields_);
   }
 
   static const char * action_result_name(rclcpp_action::ResultCode code)
@@ -1305,6 +1314,12 @@ private:
       finish();
       return;
     }
+    if (fallback_priority_requested()) {
+      cycle_termination_reason_ = "FALLBACK_PRIORITY_YIELD";
+      ++path_priority_yields_;
+      schedule_query_retry(10ms);
+      return;
+    }
     if (!planner_->action_server_is_ready()) {
       cycle_termination_reason_ = "PLANNER_UNAVAILABLE";
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "planner action unavailable");
@@ -1330,13 +1345,7 @@ private:
     }
     if (!acquire_path_lock()) {
       cycle_termination_reason_ = "PATH_LOCK_RETRY";
-      if (!retry_timer_) {
-        retry_timer_ = create_wall_timer(50ms, [this] {
-          if (retry_timer_) {retry_timer_->cancel();}
-          retry_timer_.reset();
-          send_next();
-        });
-      }
+      schedule_query_retry(10ms);
       return;
     }
     const auto candidate = works_[query_index_++];
@@ -1419,7 +1428,7 @@ private:
             orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
             std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
           release_path_lock();
-          send_next();
+          schedule_query_retry(1ms);
           return;
         }
         active_ = handle;
@@ -1454,7 +1463,7 @@ private:
               std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
             timeout_timer_->cancel();
             release_path_lock();
-            send_next();
+            schedule_query_retry(1ms);
           });
       };
     options.result_callback = [this, candidate, revision, candidate_generation, request, request_started](const GoalHandle::WrappedResult & result) {
@@ -1586,7 +1595,7 @@ private:
           query_failure_class(result.code, error_code)), candidate_generation,
           error_code, nav2_error_name(error_code), duration);
         release_path_lock();
-        send_next();
+        schedule_query_retry(1ms);
       };
     planner_->async_send_goal(goal, options);
   }
@@ -1667,23 +1676,72 @@ private:
 
   bool acquire_path_lock()
   {
+    ++path_lock_acquire_attempts_;
     if (path_lock_fd_ >= 0) {return true;}
     path_lock_fd_ = ::open(path_query_lock_path_.c_str(), O_CREAT | O_RDWR, 0666);
     if (path_lock_fd_ < 0 || ::flock(path_lock_fd_, LOCK_EX | LOCK_NB) != 0) {
       if (path_lock_fd_ >= 0) {::close(path_lock_fd_);}
       path_lock_fd_ = -1;
+      ++path_lock_retry_count_;
+      if (!path_lock_waiting_) {
+        path_lock_waiting_ = true;
+        path_lock_wait_started_ = std::chrono::steady_clock::now();
+      }
       return false;
     }
+    if (path_lock_waiting_) {
+      const double wait_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - path_lock_wait_started_).count();
+      path_lock_wait_total_s_ += wait_s;
+      path_lock_wait_max_s_ = std::max(path_lock_wait_max_s_, wait_s);
+      path_lock_waiting_ = false;
+    }
+    path_lock_acquired_at_ = std::chrono::steady_clock::now();
     return true;
   }
 
   void release_path_lock()
   {
     if (path_lock_fd_ >= 0) {
+      const double hold_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - path_lock_acquired_at_).count();
+      ++path_lock_hold_count_;
+      path_lock_hold_total_s_ += hold_s;
+      path_lock_hold_max_s_ = std::max(path_lock_hold_max_s_, hold_s);
       ::flock(path_lock_fd_, LOCK_UN);
       ::close(path_lock_fd_);
       path_lock_fd_ = -1;
     }
+  }
+
+  void schedule_query_retry(std::chrono::milliseconds delay)
+  {
+    if (retry_timer_) {return;}
+    retry_timer_ = create_wall_timer(delay, [this] {
+      if (retry_timer_) {retry_timer_->cancel();}
+      retry_timer_.reset();
+      send_next();
+    });
+  }
+
+  bool fallback_priority_requested()
+  {
+    const int fd = ::open(path_priority_path_.c_str(), O_RDONLY);
+    if (fd < 0) {return false;}
+    char buffer[64] = {};
+    const ssize_t count = ::read(fd, buffer, sizeof(buffer) - 1);
+    ::close(fd);
+    if (count <= 0) {return false;}
+    char * end = nullptr;
+    const long owner = std::strtol(buffer, &end, 10);
+    if (owner <= 0 || end == buffer) {return false;}
+    if (::kill(static_cast<pid_t>(owner), 0) == 0 || errno == EPERM) {
+      return true;
+    }
+    if (errno == ESRCH) {
+      ::unlink(path_priority_path_.c_str());
+    }
+    return false;
   }
 
   void normalize_final()
@@ -2072,7 +2130,8 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   int path_lock_fd_{-1};
   std::string robot_id_, map_topic_, global_costmap_topic_, global_frame_, robot_base_frame_;
-  std::string compute_path_action_, candidate_topic_, marker_topic_, path_query_lock_path_;
+  std::string compute_path_action_, candidate_topic_, marker_topic_, path_query_lock_path_,
+    path_priority_path_;
   std::string grid_subscription_reliability_, grid_subscription_durability_;
   std::string planner_id_;
   std::string selection_policy_;
@@ -2113,6 +2172,13 @@ private:
   std::size_t cycle_map_cancelled_tier1_{0};
   uint64_t cycle_old_revision_{0}, cycle_new_revision_{0};
   std::string cycle_termination_reason_{"OTHER"};
+  uint64_t path_lock_acquire_attempts_{0}, path_lock_retry_count_{0};
+  uint64_t path_lock_hold_count_{0}, path_priority_yields_{0};
+  double path_lock_wait_total_s_{0.0}, path_lock_wait_max_s_{0.0};
+  double path_lock_hold_total_s_{0.0}, path_lock_hold_max_s_{0.0};
+  bool path_lock_waiting_{false};
+  std::chrono::steady_clock::time_point path_lock_wait_started_{};
+  std::chrono::steady_clock::time_point path_lock_acquired_at_{};
 };
 
 }  // namespace my_epuck_frontier_candidates

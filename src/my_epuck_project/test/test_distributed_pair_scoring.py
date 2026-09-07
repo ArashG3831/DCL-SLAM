@@ -185,10 +185,10 @@ def test_mrtsp_completed_task_is_skipped_until_its_physical_frontier_evolves():
     assert decision.robot2_task_id == ''
 
 
-def batch(robot, union_hash, bids):
+def batch(robot, union_hash, bids, round_id='round'):
     """Create a correctly round-bound bid batch."""
     return BidBatch(
-        'round', union_hash, robot,
+        round_id, union_hash, robot,
         's1' if robot == 'robot1' else 's2', 1, 2.0, tuple(bids),
     )
 
@@ -873,8 +873,8 @@ def test_hard_failed_equivalent_task_does_not_block_useful_task():
     assert ids['useful'] in (decision.robot1_task_id, decision.robot2_task_id)
 
 
-def test_one_active_can_beat_conflicting_two_active_pair():
-    """A strongly overlapping second task does not force a pair assignment."""
+def test_two_active_cardinality_precedes_conflicting_pair_score():
+    """A valid pair wins before the existing conflict-aware score ranking."""
     first_task = make_task(
         'robot1', 'primary', (2.0, 0.0), (2.0, 0.2),
         Bounds((1.8, 0.0), (2.2, 0.4)), gain=2.0,
@@ -898,9 +898,94 @@ def test_one_active_can_beat_conflicting_two_active_pair():
             bid(ids['nearby'], 2.0, same_path),
         ]),
     )
-    assert (decision.robot1_task_id, decision.robot2_task_id) in {
-        (ids['primary'], ''), ('', ids['primary']),
+    assert decision.robot1_task_id and decision.robot2_task_id
+    assert decision.robot1_task_id != decision.robot2_task_id
+    assert decision.diagnostics.valid_two_active_pair_count == 2
+
+
+def _independent_cost_pair_fixture(round_id, first_path, second_path):
+    """Build a two-robot cost-only pair resembling a recorded C round."""
+    first = cost_task(
+        '%s-robot1' % round_id, (4.0, 0.0), first_path, 0.0, local_id=1,
+    )
+    second = replace(cost_task(
+        '%s-robot2' % round_id, (0.0, 4.0), second_path, 0.0, local_id=2,
+    ), source_robot_id='robot2', source_session_id='s2')
+    union = build_canonical_union([first], [second])
+    ids = {
+        member.physical_signature: task.canonical_id
+        for task in union.tasks for member in task.members
     }
+    first_id = ids['%s-robot1' % round_id]
+    second_id = ids['%s-robot2' % round_id]
+    first_batch = batch('robot1', union.union_hash, [
+        bid(first_id, first_path, [(0.0, 0.0), (first_path, 0.0)]),
+    ], round_id=round_id)
+    second_batch = batch('robot2', union.union_hash, [
+        bid(second_id, second_path, [(0.0, 1.0), (0.0, second_path + 1.0)]),
+    ], round_id=round_id)
+    return union, first_batch, second_batch, first_id, second_id
+
+
+def test_cost_only_recorded_63_20_round_prefers_two_active_cardinality():
+    """The preserved 63.20 s shape cannot regress to robot1-only IDLE."""
+    union, first, second, first_id, second_id = _independent_cost_pair_fixture(
+        'c-63.20', 2.623618, 2.747824,
+    )
+    decision = choose_pair_assignment(
+        'c-63.20', union, first, second,
+        scoring_mode='frontier_cost_only',
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        first_id, second_id,
+    )
+
+
+def test_cost_only_recorded_96_52_round_prefers_two_active_cardinality():
+    """The preserved 96.52 s shape cannot regress to robot1-only IDLE."""
+    union, first, second, first_id, second_id = _independent_cost_pair_fixture(
+        'c-96.52', 1.965506, 3.517690,
+    )
+    decision = choose_pair_assignment(
+        'c-96.52', union, first, second,
+        scoring_mode='frontier_cost_only',
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (
+        first_id, second_id,
+    )
+
+
+def test_cost_only_one_active_survives_when_other_robot_has_no_feasible_bid():
+    """One-active remains the fallback when no valid pair can be formed."""
+    first = cost_task('only-robot1', (1.0, 0.0), 1.0, 0.0)
+    union = build_canonical_union([first], [])
+    first_id = union.tasks[0].canonical_id
+    decision = choose_pair_assignment(
+        'round-one-active', union,
+        batch('robot1', union.union_hash, [
+            bid(first_id, 1.0, [(0.0, 0.0), (1.0, 0.0)]),
+        ], round_id='round-one-active'),
+        batch('robot2', union.union_hash, [], round_id='round-one-active'),
+        scoring_mode='frontier_cost_only',
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == (first_id, '')
+    assert decision.diagnostics.valid_two_active_pair_count == 0
+
+
+def test_cost_only_idle_remains_possible_when_nothing_is_feasible():
+    """IDLE/IDLE remains the explicit result when every bid is invalid."""
+    task = cost_task('invalid-both', (1.0, 0.0), 1.0, 0.0)
+    union = build_canonical_union([task], [])
+    task_id = union.tasks[0].canonical_id
+    invalid = bid(task_id, 1.0, [(0.0, 0.0), (1.0, 0.0)], valid=False)
+    decision = choose_pair_assignment(
+        'round-no-work', union,
+        batch('robot1', union.union_hash, [invalid], round_id='round-no-work'),
+        batch('robot2', union.union_hash, [invalid], round_id='round-no-work'),
+        scoring_mode='frontier_cost_only',
+    )
+    assert (decision.robot1_task_id, decision.robot2_task_id) == ('', '')
+    assert decision.diagnostics.idle_idle_permitted is True
 
 
 def test_conflict_free_pair_beats_numerically_better_solo_assignment():

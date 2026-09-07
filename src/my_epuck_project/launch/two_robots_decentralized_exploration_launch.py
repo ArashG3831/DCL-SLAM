@@ -18,8 +18,9 @@ from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from my_epuck_project.cooperative_profiles import profile_for_world, profile_summary
 
@@ -122,7 +123,9 @@ def launch_setup(context):
         'false' if 'do_loop_closing' in profile_scan_parameters
         else LaunchConfiguration('do_loop_closing'))
     launch_world_path = world_path or selected['world_path']
-    if forensic_enabled or contact_enabled:
+    integrated_thin_capture = os.environ.get(
+        'MY_EPUCK_THIN_INTEGRATED_GT', '').lower() in ('1', 'true', 'yes')
+    if (forensic_enabled or contact_enabled) and not integrated_thin_capture:
         # Keep the source/production world untouched.  Webots requires every
         # external controller to have a corresponding Robot node, so the
         # read-only Supervisor gets one temporary diagnostic-only node.
@@ -417,6 +420,9 @@ def launch_setup(context):
                         # waits for the peer's matching fact; single-robot
                         # diagnostic launches do not use these local nodes.
                         'initial_peer_readiness_barrier': True,
+                        'common_start_release_required': LaunchConfiguration(
+                            'common_start_release_required'),
+                        'publish_cooperative_start_ready': False,
                         # Local pre-handoff assignment is a single-owner
                         # action boundary; one executor avoids four-worker
                         # waitable/GIL contention without changing task logic.
@@ -477,7 +483,7 @@ def launch_setup(context):
                         'handoff_marker_path': os.path.join(
                             diagnostic_output,
                             f'{robot}_accepted_handoff.marker'),
-                        'historical_cleanup_required': True,
+                'historical_cleanup_required': True,
                     }],
                 ),
             ])
@@ -543,6 +549,8 @@ def launch_setup(context):
                 'assignment_strategy': LaunchConfiguration('assignment_strategy'),
                 'local_path_gate_mode': LaunchConfiguration(
                     'local_path_gate_mode'),
+                'common_start_release_required': LaunchConfiguration(
+                    'common_start_release_required'),
                 'burgard_beta': LaunchConfiguration('burgard_beta'),
                 'traffic_scheduler_enabled': LaunchConfiguration(
                     'traffic_scheduler_enabled'),
@@ -582,11 +590,18 @@ def launch_setup(context):
         # for a bounded campaign's final evidence flush.
         sigterm_timeout='120.0',
         sigkill_timeout='30.0',
-        condition=IfCondition(LaunchConfiguration('enable_observer')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('enable_observer'),
+            "' == 'true' and '",
+            LaunchConfiguration('observer_architecture'), "' == 'legacy'",
+        ])),
         parameters=[{
             'run_id': LaunchConfiguration('run_id'),
             'output_root': LaunchConfiguration('output_root'),
             'launch_file': 'two_robots_decentralized_exploration_launch.py',
+            'experiment_condition': LaunchConfiguration('experiment_condition'),
+            'seed_provenance_json': ParameterValue(
+                LaunchConfiguration('seed_provenance_json'), value_type=str),
             'world_profile': selected['name'],
             'source_world_path': selected['world_path'],
             'installed_world_path': selected['world_path'],
@@ -662,6 +677,8 @@ def launch_setup(context):
                 'diagnostic_frontier_capture'),
             'enable_contact_capture': LaunchConfiguration(
                 'enable_contact_capture'),
+            'enable_passive_rosbag': LaunchConfiguration(
+                'enable_passive_rosbag'),
             'enable_scientific_raw_capture': LaunchConfiguration(
                 'enable_scientific_raw_capture'),
             'contact_sampling_period_ms': LaunchConfiguration(
@@ -736,6 +753,9 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('dispatch_enabled', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('common_start_release_required',
+                              default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('prehandoff_dispatch_delay_s',
                               default_value='0.0'),
         DeclareLaunchArgument('unknown_initial_pose', default_value='false',
@@ -804,7 +824,11 @@ def generate_launch_description():
             default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('enable_observer', default_value='true',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('observer_architecture', default_value='legacy',
+                              choices=['legacy', 'thin']),
         DeclareLaunchArgument('run_id', default_value=''),
+        DeclareLaunchArgument('experiment_condition', default_value='C'),
+        DeclareLaunchArgument('seed_provenance_json', default_value='{}'),
         DeclareLaunchArgument('output_root', default_value='/home/arash/webots_ws/results'),
         DeclareLaunchArgument('mission_timeout_s', default_value='600.0'),
         DeclareLaunchArgument('terminal_small_frontier_length_m',
@@ -844,6 +868,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('enable_contact_capture', default_value='false',
                               choices=['true', 'false']),
+        DeclareLaunchArgument('enable_passive_rosbag', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument(
             'enable_scientific_raw_capture', default_value='false',
             choices=['true', 'false']),
@@ -851,8 +877,8 @@ def generate_launch_description():
         DeclareLaunchArgument('controller_variant', default_value='rpp',
                               choices=['dwb', 'rotation_shim_dwb', 'rpp']),
         DeclareLaunchArgument('forensic_snapshot_interval_s', default_value='5.0'),
-        # Preserve the historical default while making the passive Supervisor
-        # observer rate an explicit experiment-time launch override.
+        # Preserve the historical 50 Hz GT evidence rate until thin-mode
+        # scientific parity explicitly proves a lower rate equivalent.
         DeclareLaunchArgument(
             'forensic_ground_truth_sample_period_s', default_value='0.02'),
         OpaqueFunction(function=launch_setup),

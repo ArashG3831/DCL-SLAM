@@ -44,6 +44,9 @@ def _assignment_peer(robot):
             'robot_base_frame': f'{robot}/base_footprint',
             'global_frame': 'shared_map',
             'dispatch_enabled': LaunchConfiguration('dispatch_enabled'),
+            'common_start_release_required': LaunchConfiguration(
+                'common_start_release_required'),
+            'publish_cooperative_start_ready': True,
             'handoff_gated': LaunchConfiguration('handoff_gated'),
             'phase_gated': LaunchConfiguration('phase_gated'),
             'shared_nav2_ready_topic': LaunchConfiguration(
@@ -198,6 +201,9 @@ def generate_launch_description():
         DeclareLaunchArgument('handoff_transform_yaw', default_value='0.0'),
         DeclareLaunchArgument('handoff_evidence_set_hash', default_value=''),
         DeclareLaunchArgument('dispatch_enabled', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('common_start_release_required',
+                              default_value='false',
                               choices=['true', 'false']),
         # Defaults are the production literature-backed allocator.  These
         # switches are deliberately explicit so historical weighted rounds

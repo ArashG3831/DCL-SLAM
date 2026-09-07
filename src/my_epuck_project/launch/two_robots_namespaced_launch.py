@@ -95,6 +95,11 @@ def launch_setup(context):
         'corrected_scan_reliability').perform(context)
     corrected_scan_depth = int(LaunchConfiguration(
         'corrected_scan_depth').perform(context))
+    active_robots = tuple(
+        item.strip() for item in LaunchConfiguration('active_robots').perform(context).split(',')
+        if item.strip() in ('robot1', 'robot2'))
+    if not active_robots:
+        raise RuntimeError('active_robots must contain robot1 and/or robot2')
     # ROS parameter typing is strict. LaunchConfiguration values are strings;
     # convert the scan period before passing it to rclpy's DOUBLE parameter.
     scan_publish_period = float(
@@ -158,7 +163,7 @@ def launch_setup(context):
     controller_manager_prefix = 'python.exe' if os.name == 'nt' else ''
 
     robot_actions = []
-    for robot_name in ('robot1', 'robot2'):
+    for robot_name in active_robots:
         if scan_transport == 'chunked':
             # The stock Ros2Lidar publisher serializes a 720-beam LaserScan
             # as one DDS sample.  That sample is dropped by the verified WSL
@@ -422,6 +427,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'webots_controller_port', default_value='',
             description='Confirmed actual Webots port used by controllers.',
+        ),
+        DeclareLaunchArgument(
+            'active_robots', default_value='robot1,robot2',
+            description='Comma-separated physical robots to control.',
         ),
         DeclareLaunchArgument(
             'webots_mode',

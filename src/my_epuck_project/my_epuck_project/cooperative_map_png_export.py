@@ -28,6 +28,10 @@ POSE_COLORS = {
 }
 PATH_OUTLINE_RGB = (70, 70, 70)
 POSE_OUTLINE_RGB = (20, 20, 20)
+OWNERSHIP_UNKNOWN_RGB = (160, 160, 160)
+OWNERSHIP_ROBOT1_RGB = (55, 120, 235)
+OWNERSHIP_ROBOT2_RGB = (220, 70, 70)
+OWNERSHIP_BOTH_RGB = (145, 70, 175)
 
 
 _FONT = {
@@ -87,6 +91,119 @@ def occupancy_rgb(data, free_threshold=25, occupied_threshold=65, scale=4):
     if scale > 1:
         rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
     return rgb
+
+
+def render_exploration_ownership(attempt, target, scale=4):
+    """Render final local-map known-cell ownership in the shared frame.
+
+    This is an offline attribution figure.  Each local map's known-cell mask
+    is projected through its captured ``shared_map <- robotN/map`` transform
+    into the final shared-map geometry.  No occupancy value or runtime state is
+    changed, and no guessed transform is used when the required evidence is
+    absent.
+    """
+    attempt = Path(attempt)
+    transforms = _forensic_transforms(attempt)
+    owner = np.zeros((target.geometry.height, target.geometry.width),
+                     dtype=np.uint8)
+    source_details = {}
+    for bit, robot in ((1, 'robot1'), (2, 'robot2')):
+        try:
+            local_path = _final_map_path(attempt, robot, shared=False)
+        except ValueError:
+            return None, {
+                'available': False,
+                'reason': f'missing final local map for {robot}',
+            }
+        transform = _transform_row(
+            transforms, 'shared_map', f'{robot}/map')
+        if transform is None:
+            return None, {
+                'available': False,
+                'reason': f'missing captured shared_map <- {robot}/map TF',
+            }
+        local = load_map(local_path)
+        rows, columns = np.nonzero(local.data >= 0)
+        if len(rows) == 0:
+            source_details[robot] = {
+                'known_cells': 0,
+                'projected_cells': 0,
+                'transform_query_ros_time_s': float(
+                    transform['query_ros_time_s']),
+                'source_map': str(local_path),
+            }
+            continue
+        local_x = (columns.astype(float) + 0.5) * local.geometry.resolution
+        local_y = (rows.astype(float) + 0.5) * local.geometry.resolution
+        local_cos = math.cos(local.geometry.yaw)
+        local_sin = math.sin(local.geometry.yaw)
+        map_x = (local.geometry.origin_x + local_cos * local_x
+                 - local_sin * local_y)
+        map_y = (local.geometry.origin_y + local_sin * local_x
+                 + local_cos * local_y)
+
+        transform_yaw = _yaw_from_quaternion(transform)
+        transform_cos = math.cos(transform_yaw)
+        transform_sin = math.sin(transform_yaw)
+        shared_x = (float(transform['translation_x'])
+                    + transform_cos * map_x - transform_sin * map_y)
+        shared_y = (float(transform['translation_y'])
+                    + transform_sin * map_x + transform_cos * map_y)
+
+        delta_x = shared_x - target.geometry.origin_x
+        delta_y = shared_y - target.geometry.origin_y
+        target_cos = math.cos(target.geometry.yaw)
+        target_sin = math.sin(target.geometry.yaw)
+        target_x = target_cos * delta_x + target_sin * delta_y
+        target_y = -target_sin * delta_x + target_cos * delta_y
+        target_columns = np.floor(
+            target_x / target.geometry.resolution).astype(int)
+        target_rows = np.floor(
+            target_y / target.geometry.resolution).astype(int)
+        valid = (
+            (target_rows >= 0) & (target_rows < target.geometry.height)
+            & (target_columns >= 0)
+            & (target_columns < target.geometry.width)
+        )
+        owner[target_rows[valid], target_columns[valid]] |= bit
+        source_details[robot] = {
+            'known_cells': int(len(rows)),
+            'projected_cells': int(valid.sum()),
+            'transform_query_ros_time_s': float(
+                transform['query_ros_time_s']),
+            'source_map': str(local_path),
+        }
+
+    rgb = np.empty(owner.shape + (3,), dtype=np.uint8)
+    rgb[:] = OWNERSHIP_UNKNOWN_RGB
+    rgb[owner == 1] = OWNERSHIP_ROBOT1_RGB
+    rgb[owner == 2] = OWNERSHIP_ROBOT2_RGB
+    rgb[owner == 3] = OWNERSHIP_BOTH_RGB
+    rgb = np.flipud(rgb)
+    if scale < 1:
+        raise ValueError('scale must be at least one')
+    if scale > 1:
+        rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
+    return rgb, {
+        'available': True,
+        'frame': 'shared_map',
+        'source_definition': (
+            'known cells from final robotN/map NPZ projected through '
+            'captured shared_map <- robotN/map TF'),
+        'colors': {
+            'unknown': list(OWNERSHIP_UNKNOWN_RGB),
+            'robot1_only': list(OWNERSHIP_ROBOT1_RGB),
+            'robot2_only': list(OWNERSHIP_ROBOT2_RGB),
+            'both': list(OWNERSHIP_BOTH_RGB),
+        },
+        'counts': {
+            'unknown': int(np.count_nonzero(owner == 0)),
+            'robot1_only': int(np.count_nonzero(owner == 1)),
+            'robot2_only': int(np.count_nonzero(owner == 2)),
+            'both': int(np.count_nonzero(owner == 3)),
+        },
+        'source_details': source_details,
+    }
 
 
 def _yaw_from_quaternion(row):
@@ -905,6 +1022,10 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
     output.mkdir(parents=True, exist_ok=False)
     written = []
     pose_records = {}
+    ownership_metadata = {
+        'available': False,
+        'reason': 'shared-map final artifacts are unavailable',
+    }
 
     def save(name, image, records=None):
         path = output / name
@@ -977,6 +1098,10 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
             if same_geometry:
                 save('robot1_robot2_exact_difference.png',
                      difference_rgb(robot1.data, robot2.data, scale=scale))
+            ownership_image, ownership_metadata = render_exploration_ownership(
+                attempt, canonical, scale=scale)
+            if ownership_image is not None:
+                save('exploration_ownership_map.png', ownership_image)
     manifest = {
         'schema_version': '1.0.0',
         'campaign_id': campaign.name,
@@ -1009,6 +1134,7 @@ def export_maps(campaign, output_dir, trial_id=None, scale=4,
             'uncertain': list(UNCERTAIN_RGB),
             'exact_difference': list(DIFFERENCE_RGB),
         },
+        'ownership_map': ownership_metadata,
         'robot_maps_same_geometry': same_geometry,
         'robot_maps_exactly_identical': exact_equal,
         'different_cell_count': (

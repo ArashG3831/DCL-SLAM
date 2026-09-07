@@ -18,7 +18,7 @@ import json
 import rclpy
 from my_epuck_interfaces.msg import RelativePoseHypothesis
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
@@ -39,6 +39,8 @@ class UnknownPoseSharedStackActivation(Node):
         self._shared_costmap_seen = {'robot1': False, 'robot2': False}
         self._shared_local_costmap_seen = {'robot1': False, 'robot2': False}
         self._shared_nav2_barrier_published = False
+        self._cooperative_start_ready = {'robot1': False, 'robot2': False}
+        self._start_release_published = False
         self._shutdown_requested = False
         self._ros2 = shutil.which('ros2') or 'ros2'
         boolean_parameters = {
@@ -54,6 +56,7 @@ class UnknownPoseSharedStackActivation(Node):
             'traffic_test_force_conflict_pair',
             'prelaunch_shared_nav2',
             'enable_mission_timeout',
+            'common_start_release_required',
         }
         parameter_defaults = (
                 ('world_profile', 'large_unknown_pose_16m'),
@@ -89,6 +92,7 @@ class UnknownPoseSharedStackActivation(Node):
                 # unknown-pose startup can starve Webots/DDS on a loaded host.
                 # The normal profile launches this graph at accepted handoff.
                 ('prelaunch_shared_nav2', False),
+                ('common_start_release_required', False),
                 ('enable_mission_timeout', False),
                 ('mission_timeout_s', 600.0),
                 ('terminal_small_frontier_length_m', 0.20),
@@ -129,11 +133,27 @@ class UnknownPoseSharedStackActivation(Node):
                 depth=1, reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
+        self._start_release_publisher = self.create_publisher(
+            String,
+            '/cslam/unknown_pose/start_release',
+            QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         for robot in ('robot1', 'robot2'):
             self.create_subscription(
                 Bool,
                 f'/cslam/unknown_pose/{robot}/historical_cleanup_ready',
                 lambda message, item=robot: self._cleanup_callback(
+                    item, message),
+                QoSProfile(
+                    depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            )
+            self.create_subscription(
+                String,
+                f'/cslam/unknown_pose/cooperative_start_ready/{robot}',
+                lambda message, item=robot: self._start_ready_callback(
                     item, message),
                 QoSProfile(
                     depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -243,6 +263,48 @@ class UnknownPoseSharedStackActivation(Node):
         self.get_logger().info(
             'UNKNOWN_POSE_SHARED_ACTIVATION shared_nav2_barrier_released=true')
         self._timeline('SHARED_NAV2_COSTMAP_BARRIER_RELEASED')
+        self._maybe_publish_start_release()
+
+    def _start_ready_callback(self, robot, message):
+        try:
+            payload = json.loads(str(message.data))
+            if (str(payload.get('event', '')) !=
+                    'COOPERATIVE_START_STATE_READY'):
+                return
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        self._cooperative_start_ready[robot] = True
+        self._timeline('COOPERATIVE_START_STATE_READY_OBSERVED',
+                       robot_id=robot)
+        self._maybe_publish_start_release()
+
+    def _maybe_publish_start_release(self):
+        if (self._start_release_published or
+                not self._shared_nav2_barrier_published or
+                not all(self._cooperative_start_ready.values()) or
+                self._accepted_message is None):
+            return
+        # The traffic scheduler is disabled in the current authoritative C
+        # profile; that is a ready/no-gate state, not a reason to delay the
+        # common release.  If enabled, the existing scheduler remains the
+        # authority for later dispatch conflict decisions.
+        release_time = self.get_clock().now().nanoseconds / 1e9
+        message = String()
+        message.data = json.dumps({
+            'event': 'START_RELEASE',
+            'release_sim_time_s': release_time,
+            'traffic_scheduler_ready': True,
+            'shared_nav2_ready': True,
+            'accepted_handoff': True,
+            'ready_robots': ['robot1', 'robot2'],
+        }, sort_keys=True, separators=(',', ':'))
+        self._start_release_publisher.publish(message)
+        self._start_release_published = True
+        self.get_logger().info(
+            'START_RELEASE t=%.6f traffic_scheduler_ready=true' %
+            release_time)
+        self._timeline('START_RELEASE', release_sim_time_s=release_time,
+                       traffic_scheduler_ready=True)
 
     def _maybe_start_shared_stack(self):
         if (self._activated or self._shutdown_requested or

@@ -382,8 +382,8 @@ def parse_world(path):
     names = [robot.name for robot in robots]
     if len(names) != len(set(names)):
         raise ValueError(f'world contains duplicate robot names: {names!r}')
-    if set(names) != {'robot1', 'robot2'} or len(names) != 2:
-        raise ValueError('world must contain exactly robot1 and robot2')
+    if set(names) not in ({'robot1'}, {'robot1', 'robot2'}):
+        raise ValueError('world must contain robot1, optionally with robot2')
     arena = arenas[0]
     viewpoint = viewpoints[0]
     by_name = {robot.name: robot for robot in robots}
@@ -406,9 +406,11 @@ def parse_world(path):
                 abs(robot.translation[1]) + 0.11 > dimensions[1] / 2:
             raise ValueError(f'{robot.name} is outside the arena')
         axis_angle_yaw(robot.rotation)
-    robot1, robot2 = by_name['robot1'], by_name['robot2']
-    separation = math.dist(robot1.translation[:2], robot2.translation[:2])
-    if not math.isfinite(separation) or separation < 0.22:
+    robot1 = by_name['robot1']
+    robot2 = by_name.get('robot2')
+    separation = math.dist(robot1.translation[:2], robot2.translation[:2]) \
+        if robot2 is not None else 0.0
+    if robot2 is not None and (not math.isfinite(separation) or separation < 0.22):
         raise ValueError(f'robots overlap or are too close: separation={separation}')
     for robot in robots:
         for obstacle in obstacles:
@@ -422,7 +424,7 @@ def parse_world(path):
             if (max(abs(local_x) - width / 2, 0.0) ** 2 +
                     max(abs(local_y) - height / 2, 0.0) ** 2) < 0.11 ** 2:
                 raise ValueError(f'{robot.name} intersects obstacle {obstacle["name"]}')
-    relative = relative_transform(robot1, robot2)
+    relative = relative_transform(robot1, robot2) if robot2 is not None else (0.0, 0.0, 0.0)
     return {
         'path': str(path),
         'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -440,8 +442,9 @@ def parse_world(path):
         },
         'planar_yaws': {name: robot.planar_yaw for name, robot in by_name.items()},
         'relative_transform': relative,
-        'reverse_relative_transform': relative_transform(
-            by_name['robot2'], by_name['robot1']),
+        'reverse_relative_transform': (
+            relative_transform(robot2, robot1)
+            if robot2 is not None else (0.0, 0.0, 0.0)),
         'obstacles': obstacles,
         'solid_box_count': len(obstacles),
         'solid_count': len(list(_blocks(content, 'Solid'))),

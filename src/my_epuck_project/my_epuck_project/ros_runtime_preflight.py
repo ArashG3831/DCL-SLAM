@@ -225,6 +225,28 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         if not config.is_file():
             issues.append(f'frontier_exploration_ros2 config missing: {config}')
 
+    # The cooperative launch chain has a real package-closure requirement.
+    # Resolve every project package from the selected overlay instead of
+    # allowing an inherited /home/arash/webots_ws install to satisfy only the
+    # first import or launch lookup.
+    required_project_packages = (
+        'my_epuck_project', 'my_epuck_interfaces',
+        'my_epuck_frontier_candidates', 'my_epuck_cooperative_exploration',
+        'reliable_slam_toolbox_wrapper')
+    project_package_prefixes = {}
+    for package_name in required_project_packages:
+        prefix = _ament_package_prefix(package_name, environment)
+        project_package_prefixes[package_name] = (
+            str(prefix) if prefix is not None else None)
+        if prefix is None:
+            issues.append(
+                f'{package_name} is not present in selected AMENT prefixes')
+            continue
+        if dirty_root in prefix.parents and not _workspace_path(
+                prefix, workspace):
+            issues.append(
+                f'{package_name} resolved from stale project install: {prefix}')
+
     # A campaign may deliberately use an isolated colcon overlay (for
     # example, ``build_current_<commit>``) rather than the workspace's
     # default ``build`` directory.  Provenance must inspect the exact build
@@ -258,6 +280,7 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         'module_sha256': module_hashes,
         'source_build_parity': parity,
         'frontier_dependency': frontier_report,
+        'project_package_prefixes': project_package_prefixes,
         'contaminated_environment_paths': contaminated,
         'allowed_external_prefixes': [str(path) for path in allowed_external_prefixes],
         'issues': issues,

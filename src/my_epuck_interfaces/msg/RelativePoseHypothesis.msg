@@ -48,3 +48,14 @@ bool target_viewpoint_available
 float64 target_viewpoint_x
 float64 target_viewpoint_y
 float64 target_viewpoint_yaw
+
+# Stationary witness provenance.  These fields are empty/default for ordinary
+# hypotheses.  They identify the immutable whole-map seed used only to define
+# deterministic disjoint witness support; the seed is never itself proof of
+# the registration.
+string stationary_witness_scheme_version
+string stationary_canonical_source_snapshot_id
+string stationary_canonical_target_snapshot_id
+string stationary_canonical_source_map_hash
+string stationary_canonical_target_map_hash
+float64[3] stationary_canonical_seed

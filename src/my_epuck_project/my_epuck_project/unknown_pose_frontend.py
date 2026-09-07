@@ -64,16 +64,22 @@ from .unknown_pose_frontend_core import (
     physical_candidate_geometry_identity,
     physical_candidate_identity,
     register_crops,
+    reestimate_registration_from_seed,
     refine_registration_locally,
     register_crop_hypotheses,
     register_crop_set,
     select_hypothesis_family,
+    iter_stationary_witness_partitions,
+    stationary_witness_supports_disjoint,
     consensus_admission_quality,
     consensus_crop_maturity,
     should_accept_hypothesis,
     temporal_support_count,
     temporal_consistency,
 )
+
+
+STATIONARY_WITNESS_SCHEME_VERSION = 'stationary-disjoint-partition-v1'
 from .robust_relative_pose_selector import IncrementalHypothesisAccumulator
 
 
@@ -1790,6 +1796,245 @@ class UnknownPoseFrontend(Node):
             },)
         return replace(refined, consensus_diagnostics=diagnostics)
 
+    @staticmethod
+    def _stationary_witness_evidence_id(source, target, partition):
+        suffix = str(partition.support_hash)[:32]
+        return (f"{source['id']}-witness-{suffix}|"
+                f"{target['id']}-witness-{suffix}")
+
+    @staticmethod
+    def _stationary_support_baseline(partitions):
+        points = [partition.target_centroid for partition in partitions]
+        if len(points) < 2:
+            return 0.0
+        return float(max(
+            math.hypot(left[0] - right[0], left[1] - right[1])
+            for index, left in enumerate(points)
+            for right in points[index + 1:]))
+
+    @staticmethod
+    def _run_stationary_full_map_registration(source, target,
+                                              source_snapshot_id='',
+                                              target_snapshot_id=''):
+        """Find three real stationary witnesses using unchanged gates.
+
+        The whole-map fit is retained as the immutable seed.  Candidate
+        sectors are deterministic and disjoint; every sector is independently
+        registered, then the existing family selector is the sole acceptance
+        decision.  A family is rejected if its actual support does not span
+        the existing 0.75 m physical diversity floor, even though the legacy
+        full-map path historically passed zero viewpoint metadata.
+        """
+        whole = UnknownPoseFrontend._run_full_map_registration(source, target)
+        if not whole.accepted:
+            return whole, ()
+        for left_fraction, right_fraction, partitions in \
+                iter_stationary_witness_partitions(source, target,
+                                                    whole.transform):
+            if not stationary_witness_supports_disjoint(partitions):
+                continue
+            support_baseline = UnknownPoseFrontend._stationary_support_baseline(
+                partitions)
+            if support_baseline < 0.75:
+                continue
+            results = [reestimate_registration_from_seed(
+                partition.source, partition.target, whole.transform,
+                minimum_agreement=0.0) for partition in partitions]
+            source_record = {'id': str(source_snapshot_id)}
+            target_record = {'id': str(target_snapshot_id)}
+            evidence_ids = [UnknownPoseFrontend._stationary_witness_evidence_id(
+                source_record, target_record, partition)
+                for partition in partitions]
+            family = select_hypothesis_family(
+                [(partition.source, partition.target)
+                 for partition in partitions],
+                [(result,) for result in results],
+                target_map_radius_m=40.0,
+                min_consistent_constraints=3,
+                # Keep the production full-map selector's setting.  The
+                # independent physical-support floor is enforced above.
+                min_spatial_baseline_m=0.0,
+                max_translation_consistency_m=0.15,
+                max_yaw_consistency_rad=math.radians(1.0),
+                max_projected_registration_error_m=0.20,
+                minimum_agreement=0.0,
+                evidence_ids=evidence_ids)
+            if not family.accepted:
+                continue
+            diagnostics = tuple(family.consensus_diagnostics) + ({
+                'kind': 'stationary_witness_family',
+                'cut_fractions': [float(left_fraction),
+                                  float(right_fraction)],
+                'support_baseline_m': float(support_baseline),
+                'witnesses': [{
+                    'index': int(partition.index),
+                    'evidence_id': evidence_id,
+                    'support_hash': str(partition.support_hash),
+                    'source_support_count': int(
+                        partition.source_support_count),
+                    'target_support_count': int(
+                        partition.target_support_count),
+                    'source_bbox': list(partition.source_bbox),
+                    'target_bbox': list(partition.target_bbox),
+                    'source_centroid': list(partition.source_centroid),
+                    'target_centroid': list(partition.target_centroid),
+                    'source_extent_m': list(partition.source_extent_m),
+                    'target_extent_m': list(partition.target_extent_m),
+                    'individual_transform': [float(value)
+                                             for value in results[index].transform],
+                    'individual_inlier_ratio': float(results[index].inlier_ratio),
+                    'individual_residual_m': float(results[index].residual_m),
+                    'individual_agreement': float(
+                        results[index].occupied_free_agreement),
+                    'individual_overlap': float(results[index].overlap_fraction),
+                } for index, (partition, evidence_id) in enumerate(
+                    zip(partitions, evidence_ids))],
+            }, {
+                'kind': 'stationary_witness_canonical_seed',
+                'scheme_version': STATIONARY_WITNESS_SCHEME_VERSION,
+                'transform': [float(value) for value in whole.transform],
+                'source_snapshot_id': str(source_snapshot_id),
+                'target_snapshot_id': str(target_snapshot_id),
+            },)
+            return replace(family, consensus_diagnostics=diagnostics), tuple(
+                (partition, result, evidence_id)
+                for partition, result, evidence_id in zip(
+                    partitions, results, evidence_ids))
+        return replace(
+            whole, accepted=False,
+            reason='INSUFFICIENT_STATIONARY_WITNESSES',
+            constraint_count=0, consistent_constraint_count=0,
+            consensus_diagnostics=tuple(whole.consensus_diagnostics) + ({
+                'kind': 'stationary_witness_search',
+                'reason': 'NO_ACCEPTED_DISJOINT_THREE_MEMBER_FAMILY',
+            },)), ()
+
+    @staticmethod
+    def _derived_stationary_snapshot(base, crop, support_hash, index):
+        """Materialize an immutable witness under the existing owner prefix."""
+        digest = hashlib.sha256()
+        digest.update(np.asarray(crop.values, dtype=np.int16).tobytes())
+        digest.update(repr((crop.resolution, crop.origin_x, crop.origin_y,
+                            crop.origin_yaw)).encode('ascii'))
+        fingerprint = digest.hexdigest()
+        snapshot_id = (f"{base['id']}-witness-{str(support_hash)[:32]}")
+        return {
+            'id': snapshot_id,
+            'robot_id': str(base['robot_id']),
+            'revision': int(base['revision']),
+            'timestamp_ns': int(base['timestamp_ns']),
+            'fingerprint': fingerprint,
+            'frame_id': str(base['frame_id']),
+            'crop': crop,
+            'width': int(crop.values.shape[1]),
+            'height': int(crop.values.shape[0]),
+            'resolution': float(crop.resolution),
+            'origin_x': float(crop.origin_x),
+            'origin_y': float(crop.origin_y),
+            'origin_yaw': float(crop.origin_yaw),
+            'known_cells': int(np.count_nonzero(crop.values >= 0)),
+            'occupied_cells': int(np.count_nonzero(crop.values >= 50)),
+            'free_cells': int(np.count_nonzero(
+                (crop.values >= 0) & (crop.values < 50))),
+            'stationary_witness_index': int(index),
+            'stationary_support_hash': str(support_hash),
+            'stationary_base_snapshot_id': str(base['id']),
+        }
+
+    def _materialize_stationary_witness_snapshots(self, source, target,
+                                                   partitions):
+        """Cache exact derived crops on both owner sides for peer replay."""
+        records = []
+        for partition, result, evidence_id in partitions:
+            source_snapshot = self._derived_stationary_snapshot(
+                source, partition.source, partition.support_hash,
+                partition.index)
+            target_snapshot = self._derived_stationary_snapshot(
+                target, partition.target, partition.support_hash,
+                partition.index)
+            for snapshot in (source_snapshot, target_snapshot):
+                cache = (self.local_full_map_snapshots
+                         if snapshot['robot_id'] == self.robot_id else
+                         self.peer_full_map_snapshots)
+                cache[snapshot['id']] = snapshot
+                self._trim_full_map_cache(cache)
+            records.append({
+                'evidence_id': str(evidence_id),
+                'source': source_snapshot,
+                'target': target_snapshot,
+                'base_source': source,
+                'base_target': target,
+                'result': result,
+                'partition': partition,
+            })
+        return tuple(records)
+
+    def _ensure_stationary_witness_snapshots_for_proposal(self, proposal):
+        source_id = str(getattr(proposal, 'source_keyframe_id', ''))
+        target_id = str(getattr(proposal, 'target_keyframe_id', ''))
+        source = self._find_full_map_snapshot(source_id)
+        target = self._find_full_map_snapshot(target_id)
+        if source is None or target is None:
+            return False
+        # A stationary proposal uses the canonical robot1->robot2 envelope;
+        # the owner caches may be reversed on robot2, but the IDs are not.
+        if str(source['robot_id']) != 'robot1' or \
+                str(target['robot_id']) != 'robot2':
+            return False
+        seed = self._stationary_proposal_seed(proposal)
+        if seed is None:
+            return False
+        if (str(getattr(proposal,
+                       'stationary_canonical_source_snapshot_id', '')) !=
+                str(source['id']) or
+                str(getattr(proposal,
+                            'stationary_canonical_target_snapshot_id', '')) !=
+                str(target['id']) or
+                str(getattr(proposal,
+                            'stationary_canonical_source_map_hash', '')) !=
+                str(source['fingerprint']) or
+                str(getattr(proposal,
+                            'stationary_canonical_target_map_hash', '')) !=
+                str(target['fingerprint'])):
+            return False
+        source_ids = [str(value) for value in getattr(
+            proposal, 'evidence_source_keyframe_ids', [])]
+        target_ids = [str(value) for value in getattr(
+            proposal, 'evidence_target_keyframe_ids', [])]
+        if len(source_ids) != len(target_ids) or len(source_ids) < 3:
+            return False
+        # Recompute the same deterministic whole-map basin used by the
+        # proposer from the immutable base snapshots.  The accepted family
+        # transform is a consensus output and is not a stable partition seed;
+        # using it here can move a strip boundary by one cell and change the
+        # support hash without changing the physical evidence.
+        whole = self._run_full_map_registration(
+            source['crop'], target['crop'])
+        if not whole.accepted or not self._stationary_seed_compatible(
+                seed, whole.transform):
+            return False
+        for _left, _right, candidate in iter_stationary_witness_partitions(
+                source['crop'], target['crop'], seed):
+            expected = [self._stationary_witness_evidence_id(
+                source, target, partition) for partition in candidate]
+            expected_source = [value.split('|', 1)[0] for value in expected]
+            expected_target = [value.split('|', 1)[1] for value in expected]
+            if (expected_source != source_ids or
+                    expected_target != target_ids or
+                    not stationary_witness_supports_disjoint(candidate) or
+                    self._stationary_support_baseline(candidate) < 0.75):
+                continue
+            if all(self._find_full_map_snapshot(value) is not None
+                   for value in source_ids + target_ids):
+                return True
+            self._materialize_stationary_witness_snapshots(
+                source, target,
+                tuple((partition, None, evidence_id)
+                      for partition, evidence_id in zip(candidate, expected)))
+            return all(self._find_full_map_snapshot(value) is not None
+                       for value in source_ids + target_ids)
+        return False
+
     def _full_map_family_result(self):
         if len(self.full_map_confirmation_records) < 3:
             return None
@@ -1814,38 +2059,66 @@ class UnknownPoseFrontend(Node):
             evidence_timestamps=timestamps,
             evidence_ids=evidence_ids)
 
-    def _record_full_map_result(self, local, peer, result, capture_path=None):
+    def _record_full_map_result(self, local, peer, result, capture_path=None,
+                                witness_records=()):
         canonical = result
         source, target = local, peer
-        evidence_id = f"{source['id']}|{target['id']}"
-        record = {
-            'evidence_id': evidence_id, 'source': source, 'target': target,
-            'result': canonical,
-        }
-        self.full_map_confirmation_records.append(record)
+        records = list(witness_records)
+        if not records:
+            evidence_id = f"{source['id']}|{target['id']}"
+            records = [{
+                'evidence_id': evidence_id, 'source': source, 'target': target,
+                'base_source': source, 'base_target': target,
+                'result': canonical, 'partition': None,
+            }]
+        self.full_map_confirmation_records.extend(records)
         self.full_map_confirmation_records = (
             self.full_map_confirmation_records[-12:])
-        self._record_diagnostic_event(
-            'FULL_MAP_REGISTRATION_RESULT',
-            evidence_id=evidence_id,
-            source_snapshot_id=source['id'], target_snapshot_id=target['id'],
-            source_timestamp_ns=source['timestamp_ns'],
-            target_timestamp_ns=target['timestamp_ns'],
-            transform=[float(value) for value in canonical.transform],
-            accepted=bool(canonical.accepted),
-            residual_m=float(canonical.residual_m),
-            inlier_ratio=float(canonical.inlier_ratio),
-            reverse_inlier_ratio=float(canonical.reverse_inlier_ratio),
-            occupied_free_agreement=float(canonical.occupied_free_agreement),
-            overlap_fraction=float(canonical.overlap_fraction),
-            confirmation_count=len(self.full_map_confirmation_records))
+        for record in records:
+            witness = record.get('partition')
+            individual = record.get('result') or canonical
+            fields = {
+                'evidence_id': record['evidence_id'],
+                'source_snapshot_id': record['source']['id'],
+                'target_snapshot_id': record['target']['id'],
+                'source_timestamp_ns': record['source']['timestamp_ns'],
+                'target_timestamp_ns': record['target']['timestamp_ns'],
+                'transform': [float(value) for value in
+                              individual.transform],
+                'accepted': bool(individual.accepted),
+                'residual_m': float(individual.residual_m),
+                'inlier_ratio': float(individual.inlier_ratio),
+                'reverse_inlier_ratio': float(individual.reverse_inlier_ratio),
+                'occupied_free_agreement': float(
+                    individual.occupied_free_agreement),
+                'overlap_fraction': float(individual.overlap_fraction),
+                'confirmation_count': len(self.full_map_confirmation_records),
+            }
+            if witness is not None:
+                fields.update({
+                    'stationary_witness': True,
+                    'stationary_witness_index': int(witness.index),
+                    'stationary_support_hash': str(witness.support_hash),
+                    'source_support_count': int(
+                        witness.source_support_count),
+                    'target_support_count': int(
+                        witness.target_support_count),
+                    'source_bbox': list(witness.source_bbox),
+                    'target_bbox': list(witness.target_bbox),
+                    'source_centroid': list(witness.source_centroid),
+                    'target_centroid': list(witness.target_centroid),
+                    'source_extent_m': list(witness.source_extent_m),
+                    'target_extent_m': list(witness.target_extent_m),
+                })
+            self._record_diagnostic_event(
+                'FULL_MAP_REGISTRATION_RESULT', **fields)
         if capture_path is not None:
             try:
                 metadata = json.loads(capture_path.read_text(encoding='utf-8'))
                 metadata.update({
-                    'status': 'ACCEPTED' if result.accepted else 'REJECTED',
+                    'status': 'ACCEPTED' if canonical.accepted else 'REJECTED',
                     'returned_transform_local': [float(value) for value in
-                                                result.transform],
+                                                canonical.transform],
                     'returned_transform_canonical': [float(value) for value in
                                                     canonical.transform],
                     'residual_m': float(canonical.residual_m),
@@ -1854,8 +2127,13 @@ class UnknownPoseFrontend(Node):
                     'occupied_free_agreement': float(
                         canonical.occupied_free_agreement),
                     'overlap_fraction': float(canonical.overlap_fraction),
-                    'rejection_reason': '' if result.accepted else str(
-                        result.reason),
+                    'rejection_reason': '' if canonical.accepted else str(
+                        canonical.reason),
+                    'stationary_witness_family': [
+                        diagnostic for diagnostic in
+                        getattr(canonical, 'consensus_diagnostics', ())
+                        if diagnostic.get('kind') ==
+                        'stationary_witness_family'],
                 })
                 capture_path.write_text(json.dumps(
                     metadata, indent=2, sort_keys=True), encoding='utf-8')
@@ -1875,7 +2153,12 @@ class UnknownPoseFrontend(Node):
             return
         source, target, capture_path = context
         try:
-            result = future.result()
+            worker_output = future.result()
+            if (isinstance(worker_output, tuple) and len(worker_output) == 2
+                    and isinstance(worker_output[1], tuple)):
+                result, witness_candidates = worker_output
+            else:
+                result, witness_candidates = worker_output, ()
         except Exception as exc:
             self.counters['registration_callback_exceptions'] += 1
             self._record_diagnostic_event(
@@ -1883,10 +2166,14 @@ class UnknownPoseFrontend(Node):
                 source_snapshot_id=source['id'], target_snapshot_id=target['id'])
             return
         self.counters['registrations'] += 1
-        self._record_full_map_result(source, target, result, capture_path)
+        witness_records = self._materialize_stationary_witness_snapshots(
+            source, target, witness_candidates)
+        self._record_full_map_result(
+            source, target, result, capture_path,
+            witness_records=witness_records)
         if not result.accepted or self.full_map_proposal is not None:
             return
-        family = self._full_map_family_result()
+        family = result if witness_records else self._full_map_family_result()
         if family is None or not family.accepted:
             return
         self._record_diagnostic_event(
@@ -1946,7 +2233,8 @@ class UnknownPoseFrontend(Node):
             source_snapshot_id=source['id'], target_snapshot_id=target['id'])
         self._full_map_registration_context = (source, target, capture_path)
         self._full_map_registration_future = self._registration_executor.submit(
-            self._run_full_map_registration, source['crop'], target['crop'])
+            self._run_stationary_full_map_registration,
+            source['crop'], target['crop'], source['id'], target['id'])
 
     def _full_map_descriptor(self, snapshot):
         descriptor = LocalMapDescriptor()
@@ -1986,15 +2274,36 @@ class UnknownPoseFrontend(Node):
         records = self._full_map_family_records_from_result(result)
         if len(records) < 3 or self.full_map_proposal is not None:
             return False
-        own = self._full_map_descriptor(records[0]['source'])
-        peer = self._full_map_descriptor(records[0]['target'])
+        # Keep the proposal envelope anchored to the immutable full-map
+        # snapshots.  The evidence arrays name derived witness snapshots;
+        # the peer uses these base IDs to deterministically reconstruct the
+        # same partition crops before independently verifying them.
+        own = self._full_map_descriptor(records[0].get(
+            'base_source', records[0]['source']))
+        peer = self._full_map_descriptor(records[0].get(
+            'base_target', records[0]['target']))
+        seed_diagnostic = next((diagnostic for diagnostic in reversed(
+            getattr(result, 'consensus_diagnostics', ())) if
+            diagnostic.get('kind') == 'stationary_witness_canonical_seed'),
+            None)
+        if seed_diagnostic is None:
+            self._record_diagnostic_event(
+                'FULL_MAP_PROPOSAL_REJECTED_MISSING_CANONICAL_SEED')
+            return False
         proposal = self._hypothesis_message(
             own, peer, result, status='PROPOSED', accepted=False,
             rejection_reason='',
             evidence_source_keyframe_ids=[record['source']['id']
                                           for record in records],
             evidence_target_keyframe_ids=[record['target']['id']
-                                          for record in records])
+                                          for record in records],
+            stationary_canonical_seed=seed_diagnostic['transform'],
+            stationary_canonical_source_snapshot_id=own.keyframe_id,
+            stationary_canonical_target_snapshot_id=peer.keyframe_id,
+            stationary_canonical_source_map_hash=records[0][
+                'base_source']['fingerprint'],
+            stationary_canonical_target_map_hash=records[0][
+                'base_target']['fingerprint'])
         self.full_map_proposal = proposal
         self._full_map_proposal_pins.update(
             list(proposal.evidence_source_keyframe_ids) +
@@ -2005,6 +2314,18 @@ class UnknownPoseFrontend(Node):
         self._record_diagnostic_event(
             'FULL_MAP_PROPOSAL_PUBLISHED',
             evidence_set_hash=str(proposal.evidence_set_hash),
+            stationary_witness_scheme_version=str(
+                proposal.stationary_witness_scheme_version),
+            stationary_canonical_seed=[float(value) for value in
+                                       proposal.stationary_canonical_seed],
+            stationary_canonical_source_snapshot_id=str(
+                proposal.stationary_canonical_source_snapshot_id),
+            stationary_canonical_target_snapshot_id=str(
+                proposal.stationary_canonical_target_snapshot_id),
+            stationary_canonical_source_map_hash=str(
+                proposal.stationary_canonical_source_map_hash),
+            stationary_canonical_target_map_hash=str(
+                proposal.stationary_canonical_target_map_hash),
             evidence_source_snapshot_ids=[record['source']['id']
                                          for record in records],
             evidence_target_snapshot_ids=[record['target']['id']
@@ -2016,6 +2337,36 @@ class UnknownPoseFrontend(Node):
         return ('-full-map-' in str(getattr(message, 'source_keyframe_id', ''))
                 or '-full-map-' in str(getattr(
                     message, 'target_keyframe_id', '')))
+
+    @staticmethod
+    def _is_stationary_witness_proposal(message):
+        return any('-witness-' in str(value) for value in (
+            list(getattr(message, 'evidence_source_keyframe_ids', [])) +
+            list(getattr(message, 'evidence_target_keyframe_ids', []))))
+
+    @staticmethod
+    def _stationary_proposal_seed(message):
+        """Return the explicit canonical partition seed, or ``None``."""
+        if (str(getattr(message, 'stationary_witness_scheme_version', '')) !=
+                STATIONARY_WITNESS_SCHEME_VERSION):
+            return None
+        try:
+            seed = tuple(float(value) for value in getattr(
+                message, 'stationary_canonical_seed', ()))
+        except (TypeError, ValueError):
+            return None
+        if len(seed) != 3 or not all(math.isfinite(value) for value in seed):
+            return None
+        return seed
+
+    @staticmethod
+    def _stationary_seed_compatible(seed, verified):
+        """Apply the existing whole-map consistency bounds to the seed."""
+        translation = math.hypot(float(seed[0]) - float(verified[0]),
+                                 float(seed[1]) - float(verified[1]))
+        yaw = abs(math.atan2(math.sin(float(seed[2]) - float(verified[2])),
+                             math.cos(float(seed[2]) - float(verified[2]))))
+        return (translation <= 0.15 and yaw <= math.radians(1.0))
 
     def _full_map_snapshots_for_proposal(self, message):
         """Resolve the immutable full-map evidence named by a proposal."""
@@ -2046,6 +2397,14 @@ class UnknownPoseFrontend(Node):
         source_ids, target_ids = self._full_map_proposal_snapshot_ids(proposal)
         required_ids = list(dict.fromkeys(source_ids + target_ids))
         self._full_map_proposal_pins.update(required_ids)
+        if (self._is_stationary_witness_proposal(proposal) and
+                not self._ensure_stationary_witness_snapshots_for_proposal(
+                    proposal)):
+            self._record_diagnostic_event(
+                'FULL_MAP_PEER_VERIFICATION_REJECTED',
+                reason='STATIONARY_WITNESS_RECONSTRUCTION_MISMATCH')
+            self._full_map_proposal_pins.difference_update(required_ids)
+            return
         missing = self._full_map_missing_snapshot_ids(proposal)
         unavailable = [snapshot_id for snapshot_id in missing
                        if (snapshot_id in self._unavailable_full_map_snapshot_ids or
@@ -2136,17 +2495,38 @@ class UnknownPoseFrontend(Node):
                 reason='MISSING_FULL_MAP_EVIDENCE')
             self._release_full_map_proposal_pins(proposal)
             return
+        stationary_witness_proposal = self._is_stationary_witness_proposal(
+            proposal)
+        canonical_seed = (self._stationary_proposal_seed(proposal)
+                          if stationary_witness_proposal else None)
+        if stationary_witness_proposal and canonical_seed is None:
+            self._record_diagnostic_event(
+                'FULL_MAP_PEER_VERIFICATION_REJECTED',
+                reason='MISSING_STATIONARY_CANONICAL_SEED')
+            self._release_full_map_proposal_pins(proposal)
+            return
         canonical_results = []
-        proposal_seed = self._summary_transform(proposal)
+        proposal_seed = (canonical_seed if canonical_seed is not None else
+                         self._summary_transform(proposal))
         for source, target in pairs:
             try:
                 # The proposer has already done the global discovery.  The
                 # receiver independently checks the exact maps around that
                 # basin with the deterministic symmetric local refinement;
                 # it must not perform a source/target-dependent global search.
-                result = self._run_full_map_registration(
-                    source['crop'], target['crop'],
-                    initial_transform=proposal_seed)
+                if stationary_witness_proposal:
+                    # Stationary witnesses are defined by their immutable,
+                    # disjoint support.  Re-run that same support-local
+                    # estimator on the peer; using the generic whole-crop
+                    # refinement here can select a different local mode and
+                    # falsely fail the unchanged compatibility gate.
+                    result = reestimate_registration_from_seed(
+                        source['crop'], target['crop'], proposal_seed,
+                        minimum_agreement=0.0)
+                else:
+                    result = self._run_full_map_registration(
+                        source['crop'], target['crop'],
+                        initial_transform=proposal_seed)
             except Exception as exc:
                 self._record_diagnostic_event(
                     'FULL_MAP_PEER_VERIFICATION_EXCEPTION',
@@ -2188,9 +2568,14 @@ class UnknownPoseFrontend(Node):
             max_projected_registration_error_m=(
                 self.max_projected_registration_error_m),
             minimum_agreement=0.0,
-            evidence_timestamps=[(
+            # A stationary witness family is three spatially disjoint
+            # re-estimates from one immutable map pair.  Its timestamps are
+            # intentionally identical; applying the temporal-span gate here
+            # would reject valid stationary evidence.  Ordinary proposals
+            # retain the existing time-separation gate unchanged.
+            evidence_timestamps=(None if stationary_witness_proposal else [(
                 int(source['timestamp_ns']), int(target['timestamp_ns']))
-                for source, target in pairs],
+                for source, target in pairs]),
             evidence_ids=evidence_ids)
         if not family.accepted:
             ack = self._ack_message(
@@ -5761,7 +6146,12 @@ class UnknownPoseFrontend(Node):
     def _hypothesis_message(
             self, own, peer, result, status, accepted, rejection_reason,
             evidence_source_keyframe_ids=None,
-            evidence_target_keyframe_ids=None):
+            evidence_target_keyframe_ids=None,
+            stationary_canonical_seed=None,
+            stationary_canonical_source_snapshot_id='',
+            stationary_canonical_target_snapshot_id='',
+            stationary_canonical_source_map_hash='',
+            stationary_canonical_target_map_hash=''):
         message = RelativePoseHypothesis()
         message.header = own.header
         message.source_robot_id = self.robot_id
@@ -5829,6 +6219,20 @@ class UnknownPoseFrontend(Node):
             message.target_viewpoint_yaw = float(target_viewpoint[2])
         message.evidence_source_keyframe_ids = source_ids
         message.evidence_target_keyframe_ids = target_ids
+        message.stationary_witness_scheme_version = (
+            STATIONARY_WITNESS_SCHEME_VERSION
+            if stationary_canonical_seed is not None else '')
+        message.stationary_canonical_source_snapshot_id = str(
+            stationary_canonical_source_snapshot_id)
+        message.stationary_canonical_target_snapshot_id = str(
+            stationary_canonical_target_snapshot_id)
+        message.stationary_canonical_source_map_hash = str(
+            stationary_canonical_source_map_hash)
+        message.stationary_canonical_target_map_hash = str(
+            stationary_canonical_target_map_hash)
+        if stationary_canonical_seed is not None:
+            message.stationary_canonical_seed = [float(value) for value in
+                                                  stationary_canonical_seed]
         message.constraint_count = int(result.constraint_count)
         message.consistent_constraint_count = int(
             result.consistent_constraint_count)
@@ -6172,6 +6576,15 @@ class UnknownPoseFrontend(Node):
             proposal.evidence_source_keyframe_ids)
         message.evidence_target_keyframe_ids = list(
             proposal.evidence_target_keyframe_ids)
+        for field in (
+                'stationary_witness_scheme_version',
+                'stationary_canonical_source_snapshot_id',
+                'stationary_canonical_target_snapshot_id',
+                'stationary_canonical_source_map_hash',
+                'stationary_canonical_target_map_hash'):
+            setattr(message, field, str(getattr(proposal, field, '')))
+        message.stationary_canonical_seed = list(getattr(
+            proposal, 'stationary_canonical_seed', (0.0, 0.0, 0.0)))
         message.constraint_count = proposal.constraint_count
         message.consistent_constraint_count = proposal.consistent_constraint_count
         message.spatial_baseline_m = proposal.spatial_baseline_m

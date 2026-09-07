@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 import time
 from typing import Callable, Optional
 
@@ -558,7 +559,9 @@ class LocalNav2:
             'path_query_lock_path',
             '/tmp/my_epuck_%s_compute_path.lock' % namespace,
         ).value)
+        self._path_priority_path = self._path_query_lock_path + '.fallback_priority'
         self._path_query_lock_file = None
+        self._last_path_start_failure_reason = ''
         # These waitables are created on first real local work.  Constructing
         # them at process startup makes every idle assignment peer poll two
         # action clients and three lifecycle services even before a frontier
@@ -1127,11 +1130,19 @@ class LocalNav2:
             callback: Callable[[PathEvaluation], None],
             caller: str = 'ALLOCATOR_BID') -> bool:
         """Start one bounded local path request; return false if busy/unavailable."""
+        self._last_path_start_failure_reason = ''
         self._ensure_compute_client()
-        if (self._path_callback is not None or
-                not self._compute_client.server_is_ready() or
-                not self._acquire_path_query_lock()):
+        if self._path_callback is not None:
+            self._last_path_start_failure_reason = 'PATH_REQUEST_ACTIVE'
             return False
+        if not self._compute_client.server_is_ready():
+            self._last_path_start_failure_reason = 'ACTION_SERVER_UNAVAILABLE'
+            return False
+        if not self._acquire_path_query_lock():
+            self._last_path_start_failure_reason = 'PATH_QUERY_LEASE_BUSY'
+            self._request_path_priority()
+            return False
+        self._clear_path_priority()
         self._active_path_request += 1
         generation = self._active_path_request
         self._path_callback = callback
@@ -1151,6 +1162,35 @@ class LocalNav2:
             lambda result: self._path_goal_response(generation, result),
         )
         return True
+
+    def path_start_failure_reason(self) -> str:
+        """Return why the most recent path request could not start."""
+        return self._last_path_start_failure_reason
+
+    def clear_path_query_priority(self) -> None:
+        """Drop an obsolete fallback priority request."""
+        self._clear_path_priority()
+
+    def _request_path_priority(self) -> None:
+        """Publish a one-shot priority hint for the shared planner lease."""
+        temporary = '%s.tmp.%s' % (self._path_priority_path, os.getpid())
+        try:
+            with open(temporary, 'w', encoding='ascii') as stream:
+                stream.write('%d\n' % os.getpid())
+            os.replace(temporary, self._path_priority_path)
+        except OSError:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    def _clear_path_priority(self) -> None:
+        try:
+            os.unlink(self._path_priority_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def _path_goal_response(self, generation: int, future) -> None:
         if generation != self._active_path_request or self._path_callback is None:

@@ -456,6 +456,14 @@ class DistributedFrontierAssignment(Node):
             'phase_gated', False).value)
         self._shared_nav2_ready_topic = str(self.declare_parameter(
             'shared_nav2_ready_topic', '').value)
+        self._common_start_release_required = bool(self.declare_parameter(
+            'common_start_release_required', False).value)
+        self._publish_cooperative_start_ready = bool(self.declare_parameter(
+            'publish_cooperative_start_ready', False).value)
+        self._start_release_received = not self._common_start_release_required
+        self._start_release_sim_time_s: Optional[float] = None
+        self._start_release_subscription = None
+        self._cooperative_start_ready_publisher = None
         self._handoff_complete = False
         self._dispatch_enabled = bool(
             self.declare_parameter('dispatch_enabled', False).value,
@@ -772,6 +780,22 @@ class DistributedFrontierAssignment(Node):
         self._candidate_source_local_evidence = {
             robot: CandidateEvidence() for robot in ('robot1', 'robot2')
         }
+        # The task-snapshot TTL is deliberately short for peer/cooperative
+        # evidence.  Keep the latest source-local physical signatures
+        # separately so a temporarily expired local snapshot can only be
+        # reused as a seed when the same current candidate is still being
+        # advertised.  ``None`` means no candidate batch has been observed;
+        # an empty set is authoritative evidence that no reachable candidates
+        # were present in the latest batch.
+        self._current_local_frontier_ids: dict[
+            str, Optional[frozenset[str]]] = {
+                robot: None for robot in ('robot1', 'robot2')}
+        # Candidate/snapshot arrival is an immediate opportunity for the
+        # existing degraded-solo path. The allocator tick consumes this
+        # scheduling hint before beginning another cooperative wait; it does
+        # not bypass any dispatch or safety validation.
+        self._local_fallback_trigger_pending = False
+        self._local_fallback_trigger_reason = ''
         self._candidate_region_snapshots: dict[
             str, tuple[FrontierRegionEvidence, ...]] = {}
         # Latest pre-query lower-bound evidence, retained separately from
@@ -837,6 +861,21 @@ class DistributedFrontierAssignment(Node):
                     depth=1, reliability=ReliabilityPolicy.RELIABLE,
                     durability=DurabilityPolicy.TRANSIENT_LOCAL),
             )
+        if self._common_start_release_required:
+            start_qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._start_release_subscription = self.create_subscription(
+                String, '/cslam/unknown_pose/start_release',
+                self._start_release_callback, start_qos,
+            )
+            if self._publish_cooperative_start_ready:
+                self._cooperative_start_ready_publisher = self.create_publisher(
+                    String,
+                    f'/cslam/unknown_pose/cooperative_start_ready/{self._robot_id}',
+                    start_qos,
+                )
         if self._handoff_gated or self._stop_after_handoff:
             self.create_subscription(
                 RelativePoseHypothesis, '/cslam/relative_pose/hypotheses',
@@ -1149,6 +1188,46 @@ class DistributedFrontierAssignment(Node):
         self.get_logger().info(
             'UNKNOWN_POSE_PHASE shared_assignment_active=true '
             'protocol_inputs=true timers=true')
+        if self._cooperative_start_ready_publisher is not None:
+            message = String()
+            message.data = json.dumps({
+                'event': 'COOPERATIVE_START_STATE_READY',
+                'robot_id': self._robot_id,
+                'sim_time_s': self._sim_time_s(),
+                # C currently runs with the traffic gate disabled; that is an
+                # explicit ready/no-gate state.  Enabled traffic is still
+                # evaluated by the normal dispatch path after release.
+                'traffic_scheduler_ready': True,
+            }, sort_keys=True, separators=(',', ':'))
+            self._cooperative_start_ready_publisher.publish(message)
+            self._emit_event(
+                'COOPERATIVE_START_STATE_READY', message.data,
+            )
+
+    def _start_release_callback(self, message: String) -> None:
+        if self._start_release_received:
+            return
+        try:
+            payload = json.loads(str(message.data))
+            if str(payload.get('event', '')) != 'START_RELEASE':
+                return
+            release_time = float(payload['release_sim_time_s'])
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            self.get_logger().warning(
+                'START_RELEASE_REJECTED robot=%s reason=malformed_payload' %
+                self._robot_id)
+            return
+        self._start_release_received = True
+        self._start_release_sim_time_s = release_time
+        self.get_logger().info(
+            'START_RELEASE_RECEIVED robot=%s release_sim_time_s=%.6f' %
+            (self._robot_id, release_time))
+        self._emit_event('START_RELEASE_RECEIVED', message.data)
+
+    def _exploration_dispatch_allowed(self) -> bool:
+        """Keep every exploration send behind the common C release barrier."""
+        return (not getattr(self, '_common_start_release_required', False) or
+                getattr(self, '_start_release_received', False))
 
     def _shared_nav2_ready_callback(self, message: Bool) -> None:
         if not bool(message.data):
@@ -1215,6 +1294,29 @@ class DistributedFrontierAssignment(Node):
         if message.source_robot_id not in self._candidate_evidence:
             return
         self._candidate_evidence_seen.add(message.source_robot_id)
+        # This is source-local current evidence, not a peer/evidence TTL.  The
+        # fallback path uses it only to validate that a retained task still
+        # represents the same physical candidate before asking Nav2 to build a
+        # new path.
+        if not hasattr(self, '_current_local_frontier_ids'):
+            self._current_local_frontier_ids = {
+                robot: None for robot in ('robot1', 'robot2')}
+        self._current_local_frontier_ids[message.source_robot_id] = frozenset(
+            str(getattr(candidate, 'physical_frontier_id',
+                       getattr(candidate, 'frontier_id', '')))
+            for candidate in message.candidates
+            if str(getattr(candidate, 'physical_frontier_id',
+                           getattr(candidate, 'frontier_id', '')))
+        )
+        if message.source_robot_id == getattr(self, '_robot_id', None):
+            if message.candidates:
+                self._local_fallback_trigger_pending = True
+                self._local_fallback_trigger_reason = (
+                    'local candidate batch became current while cooperative '
+                    'evidence was pending')
+            else:
+                self._local_fallback_trigger_pending = False
+                self._local_fallback_trigger_reason = ''
         fallback = CandidateEvidence(
             detected=int(message.detected_frontier_count),
             small=int(message.small_frontier_count),
@@ -1447,6 +1549,13 @@ class DistributedFrontierAssignment(Node):
         self._snapshots[snapshot.source_robot_id] = receive(
             snapshot, snapshot.validity_s, now,
         )
+        if (snapshot.source_robot_id == self._robot_id and snapshot.tasks and
+                getattr(self, '_current_local_frontier_ids', {}).get(
+                    self._robot_id) is not None):
+            self._local_fallback_trigger_pending = True
+            self._local_fallback_trigger_reason = (
+                'local task snapshot became current while cooperative '
+                'evidence was pending')
         if (not self._local_only and snapshot.tasks and
                 snapshot.source_robot_id not in
                 self._first_nonempty_task_snapshot_logged):
@@ -1616,6 +1725,142 @@ class DistributedFrontierAssignment(Node):
     def _fresh_snapshot(self, robot_id: str, now: float) -> Optional[TaskSnapshot]:
         received = self._snapshots.get(robot_id)
         return received.value if received is not None and received.fresh(now) else None
+
+    def _local_fallback_snapshot(self, now: float) -> Optional[TaskSnapshot]:
+        """Return a current or safely revalidated local task seed.
+
+        ``Received.fresh`` remains the authority for cooperative/peer
+        evidence.  Local degraded-solo work has a different lifetime: an
+        expired local snapshot may be retained only when the latest local
+        candidate batch still advertises every task selected from it.  The
+        final dispatch path then performs the existing current TF, map,
+        costmap, Nav2 path, traffic, reservation, and failure checks.  An
+        absent/empty current candidate set never authorizes a stale task.
+        """
+        received = self._snapshots.get(self._robot_id)
+        if received is None:
+            return None
+        snapshot = received.value
+        current_frontier_ids = getattr(
+            self, '_current_local_frontier_ids', {}).get(self._robot_id)
+        if current_frontier_ids is None:
+            return snapshot if received.fresh(now) else None
+        tasks = tuple(
+            task for task in snapshot.tasks
+            if str(task.local_frontier_id) in current_frontier_ids
+        )
+        if not tasks:
+            return None
+        if tasks == snapshot.tasks:
+            return snapshot
+        return replace(snapshot, tasks=tasks)
+
+    def _consume_local_fallback_trigger(self) -> bool:
+        """Start existing fallback before another cooperative wait.
+
+        This is a scheduler hint only. The fallback still performs current
+        source-local identity, TF, path, reservation, traffic, failure, and
+        final dispatch checks; no retained path is sent.
+        """
+        if not getattr(self, '_local_fallback_trigger_pending', False):
+            return False
+        reason = getattr(
+            self, '_local_fallback_trigger_reason',
+            'current local candidate became available',
+        )
+        self._local_fallback_trigger_pending = False
+        self._local_fallback_trigger_reason = ''
+        if (self._local_only or self._terminal or
+                self._nav2.local_goal_active or self._dispatch_in_progress):
+            getattr(self._nav2, 'clear_path_query_priority', lambda: None)()
+            return False
+        local = self._local_fallback_snapshot(time.monotonic())
+        if local is None:
+            getattr(self._nav2, 'clear_path_query_priority', lambda: None)()
+            return False
+        return self._continue_local_work_while_waiting(local, reason)
+
+    def _temporary_peer_reservation_ids(self, now: float) -> frozenset[str]:
+        """Return task IDs advertised by the peer's degraded-solo fallback.
+
+        A degraded-solo goal is a temporary local commitment, not a normal
+        cooperative agreement.  It is nevertheless advertised through the
+        existing distributed status heartbeat so the peer cannot select the
+        same canonical task while cooperative evidence is catching up.
+        Normal cooperative commitments use their ordinary decision hash and
+        are deliberately not included here.
+        """
+        peer = self._peer_status
+        if peer is None or not peer.fresh(now):
+            return frozenset()
+        task_id = str(peer.value.active_canonical_task_id).strip()
+        if not task_id:
+            return frozenset()
+        if (str(peer.value.decision_hash) != 'DEGRADED_SOLO' and
+                peer.value.state != DistributedExplorationStatus.DEGRADED_SOLO):
+            return frozenset()
+        return frozenset((task_id,))
+
+    def _continue_local_work_while_waiting(
+            self, snapshot: Optional[TaskSnapshot], reason: str) -> bool:
+        """Use the existing local fallback while cooperative evidence waits.
+
+        This does not manufacture a pair decision or relax the certificate.
+        It only gives an otherwise free robot the already-supported
+        degraded-solo dispatch path.  The temporary task is published through
+        the normal status heartbeat and is excluded by
+        ``_temporary_peer_reservation_ids`` on the peer.
+        """
+        if (self._local_only or self._nav2.local_goal_active or
+                self._dispatch_in_progress):
+            return False
+        # In the cooperative path, ignore the round's possibly expired
+        # snapshot and select from the latest local seed that passed the
+        # source-local candidate check.  Keep the argument for call-site and
+        # test compatibility; it is only a fallback for ROS-free fixtures.
+        if hasattr(self, '_snapshots'):
+            snapshot = self._local_fallback_snapshot(time.monotonic())
+        if snapshot is None:
+            return False
+        self._continue_degraded_solo(snapshot)
+        selected = (
+            self._active_task is not None and
+            self._active_decision_hash == 'DEGRADED_SOLO')
+        if selected and not self._nav2.local_goal_active:
+            self._transition(CoordinatorState.DEGRADED_SOLO, reason)
+            self._publish_status()
+            self._emit_event(
+                'DEGRADED_SOLO_COMMITMENT',
+                'temporary local work advertised while cooperative evidence waits',
+            )
+        return selected
+
+    def _start_immediate_fallback_after_terminal(self) -> None:
+        """Start safe local continuation without waiting for the next tick.
+
+        A terminal navigation callback already establishes that this robot is
+        free.  A local candidate that arrived while this robot was busy is
+        already a safe scheduler trigger; consuming it here avoids waiting
+        for another cooperative tick.  When the peer still advertises an
+        active commitment, the peer reservation also prevents both replicas
+        from selecting the same task.  The fallback itself still performs
+        the normal current TF, path, traffic, reservation, and failure checks
+        before sending anything.
+        """
+        if self._local_only or self._terminal or self._nav2.local_goal_active:
+            return
+        if self._consume_local_fallback_trigger():
+            return
+        now = time.monotonic()
+        peer = self._peer_status
+        if (peer is None or not peer.fresh(now) or
+                not (peer.value.local_nav_goal_active or
+                     peer.value.state == DistributedExplorationStatus.NAVIGATING)):
+            return
+        local = self._local_fallback_snapshot(now)
+        if local is not None:
+            self._continue_local_work_while_waiting(
+                local, 'immediate local work after navigation terminal result')
 
     @staticmethod
     def _finite_path_samples(path: tuple[tuple[float, float], ...]) -> bool:
@@ -2219,6 +2464,8 @@ class DistributedFrontierAssignment(Node):
             self._released_traffic_winner_robot_id = ''
         if now < self._settle_until_steady_s:
             return
+        if self._consume_local_fallback_trigger():
+            return
         continuation = self._allocator_timing_timed_call(
             'consensus_continuation', self._continuation_context, now,
         )
@@ -2244,16 +2491,17 @@ class DistributedFrontierAssignment(Node):
             first = self._fresh_snapshot('robot1', now)
             second = self._fresh_snapshot('robot2', now)
             if first is None or second is None:
-                if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
-                    self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
-                    local = first if self._robot_id == 'robot1' else second
-                    if local is not None:
-                        self._continue_degraded_solo(local)
-                else:
-                    self._transition(
-                        CoordinatorState.WAITING_FOR_INPUTS,
-                        'fresh task snapshots from both source sessions required',
-                    )
+                local = first if self._robot_id == 'robot1' else second
+                if not self._continue_local_work_while_waiting(
+                        local,
+                        'temporary local work while peer snapshot is unavailable'):
+                    if self._peer_liveness.evaluate(now) == CoordinatorState.DEGRADED_SOLO:
+                        self._transition(CoordinatorState.DEGRADED_SOLO, 'peer snapshot timeout')
+                    else:
+                        self._transition(
+                            CoordinatorState.WAITING_FOR_INPUTS,
+                            'fresh task snapshots from both source sessions required',
+                        )
                 return
         # Terminal significance is evaluated from the unique physical
         # frontier evidence, not from whether tiny regions happened to become
@@ -2288,15 +2536,22 @@ class DistributedFrontierAssignment(Node):
             # Heartbeat epochs can advance while the semantic task set stays
             # empty.  Revisit the persistent completion gate on every tick;
             # otherwise the first empty round could never reach confirmation.
+            local = first if self._robot_id == 'robot1' else second
+            if self._continue_local_work_while_waiting(
+                    local, 'temporary local work while pair is idle'):
+                return
             if self._consider_completion(now):
                 return
             return
         if (self._round is None and self._last_semantic_fingerprint ==
                 content_fingerprint):
-            self._transition(
-                CoordinatorState.WAITING_FOR_INPUTS,
-                'unchanged semantic task content; no new planner round',
-            )
+            local = first if self._robot_id == 'robot1' else second
+            if not self._continue_local_work_while_waiting(
+                    local, 'temporary local work while semantic round is unchanged'):
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'unchanged semantic task content; no new planner round',
+                )
             return
         if (
                 current_round is not None and current_round.decision is not None and
@@ -2304,10 +2559,13 @@ class DistributedFrontierAssignment(Node):
                 not current_round.decision.robot1_task_id and
                 not current_round.decision.robot2_task_id and
                 current_round.content_fingerprint == content_fingerprint):
-            self._transition(
-                CoordinatorState.WAITING_FOR_INPUTS,
-                'unchanged IDLE task content; waiting for meaningful proposal change',
-            )
+            local = first if self._robot_id == 'robot1' else second
+            if not self._continue_local_work_while_waiting(
+                    local, 'temporary local work while cooperative IDLE repeats'):
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'unchanged IDLE task content; waiting for meaningful proposal change',
+                )
             return
         if current_round is None or current_round.round_id != round_id:
             union = build_canonical_union(
@@ -2355,15 +2613,26 @@ class DistributedFrontierAssignment(Node):
                 now, round_work,
             )
             if continuation_batches is None:
-                self._transition(
-                    CoordinatorState.BIDDING,
-                    'waiting for valid free-robot continuation bid',
-                )
+                local = next(
+                    (snapshot for snapshot in round_work.snapshots
+                     if snapshot.source_robot_id == self._robot_id), None)
+                if not self._continue_local_work_while_waiting(
+                        local,
+                        'temporary local work while continuation bid is pending'):
+                    self._transition(
+                        CoordinatorState.BIDDING,
+                        'waiting for valid free-robot continuation bid',
+                    )
                 return
             first_batch, second_batch = continuation_batches
         else:
             if not self._both_bid_batches_valid(now, round_work):
-                self._transition(CoordinatorState.BIDDING, 'waiting for valid peer bids')
+                local = next(
+                    (snapshot for snapshot in round_work.snapshots
+                     if snapshot.source_robot_id == self._robot_id), None)
+                if not self._continue_local_work_while_waiting(
+                        local, 'temporary local work while peer bid is pending'):
+                    self._transition(CoordinatorState.BIDDING, 'waiting for valid peer bids')
                 return
         # Do not publish the first actionable pair while the local shared
         # frame is still extrapolating.  The final dispatch gate remains in
@@ -2384,6 +2653,11 @@ class DistributedFrontierAssignment(Node):
                     CoordinatorState.WAITING_FOR_INPUTS,
                     'required shared-frame TF not yet usable for pair decision',
                 )
+                local = next(
+                    (snapshot for snapshot in round_work.snapshots
+                     if snapshot.source_robot_id == self._robot_id), None)
+                self._continue_local_work_while_waiting(
+                    local, 'temporary local work while shared TF is pending')
                 return
             if not self._shared_tf_ready_logged:
                 self._shared_tf_ready_logged = True
@@ -2404,8 +2678,11 @@ class DistributedFrontierAssignment(Node):
             if not continuation_active:
                 first_batch = self._bid_batches['robot1'].value
                 second_batch = self._bid_batches['robot2'].value
-            hard_ids = self._hard_failed_task_ids(round_work.union) | frozenset(
-                self._completed_shared_canonical_ids)
+            hard_ids = (
+                self._hard_failed_task_ids(round_work.union) |
+                frozenset(self._completed_shared_canonical_ids) |
+                self._temporary_peer_reservation_ids(now)
+            )
             fixed_kwargs = {}
             if continuation_active:
                 if continuation.busy_robot_id == 'robot1':
@@ -2480,6 +2757,12 @@ class DistributedFrontierAssignment(Node):
                         'cost-only dispatch certificate deferred: %s' %
                         certificate_reason,
                     )
+                    local = next(
+                        (snapshot for snapshot in round_work.snapshots
+                         if snapshot.source_robot_id == self._robot_id), None)
+                    self._continue_local_work_while_waiting(
+                        local,
+                        'temporary local work while cost-only certificate is pending')
                     return
             traffic = self._traffic_for_decision(decision, first_batch, second_batch)
             # Snapshot cardinalities are transport/provenance facts rather
@@ -2522,6 +2805,11 @@ class DistributedFrontierAssignment(Node):
         if not self._allocator_timing_timed_call(
                 'consensus_continuation', self._matching_peer_decision,
                 round_work, generation, now):
+            local = next(
+                (snapshot for snapshot in round_work.snapshots
+                 if snapshot.source_robot_id == self._robot_id), None)
+            self._continue_local_work_while_waiting(
+                local, 'temporary local work while peer agreement is pending')
             return
         if not self._round_is_current(round_work, generation):
             self._discard_stale_tick(round_work, generation, 'after peer match')
@@ -3463,6 +3751,7 @@ class DistributedFrontierAssignment(Node):
     def _continue_degraded_solo(self, snapshot: TaskSnapshot) -> None:
         """Dispatch at most one locally proposed task per epoch without team claims."""
         if (not self._dispatch_enabled or self._dispatch_in_progress or
+                not self._exploration_dispatch_allowed() or
                 (self._initial_peer_readiness_barrier and
                  not self._initial_exploration_barrier.dispatch_allowed)):
             return
@@ -3589,9 +3878,29 @@ class DistributedFrontierAssignment(Node):
 
         if not self._nav2.evaluate_path(
                 task.members[0], final_path, caller='DEGRADED_SOLO_DISPATCH'):
-            self._invalidate_round(
-                FailureClass.TF_OR_LIFECYCLE,
-                'degraded solo local path action unavailable',
+            failure_reason = getattr(
+                self._nav2, 'path_start_failure_reason', lambda: '',
+            )()
+            if failure_reason != 'PATH_QUERY_LEASE_BUSY':
+                self._invalidate_round(
+                    FailureClass.TF_OR_LIFECYCLE,
+                    'degraded solo local path action unavailable')
+                return
+            # Candidate generation may briefly own the per-robot planner
+            # lease.  This is not a task/path failure: preserve the current
+            # local seed and retry it on the next allocator tick rather than
+            # waiting for a new snapshot to re-arm degraded-solo work.
+            self._dispatch_in_progress = False
+            self._active_task = None
+            self._active_round_id = ''
+            self._active_decision_hash = ''
+            self._last_solo_snapshot_key = None
+            self._local_fallback_trigger_pending = True
+            self._local_fallback_trigger_reason = (
+                'local fallback waiting for ComputePathToPose query lease')
+            self._transition(
+                CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                'waiting for local ComputePathToPose query lease',
             )
 
     def _continue_bidding(self, round_work: RoundWork, generation: int) -> None:
@@ -3942,6 +4251,12 @@ class DistributedFrontierAssignment(Node):
             return
         if round_work.decision is None:
             return
+        if not self._exploration_dispatch_allowed():
+            self._transition(
+                CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                'common START_RELEASE barrier pending',
+            )
+            return
         if (round_work.mode == 'continuation' and
                 self._robot_id == round_work.continuation_busy_robot_id):
             commitment = self._active_commitments.get(self._robot_id)
@@ -3991,7 +4306,15 @@ class DistributedFrontierAssignment(Node):
             else round_work.decision.robot2_task_id
         )
         if not task_id:
-            self._transition(CoordinatorState.WAITING_FOR_INPUTS, 'local assignment is IDLE')
+            local = next(
+                (snapshot for snapshot in round_work.snapshots
+                 if snapshot.source_robot_id == self._robot_id), None)
+            if not self._continue_local_work_while_waiting(
+                    local, 'temporary local work while agreed assignment is IDLE'):
+                self._transition(
+                    CoordinatorState.WAITING_FOR_INPUTS,
+                    'local assignment is IDLE',
+                )
             return
         tasks = {task.canonical_id: task for task in round_work.union.tasks}
         task = tasks.get(task_id)
@@ -4308,6 +4631,7 @@ class DistributedFrontierAssignment(Node):
         self._last_semantic_fingerprint = ''
         self._last_solo_snapshot_key = None
         self._reset_round('navigation terminal result')
+        self._start_immediate_fallback_after_terminal()
 
     def _invalidate_round(
             self, failure: FailureClass, reason: str,
@@ -4524,6 +4848,28 @@ class DistributedFrontierAssignment(Node):
         message.actionable_reachable_count = sum(
             (item.actionable_reachable if item.actionable_reachable is not None
              else item.reachable) for item in evidence)
+        # These fields are passive evidence only.  They expose the existing
+        # source-local candidate state explicitly so avoidable idle can be
+        # reconstructed offline without treating absence of a dispatch as
+        # proof that work was available.
+        local_evidence = getattr(
+            self, '_candidate_source_local_evidence', {}).get(
+                self._robot_id, CandidateEvidence())
+        local_feasible = int(local_evidence.reachable) > 0
+        local_actionable = int(
+            local_evidence.actionable_reachable or 0) > 0
+        message.feasible_work_available = local_feasible
+        message.actionable_work_available = local_actionable
+        if local_actionable:
+            message.work_availability_reason = 'ACTIONABLE_REACHABLE'
+        elif local_feasible:
+            message.work_availability_reason = 'REACHABLE_BELOW_GAIN'
+        elif local_evidence.detected_not_queried:
+            message.work_availability_reason = 'UNQUERIED_EVIDENCE_PENDING'
+        elif local_evidence.detected:
+            message.work_availability_reason = 'NO_FEASIBLE_REACHABLE_TASK'
+        else:
+            message.work_availability_reason = 'NO_DETECTED_FRONTIER'
         message.validity = seconds_to_duration(2.5)
         message.reason = self._state_reason
         self._status_publisher.publish(message)

@@ -19,6 +19,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from my_epuck_project.cooperative_profiles import profile_for_world
+from my_epuck_project.thesis_baseline_topology import parse_active_robots
 from nav2_common.launch import RewrittenYaml
 
 
@@ -364,6 +365,11 @@ def launch_setup(context):
     launch_mapping = (
         LaunchConfiguration('launch_mapping').perform(context).lower()
         == 'true')
+    active_robots = parse_active_robots(
+        LaunchConfiguration('active_robots').perform(context))
+    independent_local_maps = (
+        LaunchConfiguration('independent_local_maps').perform(context).lower()
+        == 'true')
     requested_shared_stack = (
         LaunchConfiguration('launch_shared_stack').perform(context).lower()
         == 'true')
@@ -428,10 +434,12 @@ def launch_setup(context):
             'launch_mapping': LaunchConfiguration('launch_mapping'),
             'phase_already_aligned': LaunchConfiguration(
                 'phase_already_aligned'),
+            'active_robots': LaunchConfiguration('active_robots'),
+            'independent_local_maps': LaunchConfiguration('independent_local_maps'),
         }.items(),
     )
     relative = selected['world_metadata']['relative_transform']
-    alignment = [] if unknown_initial_pose else [
+    alignment = [] if unknown_initial_pose or independent_local_maps else [
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
@@ -456,6 +464,8 @@ def launch_setup(context):
     ]
     exchange = []
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
+        if independent_local_maps or robot not in active_robots or peer not in active_robots:
+            continue
         if not unknown_initial_pose:
             exchange.append(Node(
                 package='my_epuck_project', executable='map_exporter',
@@ -530,7 +540,7 @@ def launch_setup(context):
     # inter-robot pose information.
     shared_frame_anchors = []
     if unknown_initial_pose and launch_shared_stack:
-        for robot in ('robot1', 'robot2'):
+        for robot in active_robots:
             shared_frame_anchors.append(Node(
                 package='tf2_ros',
                 executable='static_transform_publisher',
@@ -544,7 +554,15 @@ def launch_setup(context):
                 ],
             ))
     nav2_actions = []
-    for robot in ('robot1', 'robot2'):
+    for robot in active_robots:
+        if independent_local_maps:
+            nav2_actions.extend(nav2_nodes(
+                package_dir, robot, selected,
+                LaunchConfiguration('controller_variant').perform(context),
+                global_frame=f'{robot}/map', map_topic=f'/{robot}/map',
+                use_sim_time_value=LaunchConfiguration('use_sim_time').perform(context),
+                autostart=LaunchConfiguration('nav2_autostart')))
+            continue
         if unknown_initial_pose and launch_mapping:
             nav2_actions.extend(nav2_nodes(
                 package_dir, robot, selected,
@@ -629,6 +647,9 @@ def generate_launch_description():
         DeclareLaunchArgument('launch_shared_fusion', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_already_aligned', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('active_robots', default_value='robot1,robot2'),
+        DeclareLaunchArgument('independent_local_maps', default_value='false',
                               choices=['true', 'false']),
         OpaqueFunction(function=launch_setup),
     ])

@@ -620,16 +620,24 @@ def choose_pair_assignment(
             candidates.append((first_id, second_id, score, combined, maximum))
     non_idle = [item for item in candidates
                 if item[0] or item[1]]
+    two_active = [item for item in non_idle
+                  if item[0] and item[1]]
+    one_active = [item for item in non_idle
+                  if bool(item[0]) ^ bool(item[1])]
     conflict_free_two_active = [
-        item for item in non_idle
+        item for item in two_active
         if _is_conflict_free_two_active_assignment(item)
     ]
-    if conflict_free_two_active:
-        # Independent useful work should use both robots.  Existing soft
-        # utility and deterministic ties still select which independent pair.
-        selection_pool = conflict_free_two_active
-    elif non_idle:
-        selection_pool = non_idle
+    if two_active:
+        # Active-assignment cardinality is the first policy tier: when both
+        # robots have a valid canonical-distinct pair, IDLE cannot make a
+        # one-active assignment cheaper.  Preserve the existing conflict-free
+        # preference and score/tie-break ordering within the two-active tier.
+        selection_pool = conflict_free_two_active or two_active
+    elif one_active:
+        # A one-active assignment is valid only when no valid two-active pair
+        # exists.  Existing score/rank semantics remain unchanged here.
+        selection_pool = one_active
     else:
         selection_pool = []
     if selection_pool:

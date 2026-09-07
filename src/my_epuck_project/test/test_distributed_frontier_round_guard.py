@@ -9,7 +9,9 @@ from my_epuck_project.distributed_assignment.models import (
     Bounds,
     FailureClass,
     PhysicalTask,
+    TaskSnapshot,
 )
+from my_epuck_project.distributed_assignment.protocol import receive
 from my_epuck_project.distributed_assignment.local_nav2 import (
     DispatchPreconditions,
     PathEvaluation,
@@ -22,10 +24,18 @@ from my_epuck_project.distributed_frontier_assignment import (
     eligible_solo_tasks,
     solo_retry_delay_s,
 )
+from my_epuck_project.passive_rosbag import passive_topics
 from my_epuck_project.distributed_assignment.scoring import rank_solo_tasks
 
 SOURCE = Path(__file__).parents[1] / 'my_epuck_project' / (
     'distributed_frontier_assignment.py'
+)
+LOCAL_NAV2_SOURCE = Path(__file__).parents[1] / 'my_epuck_project' / (
+    Path('distributed_assignment') / 'local_nav2.py'
+)
+FRONTIER_GENERATOR_SOURCE = Path(__file__).parents[2] / (
+    Path('my_epuck_frontier_candidates') / 'src' /
+    'frontier_candidate_generator.cpp'
 )
 
 
@@ -93,6 +103,35 @@ def test_local_tick_and_dispatch_selection_share_initial_barrier_guard():
                   source.index('    def _continue_bidding')]
     assert '_initial_exploration_barrier.dispatch_allowed' in tick
     assert '_initial_exploration_barrier.dispatch_allowed' in solo
+
+
+def test_common_start_release_is_required_before_any_exploration_send():
+    source = SOURCE.read_text(encoding='utf-8')
+    assert "'common_start_release_required'" in source
+    assert 'def _exploration_dispatch_allowed' in source
+    assert 'not self._exploration_dispatch_allowed()' in source
+    dispatch = source[source.index('    def _start_local_dispatch'):]
+    assert "'common START_RELEASE barrier pending'" in dispatch
+
+
+def test_shared_launch_releases_once_after_both_assignment_peers_ready():
+    launch = (Path(__file__).parents[1] / 'launch' /
+              'two_robots_decentralized_exploration_launch.py').read_text()
+    activation = (Path(__file__).parents[1] / 'my_epuck_project' /
+                  'unknown_pose_shared_stack_activation.py').read_text()
+    assert 'common_start_release_required' in launch
+    assert 'publish_cooperative_start_ready' in launch
+    assert "'/cslam/unknown_pose/start_release'" in activation
+    assert '_cooperative_start_ready.values()' in activation
+    assert 'START_RELEASE' in activation
+
+
+def test_passive_rosbag_topic_set_is_explicit_and_lossless():
+    topics = passive_topics(('robot1', 'robot2'))
+    assert len(topics) == 10
+    assert '/robot1/plan' in topics
+    assert '/robot2/navigate_to_pose/_action/feedback' in topics
+    assert len(set(topics)) == len(topics)
 
 
 def test_first_actionable_pair_is_gated_by_shared_tf_and_logs_startup_milestones():
@@ -328,3 +367,215 @@ def test_peer_activity_is_not_a_global_assignment_barrier():
     text = SOURCE.read_text(encoding='utf-8')
     assert 'peer_navigation_blocks_dispatch' not in text
     assert 'active peer goal is not a global assignment barrier' in text
+
+
+def test_cooperative_waits_reuse_degraded_solo_without_relaxing_certificate():
+    """Evidence waits must offer the existing local fallback, not bypass policy."""
+    source = SOURCE.read_text(encoding='utf-8')
+    assert 'def _continue_local_work_while_waiting' in source
+    assert "temporary local work while cost-only certificate is pending" in source
+    assert "temporary local work while peer bid is pending" in source
+    assert "temporary local work while peer agreement is pending" in source
+    assert "_cost_only_dispatch_certificate(" in source
+
+
+def test_degraded_solo_selection_advertises_a_peer_reservation():
+    """The temporary local task is visible and excluded by canonical hard IDs."""
+    source = SOURCE.read_text(encoding='utf-8')
+    assert "'DEGRADED_SOLO_COMMITMENT'" in source
+    assert 'active_canonical_task_id' in source
+    assert '_temporary_peer_reservation_ids(now)' in source
+
+
+def test_waiting_fallback_marks_selected_work_as_degraded_solo():
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._local_only = False
+    node._nav2 = SimpleNamespace(local_goal_active=False)
+    node._dispatch_in_progress = False
+    node._active_task = None
+    node._active_decision_hash = ''
+    transitions = []
+    published = []
+    events = []
+    node._transition = lambda state, reason: transitions.append((state, reason))
+    node._publish_status = lambda: published.append(True)
+    node._emit_event = lambda *args, **kwargs: events.append(args)
+    node._continue_degraded_solo = lambda snapshot: (
+        setattr(node, '_active_task', SimpleNamespace(canonical_id='temporary')),
+        setattr(node, '_active_decision_hash', 'DEGRADED_SOLO'),
+    )
+    assert node._continue_local_work_while_waiting(
+        object(), 'certificate evidence pending')
+    assert transitions[0][0].value == 'DEGRADED_SOLO'
+    assert published == [True]
+    assert events[0][0] == 'DEGRADED_SOLO_COMMITMENT'
+
+
+def _fallback_node(task, receipt=0.0, ttl=3.0):
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    snapshot = TaskSnapshot(
+        'robot1', 'local-session', 1, 7, 'map-fingerprint', 100, ttl,
+        (task,),
+    )
+    node._robot_id = 'robot1'
+    node._snapshots = {'robot1': receive(snapshot, ttl, receipt)}
+    node._current_local_frontier_ids = {
+        'robot1': frozenset((str(task.local_frontier_id),)),
+        'robot2': None,
+    }
+    return node
+
+
+def test_unchanged_local_seed_survives_expired_peer_evidence_ttl():
+    """Local fallback is not coupled to the short peer/bid freshness TTL."""
+    task = _task('local-seed', 1.0, 1.0, 1.0)
+    node = _fallback_node(task)
+    node._bid_batches = {
+        'robot2': receive(SimpleNamespace(), 3.0, 0.0),
+    }
+    assert node._bid_batches['robot2'].fresh(4.0) is False
+    fallback = node._local_fallback_snapshot(4.0)
+    assert fallback is not None
+    assert fallback.tasks == (task,)
+
+
+def test_disappeared_or_changed_frontier_is_not_reused_from_stale_seed():
+    """A current candidate batch can invalidate an expired local seed."""
+    task = _task('local-seed', 1.0, 1.0, 1.0)
+    node = _fallback_node(task)
+    node._current_local_frontier_ids['robot1'] = frozenset()
+    assert node._local_fallback_snapshot(4.0) is None
+    node._current_local_frontier_ids['robot1'] = frozenset(('different-id',))
+    assert node._local_fallback_snapshot(4.0) is None
+
+
+def test_current_path_and_reservation_gates_remain_after_stale_seed_reuse():
+    """Reusing a seed never bypasses current Nav2 or peer-reservation gates."""
+    source = SOURCE.read_text(encoding='utf-8')
+    solo = source[source.index('    def _continue_degraded_solo'):
+                  source.index('    def _continue_bidding')]
+    tick = source[source.index('    def _tick'):
+                  source.index('    def _traffic_for_decision')]
+    assert "caller='DEGRADED_SOLO_DISPATCH'" in solo
+    assert 'if not result.valid:' in solo
+    assert 'check_dispatch_preconditions' in solo
+    assert '_temporary_peer_reservation_ids(now)' in tick
+
+
+def test_cooperative_pair_path_remains_the_normal_resume_path():
+    """Fresh paired snapshots still enter the existing canonical round path."""
+    source = SOURCE.read_text(encoding='utf-8')
+    tick = source[source.index('    def _tick'):
+                  source.index('    def _traffic_for_decision')]
+    assert 'build_canonical_union(' in tick
+    assert 'choose_pair_assignment' in tick
+    assert 'if self._assignment_strategy == \'frontier_cost_only\':' in tick
+    assert 'self._continue_local_work_while_waiting(' in tick
+
+
+def test_terminal_result_can_start_fallback_without_waiting_for_next_tick():
+    """A busy peer permits immediate, still-gated local continuation."""
+    source = SOURCE.read_text(encoding='utf-8')
+    navigation = source[source.index('    def _navigation_finished'):
+                         source.index('    def _publish_failure')]
+    assert 'self._reset_round(\'navigation terminal result\')' in navigation
+    assert 'self._start_immediate_fallback_after_terminal()' in navigation
+    helper = source[source.index(
+        '    def _start_immediate_fallback_after_terminal'):
+        source.index('    @staticmethod\n    def _finite_path_samples')]
+    assert 'peer.value.local_nav_goal_active' in helper
+    assert 'if self._consume_local_fallback_trigger():' in helper
+    assert 'self._local_fallback_snapshot(now)' in helper
+    assert 'self._continue_local_work_while_waiting(' in helper
+    # The normal degraded-solo path remains the safety gate: the immediate
+    # trigger only starts candidate evaluation; it never sends a saved path.
+    assert "caller='DEGRADED_SOLO_DISPATCH'" in source
+
+
+def test_current_local_candidate_preempts_pending_cooperative_wait():
+    """Current local work enters the existing fallback before another round."""
+    source = SOURCE.read_text(encoding='utf-8')
+    candidate = source[source.index('    def _candidate_callback'):
+                       source.index('    @staticmethod\n    def _decode_frontier_regions')]
+    tick = source[source.index('    def _tick_impl'):
+                  source.index('    def _traffic_for_decision')]
+    assert '_local_fallback_trigger_pending = True' in candidate
+    assert 'def _consume_local_fallback_trigger' in source
+    assert 'if self._consume_local_fallback_trigger():' in tick
+    assert 'self._continue_local_work_while_waiting(local, reason)' in source
+    assert "caller='DEGRADED_SOLO_DISPATCH'" in source
+    assert 'check_dispatch_preconditions' in source
+
+
+def test_empty_current_local_batch_clears_fallback_trigger():
+    """A disappeared source batch cannot leave stale fallback work armed."""
+    source = SOURCE.read_text(encoding='utf-8')
+    candidate = source[source.index('    def _candidate_callback'):
+                       source.index('    @staticmethod\n    def _decode_frontier_regions')]
+    branch = candidate[candidate.index(
+        'if message.source_robot_id == getattr(self, \'_robot_id\', None)'):
+        candidate.index('fallback = CandidateEvidence(')]
+    assert 'if message.candidates:' in branch
+    assert 'self._local_fallback_trigger_pending = False' in branch
+
+
+def test_local_fallback_trigger_remains_safety_gated():
+    """The trigger cannot bypass current path or final dispatch checks."""
+    source = SOURCE.read_text(encoding='utf-8')
+    helper = source[source.index('    def _consume_local_fallback_trigger'):
+                    source.index('    def _temporary_peer_reservation_ids')]
+    assert '_local_fallback_snapshot(time.monotonic())' in helper
+    assert 'self._continue_local_work_while_waiting(local, reason)' in helper
+    solo = source[source.index('    def _continue_degraded_solo'):
+                  source.index('    def _continue_bidding')]
+    assert "caller='DEGRADED_SOLO_DISPATCH'" in solo
+    assert 'check_dispatch_preconditions' in solo
+
+
+def test_degraded_solo_retries_when_compute_path_lease_is_busy():
+    """Planner-lease contention preserves the local fallback seed."""
+    source = SOURCE.read_text(encoding='utf-8')
+    solo = source[source.index('    def _continue_degraded_solo'):
+                  source.index('    def _continue_bidding')]
+    assert "caller='DEGRADED_SOLO_DISPATCH'" in solo
+    assert 'self._local_fallback_trigger_pending = True' in solo
+    assert 'waiting for local ComputePathToPose query lease' in solo
+    assert 'self._last_solo_snapshot_key = None' in solo
+    assert "PATH_QUERY_LEASE_BUSY" in solo
+    assert "if failure_reason != 'PATH_QUERY_LEASE_BUSY':" in solo
+    assert 'degraded solo local path action unavailable' in solo
+
+
+def test_fallback_priority_uses_the_shared_serialized_planner_lease():
+    """Urgent fallback yields between bulk queries without concurrency."""
+    nav2 = LOCAL_NAV2_SOURCE.read_text(encoding='utf-8')
+    generator = FRONTIER_GENERATOR_SOURCE.read_text(encoding='utf-8')
+    assert "PATH_QUERY_LEASE_BUSY" in nav2
+    assert '_request_path_priority()' in nav2
+    assert '_clear_path_priority()' in nav2
+    assert 'fallback_priority_requested()' in generator
+    assert 'schedule_query_retry(10ms)' in generator
+    assert 'schedule_query_retry(1ms)' in generator
+    assert 'FRONTIER_GENERATOR_LEASE_SUMMARY' in generator
+
+
+def test_planner_lease_priority_preserves_single_query_and_failed_path_gates():
+    """Priority changes ordering only; path validity still gates dispatch."""
+    nav2 = LOCAL_NAV2_SOURCE.read_text(encoding='utf-8')
+    generator = FRONTIER_GENERATOR_SOURCE.read_text(encoding='utf-8')
+    assert 'self._path_callback is not None' in nav2
+    assert 'if self._path_callback is not None:' in nav2
+    assert 'if failure_reason != \'PATH_QUERY_LEASE_BUSY\':' in SOURCE.read_text(
+        encoding='utf-8')
+    assert 'active_request_' in generator
+    assert 'release_path_lock();\n        schedule_query_retry' in generator
+    assert 'planner_->async_send_goal' in generator
+
+
+def test_planner_lease_profiling_is_opt_in_and_does_not_change_selection():
+    """The new lease counters are diagnostics-only and keep policy inputs."""
+    generator = FRONTIER_GENERATOR_SOURCE.read_text(encoding='utf-8')
+    assert 'MY_EPUCK_FRONTIER_CANDIDATE_TIMING' in generator
+    assert 'maximum_path_queries_per_cycle_' in generator
+    assert 'fair_frontier_query_order' in generator
+    assert 'selection_policy_' in generator

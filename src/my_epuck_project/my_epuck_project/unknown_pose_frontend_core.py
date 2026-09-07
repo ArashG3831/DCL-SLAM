@@ -10,11 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import combinations, product
+import hashlib
 import json
 import math
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import numpy as np
 
@@ -558,6 +559,233 @@ class GridCrop:
     origin_x: float
     origin_y: float
     origin_yaw: float = 0.0
+
+
+@dataclass(frozen=True)
+class StationaryWitnessPartition:
+    """One deterministic, disjoint support partition of two map crops.
+
+    The partition is only an evidence construction.  It does not assert a
+    registration result; callers must run the existing registration and
+    family selectors on every returned partition before using it.
+    """
+
+    index: int
+    source: GridCrop
+    target: GridCrop
+    support_hash: str
+    source_support_count: int
+    target_support_count: int
+    source_bbox: tuple[float, float, float, float]
+    target_bbox: tuple[float, float, float, float]
+    source_centroid: tuple[float, float]
+    target_centroid: tuple[float, float]
+    source_extent_m: tuple[float, float]
+    target_extent_m: tuple[float, float]
+
+
+# These are candidate cut fractions, not acceptance thresholds.  The first
+# candidate family is selected only after each strip is independently
+# registered and the unchanged multi-constraint selector accepts all three.
+# The bounded list keeps startup work deterministic and prevents an adaptive
+# evidence search from becoming an unbounded registration source.
+STATIONARY_WITNESS_CUT_FRACTIONS = tuple(
+    index / 20.0 for index in range(1, 20))
+
+
+def _grid_cell_world(crop: GridCrop, row: int, column: int) -> tuple[float, float]:
+    cosine = math.cos(float(crop.origin_yaw))
+    sine = math.sin(float(crop.origin_yaw))
+    local_x = (float(column) + 0.5) * float(crop.resolution)
+    local_y = (float(row) + 0.5) * float(crop.resolution)
+    return (
+        float(crop.origin_x) + cosine * local_x - sine * local_y,
+        float(crop.origin_y) + sine * local_x + cosine * local_y)
+
+
+def _tight_masked_grid(crop: GridCrop, mask: np.ndarray) -> GridCrop | None:
+    rows, columns = np.where(mask)
+    if len(rows) == 0:
+        return None
+    row0, row1 = int(rows.min()), int(rows.max()) + 1
+    column0, column1 = int(columns.min()), int(columns.max()) + 1
+    values = np.asarray(crop.values[row0:row1, column0:column1],
+                        dtype=np.int16).copy()
+    local_mask = np.asarray(mask[row0:row1, column0:column1], dtype=bool)
+    values[~local_mask] = UNKNOWN_VALUE
+    cosine = math.cos(float(crop.origin_yaw))
+    sine = math.sin(float(crop.origin_yaw))
+    local_x = float(column0) * float(crop.resolution)
+    local_y = float(row0) * float(crop.resolution)
+    origin_x = float(crop.origin_x) + cosine * local_x - sine * local_y
+    origin_y = float(crop.origin_y) + sine * local_x + cosine * local_y
+    values.setflags(write=False)
+    return GridCrop(values=values, resolution=float(crop.resolution),
+                    origin_x=origin_x, origin_y=origin_y,
+                    origin_yaw=float(crop.origin_yaw))
+
+
+def _support_geometry(crop: GridCrop) -> tuple[int, tuple[float, float, float, float],
+                                             tuple[float, float], tuple[float, float]]:
+    rows, columns = np.where(np.asarray(crop.values) >= OCCUPIED_THRESHOLD)
+    points = np.asarray([_grid_cell_world(crop, int(row), int(column))
+                         for row, column in zip(rows, columns)],
+                        dtype=np.float64)
+    if len(points) == 0:
+        return 0, (math.nan,) * 4, (math.nan,) * 2, (0.0, 0.0)
+    minimum = np.min(points, axis=0)
+    maximum = np.max(points, axis=0)
+    return (
+        int(len(points)),
+        (float(minimum[0]), float(minimum[1]),
+         float(maximum[0]), float(maximum[1])),
+        (float(np.mean(points[:, 0])), float(np.mean(points[:, 1]))),
+        (float(maximum[0] - minimum[0]), float(maximum[1] - minimum[1])))
+
+
+def iter_stationary_witness_partitions(
+        source: GridCrop, target: GridCrop,
+        initial_transform: tuple[float, float, float],
+        *, minimum_support_cells: int = 12) -> Iterator[tuple[float, float,
+                                                                 tuple[StationaryWitnessPartition, ...]]]:
+    """Yield deterministic disjoint map-sector candidates for stationary use.
+
+    Source occupied/known cells are projected through the already accepted
+    full-map seed into target coordinates.  Each candidate is a three-strip
+    partition of the real overlap along target-map X.  Strips are tight-cropped
+    so the existing selector measures their physical separation from their
+    actual support, rather than treating three masked copies of one full grid
+    as distinct evidence.
+    """
+    source_values = np.asarray(source.values)
+    target_values = np.asarray(target.values)
+    if (source_values.ndim != 2 or target_values.ndim != 2 or
+            source_values.size == 0 or target_values.size == 0):
+        return
+    occupied_rows, occupied_columns = np.where(
+        target_values >= OCCUPIED_THRESHOLD)
+    if len(occupied_rows) < int(minimum_support_cells) * 3:
+        return
+    tx, ty, tyaw = (float(value) for value in initial_transform)
+    cosine = math.cos(tyaw)
+    sine = math.sin(tyaw)
+    target_x = {}
+    source_projected_x = {}
+    target_occupied_x = []
+    for row, column in zip(occupied_rows, occupied_columns):
+        point = _grid_cell_world(target, int(row), int(column))
+        target_x[(int(row), int(column))] = point[0]
+        target_occupied_x.append(point[0])
+    for row, column in zip(*np.where(source_values != UNKNOWN_VALUE)):
+        point = _grid_cell_world(source, int(row), int(column))
+        projected = (
+            tx + cosine * point[0] - sine * point[1],
+            ty + sine * point[0] + cosine * point[1])
+        source_projected_x[(int(row), int(column))] = projected[0]
+    if not target_occupied_x:
+        return
+    lower = float(min(target_occupied_x))
+    upper = float(max(target_occupied_x))
+    span = upper - lower
+    if not math.isfinite(span) or span <= 2.0 * float(target.resolution):
+        return
+
+    for left_fraction, right_fraction in (
+            (left, right)
+            for left in STATIONARY_WITNESS_CUT_FRACTIONS
+            for right in STATIONARY_WITNESS_CUT_FRACTIONS
+            if left < right):
+        cuts = (lower + left_fraction * span,
+                lower + right_fraction * span)
+        partitions = []
+        for index, (band_lower, band_upper) in enumerate((
+                (lower, cuts[0]), (cuts[0], cuts[1]),
+                (cuts[1], upper))):
+            target_mask = np.zeros(target_values.shape, dtype=bool)
+            for (row, column), x_value in target_x.items():
+                in_band = (band_lower <= x_value <= band_upper
+                           if index == 2 else
+                           band_lower <= x_value < band_upper)
+                if in_band:
+                    target_mask[row, column] = True
+            # Preserve all known cells in the same spatial sector; only
+            # occupied support is used for the minimum and geometry records.
+            for row, column in zip(*np.where(target_values != UNKNOWN_VALUE)):
+                point = _grid_cell_world(target, int(row), int(column))
+                x_value = point[0]
+                in_band = (band_lower <= x_value <= band_upper
+                           if index == 2 else
+                           band_lower <= x_value < band_upper)
+                if in_band:
+                    target_mask[int(row), int(column)] = True
+            source_mask = np.zeros(source_values.shape, dtype=bool)
+            for (row, column), x_value in source_projected_x.items():
+                in_band = (band_lower <= x_value <= band_upper
+                           if index == 2 else
+                           band_lower <= x_value < band_upper)
+                if in_band:
+                    source_mask[row, column] = True
+            source_crop = _tight_masked_grid(source, source_mask)
+            target_crop = _tight_masked_grid(target, target_mask)
+            if source_crop is None or target_crop is None:
+                partitions = []
+                break
+            source_support = int(np.count_nonzero(
+                source_crop.values >= OCCUPIED_THRESHOLD))
+            target_support = int(np.count_nonzero(
+                target_crop.values >= OCCUPIED_THRESHOLD))
+            if (source_support < int(minimum_support_cells) or
+                    target_support < int(minimum_support_cells)):
+                partitions = []
+                break
+            source_geometry = _support_geometry(source_crop)
+            target_geometry = _support_geometry(target_crop)
+            digest = hashlib.sha256()
+            for crop in (source_crop, target_crop):
+                digest.update(np.asarray(crop.values, dtype=np.int16).tobytes())
+                digest.update(repr((crop.resolution, crop.origin_x,
+                                    crop.origin_y, crop.origin_yaw)).encode(
+                                        'ascii'))
+            partitions.append(StationaryWitnessPartition(
+                index=index, source=source_crop, target=target_crop,
+                support_hash=digest.hexdigest(),
+                source_support_count=source_geometry[0],
+                target_support_count=target_geometry[0],
+                source_bbox=source_geometry[1], target_bbox=target_geometry[1],
+                source_centroid=source_geometry[2],
+                target_centroid=target_geometry[2],
+                source_extent_m=source_geometry[3],
+                target_extent_m=target_geometry[3]))
+        if len(partitions) == 3:
+            yield float(left_fraction), float(right_fraction), tuple(partitions)
+
+
+def stationary_witness_supports_disjoint(
+        partitions: Iterable[StationaryWitnessPartition]) -> bool:
+    """Reject repeated/overlapping physical support in a witness family."""
+    items = tuple(partitions)
+    if len(items) != 3:
+        return False
+    source_seen: set[tuple[int, int]] = set()
+    target_seen: set[tuple[int, int]] = set()
+    support_hashes = set()
+    for partition in items:
+        if partition.support_hash in support_hashes:
+            return False
+        support_hashes.add(partition.support_hash)
+        for crop, seen in ((partition.source, source_seen),
+                           (partition.target, target_seen)):
+            current = set()
+            for row, column in zip(*np.where(
+                    np.asarray(crop.values) >= OCCUPIED_THRESHOLD)):
+                point = _grid_cell_world(crop, int(row), int(column))
+                key = (int(round(point[0] * 1.0e6)),
+                       int(round(point[1] * 1.0e6)))
+                if key in seen or key in current:
+                    return False
+                current.add(key)
+            seen.update(current)
+    return True
 
 
 @dataclass(frozen=True)
@@ -1587,6 +1815,42 @@ def register_crops(
         return (-int(result.accepted), global_score, result.residual_m,
                 -result.inlier_ratio, abs(result.transform[2]))
     return min(results, key=ranking)
+
+
+def reestimate_registration_from_seed(
+        source: GridCrop, target: GridCrop,
+        initial_transform: tuple[float, float, float],
+        max_correspondence_m: float = 0.30,
+        minimum_agreement: float = 0.0) -> RegistrationResult:
+    """Re-estimate one stationary witness from its own occupied support.
+
+    The canonical whole-map matcher supplies the bounded global basin.  This
+    lightweight deterministic update recomputes correspondences only within
+    the witness support, then delegates the unchanged geometric quality
+    checks to ``_registration_quality``.  It intentionally avoids invoking
+    the multi-start diagnostic matcher repeatedly in one worker.
+    """
+    source_points = _points(source, occupied=True)
+    target_points = _points(target, occupied=True)
+    if len(source_points) < 12 or len(target_points) < 12:
+        return _empty_registration('INSUFFICIENT_OCCUPIED_GEOMETRY')
+    seed = tuple(float(value) for value in initial_transform)
+    projected = _apply(source_points, seed)
+    source_tree = cKDTree(source_points) if cKDTree is not None else None
+    target_tree = cKDTree(target_points) if cKDTree is not None else None
+    distances, indices = _nearest(projected, target_points, target_tree)
+    mask = np.isfinite(distances) & (
+        np.asarray(distances, dtype=np.float64) <=
+        float(max_correspondence_m))
+    if int(np.count_nonzero(mask)) < 3:
+        transform = seed
+    else:
+        transform = _rigid_fit(
+            source_points[mask], target_points[np.asarray(indices)[mask]])
+    return _registration_quality(
+        source, target, source_points, target_points, transform,
+        max_correspondence_m, source_tree, target_tree,
+        minimum_agreement=minimum_agreement)
 
 
 def register_crop_hypotheses(

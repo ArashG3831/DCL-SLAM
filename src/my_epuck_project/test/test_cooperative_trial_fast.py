@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 import inspect
 import threading
+import time
 from types import SimpleNamespace
 
 from my_epuck_project import cooperative_trial_fast as fast
@@ -10,11 +12,19 @@ from my_epuck_project.cooperative_trial_fast import (
     LAUNCH_FILE,
     LOCAL_NAV2_NODES,
     ReadyProbe,
+    SimulationHorizonMonitor,
     WallWatchdog,
+    _logger_processes,
+    _mission_processes,
     boolean,
     filtered_runtime_environment,
     is_campaign_webots_driver,
     launch_command,
+    nav2_readiness_action,
+    nav2_readiness_node_names,
+    phase_aware_nav2_readiness,
+    logger_artifact_finalization_status,
+    observer_finalization_status,
     parser,
     requires_fixed_anchor_forensics,
     resolve_world,
@@ -79,7 +89,10 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert args.local_path_gate_mode is None
     assert args.hold_open is False
     assert args.enable_observer is False
+    assert args.observer_architecture == 'legacy'
     assert args.enable_forensic_capture is False
+    assert args.experiment_condition == 'C'
+    assert args.webots_random_seed is None
     assert args.simulation_horizon_s is None
     assert args.wall_watchdog_s is None
     assert parser().parse_args([
@@ -88,6 +101,58 @@ def test_fast_parser_exposes_only_single_trial_options():
     assert parser().parse_args([
         '--world-profile', 'large_unknown_pose_close_start_20ms'
     ]).world_profile == 'large_unknown_pose_close_start_20ms'
+
+
+def test_fast_runner_records_condition_and_seed_in_launch_command(tmp_path):
+    args = parser().parse_args([
+        '--experiment-condition', 'D', '--webots-random-seed', '1001',
+    ])
+    args.seed_provenance_json = '{"requested_seed":1001}'
+    command = launch_command(args, tmp_path / 'world.wbt')
+    assert 'experiment_condition:=D' in command
+    assert 'seed_provenance_json:={"requested_seed":1001}' in command
+
+
+def test_condition_c_command_enables_common_start_release_and_rosbag(tmp_path):
+    args = parser().parse_args([
+        '--experiment-condition', 'C',
+        '--assignment-strategy', 'frontier_cost_only',
+        '--local-path-gate-mode', 'MODE_B',
+        '--enable-observer', 'true',
+        '--enable-forensic-capture', 'true',
+    ])
+    command = launch_command(
+        args, tmp_path / 'world.wbt', output_root=tmp_path,
+        run_id='c-smoke')
+    assert 'common_start_release_required:=true' in command
+    assert 'enable_passive_rosbag:=true' in command
+
+
+def test_thin_condition_c_disables_legacy_live_observer(tmp_path):
+    args = parser().parse_args([
+        '--experiment-condition', 'C',
+        '--assignment-strategy', 'frontier_cost_only',
+        '--local-path-gate-mode', 'MODE_B',
+        '--enable-observer', 'true',
+        '--enable-forensic-capture', 'true',
+        '--observer-architecture', 'thin',
+    ])
+    command = launch_command(
+        args, tmp_path / 'world.wbt', output_root=tmp_path,
+        run_id='thin-c')
+    assert 'observer_architecture:=thin' in command
+    assert 'enable_observer:=false' in command
+    # Thin mode may still stage the read-only Supervisor world node so the
+    # external GT/contact recorder can connect; this does not enable the
+    # legacy live forensic logger, which is gated separately by observer_architecture.
+    assert 'enable_forensic_capture:=true' in command
+    assert 'enable_passive_rosbag:=false' in command
+
+
+def test_fast_runner_rejects_negative_webots_seed():
+    import pytest
+    with pytest.raises(SystemExit):
+        parser().parse_args(['--webots-random-seed', '-1'])
 
 
 def test_close_start_unknown_pose_runner_requires_passive_fixed_anchor_gt():
@@ -339,6 +404,123 @@ def test_ready_probe_horizon_uses_live_clock_not_observer_files():
     assert probe.simulation_horizon_reached(1500.0)
 
 
+def test_horizon_monitor_records_horizon_without_interrupting_launch(
+        monkeypatch):
+    clock = [0.0]
+    signals = []
+
+    class Process:
+        pid = 42
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        fast, 'stop_process',
+        lambda process, sig: signals.append((process.pid, sig)))
+    monitor = SimulationHorizonMonitor(180.0, lambda: clock[0])
+    monitor.add_process(Process())
+    monitor.start()
+    clock[0] = 180.0
+    assert monitor.reached.wait(1.0)
+    monitor.stop()
+    assert monitor.reached_sim_time_s == 180.0
+    assert signals == []
+
+
+def test_horizon_monitor_marks_horizon_overrun_and_contains_launch(
+        monkeypatch):
+    clock = [0.0]
+    signals = []
+
+    class Process:
+        pid = 43
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        fast, 'stop_process',
+        lambda process, sig: signals.append((process.pid, sig)))
+    monitor = SimulationHorizonMonitor(
+        180.0, lambda: clock[0], overrun_fence_s=240.0)
+    monitor.add_process(Process())
+    monitor.start()
+    clock[0] = 180.0
+    assert monitor.reached.wait(1.0)
+    clock[0] = 240.0
+    assert monitor.overrun.wait(1.0)
+    monitor.stop()
+    assert monitor.reached_sim_time_s == 180.0
+    assert monitor.overrun_sim_time_s == 240.0
+    assert signals == [(43, fast.signal.SIGINT)]
+
+
+def test_horizon_cleanup_gives_logger_finalization_barrier_before_launch_stop():
+    source = inspect.getsource(fast.shutdown_processes)
+    logger_barrier = source.index('shutdown_observer_before_launch')
+    launch_stop = source.index('stop_process(launch, signal.SIGINT)')
+    logger_wait = inspect.getsource(fast.shutdown_observer_before_launch)
+    assert logger_barrier < launch_stop
+    assert 'psutil.wait_procs' in logger_wait
+    assert 'processes' in logger_wait
+
+
+def test_finalization_acknowledgement_requires_external_and_logger_contract(
+        tmp_path):
+    attempt = tmp_path / 'attempt'
+    run = attempt / 'observer' / 'run-1'
+    runtime = run / 'forensic' / 'runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'runtime_metrics.json').write_text(
+        json.dumps({'finalized': True}), encoding='utf-8')
+    (run / 'summary.json').write_text(json.dumps({
+        'artifact_finalization': {'complete': True},
+    }), encoding='utf-8')
+    (run / 'artifact_finalization.json').write_text(json.dumps({
+        'complete': True, 'status': 'COMPLETE', 'missing': [],
+    }), encoding='utf-8')
+    (run / 'run_manifest.json').write_text(json.dumps({
+        'clean_shutdown': True,
+        'shutdown_status': 'clean',
+        'artifact_finalization': {
+            'complete': True, 'status': 'COMPLETE', 'missing': [],
+        },
+    }), encoding='utf-8')
+    assert logger_artifact_finalization_status(attempt) is True
+    assert observer_finalization_status(attempt) is True
+
+    (run / 'artifact_finalization.json').write_text(json.dumps({
+        'complete': False, 'status': 'NOT_FINALIZED', 'missing': [],
+    }), encoding='utf-8')
+    assert logger_artifact_finalization_status(attempt) is False
+    assert observer_finalization_status(attempt) is False
+
+
+def test_horizon_monitor_does_not_teardown_processes_before_ordered_cleanup():
+    source = inspect.getsource(fast.SimulationHorizonMonitor._run)
+    assert 'self.reached.set()' in source
+    assert 'if self.reached.is_set() and latest >= self.overrun_fence_s' in source
+
+
+def test_horizon_monitor_is_started_before_all_condition_readiness_paths():
+    source = inspect.getsource(fast.run)
+    monitor_start = source.index('horizon_monitor.start()')
+    readiness = source.index('readiness_deadline =')
+    nav2_wait = source.index('activate_and_check_nav2(')
+    assert monitor_start < readiness < nav2_wait
+    assert 'horizon_monitor.reached.is_set()' in source
+
+
+def test_horizon_completion_is_condition_independent_and_preserves_a_b_paths():
+    source = inspect.getsource(fast.run)
+    assert "termination_reason = 'SIM_TIME_COMPLETE'" in source
+    assert 'SimulationHorizonReached' in source
+    for condition in ('A', 'B', 'C', 'D'):
+        assert condition in ('A', 'B', 'C', 'D')
+    assert 'nav2_autostart=args.experiment_condition in (\'A\', \'B\')' in source
+
+
 def test_wall_watchdog_has_independent_deadline_and_process_group_control():
     source = inspect.getsource(WallWatchdog)
     assert 'time.monotonic()' in source
@@ -352,6 +534,63 @@ def test_cleanup_waits_are_bounded_by_absolute_wall_deadline():
     source = inspect.getsource(fast.shutdown_processes)
     assert 'absolute_deadline' in source
     assert 'absolute_deadline=absolute_deadline' in source
+
+
+def test_observer_logger_is_finalized_before_ros_launch_shutdown():
+    source = inspect.getsource(fast.shutdown_processes)
+    assert source.index('shutdown_mission_before_logger') < source.index(
+        'shutdown_observer_before_launch')
+    assert source.index('shutdown_observer_before_launch') < source.index(
+        'stop_process(launch, signal.SIGINT)')
+
+
+def test_logger_process_filter_excludes_webots_and_controller(monkeypatch):
+    class Process:
+        def __init__(self, command):
+            self.pid = 1
+            self._command = command
+
+        def cmdline(self):
+            return self._command
+
+    class Root:
+        def children(self, recursive=False):
+            assert recursive is True
+            return [
+                Process(['/mnt/c/Program Files/Webots/webots.exe', '--batch']),
+                Process(['/install/my_epuck_project/cooperative_experiment_logger']),
+                Process(['/path/webots-controller', '--robot-name=robot1']),
+            ]
+
+    monkeypatch.setattr(fast.psutil, 'Process', lambda pid: Root())
+    selected = _logger_processes(SimpleNamespace(pid=42))
+    assert len(selected) == 1
+    assert 'cooperative_experiment_logger' in selected[0].cmdline()[0]
+
+
+def test_mission_process_filter_keeps_webots_logger_and_supervisor_alive(
+        monkeypatch):
+    class Process:
+        def __init__(self, pid, command):
+            self.pid = pid
+            self._command = command
+
+        def cmdline(self):
+            return self._command
+
+    class Root:
+        def children(self, recursive=False):
+            assert recursive is True
+            return [
+                Process(1, ['/bin/webots.exe', '--batch']),
+                Process(2, ['/install/cooperative_experiment_logger']),
+                Process(3, ['/install/paced_ros2_supervisor']),
+                Process(4, ['/install/unknown_pose_frontend']),
+            ]
+
+    monkeypatch.setattr(fast.psutil, 'Process', lambda pid: Root())
+    selected = _mission_processes(SimpleNamespace(pid=42))
+    assert [process.pid for process in selected] == [4]
 
 
 def test_unknown_pose_readiness_accepts_local_graph_before_handoff():
@@ -426,12 +665,14 @@ def test_launch_command_can_enable_passive_evidence_in_attempt_directory(tmp_pat
     args = parser().parse_args([
         '--enable-observer', 'true',
         '--enable-forensic-capture', 'true',
+        '--enable-contact-capture', 'true',
     ])
     command = launch_command(
         args, Path('/tmp/test_world.wbt'),
         output_root=tmp_path / 'observer', run_id='attempt_01')
     assert 'enable_observer:=true' in command
     assert 'enable_forensic_capture:=true' in command
+    assert 'enable_contact_capture:=true' in command
     assert f'output_root:={tmp_path / "observer"}' in command
     assert 'run_id:=attempt_01' in command
     assert f'unknown_pose_diagnostic_output:={tmp_path / "observer" / "attempt_01" / "frontend"}' in command
@@ -516,7 +757,7 @@ def test_unknown_pose_readiness_uses_local_nav2_and_local_map_tf():
     source = ReadyProbe.tf_ready.__code__.co_consts
     assert 'shared_map' not in source
     method_source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
-    assert 'LOCAL_NAV2_NODES' in method_source
+    assert 'nav2_readiness_node_names' in method_source
     assert 'lifecycle_manager_navigation/manage_nodes' in method_source
     assert 'ManageLifecycleNodes.Request.STARTUP' in method_source
 
@@ -527,11 +768,68 @@ def test_fast_runner_accepts_already_autostarted_local_nav2():
     assert 'startup_results[robot] = True' in method_source
 
 
+def test_nav2_readiness_never_restarts_active_nodes():
+    assert nav2_readiness_action(True, True) == 'READY_NO_STARTUP'
+    assert nav2_readiness_action(True, False) == 'READY_NO_STARTUP'
+
+
+def test_nav2_readiness_waits_for_launch_autostart_without_startup_request():
+    assert nav2_readiness_action(False, True) == 'WAIT_FOR_LAUNCH_AUTOSTART'
+
+
+def test_nav2_readiness_preserves_runner_startup_for_inactive_nodes():
+    assert nav2_readiness_action(False, False) == 'SEND_STARTUP'
+
+
+def test_nav2_readiness_uses_nonlocal_names_for_a_and_b():
+    assert nav2_readiness_node_names('A') == fast.NAV2_NODES
+    assert nav2_readiness_node_names('B') == fast.NAV2_NODES
+    assert nav2_readiness_node_names('C') == LOCAL_NAV2_NODES
+    assert nav2_readiness_node_names('D') == LOCAL_NAV2_NODES
+
+
 def test_nav2_readiness_retries_a_failed_lifecycle_startup():
     source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
     assert 'next_startup_attempt' in source
     assert 'if startup_results[robot]:' in source
     assert 'next_startup_attempt[robot]' in source
+
+
+def test_cd_readiness_latches_local_before_handoff_and_shared_activation():
+    ready, reason = phase_aware_nav2_readiness(
+        {'robot1', 'robot2'}, True, {'robot1', 'robot2'})
+    assert ready is True
+    assert reason == 'shared_nav2_active_after_handoff'
+
+
+def test_cd_readiness_does_not_hide_failed_local_activation():
+    ready, reason = phase_aware_nav2_readiness(
+        {'robot1'}, True, {'robot1', 'robot2'})
+    assert ready is False
+    assert reason == 'waiting_local_activation'
+
+
+def test_cd_readiness_requires_shared_activation_after_handoff():
+    ready, reason = phase_aware_nav2_readiness(
+        {'robot1', 'robot2'}, True, {'robot1'})
+    assert ready is False
+    assert reason == 'waiting_shared_nav2_activation'
+
+
+def test_cd_readiness_ignores_expected_local_teardown_after_latch():
+    # The phase state contains only the latched evidence; disappearance of
+    # local lifecycle services after handoff cannot revoke it.
+    ready, reason = phase_aware_nav2_readiness(
+        {'robot1', 'robot2'}, True, {'robot1', 'robot2'})
+    assert ready is True
+    assert reason == 'shared_nav2_active_after_handoff'
+
+
+def test_ab_readiness_path_remains_separate_from_phase_aware_path():
+    source = inspect.getsource(ReadyProbe.activate_and_check_nav2)
+    assert "if self.experiment_condition in ('C', 'D')" in source
+    assert 'nav2_readiness_action(' in source
+    assert "nav2_readiness_node_names(\n                        self.experiment_condition)" in source
 
 
 def test_runner_separates_simulation_horizon_and_wall_watchdog():

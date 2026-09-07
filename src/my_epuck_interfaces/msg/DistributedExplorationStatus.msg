@@ -34,3 +34,7 @@ uint32 planner_failure_count
 uint32 detected_not_queried_count
 uint32 below_minimum_gain_count
 uint32 actionable_reachable_count
+# Explicit passive evidence for offline avoidable-idle reconstruction.
+bool feasible_work_available
+bool actionable_work_available
+string work_availability_reason

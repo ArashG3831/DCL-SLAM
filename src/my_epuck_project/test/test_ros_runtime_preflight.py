@@ -57,8 +57,13 @@ def _clean_runtime_environment(workspace, domain=34):
         'CYCLONEDDS_URI': f'file://{profile}',
         'ROS_DOMAIN_ID': str(domain),
         'PYTHONPATH': str(workspace / 'build/my_epuck_project'),
-        'AMENT_PREFIX_PATH': str(
-            workspace / 'install/frontier_exploration_ros2'),
+        'AMENT_PREFIX_PATH': os.pathsep.join(
+            str(workspace / f'install/{package}') for package in (
+                'my_epuck_project', 'my_epuck_interfaces',
+                'my_epuck_frontier_candidates',
+                'my_epuck_cooperative_exploration',
+                'reliable_slam_toolbox_wrapper',
+                'frontier_exploration_ros2')),
         'COLCON_PREFIX_PATH': str(workspace / 'install'),
         'MY_EPUCK_FRONTIER_PREFIX': str(
             workspace / 'install/frontier_exploration_ros2'),
@@ -116,6 +121,18 @@ def test_runtime_provenance_rejects_original_frontier_dependency():
     assert not report['passed']
     assert any('frontier_exploration_ros2' in issue
                and ('outside' in issue or 'dirty' in issue)
+               for issue in report['issues'])
+
+
+def test_runtime_provenance_rejects_stale_project_package_prefix():
+    workspace = Path(__file__).resolve().parents[3]
+    environment = _clean_runtime_environment(workspace)
+    environment['AMENT_PREFIX_PATH'] = os.pathsep.join((
+        '/home/arash/webots_ws/install/my_epuck_project',
+        environment['AMENT_PREFIX_PATH']))
+    report = preflight.runtime_provenance(workspace, environment, 34)
+    assert not report['passed']
+    assert any('my_epuck_project' in issue and 'stale project install' in issue
                for issue in report['issues'])
 
 

@@ -18,17 +18,19 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rosgraph_msgs.msg import Clock
 
 from webots_ros2_driver.ros2_supervisor import Ros2Supervisor
+from .thin_supervisor_capture import ThinSupervisorCapture
 
 
 class _ClockPublisherProxy:
     """Forward clock messages at most once per simulation-time interval."""
 
     def __init__(self, publisher, interval_seconds=0.1,
-                 step_sleep_seconds=0.001):
+                 step_sleep_seconds=0.001, capture=None):
         self._publisher = publisher
         self._interval_seconds = float(interval_seconds)
         self._step_sleep_seconds = max(0.0, float(step_sleep_seconds))
         self._last_seconds = None
+        self._capture = capture
 
     def publish(self, message):
         # A tiny wall-time yield keeps the external Webots ROS drivers
@@ -39,6 +41,8 @@ class _ClockPublisherProxy:
             time.sleep(self._step_sleep_seconds)
         stamp = message.clock
         seconds = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        if self._capture is not None:
+            self._capture.capture(seconds)
         if (self._last_seconds is None or
                 seconds - self._last_seconds >= self._interval_seconds):
             self._last_seconds = seconds
@@ -66,10 +70,26 @@ class PacedRos2Supervisor(Ros2Supervisor):
             durability=DurabilityPolicy.VOLATILE,
         )
         clock_publisher = self.create_publisher(Clock, 'clock', clock_qos)
+        self._thin_capture = None
+        if os.environ.get('MY_EPUCK_THIN_INTEGRATED_GT', '').lower() in (
+                '1', 'true', 'yes'):
+            self._thin_capture = ThinSupervisorCapture(
+                getattr(self, '_Ros2Supervisor__robot'),
+                ('robot1', 'robot2'),
+                os.environ['MY_EPUCK_THIN_GT_OUTPUT'],
+                os.environ['MY_EPUCK_THIN_GT_READY_FILE'],
+                os.environ['MY_EPUCK_THIN_GT_RUNTIME_DIRECTORY'],
+                sample_period_s=float(os.environ.get(
+                    'MY_EPUCK_THIN_GT_SAMPLE_PERIOD_S', '0.02')),
+                contact_output=os.environ.get(
+                    'MY_EPUCK_THIN_CONTACT_OUTPUT', ''),
+                contact_sampling_period_ms=int(os.environ.get(
+                    'MY_EPUCK_THIN_CONTACT_PERIOD_MS', '20')))
         setattr(self, private_name, _ClockPublisherProxy(
             clock_publisher,
             step_sleep_seconds=os.environ.get(
-                'MY_EPUCK_FAST_STEP_SLEEP_SECONDS', '0.001')))
+                'MY_EPUCK_FAST_STEP_SLEEP_SECONDS', '0.001'),
+            capture=self._thin_capture))
 
 
 def main(args=None):
@@ -78,6 +98,10 @@ def main(args=None):
     try:
         rclpy.spin(supervisor)
     finally:
+        if supervisor._thin_capture is not None:
+            # Webots may already have closed the controller socket during
+            # SIGINT; the capture retains the last clock stamp locally.
+            supervisor._thin_capture.close(None, 'shutdown')
         supervisor.destroy_node()
         rclpy.shutdown()
 

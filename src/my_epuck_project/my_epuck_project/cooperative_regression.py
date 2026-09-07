@@ -52,6 +52,8 @@ from .ros_runtime_preflight import (
     ROS_DOMAIN_MIN, ROS_DOMAIN_MAX, require_runtime_provenance,
 )
 from .cooperative_trial_fast import filtered_runtime_environment
+from .thesis_baseline_topology import (
+    materialize_seeded_world, parse_world_random_seed, sha256_file)
 
 
 CLASSIFICATIONS = (
@@ -378,10 +380,34 @@ def resolve_runner_profile(args):
     return source
 
 
+def seed_schedule(args):
+    """Return one explicit seed per trial, or None when uncontrolled."""
+    values = getattr(args, 'webots_random_seed', None)
+    if values is None:
+        return [None] * int(args.trials)
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    values = [int(value) for value in values]
+    if any(value < 0 for value in values):
+        raise SystemExit('--webots-random-seed values must be nonnegative')
+    if len(values) == 1:
+        return values * int(args.trials)
+    if len(values) != int(args.trials):
+        raise SystemExit(
+            '--webots-random-seed accepts one value or exactly one value per trial')
+    return values
+
+
+def seed_for_trial(args, trial_number):
+    return seed_schedule(args)[int(trial_number) - 1]
+
+
 def print_profile_selection(args, selected):
     """Print the exact reusable experiment configuration before launch."""
     metadata = selected['world_metadata']
     print(f'world_profile={selected["name"]}')
+    print(f'experiment_condition={getattr(args, "experiment_condition", "C")}')
+    print(f'webots_random_seeds={seed_schedule(args)}')
     print(f'source_world_path={args.source_world_path}')
     print(f'installed_world_path={args.installed_world_path}')
     print(
@@ -1779,6 +1805,23 @@ def internal_trial(args):
         if args.capture_registration_inputs else '')
     (attempt / 'ros_logs').mkdir()
     (attempt / 'tmp').mkdir()
+    requested_seed = getattr(args, 'webots_random_seed', None)
+    canonical_world = Path(args.source_world_path).resolve()
+    if requested_seed is None:
+        run_world = canonical_world
+        effective_seed = parse_world_random_seed(canonical_world)
+    else:
+        run_world = materialize_seeded_world(
+            canonical_world, attempt / 'tmp' / 'seeded_world', requested_seed)
+        effective_seed = requested_seed
+    seed_provenance = {
+        'requested_seed': requested_seed,
+        'effective_seed': effective_seed,
+        'canonical_base_world_path': str(canonical_world),
+        'canonical_base_world_sha256': sha256_file(canonical_world),
+        'derived_run_world_path': str(run_world),
+        'derived_run_world_sha256': sha256_file(run_world),
+    }
     shutdown_events = attempt / 'shutdown_events.jsonl'
     start = time.monotonic()
     requested_rmw = environment.get('RMW_IMPLEMENTATION', '').strip()
@@ -1805,6 +1848,9 @@ def internal_trial(args):
         'run_id': args.run_id,
         'ros_domain_id': args.ros_domain_id,
         'webots_port': args.webots_port,
+        'experiment_condition': getattr(args, 'experiment_condition', 'C'),
+        'webots_random_seed': requested_seed,
+        'seed_provenance': seed_provenance,
         'output_directory': str(attempt),
         'ros_log_directory': str(attempt / 'ros_logs'),
         'temporary_directory': str(attempt / 'tmp'),
@@ -1815,7 +1861,7 @@ def internal_trial(args):
         'removed_stale_runtime_paths': removed_runtime_paths,
         'launch_arguments': {
             'world_profile': args.world_profile,
-            'source_world_path': args.source_world_path,
+            'source_world_path': str(run_world),
             'run_id': args.run_id,
             'output_root': str(attempt / 'observer'),
             'unknown_pose_diagnostic_output': str(frontend_diagnostic_output),
@@ -1841,6 +1887,7 @@ def internal_trial(args):
             'do_loop_closing': args.do_loop_closing,
             'unknown_initial_pose': args.unknown_initial_pose,
             'assignment_strategy': args.assignment_strategy,
+            'local_path_gate_mode': args.local_path_gate_mode,
             'traffic_scheduler_enabled': args.traffic_scheduler_enabled,
             'enable_motion_fixture': args.enable_motion_fixture,
             'motion_fixture_cycles': args.motion_fixture_cycles,
@@ -1895,7 +1942,7 @@ def internal_trial(args):
         'ros2', 'launch', 'my_epuck_project',
         'two_robots_decentralized_exploration_launch.py',
         f'world_profile:={args.world_profile}',
-        f'world_path:={args.source_world_path}',
+        f'world_path:={run_world}',
         f'run_id:={args.run_id}',
         f'output_root:={attempt / "observer"}',
         f'unknown_pose_diagnostic_output:={frontend_diagnostic_output}',
@@ -1925,6 +1972,9 @@ def internal_trial(args):
         f'do_loop_closing:={str(args.do_loop_closing).lower()}',
         f'unknown_initial_pose:={str(args.unknown_initial_pose).lower()}',
         f'assignment_strategy:={args.assignment_strategy}',
+        f'local_path_gate_mode:={args.local_path_gate_mode}',
+        f'experiment_condition:={getattr(args, "experiment_condition", "C")}',
+        f'seed_provenance_json:={json.dumps(seed_provenance, sort_keys=True, separators=(",", ":"))}',
         f'traffic_scheduler_enabled:={str(args.traffic_scheduler_enabled).lower()}',
         # Full accumulated-map registration is the explicitly selected
         # unknown-pose experiment.  This bypasses the historical crop path;
@@ -2589,6 +2639,8 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         workspace=getattr(args, 'workspace', '/home/arash/webots_ws'),
         world_profile=getattr(args, 'world_profile', 'small'),
         source_world_path=getattr(args, 'source_world_path', ''),
+        experiment_condition=getattr(args, 'experiment_condition', 'C'),
+        webots_random_seed=seed_for_trial(args, trial_number),
         ros_domain_id=ros_domain_id,
         webots_port=webots_port,
         webots_mode='fast' if args.fast_mode else 'realtime',
@@ -2605,6 +2657,7 @@ def attempt_namespace(args, trial_number, attempt_number, campaign):
         unknown_initial_pose=getattr(args, 'unknown_initial_pose', False),
         assignment_strategy=getattr(
             args, 'assignment_strategy', 'frontier_mrtsp'),
+        local_path_gate_mode=getattr(args, 'local_path_gate_mode', None),
         traffic_scheduler_enabled=getattr(
             args, 'traffic_scheduler_enabled', True),
         enable_motion_fixture=getattr(args, 'enable_motion_fixture', False),
@@ -3157,6 +3210,7 @@ def create_manifest(args, campaign, workspace):
     commit = git_value(workspace, ['rev-parse', 'HEAD'])
     dirty = git_value(workspace, ['status', '--porcelain'], '')
     command = ' '.join([shlex_quote(item) for item in sys.argv])
+    requested_seeds = seed_schedule(args)
     manifest = {
         'schema_version': '1.0.0',
         'campaign_id': campaign.name,
@@ -3192,6 +3246,12 @@ def create_manifest(args, campaign, workspace):
         'world_dimensions_m':
             args.profile_metadata['world_dimensions_m'],
         'world_sha256': args.profile_metadata['world_sha256'],
+        'experiment_condition': getattr(args, 'experiment_condition', 'C'),
+        'random_seeds': {
+            'controlled': all(seed is not None for seed in requested_seeds),
+            'requested': requested_seeds,
+            'description': 'five prespecified simulator-seed repetitions; not formal statistical independence',
+        },
         'installed_world_sha256': args.profile_metadata.get('installed_world_sha256'),
         'robot_start_poses': args.profile_metadata['robot_start_poses'],
         'known_initial_relative_transform':
@@ -3228,6 +3288,7 @@ def create_manifest(args, campaign, workspace):
             'do_loop_closing': args.do_loop_closing,
             'unknown_initial_pose': args.unknown_initial_pose,
             'assignment_strategy': args.assignment_strategy,
+            'local_path_gate_mode': args.local_path_gate_mode,
             'traffic_scheduler_enabled': args.traffic_scheduler_enabled,
             'ideal_encoder_sensing': args.ideal_encoder_sensing,
             'assignment_mode': 'replicated_two_robot_pair',
@@ -3266,10 +3327,6 @@ def create_manifest(args, campaign, workspace):
             'normal_cap': 3, 'hard_default_cap': 4,
             'overload_cpu_percent': 90,
             'minimum_available_memory_fraction': 0.20,
-        },
-        'random_seeds': {
-            'controlled': False,
-            'reason': 'no project/Webots seed is exposed by committed launch',
         },
         'reproduction_command': command,
         'limitations': [
@@ -3643,6 +3700,16 @@ def parser():
         default='frontier_mrtsp',
         help='The sole intentional policy variable for a campaign run.')
     result.add_argument(
+        '--experiment-condition', choices=['C', 'D'], default='C',
+        help='Cooperative campaign condition recorded in every artifact.')
+    result.add_argument(
+        '--webots-random-seed', type=int, action='append', default=None,
+        help=('One nonnegative WorldInfo.randomSeed, or one value per trial.'))
+    result.add_argument(
+        '--local-path-gate-mode', choices=['MODE_A', 'MODE_B'], default=None,
+        help=('Final local-path dispatch gate mode. Required explicitly so a '
+              'missing value cannot silently select a different policy.'))
+    result.add_argument(
         '--traffic-scheduler-enabled', type=boolean, default=True,
         metavar='BOOL',
         help='Preserve the cooperative traffic scheduler in the campaign.')
@@ -3818,6 +3885,9 @@ def validate_cli_options(args):
             and not args.rendering):
         raise SystemExit(
             '--hold-open-after-completion true requires --rendering true')
+    if args.local_path_gate_mode not in ('MODE_A', 'MODE_B'):
+        raise SystemExit(
+            '--local-path-gate-mode MODE_A or MODE_B is required explicitly')
 
 
 def main(argv=None):

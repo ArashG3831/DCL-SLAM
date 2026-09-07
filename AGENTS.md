@@ -48,6 +48,35 @@ Record WSL memory and Windows counters separately; WSL's reported values do not
 replace the Windows counters, and Windows counters do not by themselves identify
 a Linux process owner.
 
+## ROS domain-range and retry preflight (hard rule)
+
+Never launch a validation run using a ROS domain ID merely because it is
+unique. Validate the requested `ROS_DOMAIN_ID` against the active CycloneDDS
+profile before Webots or any scientific process starts. For the current
+approved WSL loopback profile, the inclusive valid range ends at domain `230`;
+domain `231` and any higher value must be rejected during preflight.
+
+The domain check is mandatory for every run and every retry, including a retry
+of the same acceptance run. Record the validated domain, active CycloneDDS
+profile, and selected Webots port in the attempt provenance before launch.
+
+If domain/port preflight rejects an attempt:
+
+- classify it as a preflight failure, not an algorithm or experiment result;
+- do not start Webots, ROS nodes, observers, or evidence collection;
+- do not count it as an accepted run and do not overwrite or relabel an
+  earlier accepted run;
+- preserve the rejected attempt's command, reason, and provenance;
+- retry only with a domain accepted by the active profile, a newly validated
+  unused Webots port, and a new unique output directory.
+
+Before claiming that a second acceptance run started, verify that the live
+manifest/effective command contains the validated in-range domain and fresh
+port and that launch/readiness markers and the result directory exist. A
+message such as “retrying with domain 230” is not evidence that a simulation
+started. The current incident—domain `231` rejected before any simulation or
+evidence—must never recur.
+
 ## Webots campaign time policy
 
 Keep these two limits separate and record both.
@@ -232,6 +261,299 @@ exclude build, install, log, ROS-log, temporary, raw simulation-output, and
 other generated directories unless the user explicitly requests them. If the
 Windows Desktop is not accessible, report the exact handoff failure instead of
 silently skipping it.
+
+## Canonical thesis world
+
+For normal thesis development, validation, smoke tests, and experiments, use
+the close-start profile `large_unknown_pose_close_start_20ms_scan_matching`
+with world `epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt`.
+This is the close-start/common-overlap configuration with approximately 0.5 m
+initial robot separation. Far-start, delayed-overlap, and legacy worlds must
+not be selected by default or by filename/history inference; use another
+world only when the USER explicitly requests it. Condition A uses the
+robot1-only derived copy of this same environment.
+
+## Authoritative experiment-plan correction (permanent)
+
+These rules supersede any older ABCD, asynchronous-start, D/MRTSP, or 20-run
+instructions in this repository, historical reports, or future handoff
+messages.
+
+### Synchronized two-robot start
+
+For every two-robot experimental condition, especially B and C, both robots
+may initialize while stationary, but neither may dispatch an exploration goal
+or intentionally move before both robots are ready. Exploration must begin
+from one common simulation-time `START_RELEASE` barrier, and both robots must
+receive the exact same release timestamp. This is required because the
+canonical starting geometry deliberately creates a symmetric narrow-doorway
+traffic scenario; allowing one robot to start early invalidates that
+experimental condition.
+
+Record robot1-ready time, robot2-ready time, the authoritative
+`START_RELEASE` time, each robot's first goal dispatch, first nonzero
+`cmd_vel`, and first measurable motion. Do not fake simultaneity by delaying
+logs or rewriting timestamps: gate the actual exploration behavior.
+
+### Main thesis experiment is ABC only
+
+- A = one-robot frontier exploration.
+- B = two independent robots.
+- C = two cooperative robots using the fixed cost-only strategy.
+
+D/MRTSP is not part of the current main thesis experiment, validation
+pipeline, long-horizon stress tests, videos, or final campaign. D may be
+revisited only as an optional secondary experiment after ABC is completely
+finished. With five seeds, the main final campaign is 15 runs, not 20.
+
+### Validation order
+
+Do not proceed to A/B, videos, or the final campaign while the C RTF gate is
+blocked. After the 180-s C RTF gate passes, require full 1200-s long-horizon
+validation before final-campaign work.
+
+### Reproducible package closure and provenance
+
+Audit the complete launch/runtime dependency closure in the appropriate ROS
+`package.xml`, including the selected interfaces, frontier, cooperative, and
+SLAM-wrapper packages. Fresh builds must derive their closure from the ROS/
+colcon dependency graph, not from a manually remembered package list.
+
+Before every simulation, source only ROS, the selected fresh thesis install,
+and explicitly approved external Webots-driver prefixes. Fail closed if any
+required project package resolves from the stale `/home/arash/webots_ws/install`
+or another old project overlay. Record and verify every required `ros2 pkg
+prefix`, including `my_epuck_interfaces`, `my_epuck_frontier_candidates`,
+`my_epuck_cooperative_exploration`, and
+`reliable_slam_toolbox_wrapper`.
+
+### Absolute stale-driver fail-closed rule
+
+Codex MUST NEVER source, launch, or accept any Webots/ROS driver or required
+runtime package from `/home/arash/webots_ws/install`. Before Webots starts,
+preflight MUST fail closed if that prefix appears in any effective environment,
+effective command, launch provenance, package provenance, executable
+resolution, or planned runtime path. The check must also fail closed if a
+process or child-process command line/executable provenance from that prefix is
+observed during startup. The only approved external Webots driver prefix is
+`/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver`;
+project packages MUST resolve from the selected fresh thesis install. A direct
+nested `ros2 launch` or another wrapper MUST NOT bypass these provenance checks.
+
+### Clean-shell and clean-build contamination gate
+
+Every ROS/Webots build and validation must start from a fresh environment, not
+from a shell that previously sourced another ROS workspace. Use an `env -i`
+shell with only the required base `PATH`/`HOME`, source `/opt/ros/jazzy`, then
+source only the approved external Webots-driver package setup and the selected
+fresh project install. Do not inherit or manually retain `AMENT_PREFIX_PATH`,
+`CMAKE_PREFIX_PATH`, `COLCON_PREFIX_PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`, or
+similar overlay variables from an earlier run.
+
+Build every selected project dependency into a new uniquely named build and
+install prefix. A build directory configured from a contaminated environment
+must not be reused; quarantine or replace that exact cache before rebuilding.
+The old `/home/arash/webots_ws/install` prefix is forbidden even as a lower
+priority underlay. Sourcing the complete setup of an external workspace is
+also forbidden when it adds old project packages; source the approved driver
+package setup narrowly and verify package resolution explicitly.
+
+Before launch, fail closed unless all of the following are true:
+
+- CMake cache/configuration and generated build metadata contain no
+  `/home/arash/webots_ws/install` reference;
+- every required project package resolves from the selected fresh install;
+- the Webots driver resolves only from the approved external prefix or the
+  explicitly approved ROS underlay;
+- every relevant executable and shared library passes `ldd` without resolving
+  from the stale prefix, and its RPATH/RUNPATH contains no stale prefix;
+- the effective environment, command line, launch provenance, and planned
+  runtime paths contain no stale prefix.
+
+### Launch-wrapper argument preflight
+
+Before spawning any Webots/ROS process, validate the launch wrapper's own
+arguments in the clean shell. In particular:
+
+- Set `MY_EPUCK_INSTALL_PREFIX` explicitly to the selected isolated install and
+  verify `ros2 pkg prefix my_epuck_project` equals it.
+- Set `MY_EPUCK_WEBOTS_DRIVER_PREFIX` explicitly to the approved driver prefix
+  and verify the driver provenance before launch.
+- Choose a unique `ROS_DOMAIN_ID` and fail closed unless it is an integer in
+  the active CycloneDDS profile's supported range `0..230`.
+- Pass the absolute results directory into the `env -i` shell explicitly (for
+  example as `RUN_OUT=...`); do not rely on an outer-shell variable that is not
+  exported. Create it and verify it is writable before starting the pipeline.
+- Require the log destination to be an absolute path below that validated
+  directory and verify it can be opened before launch. A failed `tee`, missing
+  output variable, invalid domain, or failed preflight is a pre-launch failure;
+  it must not start Webots or any experiment process.
+- Use `set -u`/equivalent unbound-variable failure in the wrapper and preserve
+  the runner return code separately from the logging pipeline (for example via
+  `PIPESTATUS`).
+
+The minimum launch preflight must therefore validate, before Webots starts:
+
+```bash
+test -n "${RUN_OUT:-}" && test -d "$RUN_OUT" && test -w "$RUN_OUT"
+test "${ROS_DOMAIN_ID:?}" -ge 0 && test "$ROS_DOMAIN_ID" -le 230
+test "$(ros2 pkg prefix my_epuck_project)" = "$MY_EPUCK_INSTALL_PREFIX"
+test -n "${MY_EPUCK_WEBOTS_DRIVER_PREFIX:-}"
+```
+
+Do not retry a rejected launch by guessing another argument. Correct the
+preflight inputs, record the rejection, and only then launch once.
+
+Record the exact clean-shell recipe, build/install/log prefixes, package
+prefixes, executable paths, and dependency-scan result in run provenance. A
+successful compile is not sufficient evidence of a clean build: CMake can
+cache absolute dependency paths, while an inherited `LD_LIBRARY_PATH` can
+override a fresh binary's RUNPATH at runtime. Any such contamination makes the
+build/validation attempt invalid and it must not be used for scientific
+results.
+
+### Current hard acceptance requirements
+
+The two-robot start barrier and ABC-only scope above are authoritative for the
+current thesis stage. A reachable useful task must not be converted into
+avoidable software idle because a peer is busy, cooperative evidence is slow,
+certificates are pending, or a goal/assignment transition is in progress.
+The existing cooperation protocol must establish peer unavailability before
+degraded-solo continuation is permitted; it must not bypass cooperative
+evaluation, commitments, certificates, duplicate exclusion, traffic, or
+safety checks.
+
+Active-simulation RTF is advancing ROS `/clock` divided by wall time while
+Webots is running and must be at least 2.0x, with approximately 2.5x as the
+target. This may not be achieved by reducing sensors, map/SLAM quality,
+ground-truth/evaluator metrics, contact or other evidence fidelity, or
+cooperative functionality. Investigate telemetry backlog and observer,
+logger, serialization, executor, Nav2, and Webots bottlenecks when the gate
+fails.
+
+### Authoritative active RTF measurement
+
+For diagnostic and acceptance reporting, measure RTF only over the active
+simulation interval. The authoritative interval begins at the first strictly
+advancing live simulation-clock sample after startup (ROS `/clock`, or the
+equivalent live Webots Supervisor time) and ends at the final live sample at
+the configured simulation horizon `H`. Use monotonic wall time for the same two
+boundary events:
+
+```text
+active_simulated_seconds = sim_time_at_H - sim_time_at_first_advance
+active_wall_seconds = monotonic_wall_at_H - monotonic_wall_at_first_advance
+authoritative_RTF = active_simulated_seconds / active_wall_seconds
+```
+
+The first advancing-clock boundary excludes launch, controller connection,
+readiness, and any period in which Webots has not yet advanced simulation
+time. The horizon boundary excludes shutdown, recorder stopping, rosbag export,
+offline evaluation, finalization, and other cleanup work. Never obtain this
+metric by subtracting an assumed startup duration such as 60 seconds, by using
+the whole runner wall duration, by using observer-process lifetime, or by using
+clock-message count alone.
+
+The runner must record both boundary timestamps and the clock source, together
+with the configured horizon and termination reason. It must cut all scientific
+metrics at `H`; samples after `H` may be retained only as teardown diagnostics
+and must not enter the RTF or thesis result. Reports may additionally show the
+raw observer-lifetime ratio and total launch wall duration, but those are
+secondary diagnostics and must not be labeled authoritative active RTF.
+
+## VALIDATED / PROTECTED SUBSYSTEMS — DO NOT REOPEN WITHOUT DIRECT EVIDENCE
+
+The following project areas are validated/frozen. A later failure elsewhere is
+not permission to redesign, retune, replace, or simplify them.
+
+Before changing a protected subsystem, Codex must produce direct
+runtime/source/artifact evidence that it is defective for the current failure,
+state which validated invariant is contradicted, and choose the smallest
+semantics-preserving correction. If the current requirement conflicts with a
+protected invariant, stop and report the architectural conflict. Focused unit
+tests alone do not justify replacing previously validated production behavior.
+
+### Protected canonical simulation and sensing
+
+- Profile: `large_unknown_pose_close_start_20ms_scan_matching`
+- World: `src/my_epuck_project/worlds/epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt`
+- World SHA-256: `feda86d1c1ba8b3f1b18c8f216a079c61fff222dbda09b0326c68f8e0ef9bb86`
+- Environment geometry SHA-256: `40f2a7c1982c0d1983b3e6dc260ebca8f80252efbdf17036299c08bfb0845a36`
+- Webots basic timestep: 20 ms.
+- Preserve the symmetric close-start narrow-doorway traffic geometry and
+  physics/sensor fidelity; do not alter them to make validation easier or RTF
+  faster.
+- Preserve the D500 lidar, 12.0 m physical range, 720 beams, approximately
+  11.98 m usable SLAM/Nav range, and 0.03 m map resolution.
+
+### Protected SLAM, Nav2, frontier, fusion, traffic, and cooperation
+
+- SLAM Toolbox parameters, scan matching, loop-closure policy, and map/sensor
+  integration are closed absent direct SLAM evidence; do not retune them for
+  unrelated frontier, startup, logging, or RTF failures.
+- Nav2 lifecycle/readiness, MODE_B costmap interpretation, current path/goal
+  validity, and Nav2 success authority are protected. Do not restore arbitrary
+  endpoint-distance rejection or reconfigure active lifecycle nodes without
+  direct evidence.
+- Stable physical frontier/task identity, canonicalization, Tier-1 duplicate
+  suppression, source-aware map fusion, snapshot-time teammate-pose freshness,
+  and existing ghost-map corrections are protected.
+- Traffic semantics are protected: continuous path-segment conflicts, roughly
+  0.16 m minimum separation, roughly 0.13 m/s ETA logic, deterministic tie
+  handling, no conflicting goal for a waiting robot, and fresh allocation after
+  conflicts clear. Do not weaken traffic coordination to make robots move.
+- C remains `frontier_cost_only` + `MODE_B`; preserve two-active cardinality,
+  reservations, agreements, certificates, continuation semantics, serialized
+  planner safety, traffic, and safety gates. Never dispatch an otherwise
+  disallowed local task merely to improve idle metrics.
+
+### Protected unknown-pose estimator
+
+The existing full occupancy-map bounded SE(2) estimator is validated and
+frozen. Preserve its refinement, existing quality thresholds, bidirectional
+validation, reciprocal peer verification, canonical T21 convention, immutable
+accepted transform, and startup-only discovery/quiescence.
+
+Do not replace it or introduce a second transform estimator merely because the
+stationary `START_RELEASE` requirement makes evidence accumulation difficult.
+The active issue is the evidence/acceptance contract, not evidence that the
+validated estimator is defective. If stationary independent evidence is
+incompatible with the frozen estimator contract, stop and report that conflict
+instead of inventing another estimator or evidence family.
+
+### Validated stationary registration and common release
+
+The stationary `stationary-disjoint-partition-v1` evidence path is validated
+and frozen for the canonical close-start C startup: the original whole-map
+bounded SE(2) estimator supplies the canonical seed, three genuinely disjoint
+support partitions are reconstructed and peer-verified 3/3, and the accepted
+handoff is required before shared-stack activation. The common simulation-time
+`START_RELEASE` barrier is also frozen: both robots must be ready, traffic
+must be ready, exploration dispatch and intentional motion before release are
+forbidden, and both robots receive the same release timestamp. Do not lower
+the witness count, reuse overlapping evidence, bypass reciprocal verification,
+or move the release barrier to compensate for a later failure.
+
+### Protected runtime, time, and evaluation semantics
+
+- Preserve WSL NAT, bounded unique ROS domain IDs, unique Webots ports,
+  filtered provenance, and the approved external driver prefix
+  `/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver`.
+- Project packages must resolve from the selected fresh install, never the
+  stale `/home/arash/webots_ws/install`; runtime dependency closure belongs in
+  `package.xml` and must be derived through colcon.
+- Keep simulated time and wall time separate: 180 s smoke, exactly 1200 s final
+  mission, 1200 s outer wall watchdog, and normal stop `SIM_TIME_COMPLETE`.
+- Preserve GT-as-evaluation-only, authoritative physical-contact evidence,
+  coverage/evaluator definitions, artifact schemas, and full evidence fidelity.
+  Passive logging implementation may still be optimized for RTF only when
+  outputs and semantics remain equivalent.
+
+### Active and not yet frozen
+
+Do not label these complete from a single smoke: current RTF work, full
+1200-s C snappiness/scaling, B under the common barrier, or the final ABC
+campaign snapshot.
 
 ## Legacy Observer Salvage / Incremental Migration Protocol
 

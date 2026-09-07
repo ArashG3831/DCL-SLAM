@@ -379,6 +379,20 @@ def test_world_profile_reaches_internal_trial_command(tmp_path):
         args.source_world_path)
 
 
+def test_local_path_gate_mode_is_required_and_crosses_trial_boundary(tmp_path):
+    missing = parser().parse_args([])
+    with pytest.raises(SystemExit, match='local-path-gate-mode'):
+        validate_cli_options(missing)
+    args = options(tmp_path, trials=1)
+    args.local_path_gate_mode = 'MODE_B'
+    args.world_profile = 'large'
+    args.source_world_path = str(tmp_path / 'large.wbt')
+    namespace = attempt_namespace(args, 1, 1, tmp_path)
+    command = internal_command(namespace)
+    index = command.index('--local-path-gate-mode')
+    assert command[index + 1] == 'MODE_B'
+
+
 def test_hold_open_defaults_false_and_normal_launch_timeout_stays_enabled(
         tmp_path):
     """Runner trials defer the mission budget until readiness is complete."""

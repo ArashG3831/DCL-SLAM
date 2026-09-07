@@ -21,11 +21,12 @@ from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
 from my_epuck_project.cooperative_profiles import profile_for_world
 from my_epuck_project.slam_range_policy import FREE_SPACE_CAP
+from my_epuck_project.thesis_baseline_topology import parse_active_robots
 
 
 def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
                  tf_probe_log, tf_publication_mode, unknown_initial_pose,
-                 slam_runtime_parameters):
+                 slam_runtime_parameters, scan_topic=None):
     probe_env = {}
     if tf_probe_library:
         probe_env = {
@@ -38,7 +39,7 @@ def slam_actions(package_dir, robot, slam_resolution, tf_probe_library,
         'use_lifecycle_manager': False,
         'use_sim_time': LaunchConfiguration('use_sim_time'),
         'resolution': slam_resolution,
-        'scan_topic': f'/{robot}/scan_d500_slam',
+        'scan_topic': scan_topic or f'/{robot}/scan_d500_slam',
     }
     if slam_runtime_parameters:
         # Raw Webots transport QoS belongs to the namespaced driver/relay
@@ -119,6 +120,11 @@ def launch_setup(context):
     phase_already_aligned = (
         LaunchConfiguration('phase_already_aligned').perform(context).lower()
         == 'true')
+    active_robots = parse_active_robots(
+        LaunchConfiguration('active_robots').perform(context))
+    independent_local_maps = (
+        LaunchConfiguration('independent_local_maps').perform(context).lower()
+        == 'true')
     slam_runtime_parameters = dict(
         selected.get('slam_runtime_parameters', {}))
     base = IncludeLaunchDescription(
@@ -146,6 +152,8 @@ def launch_setup(context):
                 'corrected_scan_reliability'),
             'corrected_scan_depth': LaunchConfiguration(
                 'corrected_scan_depth'),
+            'active_robots': LaunchConfiguration('active_robots'),
+            'independent_local_maps': LaunchConfiguration('independent_local_maps'),
         }.items(),
     )
     filters = []
@@ -155,6 +163,9 @@ def launch_setup(context):
             selected['world_metadata']['reverse_relative_transform']),
     }
     for robot, peer in (('robot1', 'robot2'), ('robot2', 'robot1')):
+        if (independent_local_maps or robot not in active_robots
+                or len(active_robots) < 2):
+            continue
         filters.append(Node(
                 package='my_epuck_project',
                 executable='teammate_scan_filter',
@@ -215,12 +226,14 @@ def launch_setup(context):
             base,
             *filters,
             *local_frame_anchors,
-            *slam_actions(package_dir, 'robot1', selected['slam_resolution'],
-                          tf_probe_library, tf_probe_log, tf_publication_mode,
-                          unknown_initial_pose, slam_runtime_parameters),
-            *slam_actions(package_dir, 'robot2', selected['slam_resolution'],
-                          tf_probe_library, tf_probe_log, tf_publication_mode,
-                          unknown_initial_pose, slam_runtime_parameters),
+            *sum((slam_actions(
+                package_dir, robot, selected['slam_resolution'],
+                tf_probe_library, tf_probe_log, tf_publication_mode,
+                unknown_initial_pose, slam_runtime_parameters,
+                scan_topic=(f'/{robot}/scan_d500_fixed'
+                            if independent_local_maps or len(active_robots) == 1
+                            else None))
+                  for robot in active_robots), []),
         ]
     return mapping_actions
 
@@ -258,6 +271,9 @@ def generate_launch_description():
             'corrected_scan_reliability', default_value='reliable',
             choices=['reliable', 'best_effort']),
         DeclareLaunchArgument('corrected_scan_depth', default_value='100'),
+        DeclareLaunchArgument('active_robots', default_value='robot1,robot2'),
+        DeclareLaunchArgument('independent_local_maps', default_value='false',
+                              choices=['true', 'false']),
         DeclareLaunchArgument('slam_tf_publish_probe_library', default_value=''),
         DeclareLaunchArgument('slam_tf_publish_probe_log', default_value=''),
         DeclareLaunchArgument('slam_tf_publication_mode', default_value='',

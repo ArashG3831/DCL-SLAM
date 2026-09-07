@@ -60,9 +60,7 @@ Python compilation and `git diff --check` also passed.
 
 ### Commit
 
-Pending in this working checkpoint; the source, focused regression test, and
-this report section are to be committed together as one isolated fix-family
-commit.
+Commit: `85048b3` — `observer: honor finalized Condition-C coverage timeline`.
 
 ### Remaining caveat
 
@@ -104,8 +102,7 @@ last-receipt joins, and both endpoints of the ten-second rate window.
 
 ### Commit
 
-Pending in this working checkpoint; this family will be committed separately
-after the report update.
+Commit: `ca13345` — `observer: bound deferred health finalization`.
 
 ### Remaining caveat
 
@@ -145,8 +142,7 @@ warnings, missing raw evidence, and corrupt raw evidence.
 
 ### Commit
 
-Pending in this working checkpoint; this warning-output change and its focused
-tests will be committed separately.
+Commit: `4a51c1a` — `observer: replay warnings from raw receipts`.
 
 ### Remaining caveat
 
@@ -185,8 +181,7 @@ approved tool from manifest provenance without copying or reimplementing it.
 
 ### Commit
 
-Pending in this working checkpoint; this map-quality discovery fix and its
-focused test will be committed separately.
+Commit: `0e8b94d` — `observer: resolve approved map quality tool`.
 
 ### Remaining caveat
 
@@ -233,3 +228,51 @@ The next preflight must print and verify the exact absolute results directory,
 the generated attempt path, and the manifest's `runtime_worktree` separately
 from its output directory. Any result that resolves to the repository root
 instead of the requested results directory must be rejected before launch.
+
+## Fix family 6 — long-horizon RTF scaling attribution
+
+Status: ANALYZED — no additional safe source optimization justified from the
+preserved evidence; the 600 s run remains required.
+
+### Measured evidence
+
+The 1200 s launch log contains 1,092 fusion profile records. Across both fusion
+processes, the recorded process CPU durations were approximately:
+
+| Fusion mode | Calls | CPU seconds | Wall seconds | Cells inspected |
+|---|---:|---:|---:|---:|
+| `FULL_REBUILD` | 76 | 2.749 | 3.093 | 30,603,324 |
+| `POSE_PATCH` | 23 | 0.223 | 0.358 | 1,891,857 |
+| `COALESCED` | 22 | 0.375 | 0.389 | 3,701,156 |
+| `NOOP` | 971 | 1.933 | 2.375 | 6,114,401 |
+| **total** | **1,092** | **5.281** | **6.215** | **42,310,738** |
+
+The preserved authoritative active execution window is 656.186 wall seconds for
+approximately 1200 simulated seconds. The fusion profile therefore proves
+real map-processing work and increasing map dimensions (ending at approximately
+383x825), but it does not account for the full long-horizon wall-time loss by
+itself. The artifact contains no valid post-run per-process CPU attribution for
+the rest of the ROS graph, so assigning the remaining degradation to rosbag,
+TF, SLAM, frontier generation, or observer callbacks would be speculation.
+
+### Decision
+
+No map-resolution, sensor-rate, evidence-rate, GT/contact, cooperation, or
+robotics behavior change is made. No source optimization is accepted without a
+measured dominant cost and a semantic parity proof. The indexed finalization
+change already removes the proven superlinear shutdown work; the corrected
+Condition-C coverage authority removes the sparse-stream evaluator defect. The
+fresh 600 s run will provide the required end-to-end confirmation and report
+RTF, finalization, and evidence completeness separately.
+
+### Commit
+
+This analysis is recorded in the remediation report; no performance source
+commit is warranted from the available evidence.
+
+### Remaining caveat
+
+The 1200 s run cannot establish a complete post-fix RTF or prove that every
+remaining ROS process scales acceptably. The single authorized 600 s run must
+be used for that validation; if it fails a pipeline gate, stop and diagnose that
+failure rather than launching another run.

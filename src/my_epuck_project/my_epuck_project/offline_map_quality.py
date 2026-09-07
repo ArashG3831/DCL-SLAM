@@ -29,6 +29,36 @@ def _world_path(root, manifest):
     return None
 
 
+def _approved_map_quality_tool(root, manifest):
+    """Locate the approved analyzer from recorded source provenance.
+
+    The Python package install does not include the repository's ``tools``
+    directory.  Prefer the manifest-owned source worktree so an installed
+    evaluator still invokes the exact analyzer belonging to the run, then use
+    the source-relative path when running directly from a checkout.
+    """
+    manifest = manifest or {}
+    bases = []
+    runtime_worktree = manifest.get("runtime_worktree")
+    if runtime_worktree:
+        bases.append(Path(runtime_worktree))
+    source_root = manifest.get("source_root")
+    if source_root:
+        bases.append(Path(source_root))
+    package_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        base / "src" / "my_epuck_project" / "tools" /
+        "analyze_cooperative_decision_offline.py"
+        for base in bases
+    ]
+    candidates.append(
+        package_root / "tools" / "analyze_cooperative_decision_offline.py")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _existing_direct_geometry_report(root, manifest):
     """Reuse the project's established world-geometry map analyzer."""
     world = _world_path(root, manifest)
@@ -40,9 +70,8 @@ def _existing_direct_geometry_report(root, manifest):
     }
     if world is None or not all(path.is_file() for path in map_paths.values()):
         return None
-    tool_path = Path(__file__).resolve().parents[1] / "tools" / \
-        "analyze_cooperative_decision_offline.py"
-    if not tool_path.is_file():
+    tool_path = _approved_map_quality_tool(root, manifest)
+    if tool_path is None:
         return None
     try:
         spec = importlib.util.spec_from_file_location(

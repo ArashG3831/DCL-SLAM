@@ -154,3 +154,42 @@ The 1200 s artifact was interrupted before finalization and therefore cannot
 prove the normal finalizer path. The fresh 600 s run must confirm that warning
 output is available from ordinary finalization and that the fallback does not
 mask any other finalization failure.
+
+## Fix family 4 — approved map-quality output discovery
+
+Status: IMPLEMENTED — focused analyzer/path tests pass; real-run confirmation
+remains part of the 600 s acceptance.
+
+### Root cause
+
+The approved analyzer is tracked at
+`src/my_epuck_project/tools/analyze_cooperative_decision_offline.py`, but the
+package install does not install the repository `tools/` directory. The
+installed `offline_map_quality.py` therefore looked only beneath its installed
+package location and returned unavailable even when all four final map NPZ
+artifacts and canonical world metadata existed.
+
+### Implementation
+
+`offline_map_quality._approved_map_quality_tool()` now resolves the analyzer
+first from the manifest's recorded `runtime_worktree` (and then its recorded
+source root), followed by the existing checkout-relative path. The existing
+analyzer, world geometry, transforms, map inputs, and output metric definitions
+are unchanged. The selected source path remains recorded in the report.
+
+### Tests
+
+Focused map-quality, approved-analyzer, warning, and comparison tests passed:
+**13 passed**. The new regression proves an installed evaluator can resolve the
+approved tool from manifest provenance without copying or reimplementing it.
+
+### Commit
+
+Pending in this working checkpoint; this map-quality discovery fix and its
+focused test will be committed separately.
+
+### Remaining caveat
+
+The 1200 s artifact has the four maps but was finalized incompletely. The fresh
+600 s run must demonstrate that normal finalization and the provenance-resolved
+analyzer produce `map_quality_report.json` with the approved metrics.

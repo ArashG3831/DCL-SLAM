@@ -1,6 +1,18 @@
 import json
 
-from my_epuck_project.offline_map_quality import map_quality_report
+from my_epuck_project.offline_map_quality import (
+    _approved_map_quality_tool, map_quality_report)
+
+
+def test_map_quality_tool_comes_from_manifest_worktree(tmp_path):
+    source_root = tmp_path / "source"
+    tool = (source_root / "src" / "my_epuck_project" / "tools" /
+            "analyze_cooperative_decision_offline.py")
+    tool.parent.mkdir(parents=True)
+    tool.write_text("# approved fixture tool\n", encoding="utf-8")
+
+    assert _approved_map_quality_tool(
+        tmp_path / "run", {"runtime_worktree": str(source_root)}) == tool
 
 
 def test_map_quality_uses_existing_artifact(tmp_path):

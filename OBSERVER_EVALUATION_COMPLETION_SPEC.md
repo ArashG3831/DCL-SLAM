@@ -308,6 +308,10 @@ same definitions, units, frames, and timestamp semantics.
 
 ### 7. Handoff reciprocal verification where feasible
 
+**Status: DONE** — reciprocal verification is implemented for accepted
+opposite-direction hypotheses; absent reciprocal evidence is reported
+explicitly. Checkpoint details are in the incremental completion report.
+
 **Required raw inputs:** accepted handoff transform, acceptance timestamp,
 evidence-set hash, estimator-quality fields, reciprocal verification evidence,
 and physical GT poses.

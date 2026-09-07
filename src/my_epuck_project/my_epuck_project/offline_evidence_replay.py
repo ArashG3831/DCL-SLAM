@@ -743,6 +743,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     finalization = (json.loads(finalization_path.read_text(encoding='utf-8'))
                     if finalization_path.exists() else {})
     handoff = _handoff_metrics(run_directory, manifest, gt_rows)
+    from .offline_handoff import reciprocal_verification
+    handoff['reciprocal_verification'] = reciprocal_verification(
+        handoff.get('structured_files', []))
     contacts = _contact_metrics(run_directory)
     warnings = _warning_metrics(run_directory)
     semantic = (finalization.get('semantic_contract') or
@@ -898,6 +901,9 @@ def evaluate_run(run_directory: Path, robots=('robot1', 'robot2'),
     (destination.parent / 'map_quality_report.json').write_text(
         json.dumps(map_quality_report_value, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
+    (destination.parent / 'handoff_reciprocal_verification.json').write_text(
+        json.dumps(handoff['reciprocal_verification'], indent=2,
+                   sort_keys=True) + '\n', encoding='utf-8')
     return evaluation
 
 

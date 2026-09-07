@@ -463,3 +463,67 @@ Remaining caveat:
 
 This item requires an approved reference-map/quality evidence source before a
 complete thesis report can be claimed.
+
+## Item 7 — Handoff reciprocal verification
+
+Status: DONE
+
+Legacy definition/source:
+
+The existing structured frontend artifacts contain accepted hypotheses,
+source/target identities, transforms, timestamps, evidence-set hashes, and
+quality fields. The existing handoff evaluator computes the physical-GT core.
+
+Current raw evidence:
+
+`_handoff_metrics` preserves accepted structured records. Where both transform
+directions are present, both are sufficient for an inverse-consistency check;
+otherwise the missing direction is observable as missing evidence, not a zero
+residual.
+
+Existing reusable implementation:
+
+`offline_handoff.reciprocal_verification` composes the two existing SE(2)
+transforms, reports translation/yaw inverse error, compares evidence hashes,
+and retains acceptance timestamps.
+
+Gap identified:
+
+The evaluator previously exposed no reciprocal status or inverse residual.
+
+Implementation:
+
+Added reciprocal verification to the handoff result and emitted
+`handoff_reciprocal_verification.json`. No live handoff behavior changed.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_handoff.py`
+- `src/my_epuck_project/my_epuck_project/offline_evidence_replay.py`
+- `src/my_epuck_project/test/test_offline_handoff.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+
+Tests:
+
+- focused offline handoff/map/window/fairness/motion/timing/protocol/metric
+  tests: **43 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic opposite-direction transforms produced zero inverse residual and
+matching-hash verification; one-direction input produced explicit missing
+reciprocal status.
+
+Parity/semantic result:
+
+Existing accepted transforms and physical-GT interpretation are unchanged;
+reciprocal results are additive and fail closed.
+
+Commit:
+
+Pending source checkpoint.
+
+Remaining caveat:
+
+Runs with only one observed direction remain `MISSING_RECIPROCAL_EVIDENCE`.

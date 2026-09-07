@@ -527,3 +527,77 @@ Pending source checkpoint.
 Remaining caveat:
 
 Runs with only one observed direction remain `MISSING_RECIPROCAL_EVIDENCE`.
+
+## Item 8 — Final legacy-versus-current scientific output comparison
+
+Status: BLOCKED
+
+Legacy definition/source:
+
+The legacy summaries and metric primitives remain the behavioral reference. The
+current evaluator now exposes parsed semantic outputs for coverage, idle,
+snappiness, protocol, anomalies, fairness, windows, handoff, map quality, and
+navigation.
+
+Current raw evidence:
+
+The preserved historical thin artifacts include finalized bags, manifests,
+GT/contact evidence, protocol files, and prior thin metrics. A complete replay
+of the native bag cannot be executed in this shell because `rclpy` and
+`rosbag2_py` are unavailable.
+
+Existing reusable implementation:
+
+`offline_final_comparison.compare_outputs` compares parsed semantic fields and
+distinguishes exact equality, equivalent offline output, missing current
+evidence, and unresolved differences. It does not require byte-identical JSON
+formatting.
+
+Gap identified:
+
+The final comparison cannot honestly claim all thesis rows as PASS while item 6
+has no approved complete reference-map quality source and some runs lack the
+allocator's full certificate payload. These are evidence blockers, not inferred
+zeros.
+
+Implementation:
+
+Added the semantic comparison helper and this final completeness report. The
+report enumerates all roadmap families, all required metric groups, known
+parity/replacement status, exact blocked fields, and the prerequisite for
+campaign readiness.
+
+Files changed:
+
+- `src/my_epuck_project/my_epuck_project/offline_final_comparison.py`
+- `src/my_epuck_project/test/test_offline_final_comparison.py`
+- `OBSERVER_EVALUATION_COMPLETION_SPEC.md`
+- `reports/observer_evaluation_final_completeness_20260907.md`
+
+Tests:
+
+- focused offline comparison/map/handoff/window/fairness/motion/timing/protocol/
+  metric tests: **45 passed**;
+- Python syntax compilation: **PASS**.
+
+Validation:
+
+Synthetic comparison fixtures verified exact semantic matches, equivalent
+offline-only fields, and fail-closed missing-current fields. No Webots or long
+campaign was run.
+
+Parity/semantic result:
+
+All implemented families have explicit output ownership and missing-evidence
+behavior. Final campaign readiness remains blocked by the exact fields listed
+in the final completeness report.
+
+Commit:
+
+Pending final documentation checkpoint.
+
+Remaining caveat:
+
+The offline layer is not marked campaign-ready until a ROS-enabled replay can
+validate the current bag and the reference-map/certificate evidence blockers
+are resolved or formally approved as replacements.

@@ -327,6 +327,13 @@ was not observable from the run.
 
 ### 8. Final legacy-versus-current report comparison
 
+**Status: BLOCKED** — the final offline comparison/report is generated with
+explicit semantic statuses, but the preserved evidence still contains the
+map-quality reference gap and conditional certificate-payload gaps documented
+above. The current shell also lacks the ROS Python runtime required to replay a
+native bag for a fresh end-to-end comparison. Checkpoint details are in the
+incremental completion report.
+
 **Required raw inputs:** all sources consumed by the completed metric modules,
 the preserved legacy reference outputs, manifests, and finalization records.
 

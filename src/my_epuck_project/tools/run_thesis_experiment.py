@@ -15,7 +15,7 @@ import sys
 
 WORKSPACE = Path(__file__).resolve().parents[3]
 ROS_SETUP = Path('/opt/ros/jazzy/setup.bash')
-PROJECT_INSTALL = WORKSPACE / 'install_canonical_thesis_20260907'
+PROJECT_INSTALL = WORKSPACE / 'install_canonical_thesis_20260907_symlink'
 LOOPBACK_SETUP = WORKSPACE / 'scripts/ros2_wsl_cyclonedds_loopback.sh'
 DRIVER_PREFIX = Path('/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver')
 WORLD_PROFILE = 'large_unknown_pose_close_start_20ms_scan_matching'
@@ -79,7 +79,7 @@ def canonical_environment(base: dict[str, str], result_root: Path, domain: int, 
         'MY_EPUCK_WORKSPACE': str(WORKSPACE),
         'MY_EPUCK_INSTALL_PREFIX': str(PROJECT_INSTALL / 'my_epuck_project'),
         'MY_EPUCK_FRONTIER_PREFIX': str(PROJECT_INSTALL / 'frontier_exploration_ros2'),
-        'MY_EPUCK_BUILD_BASE': str(WORKSPACE / 'build_canonical_thesis_20260907'),
+        'MY_EPUCK_BUILD_BASE': str(WORKSPACE / 'build_canonical_thesis_20260907_symlink'),
         'MY_EPUCK_WEBOTS_DRIVER_PREFIX': str(DRIVER_PREFIX),
         'MY_EPUCK_WEBOTS_NETWORK_MODE': 'nat',
         'MY_EPUCK_DEFER_SYNC_MAP_FRAMES': '1',

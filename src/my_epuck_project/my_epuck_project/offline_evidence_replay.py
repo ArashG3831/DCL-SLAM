@@ -377,9 +377,42 @@ def _contact_metrics(run_directory):
 
 
 def _warning_metrics(run_directory):
-    path = Path(run_directory) / 'warnings.jsonl'
+    run_directory = Path(run_directory)
+    path = run_directory / 'warnings.jsonl'
     if not path.exists():
-        return {'available': False, 'reason': 'warnings.jsonl absent'}
+        receipt_path = run_directory / 'rosout_receipts.jsonl'
+        if not receipt_path.is_file():
+            return {
+                'available': False,
+                'reason': 'warnings.jsonl and rosout_receipts.jsonl absent',
+            }
+        try:
+            from .deferred_protocol import replay_warning_records_from_receipts
+            replay = replay_warning_records_from_receipts(receipt_path)
+            temporary = path.with_suffix('.jsonl.replay.tmp')
+            with temporary.open('w', encoding='utf-8') as stream:
+                for record in replay['records']:
+                    stream.write(json.dumps(record, sort_keys=True) + '\n')
+            temporary.replace(path)
+        except (OSError, RuntimeError, ValueError, TypeError,
+                json.JSONDecodeError) as exc:
+            return {
+                'available': False,
+                'reason': f'rosout receipt replay failure: {exc}',
+            }
+        counts = {}
+        for record in replay['records']:
+            category = str(record.get('category', 'PROCESS_WARNING'))
+            counts[category] = counts.get(category, 0) + int(
+                record.get('occurrence_count', 1))
+        return {
+            'available': True,
+            'counts': counts,
+            'source': 'rosout_receipts.jsonl',
+            'receipt_count': replay['receipt_count'],
+            'warning_receipt_count': replay['warning_receipt_count'],
+            'record_count': len(replay['records']),
+        }
     counts = {}
     try:
         for line in path.read_text(encoding='utf-8').splitlines():
@@ -391,7 +424,13 @@ def _warning_metrics(run_directory):
                 row.get('occurrence_count', 1))
     except (OSError, ValueError, TypeError):
         return {'available': False, 'reason': 'warning parse failure'}
-    return {'available': True, 'counts': counts}
+    return {
+        'available': True,
+        'counts': counts,
+        'source': 'warnings.jsonl',
+        'record_count': sum(1 for line in path.read_text(
+            encoding='utf-8').splitlines() if line.strip()),
+    }
 
 
 def _known_cells(record, transform=(0.0, 0.0, 0.0)):

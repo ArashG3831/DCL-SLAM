@@ -112,3 +112,45 @@ after the report update.
 The optimization is a finalization-only change. A fresh 600 s run must verify
 that normal shutdown writes all final artifacts without escalation and that the
 indexed output remains semantically equivalent on a real long evidence history.
+
+## Fix family 3 — warning replay completeness
+
+Status: IMPLEMENTED — focused replay tests pass; real-run confirmation remains
+part of the 600 s acceptance.
+
+### Root cause
+
+The legacy warning replay already consumes the complete
+`rosout_receipts.jsonl` stream through `replay_warning_records_from_receipts()`.
+The standalone offline evaluator, however, reported warnings unavailable unless
+the finalizer had already materialized `warnings.jsonl`. When the 1200 s
+finalization was interrupted, this made complete raw rosout evidence appear
+unavailable even though the authoritative replay input existed.
+
+### Implementation
+
+`offline_evidence_replay._warning_metrics()` now retains the existing
+`warnings.jsonl` path as authoritative when present. If it is absent, it invokes
+the existing legacy-compatible receipt replay, writes the resulting
+`warnings.jsonl` sidecar, and reports its source and receipt counts. Missing
+receipts and corrupt receipts fail closed. A readable receipt stream with no
+warning-level records is reported as a valid zero and produces an empty warning
+sidecar. No classifier or warning normalization semantics were duplicated.
+
+### Tests
+
+Focused warning/replay/comparison/coverage/window tests passed: **17 passed**.
+The tests cover 11,000 warning receipts, legacy deduplication, valid zero
+warnings, missing raw evidence, and corrupt raw evidence.
+
+### Commit
+
+Pending in this working checkpoint; this warning-output change and its focused
+tests will be committed separately.
+
+### Remaining caveat
+
+The 1200 s artifact was interrupted before finalization and therefore cannot
+prove the normal finalizer path. The fresh 600 s run must confirm that warning
+output is available from ordinary finalization and that the fallback does not
+mask any other finalization failure.

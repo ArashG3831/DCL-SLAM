@@ -147,6 +147,9 @@ CERTIFICATE_EVIDENCE_REASONS = frozenset({
 })
 
 
+LOCAL_PATH_EVALUATION_CACHE_MAX_ENTRIES = 32
+
+
 def classify_lower_bound_evidence(
         candidate_meta: Optional[dict], snapshot: Optional[TaskSnapshot],
         raw_bounds: Optional[tuple[float, ...]],
@@ -688,6 +691,14 @@ class DistributedFrontierAssignment(Node):
         self._round_replaced_count = 0
         self._stale_tick_discard_count = 0
         self._dispatch_count = 0
+        # Successful local planner results may outlive an ephemeral allocator
+        # round, but only as an exact task/provenance/context-keyed cache.  A
+        # new round still creates a new bid and must obtain a new peer batch.
+        self._local_path_evaluation_cache: dict[tuple, PathEvaluation] = {}
+        self._local_path_cache_hits = 0
+        self._local_path_cache_misses = 0
+        self._local_path_cache_invalidations = 0
+        self._local_path_cache_evictions = 0
         self._last_tick_steady_s = time.monotonic()
         self._last_round_completion_steady_s = 0.0
         self._last_tick_log_key = None
@@ -2255,13 +2266,17 @@ class DistributedFrontierAssignment(Node):
             'current_generation=%d last_tick_age_s=%.3f '
             'last_round_completion_age_s=%.3f stale_tick_discard_count=%d '
             'rounds_created=%d rounds_completed=%d rounds_replaced=%d '
-            'dispatch_count=%d' % (
+            'dispatch_count=%d path_cache_hits=%d path_cache_misses=%d '
+            'path_cache_invalidations=%d path_cache_evictions=%d' % (
                 self._robot_id, self._coordinator_alive,
                 '' if current is None else current.round_id,
                 self._round_lifecycle.generation, last_tick_age, completion_age,
                 self._stale_tick_discard_count, self._round_created_count,
                 self._round_completed_count, self._round_replaced_count,
-                self._dispatch_count,
+                self._dispatch_count, self._local_path_cache_hits,
+                self._local_path_cache_misses,
+                self._local_path_cache_invalidations,
+                self._local_path_cache_evictions,
             ),
         )
 
@@ -3917,6 +3932,88 @@ class DistributedFrontierAssignment(Node):
             round_work, generation,
         )
 
+    @staticmethod
+    def _local_path_execution_key(
+            round_work: RoundWork, task: CanonicalTask) -> tuple:
+        """Return the exact task/provenance key for a reusable path result.
+
+        The frozen ``CanonicalTask`` contains every source member and every
+        path-relevant task field, rather than only its quantized canonical ID.
+        The source snapshot adds candidate-generation and lower-bound
+        provenance that is not carried by ``PhysicalTask`` itself.
+        """
+        source_robot_id = task.members[0].source_robot_id if task.members else ''
+        source_snapshot = next(
+            (snapshot for snapshot in round_work.snapshots
+             if snapshot.source_robot_id == source_robot_id),
+            None,
+        )
+        snapshot_provenance = None if source_snapshot is None else (
+            source_snapshot.source_robot_id,
+            source_snapshot.source_session_id,
+            source_snapshot.epoch,
+            source_snapshot.map_revision,
+            source_snapshot.map_fingerprint,
+            source_snapshot.generation_ros_ns,
+            source_snapshot.lower_bound_context_fingerprint,
+            source_snapshot.costmap_revision,
+            source_snapshot.candidate_generation_id,
+        )
+        return task, snapshot_provenance
+
+    @staticmethod
+    def _local_path_result_cacheable(
+            task: CanonicalTask, result: PathEvaluation) -> bool:
+        """Accept only a successful finite allocator path result."""
+        if not task.members or result.caller != 'ALLOCATOR_BID':
+            return False
+        if result.task_signature != task.members[0].physical_signature:
+            return False
+        if (result.error_code != 0 or
+                result.failure_class != FailureClass.UNKNOWN or
+                not path_is_valid_finite(result)):
+            return False
+        if (not math.isfinite(float(result.heading_cost)) or
+                result.heading_cost < 0.0):
+            return False
+        return result.map_stamp_ns > 0 and result.costmap_stamp_ns > 0
+
+    def _remember_local_path_evaluation(
+            self, round_work: RoundWork, task: CanonicalTask,
+            result: PathEvaluation) -> None:
+        """Store one successful result with deterministic bounded eviction."""
+        if not self._local_path_result_cacheable(task, result):
+            return
+        key = self._local_path_execution_key(round_work, task)
+        cache = self._local_path_evaluation_cache
+        if key not in cache and len(cache) >= LOCAL_PATH_EVALUATION_CACHE_MAX_ENTRIES:
+            oldest = next(iter(cache))
+            cache.pop(oldest)
+            self._local_path_cache_evictions += 1
+        cache[key] = result
+
+    def _cached_local_path_evaluation(
+            self, round_work: RoundWork,
+            task: CanonicalTask) -> Optional[PathEvaluation]:
+        """Return a current-context exact cached path, if one exists."""
+        key = self._local_path_execution_key(round_work, task)
+        cached = self._local_path_evaluation_cache.get(key)
+        if cached is None:
+            self._local_path_cache_misses += 1
+            return None
+        if not self._local_path_result_cacheable(task, cached):
+            self._local_path_evaluation_cache.pop(key, None)
+            self._local_path_cache_invalidations += 1
+            self._local_path_cache_misses += 1
+            return None
+        if not self._nav2.path_context_matches(cached):
+            self._local_path_evaluation_cache.pop(key, None)
+            self._local_path_cache_invalidations += 1
+            self._local_path_cache_misses += 1
+            return None
+        self._local_path_cache_hits += 1
+        return cached
+
     def _continue_bidding_impl(self, round_work: RoundWork,
                                generation: int) -> None:
         if not self._round_is_current(round_work, generation):
@@ -3958,6 +4055,13 @@ class DistributedFrontierAssignment(Node):
                 FailureClass.UNKNOWN,
                 heading_cost=local_member.path_heading_cost_rad,
             ))
+            return
+
+        cached = self._cached_local_path_evaluation(round_work, task)
+        if cached is not None:
+            # _append_bid constructs a new bid for this exact current round;
+            # the cached object supplies only the still-valid path result.
+            self._append_bid(round_work, generation, task, cached)
             return
 
         def completed(result: PathEvaluation):
@@ -4013,6 +4117,7 @@ class DistributedFrontierAssignment(Node):
         if (result.valid and result.caller != 'UNKNOWN' and
                 result.map_stamp_ns and result.costmap_stamp_ns):
             round_work.local_path_evaluations[task.canonical_id] = result
+        self._remember_local_path_evaluation(round_work, task, result)
         round_work.query_index += 1
         self._continue_bidding(round_work, generation)
 

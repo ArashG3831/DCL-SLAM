@@ -493,6 +493,7 @@ def test_continuation_free_commitment_is_persisted_for_the_next_symmetric_round(
     node, context, batches = _continuation_setup()
     decision = _select_continuation(node, context, batches)
     node._round.decision = decision
+    busy_commitment = node._active_commitments[context.busy_robot_id]
     node._remember_active_commitments(node._round)
     free_id = context.free_robot_id
     assert free_id in node._active_commitments
@@ -500,6 +501,13 @@ def test_continuation_free_commitment_is_persisted_for_the_next_symmetric_round(
         context.free_tasks[0].canonical_id)
     assert node._active_commitments[context.busy_robot_id].canonical_id == (
         context.commitment.canonical_id)
+    assert node._active_commitments[context.busy_robot_id] is busy_commitment
+    assert node._active_commitments[context.busy_robot_id].decision_round_id == (
+        context.commitment.decision_round_id)
+    assert node._active_commitments[context.busy_robot_id].decision_hash == (
+        context.commitment.decision_hash)
+    assert node._active_commitments[context.busy_robot_id].commitment_id == (
+        context.commitment.commitment_id)
 
 
 def test_normal_pair_round_still_requires_both_bid_batches():

@@ -406,6 +406,32 @@ def normal_round_requires_replacement(
     )
 
 
+def selector_feasibility_identity(
+        union_task_ids, hard_failed_task_ids, completed_task_ids,
+        peer_reservation_task_ids) -> tuple[str, dict[str, tuple[str, ...]]]:
+    """Return deterministic identity for the selector's suppression inputs.
+
+    Bid/union fingerprints do not include local completion, hard-failure, or
+    temporary peer-reservation suppression.  Those sets are part of the pure
+    selector input and therefore must be bound before replicas can accept a
+    pair decision as comparable.
+    """
+    union_ids = {str(item) for item in union_task_ids if str(item)}
+
+    def selected(values) -> tuple[str, ...]:
+        return tuple(sorted(union_ids.intersection(str(item) for item in values)))
+
+    payload = {
+        'completed': selected(completed_task_ids),
+        'hard_failed': selected(hard_failed_task_ids),
+        'peer_reservations': selected(peer_reservation_task_ids),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest(), {
+        key: tuple(value) for key, value in payload.items()
+    }
+
+
 @dataclass
 class TrafficHold:
     """A local deferred dispatch bound to one agreed traffic reservation."""
@@ -779,6 +805,11 @@ class DistributedFrontierAssignment(Node):
         # needed to protect ownership and evaluate continuation traffic; it
         # never retains a stale frontier bid vector.
         self._active_commitments: dict[str, ActiveCommitment] = {}
+        # Bounded diagnostics for selector-state divergence and the stronger
+        # equal-input/different-output invariant violation.  These are
+        # diagnostics only; neither path creates a retry protocol.
+        self._last_selector_divergence_key = None
+        self._last_decision_invariant_violation_key = None
         self._state = CoordinatorState.WAITING_FOR_INPUTS
         self._state_reason = 'startup'
         self._dispatch_in_progress = False
@@ -1961,6 +1992,44 @@ class DistributedFrontierAssignment(Node):
             for point in path
         )
 
+    @staticmethod
+    def _continuation_free_action_lineage(
+            busy_commitment_id: str, free_robot_id: str,
+            source_snapshot: TaskSnapshot, task: CanonicalTask,
+    ) -> tuple[str, str, str]:
+        """Derive one immutable lineage for a newly assigned free robot.
+
+        Continuation round/decision IDs are local coordination wrappers and
+        may differ between replicas.  The physical action lineage instead
+        binds the retained busy action, free source provenance, and the exact
+        canonical task contents.  Source epochs/session changes therefore
+        produce a distinct action while equivalent replicas derive the same
+        identity.
+        """
+        payload = {
+            'kind': 'continuation-free-action',
+            'busy_commitment_id': str(busy_commitment_id),
+            'free_robot_id': str(free_robot_id),
+            'source_session_id': str(source_snapshot.source_session_id),
+            'source_snapshot_epoch': int(source_snapshot.epoch),
+            'canonical_task_id': str(task.canonical_id),
+            'physical_signatures': tuple(
+                str(member.physical_signature) for member in task.members
+            ),
+            'canonical_task_repr': repr(task),
+        }
+        seed = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(',', ':'),
+        ).encode('utf-8')).hexdigest()
+        commitment_id = hashlib.sha256(
+            ('continuation-free-commitment:' + seed).encode('utf-8'),
+        ).hexdigest()
+        decision_round_id = 'continuation-action-round:' + seed
+        decision_hash = hashlib.sha256(
+            ('continuation-free-decision:' + seed).encode('utf-8'),
+        ).hexdigest()
+        return commitment_id, decision_round_id, decision_hash
+
     def _remember_active_commitments(self, round_work: RoundWork) -> None:
         """Retain only the agreed task/path needed by future continuation rounds."""
         if round_work.decision is None:
@@ -1999,24 +2068,135 @@ class DistributedFrontierAssignment(Node):
             )
             if source_snapshot is None:
                 continue
+            existing = self._active_commitments.get(robot_id)
+            if (
+                    existing is not None and
+                    existing.canonical_id == task_id and
+                    existing.source_session_id == source_snapshot.source_session_id and
+                    existing.task == task
+            ):
+                # A continuation round may wrap the coordination context, but
+                # it does not create a new physical action for the already
+                # busy robot.  Preserve the original decision lineage so its
+                # eventual terminal remains matchable by the peer.
+                continue
             commitment_id = hashlib.sha256(repr((
                 robot_id, source_snapshot.source_session_id,
                 source_snapshot.epoch, task_id,
                 round_work.round_id, round_work.decision.decision_hash,
             )).encode('utf-8')).hexdigest()
+            decision_round_id = round_work.round_id
+            decision_hash = round_work.decision.decision_hash
+            if (
+                    round_work.mode == 'continuation' and
+                    robot_id == round_work.continuation_free_robot_id and
+                    existing is None
+            ):
+                busy_commitment = self._active_commitments.get(
+                    round_work.continuation_busy_robot_id,
+                )
+                busy_commitment_id = (
+                    busy_commitment.commitment_id
+                    if busy_commitment is not None
+                    else round_work.continuation_commitment_id
+                )
+                if busy_commitment_id:
+                    (
+                        commitment_id,
+                        decision_round_id,
+                        decision_hash,
+                    ) = self._continuation_free_action_lineage(
+                        busy_commitment_id, robot_id, source_snapshot, task,
+                    )
             self._active_commitments[robot_id] = ActiveCommitment(
                 robot_id=robot_id,
                 source_session_id=source_snapshot.source_session_id,
                 source_snapshot_epoch=source_snapshot.epoch,
                 canonical_id=task_id,
                 task=task,
-                decision_round_id=round_work.round_id,
-                decision_hash=round_work.decision.decision_hash,
+                decision_round_id=decision_round_id,
+                decision_hash=decision_hash,
                 path=tuple(bid.path),
                 path_length_m=float(bid.path_length_m),
                 heading_cost_rad=float(bid.heading_cost),
                 commitment_id=commitment_id,
             )
+
+    def _selector_feasibility_identity(
+            self, union: CanonicalUnion, hard_failed_task_ids,
+            completed_task_ids, peer_reservation_task_ids):
+        """Return the exact suppression identity used by pair selection."""
+        task_ids = tuple(task.canonical_id for task in union.tasks)
+        fingerprint, selected = selector_feasibility_identity(
+            task_ids, hard_failed_task_ids, completed_task_ids,
+            peer_reservation_task_ids,
+        )
+        return fingerprint, selected
+
+    def _selector_decision_requires_recompute(
+            self, round_work: RoundWork, selector_fingerprint: str,
+            selector_inputs: dict[str, tuple[str, ...]]) -> bool:
+        """Invalidate only an uncommitted decision whose selector inputs changed."""
+        if round_work.decision is None or self._committed.decision is not None:
+            return False
+        prior = str(
+            getattr(
+                round_work.decision.diagnostics,
+                'selector_feasibility_fingerprint', '',
+            ) or ''
+        )
+        if prior == selector_fingerprint:
+            return False
+        self._emit_event(
+            'SELECTOR_FEASIBILITY_CHANGED_RECOMPUTE',
+            json.dumps({
+                'old_fingerprint': prior,
+                'new_fingerprint': selector_fingerprint,
+                'completed': selector_inputs['completed'],
+                'hard_failed': selector_inputs['hard_failed'],
+                'peer_reservations': selector_inputs['peer_reservations'],
+            }, sort_keys=True, separators=(',', ':')),
+        )
+        round_work.decision = None
+        round_work.decision_published = False
+        round_work.traffic = None
+        self._peer_decision = None
+        return True
+
+    @staticmethod
+    def _peer_selector_feasibility_fingerprint(message) -> str:
+        """Read selector provenance from the existing decision diagnostics."""
+        try:
+            payload = json.loads(str(getattr(message, 'diagnostics_json', '') or '{}'))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ''
+        return str(payload.get('selector_feasibility_fingerprint', '') or '')
+
+    def _decision_identity_diagnostic(
+            self, event_type: str, round_work: RoundWork, payload: dict) -> None:
+        """Emit one bounded diagnostic without creating a retry protocol."""
+        key = (
+            round_work.round_id, event_type,
+            json.dumps(payload, sort_keys=True, separators=(',', ':')),
+        )
+        marker = (
+            '_last_selector_divergence_key'
+            if event_type == 'SELECTOR_FEASIBILITY_DIVERGENCE'
+            else '_last_decision_invariant_violation_key'
+        )
+        if key == getattr(self, marker, None):
+            return
+        setattr(self, marker, key)
+        self._emit_event(
+            event_type,
+            json.dumps(payload, sort_keys=True, separators=(',', ':')),
+        )
+        self.get_logger().warning(
+            '%s robot=%s round=%s details=%s' % (
+                event_type, self._robot_id, round_work.round_id,
+                json.dumps(payload, sort_keys=True, separators=(',', ':')),
+            ),
+        )
 
     def _request_navigation_cancel(self) -> bool:
         """Request Nav2 cancellation while retaining action ownership."""
@@ -2927,10 +3107,21 @@ class DistributedFrontierAssignment(Node):
             if not continuation_active:
                 first_batch = self._bid_batches['robot1'].value
                 second_batch = self._bid_batches['robot2'].value
+            hard_failed_task_ids = self._hard_failed_task_ids(round_work.union)
+            completed_task_ids = frozenset(
+                self._completed_shared_canonical_ids)
+            peer_reservation_task_ids = frozenset(
+                self._temporary_peer_reservation_ids(now))
             hard_ids = (
-                self._hard_failed_task_ids(round_work.union) |
-                frozenset(self._completed_shared_canonical_ids) |
-                self._temporary_peer_reservation_ids(now)
+                hard_failed_task_ids |
+                completed_task_ids |
+                peer_reservation_task_ids
+            )
+            selector_fingerprint, selector_inputs = (
+                self._selector_feasibility_identity(
+                    round_work.union, hard_failed_task_ids,
+                    completed_task_ids, peer_reservation_task_ids,
+                )
             )
             fixed_kwargs = {}
             if continuation_active:
@@ -2947,6 +3138,14 @@ class DistributedFrontierAssignment(Node):
                 selection_bucket,
                 candidate_count=len(first_batch.bids) + len(second_batch.bids),
                 candidate_pairs_input=len(first_batch.bids) * len(second_batch.bids),
+            )
+
+            # Completion, hard-failure, or reservation state is a real
+            # selector input.  Recompute only the local decision while
+            # retaining the semantic round and its valid bid evidence;
+            # epoch-only updates still leave the fingerprint unchanged.
+            self._selector_decision_requires_recompute(
+                round_work, selector_fingerprint, selector_inputs,
             )
 
             def traffic_compatible(first_id, first_bid, second_id, second_bid):
@@ -2993,6 +3192,21 @@ class DistributedFrontierAssignment(Node):
             )
             decision = self._select_traffic_test_conflict_pair(
                 decision, round_work.union, first_batch, second_batch,
+            )
+            decision = replace(
+                decision,
+                decision_hash=hashlib.sha256(json.dumps({
+                    'base_decision_hash': decision.decision_hash,
+                    'selector_feasibility_fingerprint': selector_fingerprint,
+                }, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest(),
+                diagnostics=replace(
+                    decision.diagnostics,
+                    selector_feasibility_fingerprint=selector_fingerprint,
+                    selector_completed_task_ids=selector_inputs['completed'],
+                    selector_hard_failed_task_ids=selector_inputs['hard_failed'],
+                    selector_peer_reservation_task_ids=(
+                        selector_inputs['peer_reservations']),
+                ),
             )
             if self._assignment_strategy == 'frontier_cost_only':
                 certified, blocking, optimistic_score, certificate_reason = (
@@ -4570,19 +4784,79 @@ class DistributedFrontierAssignment(Node):
         )
         if peer_snapshot is None:
             return False
+        local_selector_fingerprint = str(
+            getattr(local.diagnostics, 'selector_feasibility_fingerprint', '') or '')
+        peer_selector_fingerprint = self._peer_selector_feasibility_fingerprint(peer)
         expected_session = peer_snapshot.source_session_id
-        return (
+        same_context = (
             uuid_to_text(peer.source_session_id) == expected_session and
             peer.round_id == local.round_id and
             peer.union_hash == local.union_hash and
             peer.robot1_snapshot_epoch == round_work.snapshots[0].epoch and
             peer.robot2_snapshot_epoch == round_work.snapshots[1].epoch and
             peer.robot1_bid_fingerprint == local.robot1_bid_fingerprint and
-            peer.robot2_bid_fingerprint == local.robot2_bid_fingerprint and
-            peer.robot1_canonical_task_id == local.robot1_task_id and
-            peer.robot2_canonical_task_id == local.robot2_task_id and
-            peer.decision_hash == local.decision_hash
+            peer.robot2_bid_fingerprint == local.robot2_bid_fingerprint
         )
+        if not same_context:
+            return False
+        peer_diagnostics = {}
+        try:
+            peer_diagnostics = json.loads(
+                str(getattr(peer, 'diagnostics_json', '') or '{}'),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        if (not local_selector_fingerprint or
+                peer_selector_fingerprint != local_selector_fingerprint):
+            self._decision_identity_diagnostic(
+                'SELECTOR_FEASIBILITY_DIVERGENCE', round_work, {
+                    'local_fingerprint': local_selector_fingerprint,
+                    'peer_fingerprint': peer_selector_fingerprint,
+                    'local_completed': list(getattr(
+                        local.diagnostics, 'selector_completed_task_ids', ())),
+                    'peer_completed': peer_diagnostics.get(
+                        'selector_completed_task_ids', ()),
+                    'local_hard_failed': list(getattr(
+                        local.diagnostics, 'selector_hard_failed_task_ids', ())),
+                    'peer_hard_failed': peer_diagnostics.get(
+                        'selector_hard_failed_task_ids', ()),
+                    'local_peer_reservations': list(getattr(
+                        local.diagnostics,
+                        'selector_peer_reservation_task_ids', ())),
+                    'peer_peer_reservations': peer_diagnostics.get(
+                        'selector_peer_reservation_task_ids', ()),
+                },
+            )
+            return False
+        if (
+                peer.robot1_canonical_task_id != local.robot1_task_id or
+                peer.robot2_canonical_task_id != local.robot2_task_id or
+                peer.decision_hash != local.decision_hash
+        ):
+            self._decision_identity_diagnostic(
+                'PAIR_DECISION_INVARIANT_VIOLATION', round_work, {
+                    'union_hash': round_work.union.union_hash,
+                    'robot1_bid_fingerprint': local.robot1_bid_fingerprint,
+                    'robot2_bid_fingerprint': local.robot2_bid_fingerprint,
+                    'selector_feasibility_fingerprint': (
+                        local_selector_fingerprint),
+                    'local_tasks': (
+                        local.robot1_task_id, local.robot2_task_id),
+                    'peer_tasks': (
+                        str(peer.robot1_canonical_task_id),
+                        str(peer.robot2_canonical_task_id)),
+                    'local_decision_hash': local.decision_hash,
+                    'peer_decision_hash': str(peer.decision_hash),
+                    'source_sessions': (
+                        round_work.snapshots[0].source_session_id,
+                        round_work.snapshots[1].source_session_id),
+                    'snapshot_epochs': (
+                        round_work.snapshots[0].epoch,
+                        round_work.snapshots[1].epoch),
+                },
+            )
+            return False
+        return True
 
     def _start_local_dispatch(self, round_work: RoundWork, generation: int) -> None:
         if not self._round_is_current(round_work, generation):
@@ -4819,6 +5093,20 @@ class DistributedFrontierAssignment(Node):
             self, '_navigation_action_sequence', 0,
         ) + 1
         member = task.members[0]
+        action_commitment = getattr(
+            self, '_active_commitments', {},
+        ).get(self._robot_id)
+        action_round_id = self._active_round_id
+        action_decision_hash = getattr(self, '_active_decision_hash', '')
+        if (
+                action_commitment is not None and
+                action_commitment.canonical_id == task.canonical_id
+        ):
+            # A continuation wrapper is coordination-local.  Once the
+            # commitment exists, terminal events must carry the immutable
+            # action lineage independently derived by both replicas.
+            action_round_id = action_commitment.decision_round_id
+            action_decision_hash = action_commitment.decision_hash
         action = ActiveNavigationAction(
             action_id='%s:%d:%s' % (
                 self._robot_id, self._navigation_action_sequence,
@@ -4827,13 +5115,13 @@ class DistributedFrontierAssignment(Node):
             task=task,
             canonical_task_id=task.canonical_id,
             physical_signature=member.physical_signature,
-            round_id=self._active_round_id,
-            decision_hash=getattr(self, '_active_decision_hash', ''),
+            round_id=action_round_id,
+            decision_hash=action_decision_hash,
             generation=(generation if generation is not None else getattr(
                 getattr(self, '_round_lifecycle', None), 'generation', 0)),
             path=tuple(final_path.samples),
             commitment_id=getattr(
-                getattr(self, '_active_commitments', {}).get(self._robot_id),
+                action_commitment,
                 'commitment_id', '',
             ),
         )

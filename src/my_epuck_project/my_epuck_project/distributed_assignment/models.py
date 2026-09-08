@@ -185,6 +185,12 @@ class AssignmentDiagnostics:
     sensor_max_range_m: float = 0.0
     burgard_trace: Tuple[dict[str, Any], ...] = ()
     traffic: dict[str, Any] = field(default_factory=dict)
+    # Deterministic selector-feasibility provenance.  These fields bind the
+    # local suppression inputs that are not represented by the bid arrays.
+    selector_feasibility_fingerprint: str = ''
+    selector_completed_task_ids: Tuple[str, ...] = ()
+    selector_hard_failed_task_ids: Tuple[str, ...] = ()
+    selector_peer_reservation_task_ids: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -110,3 +110,10 @@ def test_dry_run_does_not_invoke_runner(monkeypatch, tmp_path):
                         subprocess.CompletedProcess(command, 0))
     assert launcher.main(['--condition', 'C', '--horizon', '1', '--dry-run']) == 0
     assert not any('run_cooperative_trial_fast.py' in command for command in calls)
+
+
+def test_frontier_geometry_capture_uses_existing_runner_flag(monkeypatch):
+    args = launcher.parser().parse_args([
+        '--condition', 'C', '--horizon', '600', '--record-frontier-geometry'])
+    command = launcher.runner_command(args, Path('/tmp/results/run'), 23420)
+    assert command[-2:] == ['--diagnostic-frontier-capture', 'true']

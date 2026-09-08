@@ -179,7 +179,7 @@ def write_records(result_root: Path, env: dict[str, str], command: list[str],
 
 def runner_command(args: argparse.Namespace, result_root: Path, port: int) -> list[str]:
     runner = WORKSPACE / 'src/my_epuck_project/tools/run_cooperative_trial_fast.py'
-    return [sys.executable, str(runner), '--world-profile', WORLD_PROFILE,
+    command = [sys.executable, str(runner), '--world-profile', WORLD_PROFILE,
             '--experiment-condition', args.condition, '--webots-random-seed', '1001',
             '--sensor-profile', 'full', '--ideal-encoder-sensing', 'true',
             '--webots-mode', 'fast', '--rendering', 'false', '--rviz', 'false',
@@ -191,6 +191,9 @@ def runner_command(args: argparse.Namespace, result_root: Path, port: int) -> li
             '--prehandoff-dispatch-delay-s', '20.0', '--simulation-horizon-s', str(args.horizon),
             '--wall-watchdog-s', '1200', '--ros-domain-id', str(args.ros_domain_id),
             '--webots-port', str(port), '--results-directory', str(result_root)]
+    if args.record_frontier_geometry:
+        command.extend(['--diagnostic-frontier-capture', 'true'])
+    return command
 
 
 def parser() -> argparse.ArgumentParser:
@@ -200,6 +203,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--ros-domain-id', type=int, default=DEFAULT_DOMAIN)
     result.add_argument('--webots-port', type=int, default=DEFAULT_PORT)
     result.add_argument('--results-root', type=Path)
+    result.add_argument(
+        '--record-frontier-geometry', action='store_true',
+        help=('Enable the existing lossless frontier-region cell capture for '
+              'offline visualization.'))
     result.add_argument('--dry-run', action='store_true')
     return result
 
@@ -232,6 +239,7 @@ def main(argv=None) -> int:
               'strategy': 'frontier_cost_only', 'mode': 'MODE_B', 'seed': 1001,
               'ros_domain_id': args.ros_domain_id, 'webots_port': args.webots_port,
               'project_prefix': preflight['project_prefix'], 'driver_prefix': preflight['driver_prefix'],
+              'record_frontier_geometry': args.record_frontier_geometry,
               'result_root': str(result_root), 'network_mode': 'nat'}
     write_records(result_root, env, command, config, preflight, ldd, host)
     print('CANONICAL_THESIS_PREFLIGHT_PASS')

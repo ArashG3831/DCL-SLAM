@@ -98,6 +98,9 @@ class Candidate:
     path_length_m: Optional[float]
     heading_rad: Optional[float]
     geometry: tuple[tuple[float, float], ...]
+    frontier_cells: tuple[tuple[int, int], ...]
+    grid_origin: tuple[float, float, float]
+    grid_resolution: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -559,6 +562,72 @@ def _safe_geometry(value: Any):
     return points if len(points) >= 2 else ()
 
 
+def _safe_cells(value: Any):
+    if not isinstance(value, list):
+        return ()
+    cells = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            x, y = int(item[0]), int(item[1])
+        except (TypeError, ValueError):
+            continue
+        cells.append((x, y))
+    return tuple(cells)
+
+
+def _safe_origin(value: Any):
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return (0.0, 0.0, 0.0)
+    try:
+        origin = tuple(float(value[index]) for index in range(3))
+        return origin if all(math.isfinite(item) for item in origin) else (0.0, 0.0, 0.0)
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0)
+
+
+def load_frontier_region_records(observer: Path):
+    path = observer / 'frontier_regions.jsonl'
+    records = {'robot1': [], 'robot2': []}
+    if not path.is_file():
+        return records
+    with path.open(encoding='utf-8', errors='replace') as stream:
+        for line in stream:
+            try:
+                payload = json.loads(line)
+                robot = payload.get('capture_robot')
+                stamp = float(payload.get('capture_elapsed_s'))
+                resolution = float(payload.get('resolution'))
+                if robot not in records or not math.isfinite(stamp) or resolution <= 0.0:
+                    continue
+                regions = {}
+                for region in payload.get('regions') or []:
+                    if not isinstance(region, dict):
+                        continue
+                    key = region.get('physical_id', region.get('id'))
+                    cells = _safe_cells(region.get('cells'))
+                    if key is not None and cells:
+                        regions[str(key)] = cells
+                if regions:
+                    records[robot].append((
+                        stamp, regions, resolution, _safe_origin(payload.get('origin'))))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    for robot in records:
+        records[robot].sort(key=lambda item: item[0])
+    return records
+
+
+def frontier_region_at(records, robot: str, stamp: float, frontier_id: str):
+    items = records.get(robot, ())
+    index = bisect.bisect_right([item[0] for item in items], stamp) - 1
+    if index < 0:
+        return (), (0.0, 0.0, 0.0), None
+    _, regions, resolution, origin = items[index]
+    return regions.get(str(frontier_id), ()), origin, resolution
+
+
 def _event_time(event: dict[str, Any]) -> Optional[float]:
     value = event.get('elapsed_s')
     try:
@@ -590,6 +659,7 @@ def load_event_records(observer: Path) -> list[dict[str, Any]]:
 
 def load_overlay_data(observer: Path) -> OverlayData:
     events = load_event_records(observer)
+    frontier_regions = load_frontier_region_records(observer)
     candidates = {'robot1': [], 'robot2': []}
     tasks = {'robot1': [], 'robot2': []}
     goals = {'robot1': [], 'robot2': []}
@@ -610,15 +680,19 @@ def load_overlay_data(observer: Path) -> OverlayData:
                 geometry = _safe_geometry(item.get('geometry') or
                                           item.get('frontier_geometry') or
                                           item.get('boundary_points'))
-                raw_geometry_records += int(bool(geometry))
+                frontier_id = str(item.get('frontier_id', ''))
+                cells, origin, resolution = frontier_region_at(
+                    frontier_regions, robot, stamp, frontier_id)
+                raw_geometry_records += int(bool(geometry or cells))
                 batch.append(Candidate(
-                    stamp, robot, str(item.get('frontier_id', '')),
+                    stamp, robot, frontier_id,
                     str(item.get('physical_signature', '')),
                     centroid, _safe_bounds(item.get('bounds')),
                     _safe_pair(item.get('approach')),
                     numeric(item, 'score'), numeric(item, 'visible_reveal_gain'),
                     numeric(item, 'path_length_m') or numeric(item, 'local_path_length_m'),
-                    numeric(item, 'path_heading_cost_rad'), geometry))
+                    numeric(item, 'path_heading_cost_rad'), geometry, cells,
+                    origin, resolution))
             candidates[robot].append((stamp, tuple(batch)))
         elif kind == 'DISTRIBUTED_TASK_SNAPSHOT':
             for item in event.get('tasks') or []:
@@ -699,11 +773,9 @@ def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
         return
     left, top, width, height, _ = map_rect
     view = canvas[top:top + height, left:left + width]
-    # First render lightly translucent recorded candidate regions. Exact raw
-    # frontier cells/polygons are absent in the saved event schema; these are
-    # only the recorded axis-aligned candidate bounds/geometry, never
-    # invented frontier shapes. The region is the primary mark; centroid and
-    # approach are secondary markers below.
+    # First render lightly translucent recorded candidate regions. When the
+    # opt-in frontier_regions.jsonl stream exists, its exact source grid cells
+    # are rendered; bounds remain the backward-compatible fallback.
     if show_frontiers:
         overlay = view.copy()
         for item in candidates:
@@ -715,7 +787,22 @@ def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
             # its robot trajectory, pose, and planned path. Selection is
             # indicated by the stronger outline and goal target marker.
             color = R1_COLOR if item.robot == 'robot1' else R2_COLOR
-            if item.geometry:
+            if item.frontier_cells and item.grid_resolution:
+                ox, oy, oyaw = item.grid_origin
+                cos_yaw, sin_yaw = math.cos(oyaw), math.sin(oyaw)
+                for cell_x, cell_y in item.frontier_cells:
+                    local = []
+                    for dx, dy in ((0.0, 0.0), (1.0, 0.0),
+                                   (1.0, 1.0), (0.0, 1.0)):
+                        gx = (cell_x + dx) * item.grid_resolution
+                        gy = (cell_y + dy) * item.grid_resolution
+                        local.append((ox + cos_yaw * gx - sin_yaw * gy,
+                                      oy + sin_yaw * gx + cos_yaw * gy))
+                    points = _local_points(local, viewport, map_rect)
+                    cv2.fillPoly(overlay, [points], color)
+                    cv2.polylines(overlay, [points], True, color,
+                                  2 if selected else 1, cv2.LINE_AA)
+            elif item.geometry:
                 points = _local_points(item.geometry, viewport, map_rect)
                 cv2.fillPoly(overlay, [points], color)
                 cv2.polylines(overlay, [points], True, color, 2 if selected else 1,

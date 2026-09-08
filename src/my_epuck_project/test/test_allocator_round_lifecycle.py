@@ -44,6 +44,30 @@ def test_busy_to_idle_requires_a_new_allocation_trigger():
     assert "self._reset_round('navigation terminal result')" in navigation_finished
 
 
+def test_reset_round_rearms_normal_round_creation_after_continuation_clear():
+    """Invalidating a continuation must not retain the semantic suppression."""
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._round_lifecycle = RoundGeneration()
+    node._round = SimpleNamespace(
+        mode='continuation',
+        round_id='continuation-round',
+    )
+    node._last_semantic_fingerprint = 'previous-round-fingerprint'
+    node._bid_batches = {}
+    node._peer_decision = object()
+    node._transition = lambda *_args, **_kwargs: None
+    node._log_round_lifecycle = lambda *_args, **_kwargs: None
+
+    DistributedFrontierAssignment._reset_round(
+        node, 'peer active commitment ended or changed',
+    )
+
+    assert node._round is None
+    assert node._last_semantic_fingerprint == ''
+    assert node._bid_batches == {}
+    assert node._peer_decision is None
+
+
 def test_stale_round_cannot_be_committed_by_source_guard():
     text = SOURCE.read_text(encoding='utf-8')
     assert 'self._round_lifecycle.generation == generation' in text

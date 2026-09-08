@@ -4858,6 +4858,13 @@ class DistributedFrontierAssignment(Node):
                     'ALLOCATOR_ROUND_CLEARED', previous, new_generation, reason,
                 )
         self._round = None
+        # A reset discards the decision context that made this semantic
+        # fingerprint suppress a new round.  Leaving it armed can strand the
+        # allocator after a continuation is invalidated before its replacement
+        # decision is agreed: the next ordinary snapshots match the previous
+        # fingerprint and _tick_impl() returns through its unchanged-content
+        # gate instead of creating a canonical round.
+        self._last_semantic_fingerprint = ''
         self._bid_batches.clear()
         self._peer_decision = None
         self._committed = CommittedRound()

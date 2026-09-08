@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import inspect
+import shutil
 
 import pytest
 
@@ -93,6 +94,24 @@ def _runtime_module_fixture(tmp_path):
     return workspace, environment, resolved
 
 
+def _symlink_install_fixture(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    source_root = workspace / 'src/my_epuck_project/my_epuck_project'
+    build_package_root = (Path(environment['MY_EPUCK_BUILD_BASE']) /
+                          'my_epuck_project')
+    build_source_root = build_package_root / 'my_epuck_project'
+    shutil.rmtree(build_source_root)
+    build_source_root.symlink_to(source_root, target_is_directory=True)
+    site_root = (Path(environment['MY_EPUCK_INSTALL_PREFIX']) /
+                 'lib/python3.12/site-packages')
+    egg_link = site_root / 'my-epuck-project.egg-link'
+    egg_link.write_text(f'{build_package_root}\n.\n', encoding='utf-8')
+    for module_name in preflight.CRITICAL_RUNTIME_MODULES:
+        relative = preflight._module_relative_path(module_name)
+        resolved[module_name] = str(source_root / relative)
+    return workspace, environment, resolved, egg_link
+
+
 def test_runtime_module_provenance_accepts_matching_source_build_install(tmp_path):
     workspace, environment, resolved = _runtime_module_fixture(tmp_path)
     records, issues = preflight._collect_runtime_module_provenance(
@@ -102,6 +121,42 @@ def test_runtime_module_provenance_accepts_matching_source_build_install(tmp_pat
         'imported_path'].endswith('distributed_frontier_assignment.py')
     assert all(item['source_sha256'] == item['build_sha256'] ==
                item['install_sha256'] for item in records.values())
+
+
+def test_runtime_module_provenance_accepts_approved_egg_link(tmp_path):
+    workspace, environment, resolved, egg_link = _symlink_install_fixture(
+        tmp_path)
+    records, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert issues == []
+    record = records['my_epuck_project.distributed_frontier_assignment']
+    assert record['validation_mode'] == 'symlink-install'
+    assert record['egg_link_detected'] is True
+    assert record['egg_link_path'] == str(egg_link.resolve())
+    assert record['resolved_path'].startswith(
+        str(workspace / 'src/my_epuck_project/my_epuck_project'))
+
+
+def test_runtime_module_provenance_rejects_wrong_egg_link_workspace(tmp_path):
+    workspace, environment, resolved, egg_link = _symlink_install_fixture(
+        tmp_path)
+    wrong_target = tmp_path / 'wrong_workspace/build/my_epuck_project'
+    egg_link.write_text(f'{wrong_target}\n.\n', encoding='utf-8')
+    _, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert any('egg-link target differs from selected build root' in issue
+               for issue in issues)
+
+
+def test_runtime_module_provenance_rejects_stale_source_against_build(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    source = workspace / 'src/my_epuck_project/my_epuck_project' / (
+        'distributed_frontier_assignment.py')
+    source.write_text('# changed source after build\n', encoding='utf-8')
+    _, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert any('installed module hash differs from source/build' in issue
+               for issue in issues)
 
 
 def test_runtime_module_resolution_uses_supplied_child_environment(tmp_path):

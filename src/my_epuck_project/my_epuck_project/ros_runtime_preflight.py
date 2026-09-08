@@ -149,6 +149,30 @@ def _path_below(path, root):
         return False
 
 
+def _project_egg_link(install_prefix):
+    """Return the selected ament_python egg-link and its target, if present."""
+    if install_prefix is None:
+        return None
+    site_roots = sorted(Path(install_prefix).glob(
+        'lib/python*/site-packages'))
+    for site_root in site_roots:
+        for candidate in sorted(site_root.glob('*.egg-link')):
+            normalized = candidate.stem.replace('-', '_')
+            if normalized != 'my_epuck_project':
+                continue
+            try:
+                lines = [line.strip() for line in candidate.read_text(
+                    encoding='utf-8').splitlines() if line.strip()]
+            except OSError:
+                lines = []
+            target = Path(lines[0]).expanduser().resolve() if lines else None
+            return {
+                'path': candidate.resolve(),
+                'target': target,
+            }
+    return None
+
+
 def _resolve_runtime_module_paths(workspace, environment):
     """Resolve modules using a clean child with exactly *environment*.
 
@@ -209,6 +233,21 @@ def _collect_runtime_module_provenance(workspace, environment,
     issues = list(resolution_issues)
     source_root = workspace / 'src/my_epuck_project/my_epuck_project'
     build_root = build_base / 'my_epuck_project/my_epuck_project'
+    egg_link = _project_egg_link(install_prefix)
+    symlink_install = egg_link is not None
+    expected_build_package_root = (build_base / 'my_epuck_project').resolve()
+    expected_build_source_root = (
+        expected_build_package_root / 'my_epuck_project').resolve()
+    if symlink_install:
+        expected_target = expected_build_package_root
+        if egg_link['target'] != expected_target:
+            issues.append(
+                'project egg-link target differs from selected build root: '
+                f"{egg_link['target']} != {expected_target}")
+        if expected_build_source_root != source_root:
+            issues.append(
+                'project egg-link build package does not resolve to selected '
+                f'source root: {expected_build_source_root}')
     for module_name in CRITICAL_RUNTIME_MODULES:
         relative = _module_relative_path(module_name)
         source_path = (source_root / relative).resolve()
@@ -233,6 +272,12 @@ def _collect_runtime_module_provenance(workspace, environment,
             'source_sha256': _sha256_file(source_path),
             'build_sha256': _sha256_file(build_path),
             'install_sha256': _sha256_file(imported_path),
+            'validation_mode': ('symlink-install' if symlink_install
+                                else 'copied-install'),
+            'egg_link_detected': symlink_install,
+            'egg_link_path': (str(egg_link['path']) if egg_link else None),
+            'egg_link_target': (str(egg_link['target'])
+                                if egg_link and egg_link['target'] else None),
         }
         records[module_name] = record
         if resolution_error:
@@ -240,7 +285,12 @@ def _collect_runtime_module_provenance(workspace, environment,
         if imported_path is None:
             issues.append(f'{module_name} is missing from the exact runtime environment')
             continue
-        if install_prefix is not None and not _path_below(
+        if symlink_install:
+            if not _path_below(imported_path, source_root):
+                issues.append(
+                    f'{module_name} resolved outside approved symlink-install '
+                    f'source root: {imported_path}')
+        elif install_prefix is not None and not _path_below(
                 imported_path, install_prefix):
             issues.append(
                 f'{module_name} resolved outside selected install prefix: '

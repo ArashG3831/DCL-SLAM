@@ -349,6 +349,94 @@ def test_continuation_free_epoch_update_keeps_active_round_generation():
     assert node._round_replaced_count == replaced
 
 
+def test_canonical_continuation_canonical_oscillation_keeps_round_on_stale_context():
+    """Temporary context loss must not clear continuation auction evidence."""
+    node, context, _ = _continuation_setup()
+    active_round = node._round
+    created = node._round_created_count
+    replaced = node._round_replaced_count
+
+    # The peer heartbeat briefly expires.  The old tick path treated this as
+    # a hard invalidation, allowing the next tick to form a canonical round.
+    node._peer_status = receive(
+        node._peer_status.value, 10.0, NOW - 20.0,
+    )
+    assert node._continuation_context(NOW) is None
+    assert not node._continuation_round_requires_invalidation(NOW)
+
+    # Exercise the exact tick gate that used to reset the continuation round.
+    node._terminal = False
+    node._last_tick_log_key = None
+    node._local_only = False
+    node._handoff_complete = False
+    node._mission_timeout_enabled = False
+    node._traffic_hold = None
+    node._traffic_reallocation_after_clear = False
+    node._released_traffic_winner_robot_id = ''
+    node._settle_until_steady_s = 0.0
+    node._dispatch_in_progress = False
+    node._expire_failures = lambda now: None
+    node._consume_local_fallback_trigger = lambda: False
+    node._allocator_timing_timed_call = (
+        lambda section, callback, *args, **kwargs: callback(*args, **kwargs)
+    )
+    reset_reasons = []
+    node._reset_round = lambda reason: reset_reasons.append(reason)
+    DistributedFrontierAssignment._tick_impl(node)
+
+    assert reset_reasons == []
+    assert node._round is active_round
+    assert node._round_created_count == created
+    assert node._round_replaced_count == replaced
+
+    # Once the same peer context is fresh again, activation retains the
+    # original continuation generation instead of canonicalizing/restarting.
+    node._peer_status = receive(
+        node._peer_status.value, 10.0, NOW,
+    )
+    restored = node._continuation_context(NOW)
+    assert restored is not None
+    assert node._activate_continuation_round(restored)
+    assert node._round is active_round
+    assert node._round_created_count == created
+    assert node._round_replaced_count == replaced
+
+
+def test_continuation_context_identity_or_safety_change_still_invalidates():
+    node, context, _ = _continuation_setup()
+
+    node._peer_status.value.source_session_id = text_to_uuid('33' * 16)
+    assert node._continuation_round_requires_invalidation(NOW)
+
+    node, context, _ = _continuation_setup()
+    node._active_commitments.pop(context.busy_robot_id)
+    assert node._continuation_round_requires_invalidation(NOW)
+
+
+def test_continuation_task_path_change_replaces_active_round():
+    node, context, _ = _continuation_setup()
+    active_round = node._round
+    changed_task = replace(
+        context.free_snapshot.tasks[0],
+        local_path_length_m=3.0,
+        local_path=((0.0, 0.0), (-3.0, 0.0)),
+    )
+    changed_snapshot = replace(
+        context.free_snapshot,
+        epoch=context.free_snapshot.epoch + 1,
+        tasks=(changed_task,),
+    )
+    node._snapshots[context.free_robot_id] = receive(
+        changed_snapshot, 10.0, NOW,
+    )
+    changed_context = node._continuation_context(NOW)
+    assert changed_context is not None
+
+    assert node._activate_continuation_round(changed_context)
+    assert node._round is not active_round
+    assert node._round_replaced_count == 1
+
+
 def test_continuation_identity_still_changes_for_semantic_session_or_commitment():
     node, _, _, _, _ = _fake_node()
     context = node._continuation_context(NOW)

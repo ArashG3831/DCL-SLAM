@@ -2040,6 +2040,99 @@ class DistributedFrontierAssignment(Node):
             free_tasks=free_tasks,
         )
 
+    def _continuation_round_requires_invalidation(self, now: float) -> bool:
+        """Return whether missing continuation context is a hard invalidation.
+
+        Continuation context can disappear temporarily while peer status or the
+        free robot's proposal is between fresh receipts.  That is not an
+        allocation change, so clearing the round would discard valid bids and
+        create a canonical/continuation oscillation.  Retain the round in that
+        case, but still invalidate it when a commitment, session, active-goal
+        identity, or known safety state has changed.
+        """
+        round_work = self._round
+        if (round_work is None or round_work.mode != 'continuation'):
+            return False
+        busy_robot_id = round_work.continuation_busy_robot_id
+        free_robot_id = round_work.continuation_free_robot_id
+        commitment = self._active_commitments.get(busy_robot_id)
+        if (
+                not busy_robot_id or not free_robot_id or
+                commitment is None or
+                commitment.commitment_id != round_work.continuation_commitment_id or
+                not self._finite_path_samples(commitment.path)):
+            return True
+
+        # Once the formerly free robot has its own commitment, this is no
+        # longer the one-free/one-busy allocation represented by the round.
+        if self._active_commitments.get(free_robot_id) is not None:
+            return True
+
+        local_active = bool(
+            self._nav2.local_goal_active or
+            self._state == CoordinatorState.NAVIGATING
+        )
+        peer = self._peer_status
+        peer_fresh = peer is not None and peer.fresh(now)
+        peer_active = bool(
+            peer_fresh and (
+                peer.value.local_nav_goal_active or
+                peer.value.state == DistributedExplorationStatus.NAVIGATING
+            )
+        )
+
+        if busy_robot_id == self._robot_id:
+            if not local_active:
+                return True
+            if (self._active_task is not None and
+                    self._active_task.canonical_id != commitment.canonical_id):
+                return True
+        elif peer_fresh:
+            advertised_task_id = str(
+                peer.value.active_canonical_task_id,
+            ).strip()
+            if (
+                    not peer_active or
+                    uuid_to_text(peer.value.source_session_id) !=
+                    commitment.source_session_id or
+                    (advertised_task_id and
+                     advertised_task_id != commitment.canonical_id)):
+                return True
+
+        # A fresh indication that the formerly free side is active is a
+        # commitment/safety change.  An absent or stale peer indication is
+        # deliberately treated as temporary below, and blocks progress until
+        # fresh evidence returns rather than authorizing a dispatch.
+        if free_robot_id == self._robot_id:
+            if local_active:
+                return True
+        elif peer_fresh and peer_active:
+            return True
+
+        # A fresh free snapshot with no independent task is a semantic change;
+        # an absent/stale snapshot is only temporary evidence loss.
+        free_snapshot = self._fresh_snapshot(free_robot_id, now)
+        if free_snapshot is not None:
+            if free_robot_id == 'robot1':
+                free_union = build_canonical_union(
+                    free_snapshot.tasks, (), self._maximum_union_tasks,
+                )
+            else:
+                free_union = build_canonical_union(
+                    (), free_snapshot.tasks, self._maximum_union_tasks,
+                )
+            free_tasks = tuple(
+                task for task in free_union.tasks
+                if task.canonical_id != commitment.canonical_id and not any(
+                    equivalent_tasks(member, committed_member)
+                    for member in task.members
+                    for committed_member in commitment.task.members
+                )
+            )
+            if not free_tasks:
+                return True
+        return False
+
     def _continuation_round_id(
             self, context: ContinuationContext,
             allocation_fingerprint: str) -> str:
@@ -2557,7 +2650,18 @@ class DistributedFrontierAssignment(Node):
         )
         if (continuation is None and self._round is not None and
                 self._round.mode == 'continuation'):
-            self._reset_round('continuation commitment no longer valid')
+            if self._continuation_round_requires_invalidation(now):
+                self._reset_round('continuation commitment no longer valid')
+            else:
+                # Preserve the in-flight continuation round while the peer or
+                # free-robot context is temporarily unavailable.  Returning
+                # here is fail-closed: no decision/dispatch may use incomplete
+                # safety context, but the round's bids are not discarded and
+                # it can resume when fresh context returns.
+                self._transition(
+                    CoordinatorState.BIDDING,
+                    'continuation context temporarily unavailable',
+                )
             return
         continuation_active = continuation is not None
         if continuation_active:

@@ -38,8 +38,8 @@ def test_full_launch_enables_only_the_common_local_dispatch_boundary():
     assert "DeclareLaunchArgument('dispatch_enabled', default_value='true'" in text
     assert 'cooperative_frontier_coordinator' not in text
     assignment_text = (LAUNCH / 'two_robots_distributed_assignment_launch.py').read_text()
-    assert "'maximum_tasks_per_source': 5" in assignment_text
-    assert "'maximum_union_tasks': 10" in assignment_text
+    assert "'maximum_tasks_per_source': 10000" in assignment_text
+    assert "'maximum_union_tasks': 10000" in assignment_text
 
 
 def test_frontier_query_budget_matches_candidate_selection_bound():
@@ -48,8 +48,8 @@ def test_frontier_query_budget_matches_candidate_selection_bound():
             'two_robots_frontier_candidates_launch.py',
             'two_robots_decentralized_exploration_launch.py'):
         text = (LAUNCH / name).read_text()
-        assert "'maximum_candidates_before_path_check': 8" in text
-        assert "'maximum_path_queries_per_cycle': 8" in text
+        assert "'maximum_candidates_before_path_check': 10000" in text
+        assert "'maximum_path_queries_per_cycle': 10000" in text
 
 
 def test_legacy_baseline_remains_explicitly_reachable():

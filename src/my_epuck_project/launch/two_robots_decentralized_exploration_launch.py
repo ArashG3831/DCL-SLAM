@@ -362,8 +362,8 @@ def launch_setup(context):
                         'stable_id_quantization_m': 0.05,
                         'approach_clearance_m': 0.15,
                         'minimum_robot_distance_m': 0.08,
-                        'maximum_candidates_before_path_check': 8,
-                        'maximum_path_queries_per_cycle': 8,
+                        'maximum_candidates_before_path_check': 10000,
+                        'maximum_path_queries_per_cycle': 10000,
                         'path_query_timeout_s': 1.0,
                         # Mirrors nav2_robot{1,2}_shared_map.yaml RPP motion
                         # references; not controller tuning or an ETA model.
@@ -387,7 +387,7 @@ def launch_setup(context):
                         'robot_id': robot,
                         'candidate_topic': f'/{robot}/local_frontier_candidates',
                         'task_snapshot_topic': f'/{robot}/local_task_snapshot',
-                        'maximum_tasks': 5,
+                        'maximum_tasks': 10000,
                         'validity_s': 8.0,
                         'stop_after_handoff': True,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -443,9 +443,9 @@ def launch_setup(context):
                         'prehandoff_dispatch_delay_s': LaunchConfiguration(
                             'prehandoff_dispatch_delay_s'),
                         'synthetic_bids': False,
-                        'maximum_tasks_per_source': 5,
-                        'maximum_union_tasks': 5,
-                        'maximum_path_queries': 5,
+                        'maximum_tasks_per_source': 10000,
+                        'maximum_union_tasks': 10000,
+                        'maximum_path_queries': 10000,
                         'minimum_solo_visible_gain_m': 0.05,
                         'minimum_solo_ordering_score': 0.0,
                         'path_cost_scale_m': 12.0,
@@ -625,9 +625,9 @@ def launch_setup(context):
                 'terminal_small_frontier_length_m'),
             'initial_configuration_json': json.dumps({
                 'frontier_engine': 'frontier_exploration_ros2 public core',
-                'maximum_tasks_per_source': 5,
-                'maximum_union_tasks': 10,
-                'maximum_path_queries': 8,
+                'maximum_tasks_per_source': 10000,
+                'maximum_union_tasks': 10000,
+                'maximum_path_queries': 10000,
                 'terminal_small_frontier_length_m': float(
                     LaunchConfiguration('terminal_small_frontier_length_m')
                     .perform(context)),

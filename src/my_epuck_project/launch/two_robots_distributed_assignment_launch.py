@@ -22,7 +22,7 @@ def _proposal_adapter(robot):
         output='screen',
         parameters=[{
             'robot_id': robot,
-            'maximum_tasks': 5,
+            'maximum_tasks': 10000,
             # A snapshot is a bounded proposal lease, not a heartbeat.  Keep
             # it alive long enough for the bounded peer-path bid round.
             'validity_s': 8.0,
@@ -52,9 +52,9 @@ def _assignment_peer(robot):
             'shared_nav2_ready_topic': LaunchConfiguration(
                 'shared_nav2_ready_topic'),
             'synthetic_bids': False,
-            'maximum_tasks_per_source': 5,
-            'maximum_union_tasks': 10,
-            'maximum_path_queries': 8,
+            'maximum_tasks_per_source': 10000,
+            'maximum_union_tasks': 10000,
+            'maximum_path_queries': 10000,
             'minimum_solo_visible_gain_m': 0.05,
             'minimum_solo_ordering_score': 0.0,
             # Production default: task-level adaptation of Burgard et al.

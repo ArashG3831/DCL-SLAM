@@ -1,10 +1,16 @@
 """Deterministic tests for allocator round ownership and liveness triggers."""
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from my_epuck_project.round_lifecycle import RoundGeneration
-from my_epuck_project.distributed_assignment.models import BidBatch, TaskSnapshot
+from my_epuck_project.distributed_assignment.models import (
+    BidBatch,
+    Bounds,
+    PhysicalTask,
+    TaskSnapshot,
+)
 from my_epuck_project.distributed_assignment.protocol import (
     bid_batch_valid,
     receive,
@@ -99,6 +105,84 @@ def test_epoch_only_snapshot_update_keeps_active_normal_round():
 
     assert normal_round_requires_replacement(
         current, first, second, 'same',
+    ) is False
+
+
+def test_allocation_fingerprint_ignores_freshness_provenance_only():
+    first = TaskSnapshot(
+        'robot1', 'session', 10, 20, 'map-a', 100, 5.0, (),
+        lower_bound_context_fingerprint='bounds-a', costmap_revision=30,
+        candidate_generation_id=40,
+    )
+    refreshed = replace(
+        first,
+        epoch=11,
+        map_revision=21,
+        map_fingerprint='map-b',
+        generation_ros_ns=101,
+        lower_bound_context_fingerprint='bounds-b',
+        costmap_revision=31,
+        candidate_generation_id=41,
+    )
+
+    assert DistributedFrontierAssignment._allocation_semantic_fingerprint(
+        first, first,
+    ) == DistributedFrontierAssignment._allocation_semantic_fingerprint(
+        refreshed, refreshed,
+    )
+
+
+def test_allocation_fingerprint_changes_when_path_semantics_change():
+    task = PhysicalTask(
+        'robot1', 'session', 1, 1, 'task', 1,
+        (1.0, 0.0), Bounds((0.9, -0.1), (1.1, 0.1)), (1.0, 0.0),
+        local_path_valid=True, local_path_length_m=1.0,
+        local_path=((0.0, 0.0), (1.0, 0.0)),
+    )
+    changed_task = replace(task, local_path_length_m=2.0)
+    first = TaskSnapshot(
+        'robot1', 'session', 1, 1, 'map', 1, 5.0, (task,),
+    )
+    changed = replace(first, tasks=(changed_task,))
+
+    assert DistributedFrontierAssignment._allocation_semantic_fingerprint(
+        first, first,
+    ) != DistributedFrontierAssignment._allocation_semantic_fingerprint(
+        changed, changed,
+    )
+
+
+def test_provenance_only_update_preserves_active_normal_round():
+    first = TaskSnapshot(
+        'robot1', 'r1', 1, 1, 'map-1', 1, 5.0, (),
+        lower_bound_context_fingerprint='bounds-1',
+    )
+    second = TaskSnapshot(
+        'robot2', 'r2', 1, 1, 'map-2', 1, 5.0, (),
+        lower_bound_context_fingerprint='bounds-2',
+    )
+    refreshed_first = replace(
+        first, epoch=2, map_revision=2, map_fingerprint='map-1-new',
+        lower_bound_context_fingerprint='bounds-1-new',
+    )
+    refreshed_second = replace(
+        second, epoch=2, map_revision=2, map_fingerprint='map-2-new',
+        lower_bound_context_fingerprint='bounds-2-new',
+    )
+    fingerprint = DistributedFrontierAssignment._allocation_semantic_fingerprint(
+        first, second,
+    )
+    current = _active_normal_round(
+        fingerprint=fingerprint, session1='r1', session2='r2',
+    )
+    refreshed_fingerprint = (
+        DistributedFrontierAssignment._allocation_semantic_fingerprint(
+            refreshed_first, refreshed_second,
+        )
+    )
+
+    assert normal_round_requires_replacement(
+        current, refreshed_first, refreshed_second, refreshed_fingerprint,
     ) is False
 
 

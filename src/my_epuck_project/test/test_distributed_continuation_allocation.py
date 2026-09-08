@@ -1,5 +1,6 @@
 """Behavioral tests for one-busy/one-free continuation allocation."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from my_epuck_interfaces.msg import DistributedExplorationStatus
@@ -317,6 +318,64 @@ def test_continuation_round_id_ignores_busy_candidate_epoch_changes():
         same_commitment, context.free_tasks,
     )
     assert node._continuation_round_id(second_context, 'content') == first
+
+
+def test_continuation_free_epoch_update_keeps_active_round_generation():
+    node, _, _, _, _ = _fake_node()
+    context = node._continuation_context(NOW)
+    assert context is not None
+    assert node._activate_continuation_round(context)
+    active_round = node._round
+    created = node._round_created_count
+    replaced = node._round_replaced_count
+
+    refreshed_free = replace(
+        context.free_snapshot,
+        epoch=context.free_snapshot.epoch + 1,
+        map_revision=context.free_snapshot.map_revision + 1,
+        map_fingerprint='fresh-map',
+        lower_bound_context_fingerprint='fresh-bounds',
+        candidate_generation_id=2,
+    )
+    node._snapshots[context.free_robot_id] = receive(
+        refreshed_free, 10.0, NOW,
+    )
+    refreshed_context = node._continuation_context(NOW)
+    assert refreshed_context is not None
+
+    assert node._activate_continuation_round(refreshed_context)
+    assert node._round is active_round
+    assert node._round_created_count == created
+    assert node._round_replaced_count == replaced
+
+
+def test_continuation_identity_still_changes_for_semantic_session_or_commitment():
+    node, _, _, _, _ = _fake_node()
+    context = node._continuation_context(NOW)
+    assert context is not None
+    baseline = node._continuation_round_id(context, 'content')
+
+    assert node._continuation_round_id(context, 'changed-path') != baseline
+
+    changed_session = replace(
+        context.free_snapshot, source_session_id='new-free-session',
+    )
+    changed_session_context = replace(
+        context, free_snapshot=changed_session,
+    )
+    assert node._continuation_round_id(
+        changed_session_context, 'content',
+    ) != baseline
+
+    changed_commitment = replace(
+        context.commitment, commitment_id='new-commitment',
+    )
+    changed_commitment_context = replace(
+        context, commitment=changed_commitment,
+    )
+    assert node._continuation_round_id(
+        changed_commitment_context, 'content',
+    ) != baseline
 
 
 def test_busy_goal_termination_invalidates_continuation_round():

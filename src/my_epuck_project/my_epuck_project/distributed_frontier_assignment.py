@@ -366,7 +366,7 @@ def round_pass_is_current(current_round, expected_round) -> bool:
 
 def normal_round_requires_replacement(
         current_round, first: TaskSnapshot, second: TaskSnapshot,
-        content_fingerprint: str) -> bool:
+        allocation_fingerprint: str) -> bool:
     """Replace normal work only when its semantic allocation problem changed.
 
     Snapshot epochs remain protocol freshness/version evidence, but an epoch-only
@@ -386,7 +386,7 @@ def normal_round_requires_replacement(
     incoming_sessions = (first.source_session_id, second.source_session_id)
     return (
         current_sessions != incoming_sessions or
-        current_round.content_fingerprint != content_fingerprint
+        current_round.content_fingerprint != allocation_fingerprint
     )
 
 
@@ -2041,15 +2041,15 @@ class DistributedFrontierAssignment(Node):
         )
 
     def _continuation_round_id(
-            self, context: ContinuationContext, content_fingerprint: str) -> str:
-        """Hash only free proposal content and the immutable busy commitment."""
+            self, context: ContinuationContext,
+            allocation_fingerprint: str) -> str:
+        """Hash allocation semantics, not the free snapshot heartbeat epoch."""
         return hashlib.sha256(repr((
             'continuation', context.free_robot_id,
             context.free_snapshot.source_session_id,
-            context.free_snapshot.epoch,
             context.commitment.robot_id,
             context.commitment.commitment_id,
-            content_fingerprint,
+            allocation_fingerprint,
         )).encode('utf-8')).hexdigest()
 
     def _activate_continuation_round(
@@ -2089,7 +2089,7 @@ class DistributedFrontierAssignment(Node):
             task.canonical_id for task in union_tasks
         )).encode('utf-8')).hexdigest()
         union = CanonicalUnion(tasks=union_tasks, union_hash=union_hash)
-        content_fingerprint = self._snapshot_content_fingerprint(*snapshots)
+        content_fingerprint = self._allocation_semantic_fingerprint(*snapshots)
         round_id = self._continuation_round_id(context, content_fingerprint)
         current = self._round
         if (current is not None and current.mode == 'continuation' and
@@ -2187,8 +2187,16 @@ class DistributedFrontierAssignment(Node):
 
     @staticmethod
     def _snapshot_content_fingerprint(
-            first: TaskSnapshot, second: TaskSnapshot) -> str:
-        """Fingerprint task content while ignoring epoch-only heartbeats."""
+            first: TaskSnapshot, second: TaskSnapshot,
+            include_provenance: bool = True) -> str:
+        """Fingerprint tasks plus optional freshness/provenance evidence.
+
+        The default form is retained for local replay/diagnostic consumers
+        that intentionally care about source evidence provenance.  Allocation
+        round identity uses ``_allocation_semantic_fingerprint`` below so
+        epoch, map, costmap, and lower-bound heartbeat changes cannot churn an
+        otherwise unchanged problem.
+        """
         def rounded_points(points):
             return tuple(
                 tuple(round(float(value), 3) for value in point)
@@ -2227,15 +2235,26 @@ class DistributedFrontierAssignment(Node):
                     rounded_points(getattr(task, 'local_path', ())),
                     round(getattr(task, 'path_heading_cost_rad', 0.0), 3),
                 ))
-            payload.append((
+            identity = [
                 snapshot.source_robot_id,
                 snapshot.source_session_id,
-                getattr(snapshot, 'map_revision', 0),
-                getattr(snapshot, 'map_fingerprint', ''),
-                getattr(snapshot, 'lower_bound_context_fingerprint', ''),
-                tuple(tasks),
-            ))
+            ]
+            if include_provenance:
+                identity.extend((
+                    getattr(snapshot, 'map_revision', 0),
+                    getattr(snapshot, 'map_fingerprint', ''),
+                    getattr(snapshot, 'lower_bound_context_fingerprint', ''),
+                ))
+            payload.append((*identity, tuple(tasks)))
         return hashlib.sha256(repr(tuple(payload)).encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _allocation_semantic_fingerprint(
+            first: TaskSnapshot, second: TaskSnapshot) -> str:
+        """Fingerprint only allocation-relevant task/path semantics."""
+        return DistributedFrontierAssignment._snapshot_content_fingerprint(
+            first, second, include_provenance=False,
+        )
 
     def _round_is_current(self, round_work: RoundWork, generation: int) -> bool:
         """Check both object identity and generation before committing work."""
@@ -2593,7 +2612,9 @@ class DistributedFrontierAssignment(Node):
                 TaskIdentity('robot1', first.source_session_id, first.epoch),
                 TaskIdentity('robot2', second.source_session_id, second.epoch),
             )
-            content_fingerprint = self._snapshot_content_fingerprint(first, second)
+            content_fingerprint = self._allocation_semantic_fingerprint(
+                first, second,
+            )
         current_round = self._round
         if (
                 current_round is not None and current_round.decision is not None and

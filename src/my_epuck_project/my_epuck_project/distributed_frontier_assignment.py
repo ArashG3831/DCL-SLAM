@@ -2759,8 +2759,9 @@ class DistributedFrontierAssignment(Node):
                     'unchanged IDLE task content; waiting for meaningful proposal change',
                 )
             return
-        if normal_round_requires_replacement(
-                current_round, first, second, content_fingerprint):
+        if (not continuation_active and
+                normal_round_requires_replacement(
+                    current_round, first, second, content_fingerprint)):
             union = build_canonical_union(
                 first.tasks, second.tasks, self._maximum_union_tasks,
             )

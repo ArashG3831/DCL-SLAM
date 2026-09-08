@@ -186,6 +186,33 @@ def test_provenance_only_update_preserves_active_normal_round():
     ) is False
 
 
+def test_continuation_round_skips_normal_replacement_gate():
+    """Canonical replacement must not kill an active continuation round."""
+    source = SOURCE.read_text(encoding='utf-8')
+    tick = source[source.index('    def _tick_impl'):
+                  source.index('    def _cost_only_certificate_blocker_diagnostics')]
+    guard = (
+        'if (not continuation_active and\n'
+        '                normal_round_requires_replacement('
+    )
+    assert guard in tick
+    assert tick.index('continuation_active = continuation is not None') < (
+        tick.index(guard)
+    )
+
+
+def test_continuation_identity_checks_remain_the_invalidation_authority():
+    """Continuation changes still flow through its dedicated invalidation path."""
+    source = SOURCE.read_text(encoding='utf-8')
+    continuation = source[
+        source.index('    def _continuation_round_requires_invalidation'):
+        source.index('    def _continuation_round_id')
+    ]
+    assert 'commitment.commitment_id != round_work.continuation_commitment_id' in continuation
+    assert 'source_session_id' in continuation
+    assert 'return True' in continuation
+
+
 def test_semantic_task_or_path_change_replaces_active_normal_round():
     current = _active_normal_round(fingerprint='old')
     first = _snapshot_identity('robot1', 'r1', 2)

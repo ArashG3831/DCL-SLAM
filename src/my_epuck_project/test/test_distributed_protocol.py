@@ -104,6 +104,19 @@ def test_bid_must_bind_round_union_identity_epoch_and_fresh_peer():
     )
 
 
+def test_uncapped_fourteen_bid_batch_is_accepted():
+    """Accept a valid uncapped batch larger than the historical ten-bid bound."""
+    batch = BidBatch(
+        'round', 'union', 'robot1', 's1', 1, 2.0,
+        tuple(Bid(f'task-{index}', True, 1.0, 1.0)
+              for index in range(14)),
+    )
+    received = receive(batch, 2.0, 10.0)
+    assert bid_batch_valid(
+        received, 11.0, 'robot1', 's1', 1, 'round', 'union', True,
+    )
+
+
 def test_useful_partial_assignment_beats_idle_when_peer_has_no_valid_bid():
     """One robot may continue useful work when the peer has no reachable bid."""
     first = PhysicalTask(

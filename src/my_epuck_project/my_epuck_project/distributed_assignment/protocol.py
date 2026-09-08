@@ -118,7 +118,7 @@ def bid_batch_valid(
         batch.source_session_id == expected_session_id and
         batch.source_snapshot_epoch == expected_snapshot_epoch and
         batch.round_id == round_id and batch.union_hash == union_hash and
-        len(batch.bids) <= 10 and
+        len(batch.bids) <= 10000 and
         len({bid.canonical_task_id for bid in batch.bids}) == len(batch.bids)
     )
 

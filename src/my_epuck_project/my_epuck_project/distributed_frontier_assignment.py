@@ -348,6 +348,22 @@ class ActiveCommitment:
     commitment_id: str = ''
 
 
+@dataclass
+class ActiveNavigationAction:
+    """Action-bound ownership that outlives an invalidated auction round."""
+
+    action_id: str
+    task: CanonicalTask
+    canonical_task_id: str
+    physical_signature: str
+    round_id: str
+    decision_hash: str
+    generation: int
+    path: tuple[tuple[float, float], ...] = ()
+    state: str = 'PENDING_SEND'
+    commitment_id: str = ''
+
+
 @dataclass(frozen=True)
 class ContinuationContext:
     """One free robot plus one still-active immutable peer commitment."""
@@ -770,6 +786,8 @@ class DistributedFrontierAssignment(Node):
         self._active_task: Optional[CanonicalTask] = None
         self._active_round_id = ''
         self._active_decision_hash = ''
+        self._navigation_action_sequence = 0
+        self._active_navigation_action: Optional[ActiveNavigationAction] = None
         self._traffic_hold: Optional[TrafficHold] = None
         # A conflict-clear event is replicated over the existing event topics.
         # It permits one fresh pair round while the previous winner is still
@@ -1288,7 +1306,7 @@ class DistributedFrontierAssignment(Node):
         self._activate_shared_phase()
         self._dispatch_enabled = False if self._local_only else True
         if self._local_only and self._nav2.local_goal_active:
-            self._nav2.cancel_navigation()
+            self._request_navigation_cancel()
         if was_waiting_for_initial_barrier:
             reason = json.dumps({
                 'handoff_sim_time_s': self._sim_time_s(),
@@ -1617,7 +1635,7 @@ class DistributedFrontierAssignment(Node):
                     self._peer_id, 'peer session restarted; commitment invalidated',
                 )
                 if self._nav2.local_goal_active:
-                    self._nav2.cancel_navigation()
+                    self._request_navigation_cancel()
                 elif self._dispatch_in_progress:
                     self._invalidate_round(
                         FailureClass.EXPLICIT_CANCELLATION,
@@ -1693,26 +1711,55 @@ class DistributedFrontierAssignment(Node):
                 reason='peer failure message',
             )
 
+    def _navigation_event_matches_commitment(
+            self, message: DistributedExplorationEvent,
+            commitment: ActiveCommitment) -> bool:
+        """Require complete available identity before consuming peer terminal evidence."""
+        expected_signatures = {
+            str(member.physical_signature)
+            for member in getattr(commitment.task, 'members', ())
+            if str(member.physical_signature)
+        }
+        return bool(
+            str(getattr(message, 'canonical_task_id', '')) ==
+            str(commitment.canonical_id) and
+            str(getattr(message, 'physical_task_signature', '')) in
+            expected_signatures and
+            str(getattr(message, 'round_id', '')) ==
+            str(commitment.decision_round_id) and
+            str(getattr(message, 'decision_hash', '')) ==
+            str(commitment.decision_hash) and
+            uuid_to_text(getattr(message, 'source_session_id', None)) ==
+            str(commitment.source_session_id)
+        )
+
     def _peer_event_callback(self, message: DistributedExplorationEvent) -> None:
         """Replicate event-driven traffic release without a coordinator."""
         if message.source_robot_id != self._peer_id:
             return
-        if (message.event_type.startswith('NAVIGATION_') and
-                message.canonical_task_id):
+        if message.event_type.startswith('NAVIGATION_'):
             commitment = self._active_commitments.get(self._peer_id)
-            if (commitment is not None and
-                    str(message.canonical_task_id) == commitment.canonical_id):
-                self._clear_active_commitment(
-                    self._peer_id, 'peer navigation commitment terminated',
+            if (commitment is None or
+                    not self._navigation_event_matches_commitment(
+                        message, commitment)):
+                self.get_logger().warning(
+                    'STALE_OR_FOREIGN_NAVIGATION_EVENT_IGNORED robot=%s '
+                    'event=%s task=%s round=%s decision=%s' % (
+                        self._robot_id, message.event_type,
+                        message.canonical_task_id, message.round_id,
+                        message.decision_hash),
                 )
-        if (message.event_type == 'NAVIGATION_SUCCEEDED' and
-                message.canonical_task_id):
-            self._completed_shared_canonical_ids.add(
-                str(message.canonical_task_id))
-            self.get_logger().info(
-                'COMPLETED_FRONTIER_REPLICATED robot=%s peer=%s task=%s' % (
-                    self._robot_id, self._peer_id,
-                    message.canonical_task_id))
+                return
+            self._clear_active_commitment(
+                self._peer_id, 'peer navigation commitment terminated',
+            )
+            if message.event_type == 'NAVIGATION_SUCCEEDED':
+                self._completed_shared_canonical_ids.add(
+                    str(message.canonical_task_id))
+                self.get_logger().info(
+                    'COMPLETED_FRONTIER_REPLICATED robot=%s peer=%s task=%s' % (
+                        self._robot_id, self._peer_id,
+                        message.canonical_task_id))
             return
         if message.event_type != 'TRAFFIC_CONFLICT_CLEARED':
             return
@@ -1970,6 +2017,14 @@ class DistributedFrontierAssignment(Node):
                 heading_cost_rad=float(bid.heading_cost),
                 commitment_id=commitment_id,
             )
+
+    def _request_navigation_cancel(self) -> bool:
+        """Request Nav2 cancellation while retaining action ownership."""
+        requested = self._nav2.cancel_navigation()
+        action = getattr(self, '_active_navigation_action', None)
+        if requested and action is not None:
+            action.state = 'CANCELLING'
+        return requested
 
     def _clear_active_commitment(self, robot_id: str, reason: str) -> None:
         """Drop one task commitment and invalidate any continuation using it."""
@@ -2618,7 +2673,7 @@ class DistributedFrontierAssignment(Node):
         if (self._mission_timeout_enabled and self._mission_timeout_s > 0.0 and
                 now - self._mission_started_steady_s >= self._mission_timeout_s):
             if self._nav2.local_goal_active:
-                self._nav2.cancel_navigation()
+                self._request_navigation_cancel()
             self._set_terminal(TerminalReason.TIMEOUT.value, success=False)
             return
         if self._traffic_hold is not None:
@@ -4753,14 +4808,54 @@ class DistributedFrontierAssignment(Node):
                 final_path,
             )
             return
+        if (getattr(self, '_active_navigation_action', None) is not None or
+                getattr(self._nav2, 'local_goal_active', False)):
+            self._invalidate_round(
+                FailureClass.ACTION_REJECTION,
+                'local navigation action already active', final_path,
+            )
+            return
+        self._navigation_action_sequence = getattr(
+            self, '_navigation_action_sequence', 0,
+        ) + 1
+        member = task.members[0]
+        action = ActiveNavigationAction(
+            action_id='%s:%d:%s' % (
+                self._robot_id, self._navigation_action_sequence,
+                task.canonical_id,
+            ),
+            task=task,
+            canonical_task_id=task.canonical_id,
+            physical_signature=member.physical_signature,
+            round_id=self._active_round_id,
+            decision_hash=getattr(self, '_active_decision_hash', ''),
+            generation=(generation if generation is not None else getattr(
+                getattr(self, '_round_lifecycle', None), 'generation', 0)),
+            path=tuple(final_path.samples),
+            commitment_id=getattr(
+                getattr(self, '_active_commitments', {}).get(self._robot_id),
+                'commitment_id', '',
+            ),
+        )
+        self._active_navigation_action = action
+
+        def navigation_finished(outcome: NavigationOutcome) -> None:
+            self._navigation_finished(outcome, action)
+
         if not self._nav2.send_navigation(
-                task.members[0], self._navigation_finished,
+                member, navigation_finished,
                 diagnostic_path=final_path.samples):
+            if self._active_navigation_action is action:
+                self._active_navigation_action = None
+                self._active_task = None
+                self._active_round_id = ''
+                self._active_decision_hash = ''
             self._invalidate_round(
                 FailureClass.ACTION_REJECTION,
                 'local NavigateToPose send precondition changed', final_path,
             )
             return
+        action.state = 'ACTIVE'
         self._active_dispatch_path = tuple(final_path.samples)
         self._dispatch_count += 1
         self._dispatch_in_progress = False
@@ -4791,7 +4886,27 @@ class DistributedFrontierAssignment(Node):
                 path_length_m=final_path.length_m,
             )
 
-    def _navigation_finished(self, outcome: NavigationOutcome) -> None:
+    def _navigation_finished(
+            self, outcome: NavigationOutcome,
+            action: Optional[ActiveNavigationAction] = None) -> None:
+        action = action or getattr(self, '_active_navigation_action', None)
+        if action is None:
+            self.get_logger().error(
+                'NAVIGATION_TERMINAL_WITHOUT_OWNERSHIP_RECORD',
+            )
+            return
+        current_action = getattr(self, '_active_navigation_action', None)
+        owns_current_action = current_action is action
+        if not owns_current_action:
+            action.state = 'TERMINAL'
+            self.get_logger().warning(
+                'NAVIGATION_TERMINAL_STALE_ACTION action_id=%s current=%s' % (
+                    action.action_id,
+                    '' if current_action is None else current_action.action_id,
+                ),
+            )
+            return
+        action.state = 'TERMINAL'
         result = 'SUCCEEDED' if (
             outcome.status == 4 and outcome.error_code == 0
         ) else 'FAILED'
@@ -4809,10 +4924,7 @@ class DistributedFrontierAssignment(Node):
                     outcome.follow_path_error_name,
                     outcome.controller_failure_family,
                     outcome.deepest_failure_classification))
-            physical_signature = (
-                '' if self._active_task is None else
-                self._active_task.members[0].physical_signature
-            )
+            physical_signature = action.physical_signature
             task_diag = self._failure_task_diagnostics.setdefault(
                 physical_signature or '__unknown__', {
                     'controller_failure_count': 0,
@@ -4871,6 +4983,7 @@ class DistributedFrontierAssignment(Node):
             nav2_error_code=outcome.error_code,
             nav2_error_message=outcome.error_message,
             nav2_error_name=outcome.nav2_error_name,
+            action=action,
         )
         if result != 'SUCCEEDED':
             self._publish_failure(
@@ -4878,28 +4991,29 @@ class DistributedFrontierAssignment(Node):
                 nav2_error_code=outcome.error_code,
                 nav2_error_message=outcome.error_message,
                 nav2_error_name=outcome.nav2_error_name,
+                action=action,
             )
-        elif self._active_task is not None:
+        elif action.task is not None:
             # Suppress only the exact physical region that just succeeded.
             # A later disappearance from the snapshot permits it to be
             # reconsidered; unchanged residual fragments cannot churn goals.
             self._completed_solo_physical_signatures.update(
                 member.physical_signature
-                for member in self._active_task.members
+                for member in action.task.members
                 if member.physical_signature
             )
             if not self._local_only:
-                self._completed_shared_canonical_ids.add(
-                    self._active_task.canonical_id)
+                self._completed_shared_canonical_ids.add(action.canonical_task_id)
                 self.get_logger().info(
                     'COMPLETED_FRONTIER_LOCAL robot=%s task=%s' % (
-                        self._robot_id, self._active_task.canonical_id))
-            if self._local_only and self._active_dispatch_path:
-                self._solo_route_history.append(self._active_dispatch_path)
-            if self._active_task.members[0].physical_signature:
-                signature = self._active_task.members[0].physical_signature
+                        self._robot_id, action.canonical_task_id))
+            if self._local_only and action.path:
+                self._solo_route_history.append(action.path)
+            if action.physical_signature:
+                signature = action.physical_signature
                 self._solo_retry_not_before.pop(signature, None)
                 self._solo_retry_counts.pop(signature, None)
+        self._active_navigation_action = None
         self._active_task = None
         self._active_round_id = ''
         self._active_decision_hash = ''
@@ -4923,9 +5037,27 @@ class DistributedFrontierAssignment(Node):
         self._publish_failure(failure, reason, path)
         self._emit_event('ROUND_INVALIDATED', reason, failure=failure)
         self._dispatch_in_progress = False
-        self._active_task = None
-        self._active_round_id = ''
-        self._active_decision_hash = ''
+        action = getattr(self, '_active_navigation_action', None)
+        if action is None and not getattr(self._nav2, 'local_goal_active', False):
+            self._active_task = None
+            self._active_round_id = ''
+            self._active_decision_hash = ''
+        elif action is not None:
+            # The auction lease may be invalidated, but the action lease must
+            # survive until LocalNav2 invokes the terminal callback.  Keeping
+            # these fields aligned also preserves status/event observability;
+            # _navigation_finished() uses the immutable action record itself.
+            self._active_task = action.task
+            self._active_round_id = action.round_id
+            self._active_decision_hash = action.decision_hash
+        else:
+            # Fail closed if an externally active goal is ever observed without
+            # an allocator record.  Do not erase the last known ownership while
+            # Nav2 may still be executing it.
+            self.get_logger().error(
+                'NAVIGATION_OWNERSHIP_RECORD_MISSING_WHILE_ACTIVE '
+                'reason=%s' % reason,
+            )
         # A failure changes the effective feasible-pair set even when the
         # published task geometry is unchanged.  Permit exactly one fresh
         # semantic round so failure suppression can take effect.
@@ -4938,17 +5070,20 @@ class DistributedFrontierAssignment(Node):
             self, failure: FailureClass, reason: str,
             path: Optional[PathEvaluation] = None,
             nav2_error_code: int = 0, nav2_error_message: str = '',
-            nav2_error_name: str = '') -> None:
-        if self._active_task is None:
+            nav2_error_name: str = '',
+            action: Optional[ActiveNavigationAction] = None) -> None:
+        owner = action or getattr(self, '_active_navigation_action', None)
+        task = owner.task if owner is not None else self._active_task
+        if task is None:
             return
-        member = self._active_task.members[0]
+        member = task.members[0]
         if failure in HARD_FAILURES:
             # Record local suppression before consulting snapshot provenance;
             # a stale snapshot must not make the failing robot immediately
             # reselect the same physical task.
             self._record_hard_failure(
                 member.physical_signature, 15.0,
-                canonical_task_id=str(self._active_task.canonical_id),
+                canonical_task_id=str(task.canonical_id),
                 failure_class=failure.value,
                 reason=reason,
             )
@@ -4971,9 +5106,10 @@ class DistributedFrontierAssignment(Node):
         message.header.frame_id = 'shared_map'
         message.source_robot_id = self._robot_id
         message.source_session_id = text_to_uuid(local_snapshot.source_session_id)
-        message.round_id = self._active_round_id
-        message.canonical_task_id = self._active_task.canonical_id
-        message.physical_task_signature = self._active_task.members[0].physical_signature
+        message.round_id = (
+            owner.round_id if owner is not None else self._active_round_id)
+        message.canonical_task_id = task.canonical_id
+        message.physical_task_signature = member.physical_signature
         message.approach_pose.header = message.header
         message.approach_pose.pose.position.x, message.approach_pose.pose.position.y = (
             member.approach
@@ -5171,7 +5307,8 @@ class DistributedFrontierAssignment(Node):
             travelled: float = 0.0, duration: float = 0.0,
             recoveries: int = 0, failure: FailureClass = FailureClass.UNKNOWN,
             nav2_error_code: int = 0, nav2_error_message: str = '',
-            nav2_error_name: str = '') -> None:
+            nav2_error_name: str = '',
+            action: Optional[ActiveNavigationAction] = None) -> None:
         message = DistributedExplorationEvent()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = 'shared_map'
@@ -5181,18 +5318,24 @@ class DistributedFrontierAssignment(Node):
             message.source_session_id = text_to_uuid(session)
         message.event_type = event_type
         round_work = self._round
-        message.round_id = self._active_round_id or (
-            '' if round_work is None else round_work.round_id
-        )
+        message.round_id = (
+            action.round_id if action is not None else
+            self._active_round_id or (
+                '' if round_work is None else round_work.round_id))
         message.union_hash = '' if round_work is None else round_work.union.union_hash
         # Agreement and state-transition events can be emitted before a local
         # task is promoted to ``_active_task``.  Preserve the round's decision
         # fingerprint in that interval instead of emitting an empty hash.
-        message.decision_hash = self._active_decision_hash
+        message.decision_hash = (
+            action.decision_hash if action is not None else
+            self._active_decision_hash)
         if (not message.decision_hash and round_work is not None and
                 round_work.decision is not None):
             message.decision_hash = round_work.decision.decision_hash
-        if self._active_task is not None:
+        if action is not None:
+            message.canonical_task_id = action.canonical_task_id
+            message.physical_task_signature = action.physical_signature
+        elif self._active_task is not None:
             message.canonical_task_id = self._active_task.canonical_id
             message.physical_task_signature = self._active_task.members[0].physical_signature
         message.previous_state = previous

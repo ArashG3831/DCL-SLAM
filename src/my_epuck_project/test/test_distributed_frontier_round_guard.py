@@ -14,12 +14,15 @@ from my_epuck_project.distributed_assignment.models import (
     TaskSnapshot,
 )
 from my_epuck_project.distributed_assignment.protocol import PeerLiveness, receive
+from my_epuck_project.distributed_assignment.ros_conversion import text_to_uuid
 from my_epuck_project.distributed_assignment.local_nav2 import (
     DispatchPreconditions,
+    NavigationOutcome,
     PathEvaluation,
 )
 from my_epuck_project.distributed_assignment.scoring import AssignmentWeights
 from my_epuck_project.distributed_frontier_assignment import (
+    ActiveNavigationAction,
     DistributedFrontierAssignment,
     InitialExplorationBarrier,
     evidence_hold_active,
@@ -572,6 +575,351 @@ def test_local_fallback_trigger_remains_safety_gated():
                   source.index('    def _continue_bidding')]
     assert "caller='DEGRADED_SOLO_DISPATCH'" in solo
     assert 'check_dispatch_preconditions' in solo
+
+
+class _NavigationOwnershipNav2:
+    """ROS-free action client double for allocator ownership races."""
+
+    def __init__(self):
+        self.local_goal_active = False
+        self.callback = None
+        self.cancel_count = 0
+
+    def send_navigation(self, _task, callback, diagnostic_path=()):
+        del diagnostic_path
+        self.callback = callback
+        self.local_goal_active = True
+        return True
+
+    def cancel_navigation(self):
+        self.cancel_count += 1
+        return self.local_goal_active
+
+
+class _NavigationOwnershipLogger:
+    def info(self, *_args, **_kwargs):
+        pass
+
+    def warning(self, *_args, **_kwargs):
+        pass
+
+    def error(self, *_args, **_kwargs):
+        pass
+
+
+def _navigation_ownership_node():
+    member = _task(
+        'ownership-task', 1.0, 1.0, 1.0,
+        ((0.0, 0.0), (1.0, 0.0)),
+    )
+    task = SimpleNamespace(members=(member,), canonical_id='ownership-canonical')
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._robot_id = 'robot1'
+    node._local_only = True
+    node._active_task = task
+    node._active_round_id = 'ownership-round'
+    node._active_decision_hash = 'ownership-decision'
+    node._active_navigation_action = None
+    node._navigation_action_sequence = 0
+    node._nav2 = _NavigationOwnershipNav2()
+    node._dispatch_count = 0
+    node._dispatch_in_progress = False
+    node._traffic_reallocation_after_clear = False
+    node._released_traffic_winner_robot_id = ''
+    node._first_cooperative_goal_logged = True
+    node._active_dispatch_path = ()
+    node._active_commitments = {}
+    node._completed_solo_physical_signatures = set()
+    node._completed_shared_canonical_ids = set()
+    node._solo_route_history = []
+    node._solo_retry_not_before = {}
+    node._solo_retry_counts = {}
+    node._failure_task_diagnostics = {}
+    node._hard_failure_signatures = {}
+    node._hard_failure_counts = {}
+    node._weights = AssignmentWeights()
+    node._post_goal_settle_s = 1.0
+    node._last_semantic_fingerprint = ''
+    node._last_solo_snapshot_key = None
+    node._settle_until_steady_s = 0.0
+    node._transition = lambda *_args, **_kwargs: None
+    node._events = []
+    node._emit_event = lambda *args, **kwargs: node._events.append((args, kwargs))
+    node._published_failures = []
+    node._publish_failure = lambda *args, **kwargs: node._published_failures.append(
+        (args, kwargs))
+    node._reset_round = lambda *_args, **_kwargs: None
+    node._start_immediate_fallback_after_terminal = lambda: None
+    node.get_logger = lambda: _NavigationOwnershipLogger()
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=1),
+    )
+    return node, task
+
+
+def _successful_navigation_outcome():
+    return NavigationOutcome(
+        True, 4, 0, '', FailureClass.UNKNOWN, 1.0, 1.0, 0,
+    )
+
+
+def _dispatch_ready_checks():
+    return DispatchPreconditions(
+        action_server_ready=True, lifecycle_active=True,
+        transform_available=True, transform_age_s=0.1,
+        goal_inside_map=True, goal_inside_costmap=True,
+        goal_map_value=0, goal_costmap_value=0,
+        local_path_clear=True, no_local_goal_active=True,
+        final_path_valid=True, reason='',
+    )
+
+
+def _dispatch_path():
+    return PathEvaluation(
+        True, 1.0, ((0.0, 0.0), (1.0, 0.0)), 0, 0, '',
+        failure_class=FailureClass.UNKNOWN,
+    )
+
+
+def test_accepted_goal_then_round_invalidation_keeps_terminal_identity():
+    """Round invalidation must not orphan an already submitted Nav2 goal."""
+    node, task = _navigation_ownership_node()
+    node._dispatch_after_checks(task, _dispatch_path(), _dispatch_ready_checks())
+
+    action = node._active_navigation_action
+    assert action is not None
+    assert node._nav2.callback is not None
+    DistributedFrontierAssignment._invalidate_round(
+        node, FailureClass.EXPLICIT_CANCELLATION, 'test round invalidation',
+    )
+    assert node._active_navigation_action is action
+    assert node._active_task is task
+
+    node._nav2.local_goal_active = False
+    node._nav2.callback(_successful_navigation_outcome())
+
+    assert node._active_navigation_action is None
+    assert node._active_task is None
+    navigation_events = [
+        (args, kwargs) for args, kwargs in node._events
+        if args and args[0] == 'NAVIGATION_SUCCEEDED'
+    ]
+    assert len(navigation_events) == 1
+    assert navigation_events[0][1]['action'].canonical_task_id == (
+        'ownership-canonical')
+
+
+def test_pending_send_then_late_acceptance_is_cancelable_and_attributed():
+    """A late goal response still closes the original action record safely."""
+    node, task = _navigation_ownership_node()
+    node._dispatch_after_checks(task, _dispatch_path(), _dispatch_ready_checks())
+    action = node._active_navigation_action
+    assert action is not None
+    assert action.state == 'ACTIVE'
+
+    DistributedFrontierAssignment._invalidate_round(
+        node, FailureClass.EXPLICIT_CANCELLATION, 'pending-send race',
+    )
+    assert node._active_navigation_action is action
+    assert node._request_navigation_cancel()
+    assert action.state == 'CANCELLING'
+    assert node._nav2.cancel_count == 1
+
+    node._nav2.local_goal_active = False
+    node._nav2.callback(_successful_navigation_outcome())
+    assert node._active_navigation_action is None
+    assert any(
+        args and args[0] == 'NAVIGATION_SUCCEEDED' and
+        kwargs['action'].action_id == action.action_id
+        for args, kwargs in node._events
+    )
+
+
+def test_stale_navigation_terminal_cannot_clear_new_action():
+    """An old callback cannot publish or mutate semantic allocator state."""
+    node, new_task = _navigation_ownership_node()
+    old_member = _task(
+        'old-ownership-task', 1.0, 1.0, 1.0,
+        ((0.0, 0.0), (1.0, 0.0)),
+    )
+    old_task = SimpleNamespace(
+        members=(old_member,), canonical_id='old-ownership-canonical',
+    )
+    old_action = ActiveNavigationAction(
+        'robot1:old:old-ownership-canonical', old_task,
+        old_task.canonical_id, old_member.physical_signature,
+        'old-round', 'old-decision', 1,
+    )
+    new_action = ActiveNavigationAction(
+        'robot1:new:ownership-canonical', new_task,
+        new_task.canonical_id, new_task.members[0].physical_signature,
+        'new-round', 'new-decision', 2, state='ACTIVE',
+    )
+    node._active_navigation_action = new_action
+    node._active_task = new_task
+    node._nav2.local_goal_active = True
+    before_completed_solo = set(node._completed_solo_physical_signatures)
+    before_completed_shared = set(node._completed_shared_canonical_ids)
+    before_route_history = list(node._solo_route_history)
+    before_retry_not_before = dict(node._solo_retry_not_before)
+    before_retry_counts = dict(node._solo_retry_counts)
+
+    DistributedFrontierAssignment._navigation_finished(
+        node, _successful_navigation_outcome(), old_action,
+    )
+
+    assert old_action.state == 'TERMINAL'
+    assert node._active_navigation_action is new_action
+    assert node._active_task is new_task
+    assert node._events == []
+    assert node._published_failures == []
+    assert node._completed_solo_physical_signatures == before_completed_solo
+    assert node._completed_shared_canonical_ids == before_completed_shared
+    assert node._solo_route_history == before_route_history
+    assert node._solo_retry_not_before == before_retry_not_before
+    assert node._solo_retry_counts == before_retry_counts
+
+
+def test_stale_navigation_failure_cannot_publish_or_suppress():
+    """An old failure cannot create hard-failure or retry suppression."""
+    node, new_task = _navigation_ownership_node()
+    old_member = _task(
+        'old-failure-task', 1.0, 1.0, 1.0,
+        ((0.0, 0.0), (1.0, 0.0)),
+    )
+    old_task = SimpleNamespace(
+        members=(old_member,), canonical_id='old-failure-canonical',
+    )
+    old_action = ActiveNavigationAction(
+        'robot1:old:old-failure-canonical', old_task,
+        old_task.canonical_id, old_member.physical_signature,
+        'old-failure-round', 'old-failure-decision', 1,
+    )
+    new_action = ActiveNavigationAction(
+        'robot1:new:ownership-canonical', new_task,
+        new_task.canonical_id, new_task.members[0].physical_signature,
+        'new-round', 'new-decision', 2, state='ACTIVE',
+    )
+    node._active_navigation_action = new_action
+    node._active_task = new_task
+    node._nav2.local_goal_active = True
+
+    DistributedFrontierAssignment._navigation_finished(
+        node,
+        NavigationOutcome(
+            True, 6, 105, 'no progress', FailureClass.CONTROLLER_NO_PROGRESS,
+            2.0, 0.2, 1,
+        ),
+        old_action,
+    )
+
+    assert old_action.state == 'TERMINAL'
+    assert node._active_navigation_action is new_action
+    assert node._hard_failure_signatures == {}
+    assert node._hard_failure_counts == {}
+    assert node._published_failures == []
+    assert node._events == []
+    assert node._solo_retry_not_before == {}
+    assert node._solo_retry_counts == {}
+
+
+def _peer_navigation_event_node():
+    member = _task('peer-physical', 1.0, 1.0, 1.0)
+    task = SimpleNamespace(members=(member,))
+    commitment = SimpleNamespace(
+        canonical_id='peer-canonical',
+        source_session_id='11' * 16,
+        decision_round_id='peer-round',
+        decision_hash='peer-decision',
+        task=task,
+    )
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._robot_id = 'robot1'
+    node._peer_id = 'robot2'
+    node._active_commitments = {'robot2': commitment}
+    node._completed_shared_canonical_ids = set()
+    node._clear_calls = []
+    node._reset_calls = []
+    node._clear_active_commitment = lambda *args: node._clear_calls.append(args)
+    node._reset_round = lambda *args: node._reset_calls.append(args)
+    node.get_logger = lambda: _NavigationOwnershipLogger()
+    return node, commitment, member
+
+
+def _peer_navigation_event(commitment, member, **changes):
+    values = {
+        'source_robot_id': 'robot2',
+        'event_type': 'NAVIGATION_SUCCEEDED',
+        'source_session_id': text_to_uuid(commitment.source_session_id),
+        'canonical_task_id': commitment.canonical_id,
+        'physical_task_signature': member.physical_signature,
+        'round_id': commitment.decision_round_id,
+        'decision_hash': commitment.decision_hash,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('canonical_task_id', 'wrong-canonical'),
+    ('physical_task_signature', 'wrong-physical'),
+    ('round_id', 'wrong-round'),
+    ('decision_hash', 'wrong-decision'),
+    ('source_session_id', text_to_uuid('22' * 16)),
+])
+def test_peer_rejects_navigation_event_with_any_identity_mismatch(field, value):
+    """Canonical-ID equality alone cannot release a peer commitment."""
+    node, commitment, member = _peer_navigation_event_node()
+    message = _peer_navigation_event(commitment, member, **{field: value})
+
+    node._peer_event_callback(message)
+
+    assert node._clear_calls == []
+    assert node._reset_calls == []
+    assert node._completed_shared_canonical_ids == set()
+    assert node._active_commitments['robot2'] is commitment
+
+
+def test_peer_accepts_exact_navigation_success_identity():
+    """A fully matching current terminal event preserves existing behavior."""
+    node, commitment, member = _peer_navigation_event_node()
+    node._peer_event_callback(_peer_navigation_event(commitment, member))
+
+    assert len(node._clear_calls) == 1
+    assert node._clear_calls[0][0] == 'robot2'
+    assert node._completed_shared_canonical_ids == {'peer-canonical'}
+
+
+def test_failed_navigation_clears_only_its_action_after_attribution():
+    """Normal Nav2 failure remains attributable and releases ownership once."""
+    node, task = _navigation_ownership_node()
+    node._dispatch_after_checks(task, _dispatch_path(), _dispatch_ready_checks())
+    action = node._active_navigation_action
+    node._nav2.local_goal_active = False
+    node._nav2.callback(NavigationOutcome(
+        True, 6, 104, 'controller stopped', FailureClass.CONTROLLER_NO_PROGRESS,
+        2.0, 0.2, 1,
+    ))
+
+    assert action.state == 'TERMINAL'
+    assert node._active_navigation_action is None
+    assert node._active_task is None
+    assert any(
+        args and args[0] == 'NAVIGATION_FAILED' and
+        kwargs['action'] is action
+        for args, kwargs in node._events
+    )
+
+
+def test_existing_cancel_paths_mark_action_cancelling_without_clearing_it():
+    """Explicit timeout/handoff cancellation retains asynchronous ownership."""
+    node, task = _navigation_ownership_node()
+    node._dispatch_after_checks(task, _dispatch_path(), _dispatch_ready_checks())
+    action = node._active_navigation_action
+    assert action is not None
+    assert node._request_navigation_cancel()
+    assert action.state == 'CANCELLING'
+    assert node._active_navigation_action is action
 
 
 def test_degraded_solo_retries_when_compute_path_lease_is_busy():

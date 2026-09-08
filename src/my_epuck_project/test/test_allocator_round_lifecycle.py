@@ -4,10 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from my_epuck_project.round_lifecycle import RoundGeneration
-from my_epuck_project.distributed_assignment.models import TaskSnapshot
-from my_epuck_project.distributed_assignment.protocol import receive
+from my_epuck_project.distributed_assignment.models import BidBatch, TaskSnapshot
+from my_epuck_project.distributed_assignment.protocol import (
+    bid_batch_valid,
+    receive,
+)
 from my_epuck_project.distributed_frontier_assignment import (
     DistributedFrontierAssignment,
+    normal_round_requires_replacement,
 )
 
 
@@ -66,6 +70,69 @@ def test_reset_round_rearms_normal_round_creation_after_continuation_clear():
     assert node._last_semantic_fingerprint == ''
     assert node._bid_batches == {}
     assert node._peer_decision is None
+
+
+def _active_normal_round(fingerprint='same', session1='r1', session2='r2',
+                         epoch1=1, epoch2=1):
+    return SimpleNamespace(
+        mode='normal',
+        content_fingerprint=fingerprint,
+        snapshots=(
+            SimpleNamespace(source_session_id=session1, epoch=epoch1),
+            SimpleNamespace(source_session_id=session2, epoch=epoch2),
+        ),
+    )
+
+
+def _snapshot_identity(robot_id, session, epoch):
+    return SimpleNamespace(
+        source_robot_id=robot_id,
+        source_session_id=session,
+        epoch=epoch,
+    )
+
+
+def test_epoch_only_snapshot_update_keeps_active_normal_round():
+    current = _active_normal_round(epoch1=10, epoch2=11)
+    first = _snapshot_identity('robot1', 'r1', 12)
+    second = _snapshot_identity('robot2', 'r2', 13)
+
+    assert normal_round_requires_replacement(
+        current, first, second, 'same',
+    ) is False
+
+
+def test_semantic_task_or_path_change_replaces_active_normal_round():
+    current = _active_normal_round(fingerprint='old')
+    first = _snapshot_identity('robot1', 'r1', 2)
+    second = _snapshot_identity('robot2', 'r2', 2)
+
+    assert normal_round_requires_replacement(
+        current, first, second, 'new-task-or-path',
+    ) is True
+
+
+def test_source_session_change_replaces_active_normal_round():
+    current = _active_normal_round()
+    first = _snapshot_identity('robot1', 'new-session', 2)
+    second = _snapshot_identity('robot2', 'r2', 2)
+
+    assert normal_round_requires_replacement(
+        current, first, second, 'same',
+    ) is True
+
+
+def test_epoch_mismatched_bid_remains_rejected():
+    batch = BidBatch(
+        round_id='round', union_hash='union', source_robot_id='robot2',
+        source_session_id='session', source_snapshot_epoch=4,
+        validity_s=5.0, bids=(),
+    )
+    received = receive(batch, 5.0, 10.0)
+
+    assert bid_batch_valid(
+        received, 10.1, 'robot2', 'session', 5, 'round', 'union', True,
+    ) is False
 
 
 def test_stale_round_cannot_be_committed_by_source_guard():

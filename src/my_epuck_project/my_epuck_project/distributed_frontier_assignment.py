@@ -364,6 +364,32 @@ def round_pass_is_current(current_round, expected_round) -> bool:
     return current_round is expected_round
 
 
+def normal_round_requires_replacement(
+        current_round, first: TaskSnapshot, second: TaskSnapshot,
+        content_fingerprint: str) -> bool:
+    """Replace normal work only when its semantic allocation problem changed.
+
+    Snapshot epochs remain protocol freshness/version evidence, but an epoch-only
+    update does not change the immutable task problem represented by an active
+    round.  Session changes and semantic content changes do.
+    """
+    if current_round is None:
+        return True
+    if getattr(current_round, 'mode', 'normal') != 'normal':
+        return True
+    current_snapshots = getattr(current_round, 'snapshots', ())
+    if len(current_snapshots) != 2:
+        return True
+    current_sessions = tuple(
+        snapshot.source_session_id for snapshot in current_snapshots
+    )
+    incoming_sessions = (first.source_session_id, second.source_session_id)
+    return (
+        current_sessions != incoming_sessions or
+        current_round.content_fingerprint != content_fingerprint
+    )
+
+
 @dataclass
 class TrafficHold:
     """A local deferred dispatch bound to one agreed traffic reservation."""
@@ -2163,16 +2189,34 @@ class DistributedFrontierAssignment(Node):
     def _snapshot_content_fingerprint(
             first: TaskSnapshot, second: TaskSnapshot) -> str:
         """Fingerprint task content while ignoring epoch-only heartbeats."""
+        def rounded_points(points):
+            return tuple(
+                tuple(round(float(value), 3) for value in point)
+                for point in points
+            )
+
+        def rounded_bounds(bounds):
+            if bounds is None:
+                return None
+            return (
+                rounded_points((bounds.minimum,))[0],
+                rounded_points((bounds.maximum,))[0],
+            )
+
         payload = []
         for snapshot in (first, second):
             tasks = []
             for task in sorted(snapshot.tasks, key=lambda item: item.physical_signature):
                 tasks.append((
                     task.physical_signature,
+                    int(getattr(task, 'local_frontier_id', 0)),
                     tuple(round(value, 3) for value in task.approach),
                     round(task.approach_yaw, 3),
                     tuple(round(value, 3) for value in task.bounds.minimum),
                     tuple(round(value, 3) for value in task.bounds.maximum),
+                    rounded_points(getattr(task, 'frontier_geometry', ())),
+                    rounded_points(getattr(task, 'visible_cells', ())),
+                    rounded_bounds(getattr(task, 'visible_bounds', None)),
                     round(task.visible_reveal_gain, 4),
                     round(task.local_ordering_score, 4),
                     int(getattr(task, 'mrtsp_route_rank', 2 ** 32 - 1)),
@@ -2180,6 +2224,7 @@ class DistributedFrontierAssignment(Node):
                     str(getattr(task, 'mrtsp_solver', '')),
                     bool(getattr(task, 'local_path_valid', False)),
                     round(getattr(task, 'local_path_length_m', 0.0), 3),
+                    rounded_points(getattr(task, 'local_path', ())),
                     round(getattr(task, 'path_heading_cost_rad', 0.0), 3),
                 ))
             payload.append((
@@ -2589,7 +2634,8 @@ class DistributedFrontierAssignment(Node):
                     'unchanged IDLE task content; waiting for meaningful proposal change',
                 )
             return
-        if current_round is None or current_round.round_id != round_id:
+        if normal_round_requires_replacement(
+                current_round, first, second, content_fingerprint):
             union = build_canonical_union(
                 first.tasks, second.tasks, self._maximum_union_tasks,
             )

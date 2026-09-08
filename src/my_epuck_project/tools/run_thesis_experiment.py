@@ -232,6 +232,9 @@ def main(argv=None) -> int:
     ldd = _ldd(env)
     preflight = existing_preflight(env, result_root, args.ros_domain_id, args.webots_port)
     command = runner_command(args, result_root, args.webots_port)
+    runtime = preflight.get('runtime', {})
+    env['MY_EPUCK_RUNTIME_PYTHON_PROVENANCE_JSON'] = json.dumps(
+        runtime.get('runtime_module_provenance', {}), sort_keys=True)
     config = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'],
                                                cwd=WORKSPACE, text=True).strip(),
               'condition': args.condition,
@@ -239,6 +242,8 @@ def main(argv=None) -> int:
               'strategy': 'frontier_cost_only', 'mode': 'MODE_B', 'seed': 1001,
               'ros_domain_id': args.ros_domain_id, 'webots_port': args.webots_port,
               'project_prefix': preflight['project_prefix'], 'driver_prefix': preflight['driver_prefix'],
+              'runtime_python_provenance': runtime.get(
+                  'runtime_module_provenance', {}),
               'record_frontier_geometry': args.record_frontier_geometry,
               'result_root': str(result_root), 'network_mode': 'nat'}
     write_records(result_root, env, command, config, preflight, ldd, host)

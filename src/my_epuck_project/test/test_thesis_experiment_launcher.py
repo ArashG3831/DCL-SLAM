@@ -117,3 +117,33 @@ def test_frontier_geometry_capture_uses_existing_runner_flag(monkeypatch):
         '--condition', 'C', '--horizon', '600', '--record-frontier-geometry'])
     command = launcher.runner_command(args, Path('/tmp/results/run'), 23420)
     assert command[-2:] == ['--diagnostic-frontier-capture', 'true']
+
+
+def test_effective_configuration_records_runtime_module_provenance(tmp_path):
+    result_root = tmp_path / 'results' / 'run'
+    module = 'my_epuck_project.distributed_frontier_assignment'
+    provenance = {
+        module: {
+            'resolved_path': '/install/my_epuck_project/distributed_frontier_assignment.py',
+            'source_path': '/src/distributed_frontier_assignment.py',
+            'build_path': '/build/distributed_frontier_assignment.py',
+            'install_path': '/install/my_epuck_project/distributed_frontier_assignment.py',
+            'resolved_sha256': 'same',
+            'source_sha256': 'same',
+            'build_sha256': 'same',
+            'install_sha256': 'same',
+        }
+    }
+    env = _env(tmp_path)
+    env.update({
+        'MY_EPUCK_WEBOTS_NETWORK_MODE': 'nat',
+        'RUN_OUT': str(result_root),
+    })
+    launcher.write_records(
+        result_root, env, ['python3', 'runner.py'],
+        {'runtime_python_provenance': provenance},
+        {'runtime': {'runtime_module_provenance': provenance}}, {},
+        '172.18.32.1')
+    configuration = json.loads(
+        (result_root / 'effective_configuration.json').read_text())
+    assert configuration['runtime_python_provenance'][module]['install_sha256'] == 'same'

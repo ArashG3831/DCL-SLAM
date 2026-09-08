@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import importlib
 import os
 from pathlib import Path
 import re
@@ -60,6 +59,20 @@ CRITICAL_RUNTIME_MODULES = (
     'my_epuck_project.unknown_pose_frontend',
     'my_epuck_project.unknown_pose_frontend_core',
     'my_epuck_project.robust_relative_pose_selector',
+    # These modules are the allocator/Nav2 ownership runtime closure.  They
+    # must be checked in the install actually visible to the ROS child; a
+    # matching package prefix is not sufficient provenance.
+    'my_epuck_project.distributed_frontier_assignment',
+    'my_epuck_project.distributed_assignment.local_nav2',
+    'my_epuck_project.round_lifecycle',
+    'my_epuck_project.distributed_assignment.protocol',
+    'my_epuck_project.distributed_assignment.scoring',
+    'my_epuck_project.distributed_assignment.canonical',
+    'my_epuck_project.distributed_assignment.failures',
+    'my_epuck_project.distributed_assignment.models',
+    'my_epuck_project.distributed_assignment.ros_conversion',
+    'my_epuck_project.distributed_assignment.traffic_scheduler',
+    'my_epuck_project.mission_termination',
 )
 
 
@@ -119,6 +132,132 @@ def _workspace_path(path, workspace):
         return False
 
 
+def _module_relative_path(module_name):
+    """Return the source-relative Python path for a project module."""
+    parts = module_name.split('.')
+    if not parts or parts[0] != 'my_epuck_project' or len(parts) < 2:
+        raise ValueError(f'unsupported runtime module: {module_name}')
+    return Path(*parts[1:]).with_suffix('.py')
+
+
+def _path_below(path, root):
+    """Return whether *path* is contained by *root* after resolution."""
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _resolve_runtime_module_paths(workspace, environment):
+    """Resolve modules using a clean child with exactly *environment*.
+
+    The launcher invokes the source-tree runner, whose wrapper intentionally
+    inserts the source package into its own ``sys.path``.  Looking up modules
+    in that process would therefore validate the wrapper rather than the ROS
+    child.  Probe through a fresh interpreter so PYTHONPATH/overlay precedence
+    is the same as the process that will import the installed package.
+    """
+    code = (
+        'import importlib.util, json, sys; '
+        'names = json.loads(sys.argv[1]); result = {}; '
+        'for_name = None\n'
+        'for for_name in names:\n'
+        '    try:\n'
+        '        spec = importlib.util.find_spec(for_name)\n'
+        '        result[for_name] = spec.origin if spec is not None else None\n'
+        '    except Exception as error:\n'
+        '        result[for_name] = {"error": repr(error)}\n'
+        'print(json.dumps(result, sort_keys=True))'
+    )
+    completed = subprocess.run(
+        [sys.executable, '-c', code,
+         json.dumps(list(CRITICAL_RUNTIME_MODULES))],
+        cwd=workspace, env=dict(environment), capture_output=True,
+        text=True, check=False, timeout=30)
+    if completed.returncode:
+        return {}, [
+            'runtime module resolution probe failed: ' +
+            (completed.stderr.strip() or completed.stdout.strip())]
+    try:
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}, ['runtime module resolution probe returned invalid JSON']
+    return result, []
+
+
+def _collect_runtime_module_provenance(workspace, environment,
+                                       resolved_paths=None):
+    """Compare exact imported modules with source and selected build files.
+
+    ``resolved_paths`` is injectable for pure tests.  Production callers leave
+    it unset, causing resolution through the exact child environment.
+    """
+    workspace = Path(workspace).resolve()
+    environment = dict(environment)
+    build_base = Path(environment.get(
+        'MY_EPUCK_BUILD_BASE', workspace / 'build')).resolve()
+    install_prefix_text = environment.get('MY_EPUCK_INSTALL_PREFIX', '').strip()
+    install_prefix = (Path(install_prefix_text).resolve()
+                      if install_prefix_text else None)
+    if resolved_paths is None:
+        resolved_paths, resolution_issues = _resolve_runtime_module_paths(
+            workspace, environment)
+    else:
+        resolution_issues = []
+    records = {}
+    issues = list(resolution_issues)
+    source_root = workspace / 'src/my_epuck_project/my_epuck_project'
+    build_root = build_base / 'my_epuck_project/my_epuck_project'
+    for module_name in CRITICAL_RUNTIME_MODULES:
+        relative = _module_relative_path(module_name)
+        source_path = (source_root / relative).resolve()
+        build_path = (build_root / relative).resolve()
+        imported_value = resolved_paths.get(module_name)
+        imported_path = None
+        resolution_error = None
+        if isinstance(imported_value, dict):
+            resolution_error = imported_value.get('error')
+        elif imported_value:
+            imported_path = Path(imported_value).resolve()
+        record = {
+            'module': module_name,
+            'resolved_path': str(imported_path) if imported_path else None,
+            'imported_path': str(imported_path) if imported_path else None,
+            'source_path': str(source_path),
+            'build_path': str(build_path),
+            'install_prefix': str(install_prefix) if install_prefix else None,
+            'install_path': str(imported_path) if imported_path else None,
+            'resolved_sha256': _sha256_file(imported_path),
+            'imported_sha256': _sha256_file(imported_path),
+            'source_sha256': _sha256_file(source_path),
+            'build_sha256': _sha256_file(build_path),
+            'install_sha256': _sha256_file(imported_path),
+        }
+        records[module_name] = record
+        if resolution_error:
+            issues.append(f'{module_name} resolution failed: {resolution_error}')
+        if imported_path is None:
+            issues.append(f'{module_name} is missing from the exact runtime environment')
+            continue
+        if install_prefix is not None and not _path_below(
+                imported_path, install_prefix):
+            issues.append(
+                f'{module_name} resolved outside selected install prefix: '
+                f'{imported_path}')
+        if record['source_sha256'] is None:
+            issues.append(f'{module_name} source file is missing: {source_path}')
+        if record['build_sha256'] is None:
+            issues.append(f'{module_name} build file is missing: {build_path}')
+        if record['install_sha256'] is None:
+            issues.append(f'{module_name} imported file is unreadable: {imported_path}')
+        if (record['source_sha256'] != record['build_sha256'] or
+                record['source_sha256'] != record['install_sha256']):
+            issues.append(
+                f'installed module hash differs from source/build: {module_name}')
+    return records, issues
+
+
 def runtime_provenance(workspace, environment=None, ros_domain_id=None):
     """Audit middleware, import paths, and source/build parity before launch.
 
@@ -174,25 +313,15 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
     if contaminated:
         issues.append('environment references the original dirty checkout')
 
-    module_paths = {}
-    module_hashes = {}
-    for module_name in CRITICAL_RUNTIME_MODULES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            try:
-                module = importlib.import_module(module_name)
-            except Exception as error:  # pragma: no cover - launch-only path
-                module_paths[module_name] = None
-                module_hashes[module_name] = None
-                issues.append(f'cannot import {module_name}: {error}')
-                continue
-        module_path = getattr(module, '__file__', None)
-        module_paths[module_name] = str(module_path) if module_path else None
-        module_hashes[module_name] = _sha256_file(module_path)
-        if not module_path or not _workspace_path(module_path, workspace):
-            issues.append(
-                f'{module_name} loaded outside validation checkout: '
-                f'{module_path}')
+    runtime_module_provenance, module_issues = (
+        _collect_runtime_module_provenance(workspace, environment))
+    issues.extend(module_issues)
+    module_paths = {
+        name: record['resolved_path']
+        for name, record in runtime_module_provenance.items()}
+    module_hashes = {
+        name: record['resolved_sha256']
+        for name, record in runtime_module_provenance.items()}
 
     parity = {}
     frontier_prefix = _ament_package_prefix(
@@ -278,6 +407,7 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         'requested_ros_domain_id': ros_domain_id,
         'module_paths': module_paths,
         'module_sha256': module_hashes,
+        'runtime_module_provenance': runtime_module_provenance,
         'source_build_parity': parity,
         'frontier_dependency': frontier_report,
         'project_package_prefixes': project_package_prefixes,

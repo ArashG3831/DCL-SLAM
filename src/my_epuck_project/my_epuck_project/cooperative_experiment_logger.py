@@ -4093,6 +4093,12 @@ class CooperativeExperimentLogger(Node):
             seed_provenance = json.loads(self.p['seed_provenance_json'] or '{}')
         except (TypeError, ValueError):
             seed_provenance = {'invalid_seed_provenance_json': True}
+        try:
+            runtime_python_provenance = json.loads(
+                os.getenv('MY_EPUCK_RUNTIME_PYTHON_PROVENANCE_JSON', '{}'))
+        except (TypeError, ValueError):
+            runtime_python_provenance = {
+                'invalid_runtime_python_provenance_json': True}
         value={
             'schema_version':SCHEMA,'run_id':self.run_id,
             'utc_start_time':self.start_utc,
@@ -4103,6 +4109,7 @@ class CooperativeExperimentLogger(Node):
             'git_branch':self.git_value(
                 ['symbolic-ref','--short','-q','HEAD'], 'DETACHED'),
             'worktree_dirty':bool(self.git_value(['status','--porcelain'],'')),
+            'runtime_python_provenance': runtime_python_provenance,
             'launch_file':self.p['launch_file'],
             'experiment_condition': self.p['experiment_condition'],
             'seed_provenance': seed_provenance,

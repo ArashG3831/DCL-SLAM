@@ -70,6 +70,87 @@ def _clean_runtime_environment(workspace, domain=34):
     }
 
 
+def _runtime_module_fixture(tmp_path):
+    workspace = tmp_path / 'workspace'
+    source_root = workspace / 'src/my_epuck_project/my_epuck_project'
+    build_base = workspace / 'build_overlay'
+    build_root = build_base / 'my_epuck_project/my_epuck_project'
+    install_prefix = workspace / 'install_overlay/my_epuck_project'
+    install_root = install_prefix / 'lib/python3.12/site-packages/my_epuck_project'
+    resolved = {}
+    for module_name in preflight.CRITICAL_RUNTIME_MODULES:
+        relative = preflight._module_relative_path(module_name)
+        content = f'# {module_name}\n'
+        for root in (source_root, build_root, install_root):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding='utf-8')
+        resolved[module_name] = str(install_root / relative)
+    environment = {
+        'MY_EPUCK_BUILD_BASE': str(build_base),
+        'MY_EPUCK_INSTALL_PREFIX': str(install_prefix),
+    }
+    return workspace, environment, resolved
+
+
+def test_runtime_module_provenance_accepts_matching_source_build_install(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    records, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert issues == []
+    assert records['my_epuck_project.distributed_frontier_assignment'][
+        'imported_path'].endswith('distributed_frontier_assignment.py')
+    assert all(item['source_sha256'] == item['build_sha256'] ==
+               item['install_sha256'] for item in records.values())
+
+
+def test_runtime_module_resolution_uses_supplied_child_environment(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    install_root = Path(next(iter(resolved.values()))).parents[0]
+    (install_root / '__init__.py').write_text('', encoding='utf-8')
+    for module_name in preflight.CRITICAL_RUNTIME_MODULES:
+        relative = preflight._module_relative_path(module_name)
+        if len(relative.parts) > 1:
+            package = install_root / relative.parent / '__init__.py'
+            package.parent.mkdir(parents=True, exist_ok=True)
+            package.touch()
+    environment['PYTHONPATH'] = str(install_root.parent)
+    paths, issues = preflight._resolve_runtime_module_paths(
+        workspace, environment)
+    assert issues == []
+    assert paths == resolved
+
+
+def test_runtime_module_provenance_rejects_stale_install(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    stale = Path(resolved['my_epuck_project.distributed_frontier_assignment'])
+    stale.write_text('# stale installed allocator\n', encoding='utf-8')
+    _, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert any('installed module hash differs from source/build' in issue
+               for issue in issues)
+
+
+def test_runtime_module_provenance_rejects_wrong_overlay(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    wrong = tmp_path / 'wrong_overlay/distributed_frontier_assignment.py'
+    wrong.parent.mkdir(parents=True)
+    wrong.write_text('# wrong overlay\n', encoding='utf-8')
+    resolved['my_epuck_project.distributed_frontier_assignment'] = str(wrong)
+    _, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert any('outside selected install prefix' in issue for issue in issues)
+
+
+def test_runtime_module_provenance_rejects_missing_module(tmp_path):
+    workspace, environment, resolved = _runtime_module_fixture(tmp_path)
+    resolved['my_epuck_project.distributed_frontier_assignment'] = None
+    _, issues = preflight._collect_runtime_module_provenance(
+        workspace, environment, resolved)
+    assert any('distributed_frontier_assignment is missing' in issue
+               for issue in issues)
+
+
 def test_runtime_provenance_requires_clean_cyclone_environment():
     workspace = Path(__file__).resolve().parents[3]
     report = preflight.runtime_provenance(
@@ -86,10 +167,9 @@ def test_runtime_provenance_binds_parity_to_explicit_build_overlay(tmp_path):
     module_root = build_base / 'my_epuck_project/my_epuck_project'
     module_root.mkdir(parents=True)
     source_root = workspace / 'src/my_epuck_project/my_epuck_project'
-    for relative in (
-            'cooperative_regression.py', 'ros_runtime_preflight.py',
-            'unknown_pose_frontend.py', 'unknown_pose_frontend_core.py',
-            'robust_relative_pose_selector.py'):
+    for module_name in preflight.CRITICAL_RUNTIME_MODULES:
+        relative = preflight._module_relative_path(module_name)
+        (module_root / relative).parent.mkdir(parents=True, exist_ok=True)
         (module_root / relative).write_bytes(
             (source_root / relative).read_bytes())
     environment = _clean_runtime_environment(workspace, domain=34)

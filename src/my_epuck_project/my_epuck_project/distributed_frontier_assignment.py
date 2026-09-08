@@ -24,7 +24,12 @@ from std_msgs.msg import Bool, String
 import rclpy
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 
 from .distributed_assignment.canonical import (
     build_canonical_union,
@@ -86,6 +91,16 @@ from .distributed_assignment.traffic_scheduler import (
     project_path_progress,
     schedule_traffic,
 )
+
+
+DISTRIBUTED_EVENT_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=50,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+
 from .round_lifecycle import RoundGeneration
 from .mission_termination import (
     CandidateEvidence,
@@ -1010,7 +1025,8 @@ class DistributedFrontierAssignment(Node):
             ExplorationFailure, 'exploration_failure', qos,
         )
         self._event_publisher = self.create_publisher(
-            DistributedExplorationEvent, 'distributed_event', 50,
+            DistributedExplorationEvent, 'distributed_event',
+            DISTRIBUTED_EVENT_QOS,
         )
         if self._synchronized_traffic_test and not self._local_only:
             traffic_test_qos = QoSProfile(
@@ -1252,7 +1268,7 @@ class DistributedFrontierAssignment(Node):
                 self.create_subscription(
                     DistributedExplorationEvent,
                     f'/{self._peer_id}/distributed_event',
-                    self._peer_event_callback, qos),
+                    self._peer_event_callback, DISTRIBUTED_EVENT_QOS),
             )
 
     def _activate_assignment_timers(self) -> None:

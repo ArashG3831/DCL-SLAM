@@ -23,6 +23,7 @@ from my_epuck_project.distributed_assignment.local_nav2 import (
 from my_epuck_project.distributed_assignment.scoring import AssignmentWeights
 from my_epuck_project.distributed_frontier_assignment import (
     ActiveNavigationAction,
+    DISTRIBUTED_EVENT_QOS,
     DistributedFrontierAssignment,
     InitialExplorationBarrier,
     evidence_hold_active,
@@ -43,6 +44,26 @@ FRONTIER_GENERATOR_SOURCE = Path(__file__).parents[2] / (
     Path('my_epuck_frontier_candidates') / 'src' /
     'frontier_candidate_generator.cpp'
 )
+
+
+def test_distributed_event_qos_is_explicit_reliable_volatile_keep_last():
+    """Live allocator event endpoints use one compatible non-latched QoS."""
+    assert DISTRIBUTED_EVENT_QOS.history.name == 'KEEP_LAST'
+    assert DISTRIBUTED_EVENT_QOS.depth == 50
+    assert DISTRIBUTED_EVENT_QOS.reliability.name == 'RELIABLE'
+    assert DISTRIBUTED_EVENT_QOS.durability.name == 'VOLATILE'
+    source = SOURCE.read_text(encoding='utf-8')
+    assert "DistributedExplorationEvent, 'distributed_event'," in source
+    assert "self._peer_event_callback, DISTRIBUTED_EVENT_QOS" in source
+    assert source.count('DISTRIBUTED_EVENT_QOS') >= 3
+    assert 'DistributedExplorationEvent, \'distributed_event\', 50' not in source
+
+
+def test_observer_distributed_event_qos_remains_compatible():
+    """The observer continues requesting reliable/volatile event delivery."""
+    logger = (Path(__file__).parents[1] / 'my_epuck_project' /
+              'cooperative_experiment_logger.py').read_text(encoding='utf-8')
+    assert "self.qos(True,False,50),f'{r}.distributed_event'" in logger
 
 
 def test_initial_barrier_blocks_one_ready_replica():

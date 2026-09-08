@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from my_epuck_interfaces.msg import DistributedExplorationStatus
+
 from my_epuck_project.distributed_assignment.models import (
     Bounds,
     CoordinatorState,
@@ -861,8 +863,14 @@ def _peer_navigation_event_node():
     node._completed_shared_canonical_ids = set()
     node._clear_calls = []
     node._reset_calls = []
-    node._clear_active_commitment = lambda *args: node._clear_calls.append(args)
+    node._clear_active_commitment = lambda robot_id, reason: (
+        node._clear_calls.append((robot_id, reason)),
+        node._active_commitments.pop(robot_id, None),
+    )
     node._reset_round = lambda *args: node._reset_calls.append(args)
+    node._round = None
+    node._peer_status = None
+    node._peer_liveness = PeerLiveness(10.0)
     node.get_logger = lambda: _NavigationOwnershipLogger()
     return node, commitment, member
 
@@ -909,6 +917,102 @@ def test_peer_accepts_exact_navigation_success_identity():
     assert len(node._clear_calls) == 1
     assert node._clear_calls[0][0] == 'robot2'
     assert node._completed_shared_canonical_ids == {'peer-canonical'}
+
+
+def _terminal_drain_node(canonical_id, physical_signature, round_id,
+                         decision_hash):
+    """Build a peer shell for a terminal racing an inactive heartbeat."""
+    member = _task(physical_signature, 1.0, 1.0, 1.0,
+                   ((0.0, 0.0), (1.0, 0.0)))
+    task = SimpleNamespace(members=(member,))
+    commitment = SimpleNamespace(
+        canonical_id=canonical_id,
+        source_session_id='11' * 16,
+        decision_round_id=round_id,
+        decision_hash=decision_hash,
+        task=task,
+    )
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._robot_id = 'robot2'
+    node._peer_id = 'robot1'
+    node._active_commitments = {'robot1': commitment}
+    node._completed_shared_canonical_ids = set()
+    node._clear_calls = []
+    node._reset_calls = []
+    node._round = None
+    node._peer_status = None
+    node._peer_liveness = PeerLiveness(10.0)
+    node._clear_active_commitment = lambda robot_id, reason: (
+        node._clear_calls.append((robot_id, reason)),
+        node._active_commitments.pop(robot_id, None),
+    )
+    node._reset_round = lambda *args: node._reset_calls.append(args)
+    node.get_logger = lambda: _NavigationOwnershipLogger()
+    status = SimpleNamespace(
+        source_robot_id='robot1',
+        source_session_id=text_to_uuid(commitment.source_session_id),
+        validity=SimpleNamespace(sec=10, nanosec=0),
+        state=DistributedExplorationStatus.WAITING_FOR_INPUTS,
+        local_nav_goal_active=False,
+        active_canonical_task_id='',
+    )
+    terminal = SimpleNamespace(
+        source_robot_id='robot1',
+        event_type='NAVIGATION_SUCCEEDED',
+        source_session_id=text_to_uuid(commitment.source_session_id),
+        canonical_task_id=canonical_id,
+        physical_task_signature=physical_signature,
+        round_id=round_id,
+        decision_hash=decision_hash,
+    )
+    return node, status, terminal, commitment
+
+
+@pytest.mark.parametrize('canonical_id,physical_signature,round_id,decision_hash', [
+    (
+        '2e45d1635c936e029ece1c04',
+        '90ebe16146a8a8975c115c65',
+        'continuation-action-round:238cea5d886360f5efaf47d00ecc6983dde1d6d6c34132ac8a8b237d25638bb1',
+        'bc8e67f8847c806e50e590111ffd73df88447720bea49d7c1a4fef221843c6bd',
+    ),
+    (
+        '9c9161cca1cfdb3d5394bf35',
+        '60e6716feac743c5504d0ad5',
+        '45e9832c065bd87a1d0717cc4e63e7c6899be5cd32a7dbe68b36c4a3f24f7113',
+        '25225bd2ed1ec368d959d7401b3979c1d19e82ff88060833803bd5e2ddc9f278',
+    ),
+])
+def test_peer_commitment_survives_inactive_status_until_exact_terminal(
+        canonical_id, physical_signature, round_id, decision_hash):
+    """The 2e45/9c916 races must drain through the strict terminal matcher."""
+    node, status, terminal, commitment = _terminal_drain_node(
+        canonical_id, physical_signature, round_id, decision_hash,
+    )
+
+    node._status_callback(status)
+
+    assert node._active_commitments['robot1'] is commitment
+    node._peer_event_callback(terminal)
+
+    assert node._completed_shared_canonical_ids == {canonical_id}
+    assert node._active_commitments == {}
+    assert len(node._clear_calls) == 1
+
+
+def test_active_different_peer_task_still_invalidates_old_commitment():
+    """An actively advertised replacement remains a hard identity change."""
+    node, commitment, _ = _peer_navigation_event_node()
+    node._status_callback(SimpleNamespace(
+        source_robot_id='robot2',
+        source_session_id=text_to_uuid(commitment.source_session_id),
+        validity=SimpleNamespace(sec=10, nanosec=0),
+        state=DistributedExplorationStatus.NAVIGATING,
+        local_nav_goal_active=True,
+        active_canonical_task_id='new-active-task',
+    ))
+
+    assert node._active_commitments == {}
+    assert node._clear_calls
 
 
 def test_failed_navigation_clears_only_its_action_after_attribution():

@@ -1736,9 +1736,15 @@ class DistributedFrontierAssignment(Node):
             # must not discard the immutable commitment needed by the free
             # robot's continuation round.  A non-empty mismatch remains a
             # hard invalidation guard.
-            if (not peer_active or
-                    peer_session != prior_commitment.source_session_id or
-                    (advertised_task_id and
+            # A status heartbeat is not the terminal event for an already
+            # committed peer action.  LocalNav2 clears its action handle
+            # before the allocator publishes NAVIGATION_*; DDS may therefore
+            # deliver the inactive heartbeat before the terminal event.  Do
+            # not erase the peer commitment in that drain window.  Session
+            # changes remain authoritative, and an actively advertised
+            # different task still proves supersession.
+            if (peer_session != prior_commitment.source_session_id or
+                    (peer_active and advertised_task_id and
                      advertised_task_id != prior_commitment.canonical_id)):
                 self._clear_active_commitment(
                     self._peer_id, 'peer active commitment ended or changed',

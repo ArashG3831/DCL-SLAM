@@ -191,8 +191,12 @@ def runner_command(args: argparse.Namespace, result_root: Path, port: int) -> li
             '--prehandoff-dispatch-delay-s', '20.0', '--simulation-horizon-s', str(args.horizon),
             '--wall-watchdog-s', '1200', '--ros-domain-id', str(args.ros_domain_id),
             '--webots-port', str(port), '--results-directory', str(result_root)]
-    if args.record_frontier_geometry:
-        command.extend(['--diagnostic-frontier-capture', 'true'])
+    # Lossless frontier-cell geometry is part of the canonical observer
+    # evidence contract. Keep the legacy CLI flag for compatibility, but
+    # always enable the existing generator/logger diagnostic capture so every
+    # canonical artifact can render actual frontier regions rather than only
+    # centroid/bounding-box fallbacks.
+    command.extend(['--diagnostic-frontier-capture', 'true'])
     return command
 
 

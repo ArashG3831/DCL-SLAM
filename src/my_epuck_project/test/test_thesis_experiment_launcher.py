@@ -119,6 +119,12 @@ def test_frontier_geometry_capture_uses_existing_runner_flag(monkeypatch):
     assert command[-2:] == ['--diagnostic-frontier-capture', 'true']
 
 
+def test_canonical_runner_always_records_frontier_geometry():
+    args = launcher.parser().parse_args(['--condition', 'C', '--horizon', '180'])
+    command = launcher.runner_command(args, Path('/tmp/results/run'), 23420)
+    assert command[-2:] == ['--diagnostic-frontier-capture', 'true']
+
+
 def test_effective_configuration_records_runtime_module_provenance(tmp_path):
     result_root = tmp_path / 'results' / 'run'
     module = 'my_epuck_project.distributed_frontier_assignment'

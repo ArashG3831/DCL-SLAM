@@ -820,32 +820,33 @@ class SourceAwareMapFusion(Node):
         if now - stats['last_log_wall'] < 1.0:
             return
         elapsed = max(1e-9, now - stats['last_log_wall'])
-        self.get_logger().info(
-            'FUSION_PROFILE ' + ' '.join((
-                f'mode={mode}', f'map_changed={map_changed}',
-                f'dimensions={dimensions[0]}x{dimensions[1]}',
-                f'invocations={stats["invocations"]}',
-                f'full_rebuilds={stats["full_rebuilds"]}',
-                f'pose_updates={stats["pose_updates"]}',
-                f'cells_inspected={stats["cells_inspected"]}',
-                f'cells_copied={stats["cells_copied"]}',
-                f'cells_modified={stats["cells_modified"]}',
-                f'publications={stats["publications"]}',
-                f'visualization_bases={stats["visualization_bases"]}',
-                f'visualization_updates={stats["visualization_updates"]}',
-                f'dirty_events={stats["dirty_events"]}',
-                f'coalesced_events={stats["coalesced_events"]}',
-                f'rebuild_skipped={stats["rebuild_skipped"]}',
-                f'wall_duration_s={stats["wall_s"]:.6f}',
-                f'cpu_duration_s={stats["cpu_s"]:.6f}',
-                f'window_wall_s={elapsed:.3f}',
-            ) + ((
-                f' freshness_source_age_s={self.last_freshness_source_age_s:.3f}'
-                f' freshness_previous_publication_age_s='
-                f'{self.last_freshness_previous_publication_age_s:.3f}'
-                f' freshness_output_stamp_s={self.last_freshness_output_stamp_s:.3f}'
-            ) if mode == 'FRESHNESS_REPUBLISH' and
-                self.last_freshness_source_age_s is not None else '')))
+        profile_fields = [
+            f'mode={mode}', f'map_changed={map_changed}',
+            f'dimensions={dimensions[0]}x{dimensions[1]}',
+            f'invocations={stats["invocations"]}',
+            f'full_rebuilds={stats["full_rebuilds"]}',
+            f'pose_updates={stats["pose_updates"]}',
+            f'cells_inspected={stats["cells_inspected"]}',
+            f'cells_copied={stats["cells_copied"]}',
+            f'cells_modified={stats["cells_modified"]}',
+            f'publications={stats["publications"]}',
+            f'visualization_bases={stats["visualization_bases"]}',
+            f'visualization_updates={stats["visualization_updates"]}',
+            f'dirty_events={stats["dirty_events"]}',
+            f'coalesced_events={stats["coalesced_events"]}',
+            f'rebuild_skipped={stats["rebuild_skipped"]}',
+            f'wall_duration_s={stats["wall_s"]:.6f}',
+            f'cpu_duration_s={stats["cpu_s"]:.6f}',
+            f'window_wall_s={elapsed:.3f}',
+        ]
+        if mode == 'FRESHNESS_REPUBLISH' and self.last_freshness_source_age_s is not None:
+            profile_fields.extend((
+                f'freshness_source_age_s={self.last_freshness_source_age_s:.3f}',
+                f'freshness_previous_publication_age_s='
+                f'{self.last_freshness_previous_publication_age_s:.3f}',
+                f'freshness_output_stamp_s={self.last_freshness_output_stamp_s:.3f}',
+            ))
+        self.get_logger().info('FUSION_PROFILE ' + ' '.join(profile_fields))
         stats.update({
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,

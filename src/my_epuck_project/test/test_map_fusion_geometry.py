@@ -218,6 +218,33 @@ def test_freshness_republish_respects_existing_cadence():
     assert not published
 
 
+def test_freshness_profile_diagnostic_is_serializable():
+    fusion = object.__new__(SourceAwareMapFusion)
+    fusion.profile_window = {
+        'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
+        'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
+        'publications': 0, 'visualization_bases': 0,
+        'visualization_updates': 0, 'dirty_events': 0,
+        'coalesced_events': 0, 'rebuild_skipped': 0,
+        'wall_s': 0.0, 'cpu_s': 0.0, 'last_log_wall': 0.0,
+    }
+    fusion.last_freshness_source_age_s = 0.25
+    fusion.last_freshness_previous_publication_age_s = 1.5
+    fusion.last_freshness_output_stamp_s = 12.0
+    messages = []
+    fusion.get_logger = lambda: SimpleNamespace(
+        info=lambda message: messages.append(message))
+
+    fusion._profile(
+        mode='FRESHNESS_REPUBLISH', map_changed=False,
+        dimensions=(2, 2), cells_inspected=0, cells_copied=0,
+        cells_modified=0, published=True, wall_s=0.01, cpu_s=0.01)
+
+    assert messages
+    assert 'mode=FRESHNESS_REPUBLISH' in messages[0]
+    assert 'freshness_source_age_s=0.250' in messages[0]
+
+
 def test_fusion_snapshot_time_is_the_newest_input_map_stamp():
     """Both peers must sanitize one map pair at the same TF snapshot time."""
     first = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])

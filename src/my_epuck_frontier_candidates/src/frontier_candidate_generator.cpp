@@ -1582,7 +1582,7 @@ private:
           ++stale_results_;
           return;
         }
-        cancel_query_timeout();
+        cancel_query_timeout_for(request);
         active_.reset();
         active_request_ = 0;
         uint64_t current_map, current_costmap;
@@ -1709,7 +1709,7 @@ private:
     // Nav2 goal.  If goal response delivery is lost, the response callback
     // cannot be the place that starts the watchdog: this request would then
     // retain active_request_ and the path lock indefinitely.
-    timeout_timer_ = create_wall_timer(
+    auto query_timeout_timer = create_wall_timer(
       std::chrono::duration<double>(path_query_timeout_s_),
       [this, candidate, revision, cost_revision, candidate_generation, request, request_started] {
         if (request != active_request_ || request != request_generation_ ||
@@ -1758,10 +1758,15 @@ private:
           candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
           Action::Result::TIMEOUT,
           std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
-        cancel_query_timeout();
+        cancel_query_timeout_owned_by(request);
         release_path_lock_for(request);
         schedule_query_retry(1ms);
       }, watchdog_callback_group_);
+    {
+      std::lock_guard<std::mutex> lock(timeout_timer_mu_);
+      timeout_timer_ = std::move(query_timeout_timer);
+      timeout_timer_request_ = request;
+    }
     RCLCPP_INFO(
       get_logger(),
       "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=WATCHDOG_ARMED "
@@ -1781,7 +1786,7 @@ private:
     }
     request_generation_++;
     active_request_ = 0;
-    if (timeout_timer_) {timeout_timer_->cancel();}
+    cancel_query_timeout();
     cancel_retry_timer();
     release_path_lock();
     state_ = State::PUBLISHING;
@@ -1907,17 +1912,32 @@ private:
 
   void cancel_query_timeout()
   {
+    std::lock_guard<std::mutex> lock(timeout_timer_mu_);
     if (timeout_timer_) {
       timeout_timer_->cancel();
       timeout_timer_.reset();
     }
+    timeout_timer_request_ = 0;
   }
 
   void cancel_query_timeout_for(uint64_t request)
   {
     if (request == active_request_) {
-      cancel_query_timeout();
+      cancel_query_timeout_owned_by(request);
     }
+  }
+
+  void cancel_query_timeout_owned_by(uint64_t request)
+  {
+    std::lock_guard<std::mutex> lock(timeout_timer_mu_);
+    if (request != timeout_timer_request_) {
+      return;
+    }
+    if (timeout_timer_) {
+      timeout_timer_->cancel();
+      timeout_timer_.reset();
+    }
+    timeout_timer_request_ = 0;
   }
 
   void schedule_query_retry(std::chrono::milliseconds delay)
@@ -2372,6 +2392,8 @@ private:
   rclcpp_action::Client<Action>::SharedPtr planner_;
   GoalHandle::SharedPtr active_;
   rclcpp::TimerBase::SharedPtr timer_, timeout_timer_, retry_timer_, receipt_summary_timer_;
+  std::mutex timeout_timer_mu_;
+  uint64_t timeout_timer_request_{0};
   rclcpp::CallbackGroup::SharedPtr planner_callback_group_, watchdog_callback_group_;
   rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;

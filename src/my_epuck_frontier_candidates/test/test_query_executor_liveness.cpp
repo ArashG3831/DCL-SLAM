@@ -4,6 +4,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -90,6 +91,97 @@ private:
   std::atomic<bool> submitted_{false}, timed_out_{false};
 };
 
+class TimeoutRetryOwnershipNode : public rclcpp::Node
+{
+public:
+  TimeoutRetryOwnershipNode()
+  : Node("candidate_query_timeout_retry_ownership")
+  {
+    watchdog_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    retry_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    start_timer_ = create_wall_timer(
+      std::chrono::milliseconds(10), [this] {start_first_query();}, retry_group_);
+  }
+
+  std::shared_future<void> completion() {return completion_.get_future().share();}
+
+private:
+  void start_first_query()
+  {
+    if (started_) {
+      return;
+    }
+    started_ = true;
+    start_timer_->cancel();
+    arm_watchdog(1, std::chrono::milliseconds(40));
+  }
+
+  void arm_watchdog(uint64_t request, std::chrono::milliseconds delay)
+  {
+    auto timer = create_wall_timer(
+      delay,
+      [this, request] {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (request != watchdog_request_) {
+          return;
+        }
+        if (watchdog_timer_) {
+          watchdog_timer_->cancel();
+          watchdog_timer_.reset();
+        }
+        watchdog_request_ = 0;
+        if (request == 1) {
+          schedule_retry();
+          return;
+        }
+        try {
+          completion_.set_value();
+        } catch (const std::future_error &) {
+        }
+      },
+      watchdog_group_);
+    std::lock_guard<std::mutex> lock(mu_);
+    watchdog_timer_ = std::move(timer);
+    watchdog_request_ = request;
+  }
+
+  void schedule_retry()
+  {
+    retry_timer_ = create_wall_timer(
+      std::chrono::milliseconds(1),
+      [this] {
+        retry_timer_->cancel();
+        retry_timer_.reset();
+        arm_watchdog(2, std::chrono::milliseconds(80));
+        // Model a late cleanup callback belonging to request 1 arriving after
+        // request 2 has installed its watchdog.
+        late_cleanup_timer_ = create_wall_timer(
+          std::chrono::milliseconds(10), [this] {cancel_watchdog_owned_by(1);}, retry_group_);
+      },
+      retry_group_);
+  }
+
+  void cancel_watchdog_owned_by(uint64_t request)
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (request != watchdog_request_) {
+      return;
+    }
+    if (watchdog_timer_) {
+      watchdog_timer_->cancel();
+      watchdog_timer_.reset();
+    }
+    watchdog_request_ = 0;
+  }
+
+  rclcpp::CallbackGroup::SharedPtr watchdog_group_, retry_group_;
+  rclcpp::TimerBase::SharedPtr start_timer_, watchdog_timer_, retry_timer_, late_cleanup_timer_;
+  std::mutex mu_;
+  uint64_t watchdog_request_{0};
+  bool started_{false};
+  std::promise<void> completion_;
+};
+
 void run_executor_liveness_case(const std::string & action_name, bool server)
 {
   auto node = std::make_shared<PendingPlannerNode>(action_name, server);
@@ -119,5 +211,21 @@ TEST(CandidateExecutorLiveness, AcceptedGoalWithoutResultWatchdogRunsOnExecutor)
 {
   rclcpp::init(0, nullptr);
   run_executor_liveness_case("/fixb_executor_no_result", true);
+  rclcpp::shutdown();
+}
+
+TEST(CandidateExecutorLiveness, TimeoutRetryCannotCancelSuccessorWatchdog)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<TimeoutRetryOwnershipNode>();
+  auto completion = node->completion();
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  std::thread spin_thread([&executor] {executor.spin();});
+
+  EXPECT_EQ(completion.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+
+  executor.cancel();
+  spin_thread.join();
   rclcpp::shutdown();
 }

@@ -212,6 +212,17 @@ bool candidate_cycle_revisions_match(
   return request_map_revision == current_map_revision &&
          request_costmap_revision == current_costmap_revision;
 }
+bool candidate_query_contexts_match(
+  uint64_t request_map_context, uint64_t current_map_context,
+  uint64_t request_cost_context, uint64_t current_cost_context,
+  uint64_t request_path_map_context, uint64_t current_path_map_context,
+  uint64_t request_path_cost_context, uint64_t current_path_cost_context)
+{
+  return request_map_context == current_map_context &&
+         request_cost_context == current_cost_context &&
+         request_path_map_context == current_path_map_context &&
+         request_path_cost_context == current_path_cost_context;
+}
 bool candidate_cycle_retry_ready(
   bool processing_active, bool cycle_idle, bool has_map, bool has_costmap)
 {

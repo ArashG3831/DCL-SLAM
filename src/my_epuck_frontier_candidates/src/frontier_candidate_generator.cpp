@@ -954,6 +954,99 @@ private:
            cache.path_cost_context == work.path_cost_context && cache.has_work;
   }
 
+  bool work_context_matches_snapshot(
+    const Work & work,
+    const nav_msgs::msg::OccupancyGrid::ConstSharedPtr & map,
+    const nav_msgs::msg::OccupancyGrid::ConstSharedPtr & costmap) const
+  {
+    if (!map || !costmap) {
+      return false;
+    }
+    frontier_exploration_ros2::OccupancyGrid2d map_grid(map), cost_grid(costmap);
+    const auto current_map_context = local_context_checksum(
+      map_grid, work.region.centroid.first, work.region.centroid.second,
+      classification_context_radius_m_);
+    const auto current_cost_context = local_context_checksum(
+      cost_grid, work.pose.pose.position.x, work.pose.pose.position.y,
+      classification_context_radius_m_);
+    const auto current_path_map_context = local_context_checksum(
+      map_grid, work.region.centroid.first, work.region.centroid.second,
+      path_context_radius_m_);
+    const auto current_path_cost_context = local_context_checksum(
+      cost_grid, work.pose.pose.position.x, work.pose.pose.position.y,
+      path_context_radius_m_);
+    return candidate_query_contexts_match(
+      work.map_context, current_map_context,
+      work.cost_context, current_cost_context,
+      work.path_map_context, current_path_map_context,
+      work.path_cost_context, current_path_cost_context);
+  }
+
+  bool work_context_matches_latest(const Work & work)
+  {
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr map, costmap;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      map = latest_map_;
+      costmap = latest_cost_;
+    }
+    return work_context_matches_snapshot(work, map, costmap);
+  }
+
+  void reject_stale_work(
+    const Work & work, uint64_t request_map_revision, uint64_t current_map_revision,
+    uint64_t request_costmap_revision, uint64_t current_costmap_revision)
+  {
+    set_region_status(work.id, "DETECTED_NOT_QUERIED");
+    auto & cache = evaluation_cache_[work.id];
+    cache.classification = "DETECTED_NOT_QUERIED";
+    cache.has_work = false;
+    cache.last_query_result = "STALE_REVISION_REJECTED";
+    cache.last_query_ns = now().nanoseconds();
+    ++cache.cycles_not_queried;
+    if (work.tier1_unqueried) {
+      ++cycle_tier1_aborted_;
+    }
+    ++cycle_stale_query_rejections_;
+    RCLCPP_INFO(
+      get_logger(),
+      "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=STALE_REVISION_REJECTED "
+      "reason=LOCAL_CONTEXT_CHANGED request_map_revision=%lu current_map_revision=%lu "
+      "request_costmap_revision=%lu current_costmap_revision=%lu",
+      work.query_event_id, work.id, request_map_revision, current_map_revision,
+      request_costmap_revision, current_costmap_revision);
+  }
+
+  void refresh_publication_context()
+  {
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr map, costmap;
+    uint64_t map_revision, costmap_revision;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      map = latest_map_;
+      costmap = latest_cost_;
+      map_revision = revision_;
+      costmap_revision = cost_revision_;
+    }
+    if (!map || !costmap) {
+      return;
+    }
+    std::vector<Work> valid;
+    valid.reserve(reachable_.size());
+    for (const auto & work : reachable_) {
+      if (work_context_matches_snapshot(work, map, costmap)) {
+        valid.push_back(work);
+      } else {
+        reject_stale_work(work, cycle_revision_, map_revision, cycle_cost_revision_, costmap_revision);
+      }
+    }
+    reachable_.swap(valid);
+    cycle_map_ = map;
+    cycle_cost_ = costmap;
+    cycle_revision_ = map_revision;
+    cycle_cost_revision_ = costmap_revision;
+  }
+
   void set_region_status(uint64_t id, const std::string & status)
   {
     for (auto & diagnostic : region_diagnostics_) {
@@ -1019,6 +1112,7 @@ private:
     cycle_old_cost_revision_ = 0;
     cycle_new_cost_revision_ = 0;
     cycle_map_cancelled_tier1_ = 0;
+    cycle_stale_query_rejections_ = 0;
     const auto started = now();
     cycle_map_ = map;
     cycle_cost_ = costmap;
@@ -1410,8 +1504,7 @@ private:
           current_map = revision_;
           current_costmap = cost_revision_;
         }
-        if (!candidate_cycle_revisions_match(
-            revision, current_map, cost_revision, current_costmap)) {
+        if (!work_context_matches_latest(candidate)) {
           cycle_termination_reason_ = "MAP_REVISION_CHANGED";
           cycle_old_revision_ = revision;
           cycle_new_revision_ = current_map;
@@ -1420,8 +1513,8 @@ private:
           if (handle) {planner_->async_cancel_goal(handle);}
           ++stale_results_;
           release_path_lock_for(request);
-          finish(false);
-          schedule_latest_cycle_retry();
+          reject_stale_work(candidate, revision, current_map, cost_revision, current_costmap);
+          send_next();
           return;
         }
           if (!handle) {
@@ -1504,20 +1597,16 @@ private:
           current_map = revision_;
           current_costmap = cost_revision_;
         }
-        if (!candidate_cycle_revisions_match(
-            revision, current_map, cost_revision, current_costmap)) {
+        if (!work_context_matches_latest(candidate)) {
           cycle_termination_reason_ = "MAP_REVISION_CHANGED";
           cycle_old_revision_ = revision;
           cycle_new_revision_ = current_map;
           cycle_old_cost_revision_ = cost_revision;
           cycle_new_cost_revision_ = current_costmap;
-          for (std::size_t i = query_index_; i < works_.size(); ++i) {
-            if (works_[i].tier1_unqueried) {++cycle_map_cancelled_tier1_;}
-          }
           ++stale_results_;
           release_path_lock_for(request);
-          finish(false);
-          schedule_latest_cycle_retry();
+          reject_stale_work(candidate, revision, current_map, cost_revision, current_costmap);
+          send_next();
           return;
         }
         const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
@@ -1640,7 +1729,15 @@ private:
     cancel_retry_timer();
     release_path_lock();
     state_ = State::PUBLISHING;
+    bool retry_latest_cycle = false;
     if (publish) {
+      refresh_publication_context();
+      retry_latest_cycle = cycle_stale_query_rejections_ > 0 && reachable_.empty();
+      if (retry_latest_cycle) {
+        cycle_termination_reason_ = "STALE_REVISION_NO_VALID_CANDIDATES";
+      }
+    }
+    if (publish && !retry_latest_cycle) {
       normalize_final();
       publish_batch();
       cycle_tier1_remaining_dnu_ = static_cast<std::size_t>(std::count_if(
@@ -1651,7 +1748,7 @@ private:
     prune_evaluation_cache();
     RCLCPP_WARN(
       get_logger(),
-      "FRONTIER_LIFECYCLE robot=%s cycle=%lu sim_time=%.3f snapshot_frontiers=%u unique_frontier_records=%zu duplicate_id_records=%zu cache_before=%zu cache_after=%zu reused_ids=%zu new_ids=%zu pruned_absent=%zu evicted_capacity=%zu identity_associations=%zu dnu=%u tier1_pending_start=%zu tier1_selected=%zu tier1_sent=%zu tier1_reachable=%zu tier1_unreachable=%zu tier1_aborted=%zu tier1_timeout=%zu tier1_remaining_dnu=%zu termination=%s old_revision=%lu new_revision=%lu old_costmap_revision=%lu new_costmap_revision=%lu map_cancelled_tier1=%zu",
+      "FRONTIER_LIFECYCLE robot=%s cycle=%lu sim_time=%.3f snapshot_frontiers=%u unique_frontier_records=%zu duplicate_id_records=%zu cache_before=%zu cache_after=%zu reused_ids=%zu new_ids=%zu pruned_absent=%zu evicted_capacity=%zu identity_associations=%zu dnu=%u tier1_pending_start=%zu tier1_selected=%zu tier1_sent=%zu tier1_reachable=%zu tier1_unreachable=%zu tier1_aborted=%zu tier1_timeout=%zu tier1_remaining_dnu=%zu termination=%s old_revision=%lu new_revision=%lu old_costmap_revision=%lu new_costmap_revision=%lu map_cancelled_tier1=%zu stale_query_rejections=%zu",
       robot_id_.c_str(), cycle_sequence_, cycle_start_sim_time_, detected_frontier_count_,
       cycle_unique_frontier_records_, cycle_duplicate_id_records_, cycle_cache_before_,
       evaluation_cache_.size(), cycle_reused_ids_, cycle_new_ids_,
@@ -1661,12 +1758,15 @@ private:
       cycle_tier1_aborted_, cycle_tier1_timeout_, cycle_tier1_remaining_dnu_,
       query_termination_name(cycle_termination_reason_), cycle_old_revision_,
       cycle_new_revision_, cycle_old_cost_revision_, cycle_new_cost_revision_,
-      cycle_map_cancelled_tier1_);
+      cycle_map_cancelled_tier1_, cycle_stale_query_rejections_);
     state_ = State::IDLE;
     works_.clear();
     reachable_.clear();
     cycle_map_.reset();
     cycle_cost_.reset();
+    if (retry_latest_cycle) {
+      schedule_latest_cycle_retry();
+    }
   }
 
   void prune_evaluation_cache()
@@ -2246,6 +2346,7 @@ private:
   std::size_t cycle_tier1_unreachable_{0}, cycle_tier1_aborted_{0};
   std::size_t cycle_tier1_timeout_{0}, cycle_tier1_remaining_dnu_{0};
   std::size_t cycle_map_cancelled_tier1_{0};
+  std::size_t cycle_stale_query_rejections_{0};
   uint64_t cycle_old_revision_{0}, cycle_new_revision_{0};
   uint64_t cycle_old_cost_revision_{0}, cycle_new_cost_revision_{0};
   std::string cycle_termination_reason_{"OTHER"};

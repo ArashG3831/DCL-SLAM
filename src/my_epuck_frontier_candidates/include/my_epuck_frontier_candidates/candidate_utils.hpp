@@ -70,6 +70,11 @@ bool async_request_is_current(uint64_t request_generation,uint64_t active_reques
 bool candidate_cycle_revisions_match(
   uint64_t request_map_revision, uint64_t current_map_revision,
   uint64_t request_costmap_revision, uint64_t current_costmap_revision);
+bool candidate_query_contexts_match(
+  uint64_t request_map_context, uint64_t current_map_context,
+  uint64_t request_cost_context, uint64_t current_cost_context,
+  uint64_t request_path_map_context, uint64_t current_path_map_context,
+  uint64_t request_path_cost_context, uint64_t current_path_cost_context);
 bool candidate_cycle_retry_ready(
   bool processing_active, bool cycle_idle, bool has_map, bool has_costmap);
 bool candidate_retry_callback_is_current(

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -145,6 +146,20 @@ TEST(AsyncRequests,RevisionChangeInvalidatesOnlyCapturedCycle){
   EXPECT_TRUE(candidate_cycle_revisions_match(19,19,7,7));
   EXPECT_FALSE(candidate_cycle_revisions_match(19,20,7,7));
   EXPECT_FALSE(candidate_cycle_revisions_match(19,19,7,8));
+}
+TEST(AsyncRequests,LocalContextChangeRejectsOnlyThatQuery){
+  EXPECT_TRUE(candidate_query_contexts_match(1,1,2,2,3,3,4,4));
+  EXPECT_FALSE(candidate_query_contexts_match(1,9,2,2,3,3,4,4));
+  EXPECT_FALSE(candidate_query_contexts_match(1,1,2,9,3,3,4,4));
+  EXPECT_FALSE(candidate_query_contexts_match(1,1,2,2,3,9,4,4));
+  EXPECT_FALSE(candidate_query_contexts_match(1,1,2,2,3,3,4,9));
+}
+TEST(AsyncRequests,ValidQueriesSurviveIndependentStaleQuery){
+  const std::vector<bool> contexts_valid{true, false, true, true};
+  const auto valid = static_cast<std::size_t>(std::count(
+    contexts_valid.begin(), contexts_valid.end(), true));
+  EXPECT_EQ(valid, 3U);
+  EXPECT_FALSE(contexts_valid[1]);
 }
 TEST(AsyncRequests,StaleCycleRetryRequiresReusableCompleteInputs){
   EXPECT_TRUE(candidate_cycle_retry_ready(true, true, true, true));

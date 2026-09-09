@@ -9,6 +9,10 @@ GENERATOR = (ROOT / "my_epuck_frontier_candidates" / "src" /
 CMAKE = ROOT / "my_epuck_frontier_candidates" / "CMakeLists.txt"
 FRONTIER_LAUNCH = ROOT / "my_epuck_project" / "launch" / (
     "two_robots_frontier_candidates_launch.py")
+DECENTRALIZED_LAUNCH = ROOT / "my_epuck_project" / "launch" / (
+    "two_robots_decentralized_exploration_launch.py")
+PROFILES = ROOT / "my_epuck_project" / "my_epuck_project" / (
+    "cooperative_profiles.py")
 
 
 def _source():
@@ -27,6 +31,8 @@ def test_adapter_constructs_upstream_core_and_uses_snapshot():
 def test_condition_c_plumbs_pinned_decision_map_defaults_without_changing_minimum():
     source = _source()
     launch = FRONTIER_LAUNCH.read_text(encoding="utf-8")
+    decentralized = DECENTRALIZED_LAUNCH.read_text(encoding="utf-8")
+    profiles = PROFILES.read_text(encoding="utf-8")
     for declaration in (
             "P(bool, frontier_map_optimization_enabled, true)",
             "P(double, sigma_s, 2.0)",
@@ -39,10 +45,12 @@ def test_condition_c_plumbs_pinned_decision_map_defaults_without_changing_minimu
             "params.sigma_r = sigma_r_;",
             "params.dilation_kernel_radius_cells = dilation_kernel_radius_cells_;"):
         assert assignment in source
-    assert "'frontier_map_optimization_enabled': True" in launch
-    assert "'sigma_s': 2.0" in launch
-    assert "'sigma_r': 30.0" in launch
-    assert "'dilation_kernel_radius_cells': 2" in launch
+    assert "FRONTIER_DECISION_MAP_PARAMETERS" in launch
+    assert "FRONTIER_DECISION_MAP_PARAMETERS" in decentralized
+    assert "'frontier_map_optimization_enabled': True" in profiles
+    assert "'sigma_s': 2.0" in profiles
+    assert "'sigma_r': 30.0" in profiles
+    assert "'dilation_kernel_radius_cells': 2" in profiles
     assert "'minimum_frontier_cells': minimum_frontier_cells" in launch
     assert "frontier_map_optimization_enabled = false" not in source
 

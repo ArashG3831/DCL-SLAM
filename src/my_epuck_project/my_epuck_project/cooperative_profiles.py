@@ -41,6 +41,17 @@ CONSERVATIVE_SCAN_MATCHING_PARAMETERS = {
 }
 
 
+# One authoritative decision-map configuration shared by the pre-handoff and
+# shared/post-handoff frontier-generator launch paths.  This is a private
+# frontier-decision view; it does not alter the SLAM/shared map or Nav2 maps.
+FRONTIER_DECISION_MAP_PARAMETERS = {
+    'frontier_map_optimization_enabled': True,
+    'sigma_s': 2.0,
+    'sigma_r': 30.0,
+    'dilation_kernel_radius_cells': 2,
+}
+
+
 PROFILE_SETTINGS = {
     'small': {
         'world': 'epuck_d500_two_world_teammate_visible.wbt',

@@ -22,7 +22,11 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-from my_epuck_project.cooperative_profiles import profile_for_world, profile_summary
+from my_epuck_project.cooperative_profiles import (
+    FRONTIER_DECISION_MAP_PARAMETERS,
+    profile_for_world,
+    profile_summary,
+)
 
 
 def _frontend_exit_handler(robot, handoff_marker_path=''):
@@ -357,6 +361,11 @@ def launch_setup(context):
                         'candidate_topic': f'/{robot}/local_frontier_candidates',
                         'marker_topic': f'/{robot}/local_frontier_candidate_markers',
                         'processing_rate_hz': 0.5,
+                        # Use the same private decision-map configuration as
+                        # the shared/post-handoff generator.  Keeping this
+                        # mapping centralized prevents the pre-handoff path
+                        # from silently falling back to the C++ default.
+                        **FRONTIER_DECISION_MAP_PARAMETERS,
                         'minimum_frontier_cells': selected['minimum_frontier_cells'],
                         'minimum_frontier_length_m': 0.05,
                         'stable_id_quantization_m': 0.05,

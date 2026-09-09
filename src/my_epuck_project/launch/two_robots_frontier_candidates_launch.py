@@ -6,7 +6,10 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from my_epuck_project.cooperative_profiles import profile_for_world
+from my_epuck_project.cooperative_profiles import (
+    FRONTIER_DECISION_MAP_PARAMETERS,
+    profile_for_world,
+)
 
 def generator(robot, minimum_frontier_cells, approach_clearance,
               forensic_clearance_cells, log_level, route_ordering_enabled,
@@ -27,13 +30,11 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'marker_topic': f'/{robot}/frontier_candidate_markers',
             'processing_rate_hz': 0.5,
             'handoff_gated': LaunchConfiguration('handoff_gated'),
-            # Pinned frontier_exploration_ros2 decision-map defaults.  This is
-            # a private frontier-decision view; the shared SLAM map and Nav2
-            # costmap topics remain unchanged.
-            'frontier_map_optimization_enabled': True,
-            'sigma_s': 2.0,
-            'sigma_r': 30.0,
-            'dilation_kernel_radius_cells': 2,
+            # Pinned upstream decision-map settings shared with the
+            # pre-handoff generator path.  This is a private frontier-
+            # decision view; the shared SLAM map and Nav2 costmap topics
+            # remain unchanged.
+            **FRONTIER_DECISION_MAP_PARAMETERS,
             'minimum_frontier_cells': minimum_frontier_cells,
             'minimum_frontier_length_m': 0.05,
             'stable_id_quantization_m': 0.05,

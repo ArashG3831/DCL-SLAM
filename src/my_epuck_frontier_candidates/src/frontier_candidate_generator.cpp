@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <fcntl.h>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <signal.h>
 #include <string>
 #include <sys/file.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -99,6 +101,21 @@ class Generator : public rclcpp::Node {
           section, sim_time_s,
           std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count());
+      }
+    }
+  };
+
+  struct QueryBoundaryScope {
+    Generator * owner;
+    const char * exit_event;
+
+    QueryBoundaryScope(Generator * node, const char * event)
+    : owner(node), exit_event(event) {}
+
+    ~QueryBoundaryScope()
+    {
+      if (owner) {
+        owner->log_query_boundary(exit_event);
       }
     }
   };
@@ -1414,6 +1431,8 @@ private:
 
   void send_next()
   {
+    log_query_boundary("SEND_NEXT_ENTER");
+    QueryBoundaryScope boundary(this, "SEND_NEXT_EXIT");
     TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
     if (queries_ >= static_cast<std::size_t>(maximum_path_queries_per_cycle_)) {
       cycle_termination_reason_ = "QUERY_LIMIT_REACHED";
@@ -1797,18 +1816,29 @@ private:
         release_path_lock_for(request);
         schedule_query_retry(1ms);
       }, watchdog_callback_group_);
+    log_query_boundary(
+      "TIMEOUT_TIMER_MUTEX_BEFORE_LOCK", request, candidate_generation, query_index_, queries_);
     {
       std::lock_guard<std::mutex> lock(timeout_timer_mu_);
       timeout_timer_ = std::move(query_timeout_timer);
       timeout_timer_request_ = request;
     }
+    log_query_boundary(
+      "TIMEOUT_TIMER_MUTEX_AFTER_UNLOCK", request, candidate_generation, query_index_, queries_);
     RCLCPP_INFO(
       get_logger(),
       "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=WATCHDOG_ARMED "
       "candidate_generation_id=%lu request_id=%lu timeout_s=%.3f",
       candidate.query_event_id, candidate.id, candidate_generation, request,
       path_query_timeout_s_);
-    planner_->async_send_goal(goal, options);
+    log_query_boundary(
+      "ASYNC_SEND_GOAL_BEFORE", request, candidate_generation, query_index_, queries_);
+    auto goal_future = planner_->async_send_goal(goal, options);
+    log_query_boundary(
+      "ASYNC_SEND_GOAL_AFTER", request, candidate_generation, query_index_, queries_);
+    (void)goal_future;
+    log_query_boundary(
+      "ASYNC_SEND_GOAL_FUTURE_RECEIVED", request, candidate_generation, query_index_, queries_);
   }
 
   void finish(bool publish = true)
@@ -1989,11 +2019,35 @@ private:
     timeout_timer_request_ = 0;
   }
 
+  void log_query_boundary(
+    const char * event, uint64_t request = 0, uint64_t generation = 0,
+    std::size_t query_index = std::numeric_limits<std::size_t>::max(),
+    std::size_t queries = std::numeric_limits<std::size_t>::max())
+  {
+    const auto effective_query_index = query_index == std::numeric_limits<std::size_t>::max() ?
+      query_index_ : query_index;
+    const auto effective_queries = queries == std::numeric_limits<std::size_t>::max() ?
+      queries_ : queries;
+    const auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    const auto wall_s = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    RCLCPP_INFO(
+      get_logger(),
+      "FRONTIER_QUERY_BOUNDARY event=%s request_id=%lu generation=%lu query_index=%zu "
+      "queries=%zu active_request=%lu request_generation=%lu timer_owner_request=%lu "
+      "retry_generation=%lu thread_id=%zu wall_s=%.9f",
+      event, request, generation, effective_query_index, effective_queries,
+      active_request_.load(), request_generation_.load(), timeout_timer_request_.load(),
+      retry_generation_, thread_id, wall_s);
+  }
+
   void schedule_query_retry(std::chrono::milliseconds delay)
   {
     if (retry_timer_) {return;}
     const auto callback_generation = ++retry_generation_;
     retry_timer_ = create_wall_timer(delay, [this, callback_generation] {
+      QueryBoundaryScope boundary(this, "RETRY_CALLBACK_EXIT");
+      log_query_boundary("RETRY_CALLBACK_ENTER");
       if (!candidate_retry_callback_is_current(callback_generation, retry_generation_)) {
         return;
       }

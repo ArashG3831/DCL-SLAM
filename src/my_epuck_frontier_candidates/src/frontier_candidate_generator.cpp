@@ -30,7 +30,6 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
-#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -317,9 +316,7 @@ public:
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       marker_topic_, rclcpp::QoS(1).reliable());
     initialize_upstream_core();
-    planner_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    watchdog_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_, planner_callback_group_);
+    planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
     if (handoff_gated_ || stop_after_handoff_) {
       handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
         "/cslam/relative_pose/hypotheses", rclcpp::QoS(1).reliable(),
@@ -1815,7 +1812,7 @@ private:
         cancel_query_timeout_owned_by(request);
         release_path_lock_for(request);
         schedule_query_retry(1ms);
-      }, watchdog_callback_group_);
+      });
     log_query_boundary(
       "TIMEOUT_TIMER_MUTEX_BEFORE_LOCK", request, candidate_generation, query_index_, queries_);
     {
@@ -2497,7 +2494,6 @@ private:
   rclcpp::TimerBase::SharedPtr timer_, timeout_timer_, retry_timer_, receipt_summary_timer_;
   std::mutex timeout_timer_mu_;
   std::atomic<uint64_t> timeout_timer_request_{0};
-  rclcpp::CallbackGroup::SharedPtr planner_callback_group_, watchdog_callback_group_;
   rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;
   rclcpp::Publisher<my_epuck_interfaces::msg::FrontierCandidateArray>::SharedPtr pub_;
@@ -2565,8 +2561,6 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<my_epuck_frontier_candidates::Generator>();
-  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
-  executor.add_node(node);
-  executor.spin();
+  rclcpp::spin(node);
   rclcpp::shutdown();
 }

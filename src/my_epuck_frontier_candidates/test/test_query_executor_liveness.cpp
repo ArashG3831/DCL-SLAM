@@ -23,9 +23,7 @@ public:
   PendingPlannerNode(const std::string & action_name, bool create_server)
   : Node("candidate_query_executor_liveness")
   {
-    planner_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    watchdog_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    planner_ = rclcpp_action::create_client<Action>(this, action_name, planner_group_);
+    planner_ = rclcpp_action::create_client<Action>(this, action_name);
 
     if (create_server) {
       server_ = rclcpp_action::create_server<Action>(
@@ -44,9 +42,9 @@ public:
     }
 
     submit_timer_ = create_wall_timer(
-      std::chrono::milliseconds(20), [this] {submit_query();}, planner_group_);
+      std::chrono::milliseconds(20), [this] {submit_query();});
     watchdog_timer_ = create_wall_timer(
-      std::chrono::milliseconds(100), [this] {watchdog_tick();}, watchdog_group_);
+      std::chrono::milliseconds(100), [this] {watchdog_tick();});
   }
 
   std::shared_future<void> completion() {return completion_.get_future().share();}
@@ -82,7 +80,6 @@ private:
     }
   }
 
-  rclcpp::CallbackGroup::SharedPtr planner_group_, watchdog_group_;
   rclcpp_action::Client<Action>::SharedPtr planner_;
   rclcpp_action::Server<Action>::SharedPtr server_;
   std::shared_ptr<ServerGoalHandle> server_goal_;
@@ -97,10 +94,8 @@ public:
   TimeoutRetryOwnershipNode()
   : Node("candidate_query_timeout_retry_ownership")
   {
-    watchdog_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    retry_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     start_timer_ = create_wall_timer(
-      std::chrono::milliseconds(10), [this] {start_first_query();}, retry_group_);
+      std::chrono::milliseconds(10), [this] {start_first_query();});
   }
 
   std::shared_future<void> completion() {return completion_.get_future().share();}
@@ -138,8 +133,7 @@ private:
           completion_.set_value();
         } catch (const std::future_error &) {
         }
-      },
-      watchdog_group_);
+      });
     std::lock_guard<std::mutex> lock(mu_);
     watchdog_timer_ = std::move(timer);
     watchdog_request_ = request;
@@ -156,9 +150,8 @@ private:
         // Model a late cleanup callback belonging to request 1 arriving after
         // request 2 has installed its watchdog.
         late_cleanup_timer_ = create_wall_timer(
-          std::chrono::milliseconds(10), [this] {cancel_watchdog_owned_by(1);}, retry_group_);
-      },
-      retry_group_);
+          std::chrono::milliseconds(10), [this] {cancel_watchdog_owned_by(1);});
+      });
   }
 
   void cancel_watchdog_owned_by(uint64_t request)
@@ -174,7 +167,6 @@ private:
     watchdog_request_ = 0;
   }
 
-  rclcpp::CallbackGroup::SharedPtr watchdog_group_, retry_group_;
   rclcpp::TimerBase::SharedPtr start_timer_, watchdog_timer_, retry_timer_, late_cleanup_timer_;
   std::mutex mu_;
   uint64_t watchdog_request_{0};
@@ -186,7 +178,7 @@ void run_executor_liveness_case(const std::string & action_name, bool server)
 {
   auto node = std::make_shared<PendingPlannerNode>(action_name, server);
   auto completion = node->completion();
-  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
   std::thread spin_thread([&executor] {executor.spin();});
 
@@ -219,7 +211,7 @@ TEST(CandidateExecutorLiveness, TimeoutRetryCannotCancelSuccessorWatchdog)
   rclcpp::init(0, nullptr);
   auto node = std::make_shared<TimeoutRetryOwnershipNode>();
   auto completion = node->completion();
-  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
   std::thread spin_thread([&executor] {executor.spin();});
 

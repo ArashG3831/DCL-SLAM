@@ -16,6 +16,7 @@ import sys
 WORKSPACE = Path(__file__).resolve().parents[3]
 ROS_SETUP = Path('/opt/ros/jazzy/setup.bash')
 PROJECT_INSTALL = WORKSPACE / 'install_canonical_thesis_20260907_symlink'
+RCLCPP_ACTION_OVERLAY = WORKSPACE / 'dependency_overlay_rclcpp_action_2798_20260909'
 LOOPBACK_SETUP = WORKSPACE / 'scripts/ros2_wsl_cyclonedds_loopback.sh'
 DRIVER_PREFIX = Path('/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver')
 WORLD_PROFILE = 'large_unknown_pose_close_start_20ms_scan_matching'
@@ -27,6 +28,8 @@ LDD_TARGETS = (Path('/opt/ros/jazzy/lib/libsdformat_urdf_plugin.so'),
 RECORDED_ENV = ('MY_EPUCK_WORKSPACE', 'MY_EPUCK_INSTALL_PREFIX',
                 'MY_EPUCK_FRONTIER_PREFIX', 'MY_EPUCK_BUILD_BASE',
                 'MY_EPUCK_WEBOTS_DRIVER_PREFIX',
+                'MY_EPUCK_RCLCPP_ACTION_PREFIX',
+                'MY_EPUCK_RCLCPP_ACTION_UPSTREAM_FIX',
                 'MY_EPUCK_WEBOTS_NETWORK_MODE', 'RUN_OUT', 'ROS_DOMAIN_ID',
                 'RMW_IMPLEMENTATION', 'CYCLONEDDS_URI', 'AMENT_PREFIX_PATH',
                 'CMAKE_PREFIX_PATH', 'COLCON_PREFIX_PATH', 'PYTHONPATH',
@@ -63,7 +66,10 @@ def source_clean_environment() -> dict[str, str]:
     if not interop:
         raise LauncherError('WSL_INTEROP is required in WSL NAT mode')
     seed = {'HOME': '/home/arash', 'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'WSL_INTEROP': interop}
-    script = f'source {shlex.quote(str(ROS_SETUP))}; source {shlex.quote(str(PROJECT_INSTALL / "setup.bash"))}; source {shlex.quote(str(LOOPBACK_SETUP))}; env -0'
+    script = (f'source {shlex.quote(str(ROS_SETUP))}; '
+              f'source {shlex.quote(str(RCLCPP_ACTION_OVERLAY / "setup.bash"))}; '
+              f'source {shlex.quote(str(PROJECT_INSTALL / "setup.bash"))}; '
+              f'source {shlex.quote(str(LOOPBACK_SETUP))}; env -0')
     completed = subprocess.run(
         ['bash', '--noprofile', '--norc', '-c', script],
         env=seed, capture_output=True, check=False, timeout=30)
@@ -79,6 +85,8 @@ def canonical_environment(base: dict[str, str], result_root: Path, domain: int, 
         'MY_EPUCK_WORKSPACE': str(WORKSPACE),
         'MY_EPUCK_INSTALL_PREFIX': str(PROJECT_INSTALL / 'my_epuck_project'),
         'MY_EPUCK_FRONTIER_PREFIX': str(PROJECT_INSTALL / 'frontier_exploration_ros2'),
+        'MY_EPUCK_RCLCPP_ACTION_PREFIX': str(RCLCPP_ACTION_OVERLAY),
+        'MY_EPUCK_RCLCPP_ACTION_UPSTREAM_FIX': '6ad551a5cc284dbca270167aa7574cfc8376c871',
         'MY_EPUCK_BUILD_BASE': str(WORKSPACE / 'build_canonical_thesis_20260907_symlink'),
         'MY_EPUCK_WEBOTS_DRIVER_PREFIX': str(DRIVER_PREFIX),
         'MY_EPUCK_WEBOTS_NETWORK_MODE': 'nat',
@@ -108,7 +116,13 @@ def apply_existing_filter(env: dict[str, str]) -> None:
 
 def _ldd(env: dict[str, str]) -> dict[str, str]:
     reports = {}
-    for target in LDD_TARGETS:
+    targets = list(LDD_TARGETS)
+    dependency_library = Path(
+        env.get('MY_EPUCK_RCLCPP_ACTION_PREFIX', '')).resolve() / 'lib/librclcpp_action.so'
+    candidate_executable = (PROJECT_INSTALL / 'my_epuck_frontier_candidates/lib/'
+                            'my_epuck_frontier_candidates/frontier_candidate_generator')
+    targets.extend((dependency_library, candidate_executable))
+    for target in targets:
         if not target.is_file(): raise LauncherError(f'missing loader target: {target}')
         result = subprocess.run(['ldd', str(target)], env=env, capture_output=True, text=True, check=False, timeout=30)
         output = result.stdout + result.stderr
@@ -133,6 +147,8 @@ def validate_launcher_values(env: dict[str, str], host: str, result_root: Path) 
     if VENDOR_LIBRARY not in env.get('LD_LIBRARY_PATH', '').split(os.pathsep):
         raise LauncherError('ROS Jazzy vendor library path was lost')
     if not env.get('WSL_INTEROP'): raise LauncherError('WSL_INTEROP was not preserved')
+    if Path(env.get('MY_EPUCK_RCLCPP_ACTION_PREFIX', '')).resolve() != RCLCPP_ACTION_OVERLAY.resolve():
+        raise LauncherError('controlled rclcpp_action overlay is not selected')
 
 
 def existing_preflight(env: dict[str, str], result_root: Path, domain: int, port: int) -> dict[str, object]:

@@ -387,6 +387,30 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         'source_tree_sha256': _sha256_tree(frontier_source),
         'pinned_commit': '476aaf4',
     }
+    rclcpp_action_prefix = _ament_package_prefix('rclcpp_action', environment)
+    expected_rclcpp_action_prefix = environment.get(
+        'MY_EPUCK_RCLCPP_ACTION_PREFIX', '').strip()
+    rclcpp_action_library = (
+        rclcpp_action_prefix / 'lib/librclcpp_action.so'
+        if rclcpp_action_prefix else None)
+    rclcpp_action_report = {
+        'prefix': str(rclcpp_action_prefix) if rclcpp_action_prefix else None,
+        'expected_prefix': expected_rclcpp_action_prefix or None,
+        'library': str(rclcpp_action_library) if rclcpp_action_library else None,
+        'upstream_fix': environment.get(
+            'MY_EPUCK_RCLCPP_ACTION_UPSTREAM_FIX', '').strip() or None,
+        'library_sha256': _sha256_file(rclcpp_action_library),
+    }
+    if expected_rclcpp_action_prefix:
+        expected_prefix = Path(expected_rclcpp_action_prefix).resolve()
+        if rclcpp_action_prefix is None:
+            issues.append('rclcpp_action is missing from selected AMENT prefixes')
+        elif rclcpp_action_prefix != expected_prefix:
+            issues.append(
+                'rclcpp_action resolved outside controlled dependency overlay: '
+                f'{rclcpp_action_prefix}')
+        if rclcpp_action_library is None or not rclcpp_action_library.is_file():
+            issues.append('controlled rclcpp_action library is missing')
     if frontier_prefix is None:
         issues.append('frontier_exploration_ros2 is not present in selected AMENT prefixes')
     else:
@@ -460,6 +484,7 @@ def runtime_provenance(workspace, environment=None, ros_domain_id=None):
         'runtime_module_provenance': runtime_module_provenance,
         'source_build_parity': parity,
         'frontier_dependency': frontier_report,
+        'rclcpp_action_dependency': rclcpp_action_report,
         'project_package_prefixes': project_package_prefixes,
         'contaminated_environment_paths': contaminated,
         'allowed_external_prefixes': [str(path) for path in allowed_external_prefixes],

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -298,7 +300,9 @@ public:
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       marker_topic_, rclcpp::QoS(1).reliable());
     initialize_upstream_core();
-    planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
+    planner_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    watchdog_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_, planner_callback_group_);
     if (handoff_gated_ || stop_after_handoff_) {
       handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
         "/cslam/relative_pose/hypotheses", rclcpp::QoS(1).reliable(),
@@ -1757,7 +1761,13 @@ private:
         cancel_query_timeout();
         release_path_lock_for(request);
         schedule_query_retry(1ms);
-      });
+      }, watchdog_callback_group_);
+    RCLCPP_INFO(
+      get_logger(),
+      "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=WATCHDOG_ARMED "
+      "candidate_generation_id=%lu request_id=%lu timeout_s=%.3f",
+      candidate.query_event_id, candidate.id, candidate_generation, request,
+      path_query_timeout_s_);
     planner_->async_send_goal(goal, options);
   }
 
@@ -2330,12 +2340,13 @@ private:
   }
 
   std::mutex mu_;
-  State state_{State::WAITING_FOR_INPUTS};
+  std::atomic<State> state_{State::WAITING_FOR_INPUTS};
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_map_, latest_cost_, cycle_map_, cycle_cost_;
   uint64_t map_sum_{0}, cost_sum_{0}, revision_{0}, cost_revision_{0};
   uint64_t core_map_revision_{0}, core_costmap_revision_{0};
   uint64_t cycle_revision_{0}, cycle_cost_revision_{0}, stale_results_{0};
-  uint64_t request_generation_{0}, active_request_{0}, query_event_sequence_{0};
+  std::atomic<uint64_t> request_generation_{0}, active_request_{0};
+  uint64_t query_event_sequence_{0};
   uint64_t candidate_generation_id_{0};
   uint64_t map_receipts_{0}, map_changed_{0};
   uint64_t cost_receipts_{0}, cost_changed_{0}, classification_cache_hits_{0};
@@ -2361,6 +2372,7 @@ private:
   rclcpp_action::Client<Action>::SharedPtr planner_;
   GoalHandle::SharedPtr active_;
   rclcpp::TimerBase::SharedPtr timer_, timeout_timer_, retry_timer_, receipt_summary_timer_;
+  rclcpp::CallbackGroup::SharedPtr planner_callback_group_, watchdog_callback_group_;
   rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;
   rclcpp::Publisher<my_epuck_interfaces::msg::FrontierCandidateArray>::SharedPtr pub_;
@@ -2427,6 +2439,9 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<my_epuck_frontier_candidates::Generator>());
+  auto node = std::make_shared<my_epuck_frontier_candidates::Generator>();
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
 }

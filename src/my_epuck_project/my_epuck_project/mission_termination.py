@@ -227,7 +227,13 @@ def classify_empty_frontiers(
         first: CandidateEvidence,
         second: CandidateEvidence,
 ) -> TerminalReason | None:
-    """Return success only when all observed frontier evidence is classified."""
+    """Return success only for authoritative exhaustion evidence.
+
+    ``unreachable`` is deliberately not a terminal class.  It describes the
+    current planner/path result, which can change when map, TF, costmap, or
+    planner evidence catches up.  Treating it as mission exhaustion made a
+    transient all-unreachable view irreversible.
+    """
     evidence = (first, second)
     def actionable_count(item: CandidateEvidence) -> int:
         return (item.actionable_reachable if item.actionable_reachable is not None
@@ -248,6 +254,12 @@ def classify_empty_frontiers(
     small = sum(item.terminal_small or item.small for item in evidence)
     out_of_range = sum(item.out_of_range for item in evidence)
     unreachable = sum(item.unreachable for item in evidence)
+    # A frontier that is currently unreachable is not proof that exploration
+    # is exhausted.  It may become reachable after fresh map/TF/planner
+    # evidence arrives.  Keep the legacy enum for wire/diagnostic compatibility
+    # but never produce it as a successful completion classification.
+    if unreachable > 0:
+        return None
     if detected == 0:
         return TerminalReason.NO_FRONTIERS
     below_gain = sum(item.below_minimum_gain for item in evidence)
@@ -258,8 +270,6 @@ def classify_empty_frontiers(
         return TerminalReason.ONLY_SMALL_FRONTIERS
     if terminal_classified == detected and out_of_range > 0 and unreachable == 0:
         return TerminalReason.ONLY_OUT_OF_RANGE_FRONTIERS
-    if terminal_classified == detected and unreachable > 0:
-        return TerminalReason.NO_REACHABLE_FRONTIERS
     return None
 
 

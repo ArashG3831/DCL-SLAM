@@ -27,11 +27,44 @@ from my_epuck_project.distributed_assignment.traffic_scheduler import schedule_t
 from my_epuck_project.distributed_frontier_assignment import (
     DistributedFrontierAssignment,
     classify_lower_bound_evidence,
+    completion_evidence_matches_snapshots,
     lower_bound_context_matches,
 )
 from my_epuck_project.mission_termination import CandidateEvidence
 from my_epuck_interfaces.msg import FrontierCandidateArray
 from dataclasses import replace
+
+
+def test_completion_evidence_requires_current_candidate_provenance():
+    snapshots = (
+        TaskSnapshot('robot1', 's1', 2, 11, 'm1', 0, 2.0, (), '', 4, 7),
+        TaskSnapshot('robot2', 's2', 3, 12, 'm2', 0, 2.0, (), '', 5, 9),
+    )
+    metadata = {
+        'robot1': {'map_revision': 11, 'costmap_revision': 4,
+                   'candidate_generation_id': 7},
+        'robot2': {'map_revision': 12, 'costmap_revision': 5,
+                   'candidate_generation_id': 9},
+    }
+    assert completion_evidence_matches_snapshots(metadata, snapshots)
+
+    changed_map = snapshots[0].__class__(
+        'robot1', 's1', 2, 13, 'm1', 0, 2.0, (), '', 4, 7,
+    )
+    assert not completion_evidence_matches_snapshots(
+        metadata, (changed_map, snapshots[1]),
+    )
+
+    changed_generation = snapshots[1].__class__(
+        'robot2', 's2', 3, 12, 'm2', 0, 2.0, (), '', 5, 10,
+    )
+    assert not completion_evidence_matches_snapshots(
+        metadata, (snapshots[0], changed_generation),
+    )
+
+    assert not completion_evidence_matches_snapshots(
+        {'robot1': metadata['robot1']}, snapshots,
+    )
 
 
 def make_task(robot, signature, approach, centroid, bounds, gain=5.0, local_id=1):

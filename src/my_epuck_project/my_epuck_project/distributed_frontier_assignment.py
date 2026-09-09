@@ -110,7 +110,6 @@ from .mission_termination import (
     summarize_frontier_regions,
     credible_planner_infrastructure_failure,
     terminal_reason_is_success,
-    all_physical_tasks_suppressed,
 )
 
 
@@ -151,6 +150,39 @@ def lower_bound_context_matches(
         int(getattr(snapshot, 'candidate_generation_id', 0) or 0) > 0 and
         int(provenance[2]) == int(snapshot.candidate_generation_id)
     )
+
+
+def completion_evidence_matches_snapshots(
+        candidate_metadata: Optional[dict[str, dict]],
+        snapshots: tuple[TaskSnapshot, ...],
+) -> bool:
+    """Require candidate evidence to belong to the fresh snapshot pair.
+
+    Candidate evidence is a terminal-proof input, not an indefinitely retained
+    diagnostic.  The candidate generation, map, and costmap provenance must
+    match the corresponding fresh task snapshots before it can support an
+    irreversible completion decision.
+    """
+    metadata = candidate_metadata or {}
+    if len(snapshots) != 2:
+        return False
+    for snapshot in snapshots:
+        source = str(snapshot.source_robot_id)
+        item = metadata.get(source)
+        if not item:
+            return False
+        candidate_generation_id = int(
+            getattr(snapshot, 'candidate_generation_id', 0) or 0)
+        if candidate_generation_id <= 0:
+            return False
+        if int(item.get('candidate_generation_id', 0) or 0) != candidate_generation_id:
+            return False
+        if int(item.get('map_revision', 0) or 0) != int(snapshot.map_revision):
+            return False
+        if int(item.get('costmap_revision', 0) or 0) != int(
+                getattr(snapshot, 'costmap_revision', 0) or 0):
+            return False
+    return True
 
 
 CERTIFICATE_EVIDENCE_REASONS = frozenset({
@@ -912,7 +944,8 @@ class DistributedFrontierAssignment(Node):
             str, tuple[int, str, int]] = {}
         self._unqueried_cost_bounds_received: dict[str, float] = {}
         # Compact candidate-side provenance is retained for certificate
-        # diagnostics only.  It is never consulted by allocation behavior.
+        # diagnostics and to bind terminal completion evidence to the same
+        # source generation/map/costmap as the fresh task snapshot.
         self._candidate_lower_bound_metadata: dict[str, dict] = {}
         self._candidate_evidence_seen = set()
         self._last_cost_only_certificate_key = None
@@ -2863,14 +2896,21 @@ class DistributedFrontierAssignment(Node):
                 return
             if (terminal_reason_is_success(peer_terminal_reason) and
                     self._candidate_evidence_seen == {'robot1', 'robot2'}):
-                local_reason = classify_empty_frontiers(
-                    self._candidate_evidence['robot1'],
-                    self._candidate_evidence['robot2'],
-                )
-                if (local_reason is not None and
-                        local_reason.value == peer_terminal_reason):
-                    self._set_terminal(peer_terminal_reason, success=True)
-                    return
+                first = self._fresh_snapshot('robot1', now)
+                second = self._fresh_snapshot('robot2', now)
+                if (first is not None and second is not None and
+                        completion_evidence_matches_snapshots(
+                            getattr(self, '_candidate_lower_bound_metadata', {}),
+                            (first, second),
+                        )):
+                    local_reason = classify_empty_frontiers(
+                        self._candidate_evidence['robot1'],
+                        self._candidate_evidence['robot2'],
+                    )
+                    if (local_reason is not None and
+                            local_reason.value == peer_terminal_reason):
+                        self._set_terminal(peer_terminal_reason, success=True)
+                        return
         if (self._mission_timeout_enabled and self._mission_timeout_s > 0.0 and
                 now - self._mission_started_steady_s >= self._mission_timeout_s):
             if self._nav2.local_goal_active:
@@ -4106,41 +4146,22 @@ class DistributedFrontierAssignment(Node):
             not peer.value.local_nav_goal_active
         )
         local_snapshot_fresh = self._fresh_snapshot(self._robot_id, now) is not None
+        first = self._fresh_snapshot('robot1', now)
+        second = self._fresh_snapshot('robot2', now)
+        evidence_current = bool(
+            first is not None and second is not None and
+            completion_evidence_matches_snapshots(
+                getattr(self, '_candidate_lower_bound_metadata', {}),
+                (first, second),
+            )
+        )
         candidate_reason = None
-        if self._candidate_evidence_seen == {'robot1', 'robot2'}:
+        if (self._candidate_evidence_seen == {'robot1', 'robot2'} and
+                evidence_current):
             candidate_reason = classify_empty_frontiers(
                 self._candidate_evidence['robot1'],
                 self._candidate_evidence['robot2'],
             )
-        first = self._fresh_snapshot('robot1', now)
-        second = self._fresh_snapshot('robot2', now)
-        if (
-                candidate_reason is None and first is not None and second is not None and
-                self._candidate_evidence_seen == {'robot1', 'robot2'} and
-                not any(
-                    item.planner_failures or item.unclassified or
-                    item.meaningful_detected_not_queried
-                    for item in self._candidate_evidence.values()
-                )
-        ):
-            # Candidate generators report global reachability.  A dispatch
-            # gate can still establish hard local execution evidence for every
-            # current physical task.  Once both source snapshots are fresh and
-            # every canonical task is fully suppressed, classify the union as
-            # having no executable frontiers instead of waiting forever for a
-            # semantic snapshot change that cannot arrive.
-            self._expire_failures(now)
-            suppressed = set(self._hard_failure_signatures)
-            union = build_canonical_union(
-                first.tasks, second.tasks, self._maximum_union_tasks,
-            )
-            if all_physical_tasks_suppressed(
-                    (
-                        (member.physical_signature for member in task.members)
-                        for task in union.tasks
-                    ), suppressed,
-            ):
-                candidate_reason = TerminalReason.NO_REACHABLE_FRONTIERS
         peer_reason = '' if not peer_fresh else str(peer.value.reason)
         if peer_reason.startswith('COMPLETION_CANDIDATE:'):
             peer_reason = peer_reason.split(':', 1)[1]
@@ -4178,6 +4199,13 @@ class DistributedFrontierAssignment(Node):
             )
             return False
         self._planner_failure_candidate_since_steady_s = None
+        if not evidence_current:
+            self._completion_candidate_since_steady_s = None
+            self._transition(
+                CoordinatorState.BLOCKED,
+                'candidate completion evidence is stale or provenance-incomplete',
+            )
+            return False
         healthy = (
             nav2_healthy and tf_healthy and peer_healthy and local_snapshot_fresh and
             not self._nav2.local_goal_active and not self._dispatch_in_progress

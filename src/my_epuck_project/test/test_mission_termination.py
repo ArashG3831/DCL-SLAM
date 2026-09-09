@@ -39,9 +39,12 @@ def test_out_of_range_frontiers_are_distinguished():
 
 def test_unreachable_frontiers_are_distinguished():
     evidence = CandidateEvidence(detected=1, unreachable=1)
-    assert classify_empty_frontiers(evidence, CandidateEvidence()) == (
-        TerminalReason.NO_REACHABLE_FRONTIERS
-    )
+    assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
+
+
+def test_inconsistent_unreachable_count_cannot_complete_empty_detection():
+    evidence = CandidateEvidence(detected=0, unreachable=1)
+    assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
 
 
 def test_planner_failure_does_not_masquerade_as_successful_completion():
@@ -119,15 +122,14 @@ def test_large_unqueried_region_blocks_even_with_small_fragments():
     assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
 
 
-def test_large_unreachable_or_out_of_range_can_be_terminal_with_small_regions():
+def test_large_unreachable_blocks_completion_but_out_of_range_can_complete():
     unreachable = summarize_frontier_regions(
         [FrontierRegionEvidence('tiny', 0.06, 'DETECTED_NOT_QUERIED'),
          FrontierRegionEvidence('blocked', 0.90, 'UNREACHABLE_SAFE_APPROACH')], 0.15)
     out_of_range = summarize_frontier_regions(
         [FrontierRegionEvidence('tiny', 0.06, 'DETECTED_NOT_QUERIED'),
          FrontierRegionEvidence('far', 19.0, 'OUT_OF_RANGE')], 0.15)
-    assert classify_empty_frontiers(unreachable, CandidateEvidence()) == (
-        TerminalReason.NO_REACHABLE_FRONTIERS)
+    assert classify_empty_frontiers(unreachable, CandidateEvidence()) is None
     assert classify_empty_frontiers(out_of_range, CandidateEvidence()) == (
         TerminalReason.ONLY_OUT_OF_RANGE_FRONTIERS)
 
@@ -191,7 +193,7 @@ def test_below_gain_is_invalidated_when_gain_evidence_changes():
     assert above.actionable_reachable == 1
 
 
-def test_mixed_terminal_categories_allow_completion_when_no_actionable_work_remains():
+def test_mixed_unreachable_evidence_blocks_completion():
     evidence = summarize_frontier_regions(
         [
             FrontierRegionEvidence(f'small-{i}', 0.10, 'DETECTED_NOT_QUERIED')
@@ -214,9 +216,7 @@ def test_mixed_terminal_categories_allow_completion_when_no_actionable_work_rema
     )
     assert evidence.actionable_reachable == 0
     assert evidence.below_minimum_gain == 2
-    assert classify_empty_frontiers(evidence, CandidateEvidence()) == (
-        TerminalReason.NO_ACTIONABLE_FRONTIERS
-    )
+    assert classify_empty_frontiers(evidence, CandidateEvidence()) is None
 
 
 def test_reachable_frontier_without_gain_evidence_still_blocks():

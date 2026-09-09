@@ -320,7 +320,7 @@ public:
             request_generation_++;
             active_request_ = 0;
             if (timer_) {timer_->cancel();}
-            if (timeout_timer_) {timeout_timer_->cancel();}
+            cancel_query_timeout();
             if (retry_timer_) {retry_timer_->cancel();}
             if (active_) {
               planner_->async_cancel_goal(active_);
@@ -372,7 +372,7 @@ public:
     emit_timing_summary();
     request_generation_++;
     active_request_ = 0;
-    if (timeout_timer_) {timeout_timer_->cancel();}
+    cancel_query_timeout();
     if (retry_timer_) {retry_timer_->cancel();}
     release_path_lock();
     if (active_) {planner_->async_cancel_goal(active_);}
@@ -1454,6 +1454,10 @@ private:
     const auto cost_revision = cycle_cost_revision_;
     const auto candidate_generation = candidate_generation_id_ + 1;
     const auto request = ++request_generation_;
+    // The request owns the query lifecycle from submission onward.  This is
+    // deliberately set before async_send_goal() so the watchdog can recover
+    // even when Nav2 never delivers a goal response.
+    active_request_ = request;
     path_lock_request_ = request;
     ++queries_;
     if (candidate.tier1_unqueried) {
@@ -1495,6 +1499,14 @@ private:
             get_logger(),
             "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=SUPERSEDED phase=GOAL_RESPONSE",
             candidate.query_event_id, candidate.id);
+          if (handle) {
+            RCLCPP_INFO(
+              get_logger(),
+              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=QUERY_CANCEL_REQUESTED "
+              "reason=SUPERSEDED phase=GOAL_RESPONSE",
+              candidate.query_event_id, candidate.id);
+            planner_->async_cancel_goal(handle);
+          }
           release_path_lock_for(request);
           ++stale_results_;
           return;
@@ -1512,12 +1524,15 @@ private:
           cycle_new_cost_revision_ = current_costmap;
           if (handle) {planner_->async_cancel_goal(handle);}
           ++stale_results_;
+          cancel_query_timeout_for(request);
+          ++request_generation_;
+          active_request_ = 0;
           release_path_lock_for(request);
           reject_stale_work(candidate, revision, current_map, cost_revision, current_costmap);
           send_next();
           return;
         }
-          if (!handle) {
+        if (!handle) {
           if (candidate.tier1_unqueried) {++cycle_tier1_aborted_;}
           set_region_status(candidate.id, "PLANNER_FAILED");
           auto & cache = evaluation_cache_[candidate.id];
@@ -1539,44 +1554,18 @@ private:
             candidate.pose.pose.position.x, candidate.pose.pose.position.y,
             orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
             std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
+          cancel_query_timeout_for(request);
+          ++request_generation_;
+          active_request_ = 0;
           release_path_lock_for(request);
           schedule_query_retry(1ms);
           return;
         }
         active_ = handle;
-        active_request_ = request;
-          timeout_timer_ = create_wall_timer(std::chrono::duration<double>(path_query_timeout_s_), [this, candidate, revision, candidate_generation, request, request_started] {
-            if (request != active_request_ || !active_) {return;}
-            cycle_termination_reason_ = "QUERY_TIMEOUT";
-            if (candidate.tier1_unqueried) {++cycle_tier1_timeout_;}
-            planner_->async_cancel_goal(active_);
-            active_.reset();
-            active_request_ = 0;
-            set_region_status(candidate.id, "PLANNER_FAILED");
-            auto & cache = evaluation_cache_[candidate.id];
-            cache.classification = "PLANNER_FAILED";
-            cache.last_query_result = "PLANNER_QUERY_TIMEOUT";
-            cache.has_work = false;
-            ++cache.query_count;
-            ++planner_failure_count_;
-            RCLCPP_INFO(
-              get_logger(),
-              "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=RESULT_RECEIVED status=PLANNER_FAILED reason=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s",
-              candidate.query_event_id, candidate.id, candidate_generation,
-              candidate.pose.pose.position.x, candidate.pose.pose.position.y,
-              orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str());
-            RCLCPP_INFO(
-              get_logger(),
-              "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx status=PLANNER_FAILED action_result=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT candidate_generation_id=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f goal_frame=%s error_code=%d error_name=TIMEOUT duration_s=%.3f",
-              candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
-              candidate.pose.pose.position.x, candidate.pose.pose.position.y,
-              orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
-              Action::Result::TIMEOUT,
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
-            timeout_timer_->cancel();
-            release_path_lock();
-            schedule_query_retry(1ms);
-          });
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=GOAL_ACCEPTED candidate_generation_id=%lu",
+          candidate.query_event_id, candidate.id, candidate_generation);
       };
     options.result_callback = [this, candidate, revision, cost_revision, candidate_generation, request, request_started](const GoalHandle::WrappedResult & result) {
         TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
@@ -1589,7 +1578,7 @@ private:
           ++stale_results_;
           return;
         }
-        if (timeout_timer_) {timeout_timer_->cancel();}
+        cancel_query_timeout();
         active_.reset();
         active_request_ = 0;
         uint64_t current_map, current_costmap;
@@ -1712,6 +1701,63 @@ private:
         release_path_lock();
         schedule_query_retry(1ms);
       };
+    // The deadline belongs to the submitted request, not only to an accepted
+    // Nav2 goal.  If goal response delivery is lost, the response callback
+    // cannot be the place that starts the watchdog: this request would then
+    // retain active_request_ and the path lock indefinitely.
+    timeout_timer_ = create_wall_timer(
+      std::chrono::duration<double>(path_query_timeout_s_),
+      [this, candidate, revision, cost_revision, candidate_generation, request, request_started] {
+        if (request != active_request_ || request != request_generation_ ||
+          state_ != State::PATH_CHECKING)
+        {
+          return;
+        }
+        cycle_termination_reason_ = "QUERY_TIMEOUT";
+        if (candidate.tier1_unqueried) {++cycle_tier1_timeout_;}
+        if (active_) {
+          RCLCPP_INFO(
+            get_logger(),
+            "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=QUERY_CANCEL_REQUESTED "
+            "candidate_generation_id=%lu",
+            candidate.query_event_id, candidate.id, candidate_generation);
+          planner_->async_cancel_goal(active_);
+          active_.reset();
+        }
+        // Invalidate both the goal-response and result callbacks.  A late
+        // callback from this request must not release or mutate a newer one.
+        ++request_generation_;
+        active_request_ = 0;
+        set_region_status(candidate.id, "PLANNER_FAILED");
+        auto & cache = evaluation_cache_[candidate.id];
+        cache.classification = "PLANNER_FAILED";
+        cache.last_query_result = "PLANNER_QUERY_TIMEOUT";
+        cache.has_work = false;
+        ++cache.query_count;
+        ++planner_failure_count_;
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=QUERY_TIMEOUT "
+          "status=PLANNER_FAILED reason=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT "
+          "candidate_generation_id=%lu request_map_revision=%lu "
+          "request_costmap_revision=%lu target_x=%.9f target_y=%.9f target_yaw=%.9f "
+          "goal_frame=%s",
+          candidate.query_event_id, candidate.id, candidate_generation,
+          revision, cost_revision, candidate.pose.pose.position.x,
+          candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
+          candidate.pose.header.frame_id.c_str());
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_RESULT query_id=%lu id=%lu canonical_id=%016lx "
+          "status=PLANNER_FAILED action_result=TIMEOUT failure_class=PLANNER_QUERY_TIMEOUT "
+          "candidate_generation_id=%lu error_code=%d error_name=TIMEOUT duration_s=%.3f",
+          candidate.query_event_id, candidate.id, candidate.id, candidate_generation,
+          Action::Result::TIMEOUT,
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
+        cancel_query_timeout();
+        release_path_lock_for(request);
+        schedule_query_retry(1ms);
+      });
     planner_->async_send_goal(goal, options);
   }
 
@@ -1846,6 +1892,21 @@ private:
   {
     if (path_lock_fd_ >= 0 && path_lock_request_ == request) {
       release_path_lock();
+    }
+  }
+
+  void cancel_query_timeout()
+  {
+    if (timeout_timer_) {
+      timeout_timer_->cancel();
+      timeout_timer_.reset();
+    }
+  }
+
+  void cancel_query_timeout_for(uint64_t request)
+  {
+    if (request == active_request_) {
+      cancel_query_timeout();
     }
   }
 

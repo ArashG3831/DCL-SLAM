@@ -142,6 +142,48 @@ TEST(AsyncRequests,OldGenerationCannotTouchReplacement){
   EXPECT_FALSE(async_request_is_current(7,7,11,12,true));
   EXPECT_FALSE(async_request_is_current(7,7,12,12,false));
 }
+TEST(AsyncRequests,SubmittedQueryOwnsWatchdogBeforeGoalResponse){
+  // The watchdog is armed at async_send_goal submission, before a goal
+  // response exists.  The submitted request therefore owns the same token
+  // that its callbacks must present.
+  const uint64_t request_generation = 7;
+  const uint64_t active_request = 7;
+  EXPECT_TRUE(async_request_is_current(request_generation, active_request, 12, 12, true));
+}
+TEST(AsyncRequests,TimeoutInvalidatesMissingGoalResponse){
+  // A timeout clears the submitted request token and advances the generation;
+  // a late goal response cannot be treated as the current query.
+  const uint64_t timed_out_request = 7;
+  const uint64_t next_request_generation = 8;
+  const uint64_t no_active_request = 0;
+  EXPECT_FALSE(async_request_is_current(
+    timed_out_request, no_active_request, 12, 12, true));
+  EXPECT_FALSE(async_request_is_current(
+    timed_out_request, next_request_generation, 12, 12, true));
+}
+TEST(AsyncRequests,TimeoutInvalidatesAcceptedQueryWithoutResult){
+  // The same token rule applies after Nav2 acceptance when no result arrives.
+  const uint64_t timed_out_request = 11;
+  const uint64_t next_request_generation = 12;
+  EXPECT_FALSE(async_request_is_current(
+    timed_out_request, 0, 19, 19, true));
+  EXPECT_TRUE(async_request_is_current(
+    next_request_generation, next_request_generation, 19, 19, true));
+}
+TEST(AsyncRequests,RepeatedTimeoutsReleaseOneQueryAtATime){
+  uint64_t request_generation = 0;
+  uint64_t active_request = 0;
+  for (uint64_t request = 1; request <= 3; ++request) {
+    request_generation = request;
+    active_request = request;
+    EXPECT_TRUE(async_request_is_current(
+      request, active_request, 4, 4, true));
+    ++request_generation;  // timeout invalidates this request
+    active_request = 0;
+    EXPECT_FALSE(async_request_is_current(
+      request, active_request, 4, 4, true));
+  }
+}
 TEST(AsyncRequests,RevisionChangeInvalidatesOnlyCapturedCycle){
   EXPECT_TRUE(candidate_cycle_revisions_match(19,19,7,7));
   EXPECT_FALSE(candidate_cycle_revisions_match(19,20,7,7));

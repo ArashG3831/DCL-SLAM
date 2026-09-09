@@ -228,6 +228,7 @@ class SourceAwareMapFusion(Node):
         self.declare_parameter('publish_on_callback', False)
         self.declare_parameter('sanitize_live_footprints', False)
         self.declare_parameter('min_fusion_rebuild_period_s', 1.0)
+        self.declare_parameter('source_freshness_max_age_s', 3.0)
         self.declare_parameter('handoff_gated', False)
         self.declare_parameter('historical_cleanup_required', False)
         self.declare_parameter('local_prehandoff_path_topic', '')
@@ -282,6 +283,9 @@ class SourceAwareMapFusion(Node):
         self.phase_active = not self.handoff_gated
         self.min_fusion_rebuild_period_s = max(
             0.0, float(self.get_parameter('min_fusion_rebuild_period_s').value))
+        self.source_freshness_max_age_s = max(
+            3.0, float(self.get_parameter('source_freshness_max_age_s').value),
+            2.0 * max(0.1, self.min_fusion_rebuild_period_s or 1.0))
         if not self.expected_source:
             raise ValueError('expected_remote_source must not be empty')
         if self.resolution <= 0.0:
@@ -323,6 +327,10 @@ class SourceAwareMapFusion(Node):
         self.last_footprint_cells = set()
         self.last_pose_key = None
         self.last_full_rebuild_wall = 0.0
+        self.last_output_publish_ros_s = 0.0
+        self.last_freshness_source_age_s = None
+        self.last_freshness_previous_publication_age_s = None
+        self.last_freshness_output_stamp_s = None
         self.geometry_cache = {}
         self.map_dirty = False
         self.dirty_event_count = 0
@@ -737,6 +745,43 @@ class SourceAwareMapFusion(Node):
         self.map_publisher.publish(grid)
         self.metadata_publisher.publish(grid.info)
         self._publish_visualization(grid)
+        self.last_output_publish_ros_s = (
+            self.get_clock().now().nanoseconds / 1e9)
+
+    def _maybe_republish_freshness(self, messages, started_wall, started_cpu):
+        """Republish unchanged content while the local source is live.
+
+        The local map callback receives timestamp-advancing samples even when
+        occupancy bytes are unchanged.  Those samples are sufficient to prove
+        that this fusion input is still live; the accepted peer grid remains
+        the same content revision until a peer content/revision change arrives.
+        """
+        if self.output_grid is None or self.local_map is None:
+            return False
+        now = self.get_clock().now()
+        source_stamp = self._message_time(self.local_map)
+        source_age_s = max(
+            0.0, (now.nanoseconds - source_stamp.nanoseconds) / 1e9)
+        if source_age_s > self.source_freshness_max_age_s:
+            return False
+        now_s = now.nanoseconds / 1e9
+        previous_age_s = now_s - self.last_output_publish_ros_s
+        if previous_age_s < self.rebuild_period_s:
+            return False
+        snapshot_time = self._common_snapshot_time(messages)
+        self.output_grid.header.stamp = snapshot_time.to_msg()
+        self._publish_fused(self.output_grid)
+        self.last_freshness_source_age_s = source_age_s
+        self.last_freshness_previous_publication_age_s = previous_age_s
+        self.last_freshness_output_stamp_s = snapshot_time.nanoseconds / 1e9
+        self._profile(
+            mode='FRESHNESS_REPUBLISH', map_changed=False,
+            dimensions=(int(self.output_grid.info.width),
+                        int(self.output_grid.info.height)),
+            cells_inspected=0, cells_copied=0, cells_modified=0,
+            published=True, wall_s=time.perf_counter() - started_wall,
+            cpu_s=time.process_time() - started_cpu)
+        return True
 
     def _fresh_footprint_cells(self, grid, footprints):
         cells = set()
@@ -783,18 +828,24 @@ class SourceAwareMapFusion(Node):
                 f'full_rebuilds={stats["full_rebuilds"]}',
                 f'pose_updates={stats["pose_updates"]}',
                 f'cells_inspected={stats["cells_inspected"]}',
-            f'cells_copied={stats["cells_copied"]}',
-            f'cells_modified={stats["cells_modified"]}',
-            f'publications={stats["publications"]}',
-            f'visualization_bases={stats["visualization_bases"]}',
-            f'visualization_updates={stats["visualization_updates"]}',
-            f'dirty_events={stats["dirty_events"]}',
-            f'coalesced_events={stats["coalesced_events"]}',
-            f'rebuild_skipped={stats["rebuild_skipped"]}',
-            f'wall_duration_s={stats["wall_s"]:.6f}',
-            f'cpu_duration_s={stats["cpu_s"]:.6f}',
+                f'cells_copied={stats["cells_copied"]}',
+                f'cells_modified={stats["cells_modified"]}',
+                f'publications={stats["publications"]}',
+                f'visualization_bases={stats["visualization_bases"]}',
+                f'visualization_updates={stats["visualization_updates"]}',
+                f'dirty_events={stats["dirty_events"]}',
+                f'coalesced_events={stats["coalesced_events"]}',
+                f'rebuild_skipped={stats["rebuild_skipped"]}',
+                f'wall_duration_s={stats["wall_s"]:.6f}',
+                f'cpu_duration_s={stats["cpu_s"]:.6f}',
                 f'window_wall_s={elapsed:.3f}',
-            )))
+            ) + ((
+                f' freshness_source_age_s={self.last_freshness_source_age_s:.3f}'
+                f' freshness_previous_publication_age_s='
+                f'{self.last_freshness_previous_publication_age_s:.3f}'
+                f' freshness_output_stamp_s={self.last_freshness_output_stamp_s:.3f}'
+            ) if mode == 'FRESHNESS_REPUBLISH' and
+                self.last_freshness_source_age_s is not None else '')))
         stats.update({
             'invocations': 0, 'full_rebuilds': 0, 'pose_updates': 0,
             'cells_inspected': 0, 'cells_copied': 0, 'cells_modified': 0,
@@ -837,6 +888,10 @@ class SourceAwareMapFusion(Node):
                 if any(path is None for path in self.historical_paths.values()):
                     return
         if not self.map_dirty and not self.sanitize_live_footprints:
+            if self._maybe_republish_freshness(
+                    [self.local_map, self.remote_map],
+                    started_wall, started_cpu):
+                return
             self._profile(
                 mode='NOOP', map_changed=False, dimensions=(0, 0),
                 cells_inspected=0, cells_copied=0, cells_modified=0,
@@ -930,6 +985,9 @@ class SourceAwareMapFusion(Node):
             published = True
         else:
             if pose_key == self.last_pose_key:
+                if self._maybe_republish_freshness(
+                        messages, started_wall, started_cpu):
+                    return
                 self._profile(
                     mode='NOOP', map_changed=False,
                     dimensions=(width, height), cells_inspected=0,

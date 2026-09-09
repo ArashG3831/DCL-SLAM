@@ -139,6 +139,85 @@ def test_identical_map_content_ignores_timestamp_changes():
     assert _same_grid_content(first, second)
 
 
+def _fusion_clock(seconds):
+    return SimpleNamespace(now=lambda: Time(nanoseconds=int(seconds * 1e9)))
+
+
+def test_live_unchanged_map_uses_freshness_republish_without_revision_change():
+    fusion = object.__new__(SourceAwareMapFusion)
+    local = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    remote = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    local.header.stamp = TimeMessage(sec=10, nanosec=0)
+    remote.header.stamp = TimeMessage(sec=9, nanosec=0)
+    output = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    output.header.frame_id = 'shared_map'
+    output.header.stamp = TimeMessage(sec=8, nanosec=0)
+    fusion.local_map = local
+    fusion.remote_map = remote
+    fusion.output_grid = output
+    fusion.rebuild_period_s = 1.0
+    fusion.source_freshness_max_age_s = 3.0
+    fusion.last_output_publish_ros_s = 8.0
+    fusion.map_revision = 4
+    fusion.get_clock = lambda: _fusion_clock(10.0)
+    published = []
+    profiles = []
+    fusion._publish_fused = lambda grid: published.append(grid)
+    fusion._profile = lambda **kwargs: profiles.append(kwargs)
+
+    assert fusion._maybe_republish_freshness(
+        [local, remote], 0.0, 0.0)
+    assert len(published) == 1
+    assert output.header.stamp.sec == 10
+    assert output.header.stamp.nanosec == 0
+    assert fusion.map_revision == 4
+    assert profiles[-1]['mode'] == 'FRESHNESS_REPUBLISH'
+
+
+def test_stale_local_source_blocks_freshness_republish():
+    fusion = object.__new__(SourceAwareMapFusion)
+    local = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    remote = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    local.header.stamp = TimeMessage(sec=4, nanosec=0)
+    remote.header.stamp = TimeMessage(sec=4, nanosec=0)
+    fusion.local_map = local
+    fusion.remote_map = remote
+    fusion.output_grid = local
+    fusion.rebuild_period_s = 1.0
+    fusion.source_freshness_max_age_s = 3.0
+    fusion.last_output_publish_ros_s = 4.0
+    fusion.get_clock = lambda: _fusion_clock(10.0)
+    published = []
+    fusion._publish_fused = lambda grid: published.append(grid)
+    fusion._profile = lambda **kwargs: None
+
+    assert not fusion._maybe_republish_freshness(
+        [local, remote], 0.0, 0.0)
+    assert not published
+
+
+def test_freshness_republish_respects_existing_cadence():
+    fusion = object.__new__(SourceAwareMapFusion)
+    local = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    remote = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])
+    local.header.stamp = TimeMessage(sec=10, nanosec=0)
+    remote.header.stamp = TimeMessage(sec=10, nanosec=0)
+    fusion.local_map = local
+    fusion.remote_map = remote
+    fusion.output_grid = local
+    fusion.rebuild_period_s = 1.0
+    fusion.source_freshness_max_age_s = 3.0
+    fusion.last_output_publish_ros_s = 9.5
+    fusion.get_clock = lambda: _fusion_clock(10.0)
+    published = []
+    fusion._publish_fused = lambda grid: published.append(grid)
+    fusion._profile = lambda **kwargs: None
+
+    assert not fusion._maybe_republish_freshness(
+        [local, remote], 0.0, 0.0)
+    assert not published
+
+
 def test_fusion_snapshot_time_is_the_newest_input_map_stamp():
     """Both peers must sanitize one map pair at the same TF snapshot time."""
     first = occupancy_grid(2, 2, 0.1, 0.0, 0.0, 0.0, [0, 100, -1, 50])

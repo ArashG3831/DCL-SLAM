@@ -832,6 +832,12 @@ private:
 
   void emit_receipt_summary()
   {
+    RCLCPP_INFO(
+      get_logger(),
+      "GENERATOR_EXECUTOR_HEARTBEAT state=%d active_request=%lu request_generation=%lu "
+      "timer_owner_request=%lu retry_generation=%lu query_index=%zu queries=%zu",
+      static_cast<int>(state_.load()), active_request_.load(), request_generation_.load(),
+      timeout_timer_request_.load(), retry_generation_, query_index_, queries_);
     uint64_t map_receipts, map_changed, cost_receipts, cost_changed;
     uint64_t map_revision, cost_revision, map_checksum_value, cost_checksum_value;
     int64_t map_receipt_ns, cost_receipt_ns;
@@ -1712,10 +1718,39 @@ private:
     auto query_timeout_timer = create_wall_timer(
       std::chrono::duration<double>(path_query_timeout_s_),
       [this, candidate, revision, cost_revision, candidate_generation, request, request_started] {
+        const auto current_active_request = active_request_.load();
+        const auto current_request_generation = request_generation_.load();
+        const auto timer_owner_request = timeout_timer_request_.load();
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_WATCHDOG_CALLBACK_ENTERED query_id=%lu id=%lu request_id=%lu "
+          "captured_generation=%lu current_active_request=%lu "
+          "current_generation=%lu timer_owner_request=%lu state=%d",
+          candidate.query_event_id, candidate.id, request, candidate_generation,
+          current_active_request, current_request_generation, timer_owner_request,
+          static_cast<int>(state_.load()));
         if (request != active_request_ || request != request_generation_ ||
           state_ != State::PATH_CHECKING)
         {
+          const char * reason = request != current_active_request ? "ACTIVE_REQUEST_MISMATCH" :
+            request != current_request_generation ? "REQUEST_GENERATION_MISMATCH" :
+            "STATE_NOT_PATH_CHECKING";
+          RCLCPP_INFO(
+            get_logger(),
+            "FRONTIER_QUERY_WATCHDOG_EARLY_RETURN query_id=%lu id=%lu request_id=%lu "
+            "reason=%s current_active_request=%lu current_generation=%lu "
+            "timer_owner_request=%lu state=%d",
+            candidate.query_event_id, candidate.id, request, reason,
+            current_active_request, current_request_generation, timer_owner_request,
+            static_cast<int>(state_.load()));
           return;
+        }
+        if (timer_owner_request != request) {
+          RCLCPP_INFO(
+            get_logger(),
+            "FRONTIER_QUERY_WATCHDOG_OWNER_MISMATCH query_id=%lu id=%lu request_id=%lu "
+            "timer_owner_request=%lu",
+            candidate.query_event_id, candidate.id, request, timer_owner_request);
         }
         cycle_termination_reason_ = "QUERY_TIMEOUT";
         if (candidate.tier1_unqueried) {++cycle_tier1_timeout_;}
@@ -1922,15 +1957,29 @@ private:
 
   void cancel_query_timeout_for(uint64_t request)
   {
-    if (request == active_request_) {
-      cancel_query_timeout_owned_by(request);
+    const auto current_active_request = active_request_.load();
+    if (request != current_active_request) {
+      RCLCPP_INFO(
+        get_logger(),
+        "FRONTIER_QUERY_WATCHDOG_CLEANUP_SKIPPED request_id=%lu "
+        "reason=ACTIVE_REQUEST_MISMATCH current_active_request=%lu "
+        "timer_owner_request=%lu",
+        request, current_active_request, timeout_timer_request_.load());
+      return;
     }
+    cancel_query_timeout_owned_by(request);
   }
 
   void cancel_query_timeout_owned_by(uint64_t request)
   {
     std::lock_guard<std::mutex> lock(timeout_timer_mu_);
-    if (request != timeout_timer_request_) {
+    const auto timer_owner_request = timeout_timer_request_.load();
+    if (request != timer_owner_request) {
+      RCLCPP_INFO(
+        get_logger(),
+        "FRONTIER_QUERY_WATCHDOG_CLEANUP_SKIPPED request_id=%lu "
+        "reason=TIMER_OWNER_MISMATCH timer_owner_request=%lu",
+        request, timer_owner_request);
       return;
     }
     if (timeout_timer_) {
@@ -2393,7 +2442,7 @@ private:
   GoalHandle::SharedPtr active_;
   rclcpp::TimerBase::SharedPtr timer_, timeout_timer_, retry_timer_, receipt_summary_timer_;
   std::mutex timeout_timer_mu_;
-  uint64_t timeout_timer_request_{0};
+  std::atomic<uint64_t> timeout_timer_request_{0};
   rclcpp::CallbackGroup::SharedPtr planner_callback_group_, watchdog_callback_group_;
   rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;

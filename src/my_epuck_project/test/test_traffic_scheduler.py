@@ -99,7 +99,7 @@ def test_allocator_uses_waiting_state_not_cmd_vel_traffic_hack():
     assert 'CoordinatorState.WAITING_FOR_TRAFFIC' in source
     assert "'cmd_vel'" not in source
     assert '_begin_traffic_wait' in source
-    assert 'stale deferred task will not dispatch' in source
+    assert 'retaining agreed deferred task' in source
 
 
 def test_test_barrier_accepts_only_complete_matching_round_identity():

@@ -304,6 +304,110 @@ def test_continuation_traffic_hold_retains_busy_commitment_path():
     assert node._traffic_hold.winner_path == context.commitment.path
 
 
+def test_traffic_clear_retains_agreed_round_instead_of_recycling_same_pair():
+    """Geometric clearance releases the waiter without a new allocation round."""
+    node, context, batches = _continuation_setup(
+        local_robot='robot2', local_active=False,
+    )
+    decision = _select_continuation(node, context, batches)
+    node._round.decision = decision
+    node._round.traffic = TrafficDecision(
+        conflict=True, minimum_separation_m=0.0,
+        required_separation_m=0.16, winner_robot_id='robot1',
+        waiting_robot_id='robot2', reason='ALREADY_ACTIVE',
+    )
+    node._traffic_hold = None
+    node._traffic_reallocation_after_clear = False
+    node._released_traffic_winner_robot_id = ''
+    node._traffic_conflict_clearance_m = 0.05
+    node._nav2.lookup_pose_in_global = lambda _frame: (
+        (1.0, 0.0), 123, 0.1,
+    )
+    node._begin_traffic_wait(TrafficDecision(
+        conflict=True, minimum_separation_m=0.0,
+        required_separation_m=0.16,
+        robot1_last_conflict_distance_m=0.5,
+        robot2_last_conflict_distance_m=0.5,
+        winner_robot_id='robot1', waiting_robot_id='robot2',
+        reason='ALREADY_ACTIVE',
+    ))
+    held_round = node._round
+    resets = []
+    node._reset_round = lambda reason: resets.append(reason)
+
+    node._continue_traffic_hold(NOW + 1.0)
+
+    assert resets == []
+    assert node._round is held_round
+    assert node._traffic_hold is None
+    assert node._round.traffic.conflict is False
+    assert node._traffic_reallocation_after_clear is True
+
+
+def test_traffic_progress_below_clearance_keeps_same_hold():
+    """Small winner progress cannot trigger a new allocation attempt."""
+    node, context, batches = _continuation_setup(
+        local_robot='robot2', local_active=False,
+    )
+    decision = _select_continuation(node, context, batches)
+    node._round.decision = decision
+    node._round.traffic = TrafficDecision(
+        conflict=True, minimum_separation_m=0.0,
+        required_separation_m=0.16, winner_robot_id='robot1',
+        waiting_robot_id='robot2', reason='ALREADY_ACTIVE',
+    )
+    node._traffic_hold = None
+    node._traffic_reallocation_after_clear = False
+    node._released_traffic_winner_robot_id = ''
+    node._traffic_conflict_clearance_m = 0.05
+    node._nav2.lookup_pose_in_global = lambda _frame: (
+        (0.52, 0.0), 123, 0.1,
+    )
+    node._begin_traffic_wait(TrafficDecision(
+        conflict=True, minimum_separation_m=0.0,
+        required_separation_m=0.16,
+        robot1_last_conflict_distance_m=0.5,
+        robot2_last_conflict_distance_m=0.5,
+        winner_robot_id='robot1', waiting_robot_id='robot2',
+        reason='ALREADY_ACTIVE',
+    ))
+    resets = []
+    node._reset_round = lambda reason: resets.append(reason)
+
+    node._continue_traffic_hold(NOW + 1.0)
+
+    assert resets == []
+    assert node._traffic_hold is not None
+    assert node._round.traffic.conflict is True
+
+
+def test_peer_traffic_clear_retains_matching_agreed_round():
+    """The peer clear event must not erase the matching deferred decision."""
+    node, context, batches = _continuation_setup(
+        local_robot='robot1', local_active=True,
+    )
+    decision = _select_continuation(node, context, batches)
+    node._round.decision = decision
+    node._round.traffic = TrafficDecision(
+        conflict=True, minimum_separation_m=0.0,
+        required_separation_m=0.16, winner_robot_id='robot1',
+        waiting_robot_id='robot2', reason='ALREADY_ACTIVE',
+    )
+    node._last_peer_traffic_clear_key = None
+    held_round = node._round
+    node._peer_event_callback(SimpleNamespace(
+        source_robot_id='robot2',
+        event_type='TRAFFIC_CONFLICT_CLEARED',
+        round_id=held_round.round_id,
+        decision_hash=held_round.decision.decision_hash,
+    ))
+
+    assert node._round is held_round
+    assert node._round.traffic.conflict is False
+    assert node._traffic_reallocation_after_clear is True
+    assert node._released_traffic_winner_robot_id == 'robot1'
+
+
 def test_continuation_round_id_ignores_busy_candidate_epoch_changes():
     node, _, _, _, _ = _fake_node()
     context = node._continuation_context(NOW)

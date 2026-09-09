@@ -1819,14 +1819,13 @@ class DistributedFrontierAssignment(Node):
         key = (str(message.round_id), str(message.decision_hash))
         if key == self._last_peer_traffic_clear_key:
             return
+        if not self._retain_traffic_cleared_round(
+                message.round_id, message.decision_hash, self._robot_id):
+            return
         self._last_peer_traffic_clear_key = key
-        self._traffic_reallocation_after_clear = True
-        # The clear event is emitted by the waiting robot, so its peer is the
-        # committed winner.  Keep that identity as an active reservation if a
-        # newly rebuilt pair happens to conflict again.
-        self._released_traffic_winner_robot_id = self._peer_id
-        self._reset_round(
-            'peer traffic conflict cleared; rebuilding from fresh proposals',
+        self._transition(
+            CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+            'peer traffic conflict cleared; retaining agreed deferred task',
         )
 
     def _record_hard_failure(
@@ -3929,6 +3928,28 @@ class DistributedFrontierAssignment(Node):
         """Keep event/status evidence compact, structured, and deterministic."""
         return json.dumps(traffic.as_dict(), sort_keys=True, separators=(',', ':'))
 
+    def _retain_traffic_cleared_round(
+            self, round_id: str, decision_hash: str,
+            winner_robot_id: str) -> bool:
+        """Retain an agreed deferred assignment after geometric clearance."""
+        round_work = self._round
+        if (round_work is None or round_work.round_id != str(round_id) or
+                round_work.decision is None or
+                round_work.decision.decision_hash != str(decision_hash)):
+            return False
+        traffic = round_work.traffic
+        if traffic is not None:
+            round_work.traffic = replace(
+                traffic,
+                conflict=False,
+                winner_robot_id='',
+                waiting_robot_id='',
+                reason='CONFLICT_CLEARED',
+            )
+        self._traffic_reallocation_after_clear = True
+        self._released_traffic_winner_robot_id = str(winner_robot_id)
+        return True
+
     def _continue_traffic_hold(self, now: float) -> None:
         """Release on conflict clearance, or terminal evidence as fallback."""
         hold = self._traffic_hold
@@ -3962,17 +3983,23 @@ class DistributedFrontierAssignment(Node):
                             ),
                         )
                         self._traffic_hold = None
-                        self._traffic_reallocation_after_clear = True
-                        self._released_traffic_winner_robot_id = hold.winner_robot_id
                         self._emit_event(
                             'TRAFFIC_RELEASED_FRESH_REALLOCATION',
                             'winner cleared committed path-conflict interval; '
-                            'stale deferred task discarded',
+                            'retaining agreed deferred task',
                             duration=now - hold.created_steady_s,
                         )
-                        self._reset_round(
-                            'traffic conflict cleared; rebuilding from fresh proposals',
-                        )
+                        if self._retain_traffic_cleared_round(
+                                hold.round_id, hold.decision_hash,
+                                hold.winner_robot_id):
+                            self._transition(
+                                CoordinatorState.WAITING_FOR_MATCHING_DECISION,
+                                'traffic conflict cleared; dispatching retained deferred task',
+                            )
+                        else:
+                            self._reset_round(
+                                'traffic conflict cleared; agreed round unavailable',
+                            )
                         return
             self._transition(
                 CoordinatorState.WAITING_FOR_TRAFFIC,

@@ -17,6 +17,7 @@ TEST(Frontiers,VisibleRevealUsesUpstreamRayCasting){auto m=grid();free_box(m,2,2
 TEST(DecisionMap,EnabledUpstreamPipelineIsDeterministicAndDoesNotMutateRawMap){
   auto message = grid(12, 12, .03);
   free_box(message, 4, 4, 7, 7);
+  message->data.front() = 100;
   const auto original = *message;
   OccupancyGrid2d raw(message);
 
@@ -34,12 +35,19 @@ TEST(DecisionMap,EnabledUpstreamPipelineIsDeterministicAndDoesNotMutateRawMap){
   enabled.sigma_s = 2.0;
   enabled.sigma_r = 30.0;
   enabled.dilation_kernel_radius_cells = 1;
-  const auto optimized_first = build_decision_map(raw, enabled);
-  const auto optimized_second = build_decision_map(raw, enabled);
+  const auto optimized_radius_one = build_decision_map(raw, enabled);
+  const auto optimized_radius_one_repeat = build_decision_map(raw, enabled);
+  enabled.dilation_kernel_radius_cells = 2;
+  const auto optimized_radius_two = build_decision_map(raw, enabled);
 
-  EXPECT_EQ(optimized_first.optimized_map_msg.data,
-    optimized_second.optimized_map_msg.data);
-  EXPECT_NE(optimized_first.optimized_map_msg.data, raw_result.optimized_map_msg.data);
+  EXPECT_EQ(optimized_radius_one.optimized_map_msg.data,
+    optimized_radius_one_repeat.optimized_map_msg.data);
+  EXPECT_NE(optimized_radius_one.optimized_map_msg.data,
+    raw_result.optimized_map_msg.data);
+  EXPECT_NE(optimized_radius_two.optimized_map_msg.data,
+    optimized_radius_one.optimized_map_msg.data);
+  EXPECT_EQ(optimized_radius_one.optimized_map_msg.data.front(), 100);
+  EXPECT_EQ(optimized_radius_two.optimized_map_msg.data.front(), 100);
   EXPECT_EQ(message->header, original.header);
   EXPECT_EQ(message->info, original.info);
   EXPECT_EQ(message->data, original.data);

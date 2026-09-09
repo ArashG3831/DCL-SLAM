@@ -42,7 +42,7 @@ def test_condition_c_plumbs_pinned_decision_map_defaults_without_changing_minimu
     assert "'frontier_map_optimization_enabled': True" in launch
     assert "'sigma_s': 2.0" in launch
     assert "'sigma_r': 30.0" in launch
-    assert "'dilation_kernel_radius_cells': 1" in launch
+    assert "'dilation_kernel_radius_cells': 2" in launch
     assert "'minimum_frontier_cells': minimum_frontier_cells" in launch
     assert "frontier_map_optimization_enabled = false" not in source
 

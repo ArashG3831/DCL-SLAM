@@ -5,6 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from my_epuck_project.round_lifecycle import RoundGeneration
+from my_epuck_project.distributed_assignment.canonical import (
+    canonical_round_id,
+    TaskIdentity,
+)
 from my_epuck_project.distributed_assignment.models import (
     BidBatch,
     Bounds,
@@ -17,6 +21,7 @@ from my_epuck_project.distributed_assignment.protocol import (
 )
 from my_epuck_project.distributed_frontier_assignment import (
     DistributedFrontierAssignment,
+    normal_round_provenance_rebase_required,
     normal_round_requires_replacement,
 )
 
@@ -108,6 +113,78 @@ def test_epoch_only_snapshot_update_keeps_active_normal_round():
     ) is False
 
 
+def test_predecision_epoch_split_requires_provenance_rebase():
+    """A newer peer-confirmed epoch pair must replace an old bid context."""
+    current = SimpleNamespace(
+        mode='normal',
+        decision=None,
+        round_id=canonical_round_id(
+            TaskIdentity('robot1', 'robot1-session', 1),
+            TaskIdentity('robot2', 'robot2-session', 1),
+        ),
+        content_fingerprint='same-task-semantics',
+        snapshots=(_snapshot('robot1', 1), _snapshot('robot2', 1)),
+    )
+    first = _snapshot('robot1', 2)
+    second = _snapshot('robot2', 1)
+    newer_round = canonical_round_id(
+        TaskIdentity('robot1', 'robot1-session', 2),
+        TaskIdentity('robot2', 'robot2-session', 1),
+    )
+
+    assert normal_round_provenance_rebase_required(
+        current, first, second, newer_round, 'same-task-semantics',
+    ) is True
+
+
+def test_predecision_epoch_split_is_not_rebased_after_commitment():
+    """Provenance-only repair cannot tear down an already-decided round."""
+    current = SimpleNamespace(
+        mode='normal',
+        decision=object(),
+        round_id='old-round',
+        content_fingerprint='same-task-semantics',
+        snapshots=(_snapshot('robot1', 1), _snapshot('robot2', 1)),
+    )
+    first = _snapshot('robot1', 2)
+    second = _snapshot('robot2', 1)
+    newer_round = canonical_round_id(
+        TaskIdentity('robot1', 'robot1-session', 2),
+        TaskIdentity('robot2', 'robot2-session', 1),
+    )
+
+    assert normal_round_provenance_rebase_required(
+        current, first, second, newer_round, 'same-task-semantics',
+    ) is False
+
+
+def test_peer_newer_round_bid_is_the_rebase_convergence_signal():
+    """Only a peer bid for the newer pair can trigger the local rebase."""
+    first = _snapshot('robot1', 2)
+    second = _snapshot('robot2', 1)
+    newer_round = canonical_round_id(
+        TaskIdentity('robot1', 'robot1-session', 2),
+        TaskIdentity('robot2', 'robot2-session', 1),
+    )
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._peer_id = 'robot2'
+    node._bid_batches = {
+        'robot2': receive(BidBatch(
+            newer_round, 'union', 'robot2', 'robot2-session', 1, 5.0, (),
+        ), 5.0, 0.0),
+    }
+
+    assert node._peer_bid_matches_latest_normal_round(
+        0.1, first, second, newer_round, 'union',
+    ) is True
+    node._bid_batches['robot2'] = receive(BidBatch(
+        'old-round', 'union', 'robot2', 'robot2-session', 1, 5.0, (),
+    ), 5.0, 0.0)
+    assert node._peer_bid_matches_latest_normal_round(
+        0.1, first, second, newer_round, 'union',
+    ) is False
+
+
 def test_allocation_fingerprint_ignores_freshness_provenance_only():
     first = TaskSnapshot(
         'robot1', 'session', 10, 20, 'map-a', 100, 5.0, (),
@@ -191,13 +268,11 @@ def test_continuation_round_skips_normal_replacement_gate():
     source = SOURCE.read_text(encoding='utf-8')
     tick = source[source.index('    def _tick_impl'):
                   source.index('    def _cost_only_certificate_blocker_diagnostics')]
-    guard = (
-        'if (not continuation_active and\n'
-        '                normal_round_requires_replacement('
-    )
-    assert guard in tick
+    replacement_gate = 'if (not continuation_active and ('
+    assert replacement_gate in tick
+    assert 'normal_round_requires_replacement(' in tick
     assert tick.index('continuation_active = continuation is not None') < (
-        tick.index(guard)
+        tick.index(replacement_gate)
     )
 
 

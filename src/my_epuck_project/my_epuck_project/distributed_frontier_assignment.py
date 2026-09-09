@@ -453,6 +453,52 @@ def normal_round_requires_replacement(
     )
 
 
+def normal_round_provenance_rebase_required(
+        current_round, first: TaskSnapshot, second: TaskSnapshot,
+        canonical_round: str, allocation_fingerprint: str) -> bool:
+    """Detect an unreconciled epoch split in an uncommitted normal round.
+
+    Epoch-only updates normally do not replace a semantic round.  A round can
+    nevertheless become unreconcilable when one replica forms it before an
+    epoch update and the peer forms it afterward.  This predicate identifies
+    only that pre-decision, same-session, forward-epoch case; strict bid
+    provenance validation remains the authority for accepting evidence.
+    """
+    if (current_round is None or
+            getattr(current_round, 'mode', 'normal') != 'normal' or
+            getattr(current_round, 'decision', None) is not None or
+            current_round.content_fingerprint != allocation_fingerprint or
+            current_round.round_id == canonical_round):
+        return False
+    current_snapshots = getattr(current_round, 'snapshots', ())
+    if len(current_snapshots) != 2:
+        return False
+    incoming = (first, second)
+    current_identity = tuple(
+        (snapshot.source_robot_id, snapshot.source_session_id,
+         int(snapshot.epoch))
+        for snapshot in current_snapshots
+    )
+    incoming_identity = tuple(
+        (snapshot.source_robot_id, snapshot.source_session_id,
+         int(snapshot.epoch))
+        for snapshot in incoming
+    )
+    if any(
+            current[0] != latest[0] or current[1] != latest[1]
+            for current, latest in zip(current_identity, incoming_identity)
+    ):
+        # Session changes and non-canonical ordering are handled by the
+        # ordinary replacement path, not this provenance-only repair.
+        return False
+    return (
+        all(latest[2] >= current[2]
+            for current, latest in zip(current_identity, incoming_identity)) and
+        any(latest[2] > current[2]
+            for current, latest in zip(current_identity, incoming_identity))
+    )
+
+
 def selector_feasibility_identity(
         union_task_ids, hard_failed_task_ids, completed_task_ids,
         peer_reservation_task_ids) -> tuple[str, dict[str, tuple[str, ...]]]:
@@ -3055,9 +3101,25 @@ class DistributedFrontierAssignment(Node):
                     'unchanged IDLE task content; waiting for meaningful proposal change',
                 )
             return
-        if (not continuation_active and
-                normal_round_requires_replacement(
-                    current_round, first, second, content_fingerprint)):
+        provenance_rebase = False
+        if not continuation_active:
+            provenance_rebase = (
+                normal_round_provenance_rebase_required(
+                    current_round, first, second, round_id,
+                    content_fingerprint,
+                ) and
+                self._peer_bid_matches_latest_normal_round(
+                    now, first, second, round_id,
+                    current_round.union.union_hash,
+                )
+            )
+        if (not continuation_active and (
+                provenance_rebase or normal_round_requires_replacement(
+                    current_round, first, second, content_fingerprint))):
+            preserved_peer_batch = (
+                self._bid_batches.get(self._peer_id)
+                if provenance_rebase else None
+            )
             union = build_canonical_union(
                 first.tasks, second.tasks, self._maximum_union_tasks,
             )
@@ -3073,11 +3135,20 @@ class DistributedFrontierAssignment(Node):
                 query_tasks=union.tasks[:self._maximum_path_queries],
                 content_fingerprint=content_fingerprint,
             )
-            generation = self._activate_round(new_round, 'new canonical round')
+            reason = (
+                'rebase pre-decision round to peer-confirmed snapshot provenance'
+                if provenance_rebase else 'new canonical round'
+            )
+            generation = self._activate_round(new_round, reason)
             self._bid_batches.clear()
+            if preserved_peer_batch is not None:
+                # This peer batch is already valid for the newer canonical
+                # context. Keep it while the local side recomputes its bid;
+                # no old-round bid crosses the provenance boundary.
+                self._bid_batches[self._peer_id] = preserved_peer_batch
             self._peer_decision = None
             self._committed = CommittedRound()
-            self._transition(CoordinatorState.BIDDING, 'new canonical round')
+            self._transition(CoordinatorState.BIDDING, reason)
             self._log_union(new_round)
         # This node uses a MultiThreadedExecutor.  A navigation-terminal
         # callback may reset self._round while this timer callback is still
@@ -4704,6 +4775,19 @@ class DistributedFrontierAssignment(Node):
                     round_work.union.union_hash, True):
                 return False
         return True
+
+    def _peer_bid_matches_latest_normal_round(
+            self, now: float, first: TaskSnapshot, second: TaskSnapshot,
+            round_id: str, union_hash: str) -> bool:
+        """Return whether the peer confirms the newer normal-round context."""
+        received = self._bid_batches.get(self._peer_id)
+        if received is None:
+            return False
+        peer_snapshot = second if self._peer_id == 'robot2' else first
+        return bid_batch_valid(
+            received, now, self._peer_id, peer_snapshot.source_session_id,
+            peer_snapshot.epoch, round_id, union_hash, True,
+        )
 
     def _publish_decision(
             self, round_work: Optional[RoundWork] = None,

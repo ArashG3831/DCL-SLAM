@@ -1005,6 +1005,39 @@ def test_cost_only_one_active_survives_when_other_robot_has_no_feasible_bid():
     assert decision.diagnostics.valid_two_active_pair_count == 0
 
 
+def test_cost_only_shared_single_task_assigns_one_robot_and_leaves_one_idle():
+    """A shared one-task union is selectable without duplicate dispatch."""
+    robot1_task = make_task(
+        'robot1', 'same-physical-frontier-r1', (1.0, 0.0), (1.0, 0.0),
+        Bounds((0.9, -0.1), (1.1, 0.1)), gain=1.0,
+    )
+    robot2_task = make_task(
+        'robot2', 'same-physical-frontier-r2', (1.0, 0.0), (1.0, 0.0),
+        Bounds((0.9, -0.1), (1.1, 0.1)), gain=1.0,
+    )
+    union = build_canonical_union([robot1_task], [robot2_task])
+    assert len(union.tasks) == 1
+    task_id = union.tasks[0].canonical_id
+
+    decision = choose_pair_assignment(
+        'shared-single-task', union,
+        batch('robot1', union.union_hash, [
+            bid(task_id, 1.0, [(0.0, 0.0), (1.0, 0.0)]),
+        ], round_id='shared-single-task'),
+        batch('robot2', union.union_hash, [
+            bid(task_id, 2.0, [(0.0, 0.0), (1.0, 0.0)]),
+        ], round_id='shared-single-task'),
+        scoring_mode='frontier_cost_only',
+    )
+
+    assert {decision.robot1_task_id, decision.robot2_task_id} == {
+        task_id, '',
+    }
+    assert decision.robot1_task_id != decision.robot2_task_id
+    assert decision.diagnostics.valid_two_active_pair_count == 0
+    assert decision.diagnostics.valid_one_active_assignment_count == 2
+
+
 def test_cost_only_idle_remains_possible_when_nothing_is_feasible():
     """IDLE/IDLE remains the explicit result when every bid is invalid."""
     task = cost_task('invalid-both', (1.0, 0.0), 1.0, 0.0)

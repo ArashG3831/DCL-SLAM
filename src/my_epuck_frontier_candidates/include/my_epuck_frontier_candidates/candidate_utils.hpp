@@ -67,4 +67,9 @@ std::array<double, 4> frontier_world_bounds(
   const frontier_exploration_ros2::OccupancyGrid2d & map);
 bool async_request_is_current(uint64_t request_generation,uint64_t active_request,
   uint64_t request_revision,uint64_t cycle_revision,bool path_checking);
+bool candidate_cycle_revisions_match(
+  uint64_t request_map_revision, uint64_t current_map_revision,
+  uint64_t request_costmap_revision, uint64_t current_costmap_revision);
+bool candidate_cycle_retry_ready(
+  bool processing_active, bool cycle_idle, bool has_map, bool has_costmap);
 }

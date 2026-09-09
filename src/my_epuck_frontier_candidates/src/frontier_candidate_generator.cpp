@@ -1011,6 +1011,8 @@ private:
     cycle_termination_reason_ = "OTHER";
     cycle_old_revision_ = 0;
     cycle_new_revision_ = 0;
+    cycle_old_cost_revision_ = 0;
+    cycle_new_cost_revision_ = 0;
     cycle_map_cancelled_tier1_ = 0;
     const auto started = now();
     cycle_map_ = map;
@@ -1353,6 +1355,7 @@ private:
     const auto cost_revision = cycle_cost_revision_;
     const auto candidate_generation = candidate_generation_id_ + 1;
     const auto request = ++request_generation_;
+    path_lock_request_ = request;
     ++queries_;
     if (candidate.tier1_unqueried) {
       ++tier1_queries_issued_;
@@ -1387,22 +1390,33 @@ private:
     goal.planner_id = planner_id_;
     goal.use_start = false;
     auto options = rclcpp_action::Client<Action>::SendGoalOptions();
-    options.goal_response_callback = [this, candidate, revision, candidate_generation, request, request_started](GoalHandle::SharedPtr handle) {
+    options.goal_response_callback = [this, candidate, revision, cost_revision, candidate_generation, request, request_started](GoalHandle::SharedPtr handle) {
         if (!async_request_is_current(request, request_generation_, revision, cycle_revision_, state_ == State::PATH_CHECKING)) {
           RCLCPP_INFO(
             get_logger(),
             "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=SUPERSEDED phase=GOAL_RESPONSE",
             candidate.query_event_id, candidate.id);
-          release_path_lock();
+          release_path_lock_for(request);
           ++stale_results_;
           return;
         }
-        uint64_t current;
-        {std::lock_guard<std::mutex> lock(mu_); current = revision_;}
-        if (current != revision) {
+        uint64_t current_map, current_costmap;
+        {std::lock_guard<std::mutex> lock(mu_);
+          current_map = revision_;
+          current_costmap = cost_revision_;
+        }
+        if (!candidate_cycle_revisions_match(
+            revision, current_map, cost_revision, current_costmap)) {
+          cycle_termination_reason_ = "MAP_REVISION_CHANGED";
+          cycle_old_revision_ = revision;
+          cycle_new_revision_ = current_map;
+          cycle_old_cost_revision_ = cost_revision;
+          cycle_new_cost_revision_ = current_costmap;
+          if (handle) {planner_->async_cancel_goal(handle);}
           ++stale_results_;
-          release_path_lock();
+          release_path_lock_for(request);
           finish(false);
+          schedule_latest_cycle_retry();
           return;
         }
           if (!handle) {
@@ -1427,7 +1441,7 @@ private:
             candidate.pose.pose.position.x, candidate.pose.pose.position.y,
             orientation_yaw(candidate.pose.pose.orientation), candidate.pose.header.frame_id.c_str(),
             std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started).count());
-          release_path_lock();
+          release_path_lock_for(request);
           schedule_query_retry(1ms);
           return;
         }
@@ -1466,32 +1480,39 @@ private:
             schedule_query_retry(1ms);
           });
       };
-    options.result_callback = [this, candidate, revision, candidate_generation, request, request_started](const GoalHandle::WrappedResult & result) {
+    options.result_callback = [this, candidate, revision, cost_revision, candidate_generation, request, request_started](const GoalHandle::WrappedResult & result) {
         TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
         if (!async_request_is_current(request, active_request_, revision, cycle_revision_, state_ == State::PATH_CHECKING)) {
           RCLCPP_INFO(
             get_logger(),
             "FRONTIER_QUERY_LIFECYCLE query_id=%lu id=%lu state=SUPERSEDED phase=RESULT",
             candidate.query_event_id, candidate.id);
-          release_path_lock();
+          release_path_lock_for(request);
           ++stale_results_;
           return;
         }
         if (timeout_timer_) {timeout_timer_->cancel();}
         active_.reset();
         active_request_ = 0;
-        uint64_t current;
-        {std::lock_guard<std::mutex> lock(mu_); current = revision_;}
-        if (current != revision) {
+        uint64_t current_map, current_costmap;
+        {std::lock_guard<std::mutex> lock(mu_);
+          current_map = revision_;
+          current_costmap = cost_revision_;
+        }
+        if (!candidate_cycle_revisions_match(
+            revision, current_map, cost_revision, current_costmap)) {
           cycle_termination_reason_ = "MAP_REVISION_CHANGED";
           cycle_old_revision_ = revision;
-          cycle_new_revision_ = current;
+          cycle_new_revision_ = current_map;
+          cycle_old_cost_revision_ = cost_revision;
+          cycle_new_cost_revision_ = current_costmap;
           for (std::size_t i = query_index_; i < works_.size(); ++i) {
             if (works_[i].tier1_unqueried) {++cycle_map_cancelled_tier1_;}
           }
           ++stale_results_;
-          release_path_lock();
+          release_path_lock_for(request);
           finish(false);
+          schedule_latest_cycle_retry();
           return;
         }
         const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
@@ -1611,7 +1632,10 @@ private:
     request_generation_++;
     active_request_ = 0;
     if (timeout_timer_) {timeout_timer_->cancel();}
-    if (retry_timer_) {retry_timer_->cancel();}
+    if (retry_timer_) {
+      retry_timer_->cancel();
+      retry_timer_.reset();
+    }
     release_path_lock();
     state_ = State::PUBLISHING;
     if (publish) {
@@ -1625,7 +1649,7 @@ private:
     prune_evaluation_cache();
     RCLCPP_WARN(
       get_logger(),
-      "FRONTIER_LIFECYCLE robot=%s cycle=%lu sim_time=%.3f snapshot_frontiers=%u unique_frontier_records=%zu duplicate_id_records=%zu cache_before=%zu cache_after=%zu reused_ids=%zu new_ids=%zu pruned_absent=%zu evicted_capacity=%zu identity_associations=%zu dnu=%u tier1_pending_start=%zu tier1_selected=%zu tier1_sent=%zu tier1_reachable=%zu tier1_unreachable=%zu tier1_aborted=%zu tier1_timeout=%zu tier1_remaining_dnu=%zu termination=%s old_revision=%lu new_revision=%lu map_cancelled_tier1=%zu",
+      "FRONTIER_LIFECYCLE robot=%s cycle=%lu sim_time=%.3f snapshot_frontiers=%u unique_frontier_records=%zu duplicate_id_records=%zu cache_before=%zu cache_after=%zu reused_ids=%zu new_ids=%zu pruned_absent=%zu evicted_capacity=%zu identity_associations=%zu dnu=%u tier1_pending_start=%zu tier1_selected=%zu tier1_sent=%zu tier1_reachable=%zu tier1_unreachable=%zu tier1_aborted=%zu tier1_timeout=%zu tier1_remaining_dnu=%zu termination=%s old_revision=%lu new_revision=%lu old_costmap_revision=%lu new_costmap_revision=%lu map_cancelled_tier1=%zu",
       robot_id_.c_str(), cycle_sequence_, cycle_start_sim_time_, detected_frontier_count_,
       cycle_unique_frontier_records_, cycle_duplicate_id_records_, cycle_cache_before_,
       evaluation_cache_.size(), cycle_reused_ids_, cycle_new_ids_,
@@ -1634,7 +1658,8 @@ private:
       cycle_tier1_sent_, cycle_tier1_reachable_, cycle_tier1_unreachable_,
       cycle_tier1_aborted_, cycle_tier1_timeout_, cycle_tier1_remaining_dnu_,
       query_termination_name(cycle_termination_reason_), cycle_old_revision_,
-      cycle_new_revision_, cycle_map_cancelled_tier1_);
+      cycle_new_revision_, cycle_old_cost_revision_, cycle_new_cost_revision_,
+      cycle_map_cancelled_tier1_);
     state_ = State::IDLE;
     works_.clear();
     reachable_.clear();
@@ -1712,6 +1737,14 @@ private:
       ::close(path_lock_fd_);
       path_lock_fd_ = -1;
     }
+    path_lock_request_ = 0;
+  }
+
+  void release_path_lock_for(uint64_t request)
+  {
+    if (path_lock_fd_ >= 0 && path_lock_request_ == request) {
+      release_path_lock();
+    }
   }
 
   void schedule_query_retry(std::chrono::milliseconds delay)
@@ -1721,6 +1754,30 @@ private:
       if (retry_timer_) {retry_timer_->cancel();}
       retry_timer_.reset();
       send_next();
+    });
+  }
+
+  void schedule_latest_cycle_retry()
+  {
+    if (retry_timer_) {return;}
+    const auto delay_ms = static_cast<int64_t>(std::max(
+      1.0, 1000.0 / std::max(0.01, processing_rate_hz_)));
+    retry_timer_ = create_wall_timer(std::chrono::milliseconds(delay_ms), [this] {
+      if (retry_timer_) {
+        retry_timer_->cancel();
+        retry_timer_.reset();
+      }
+      bool has_map, has_costmap;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        has_map = static_cast<bool>(latest_map_);
+        has_costmap = static_cast<bool>(latest_cost_);
+      }
+      if (!candidate_cycle_retry_ready(
+          processing_active_, state_ == State::IDLE, has_map, has_costmap)) {
+        return;
+      }
+      tick();
     });
   }
 
@@ -2171,6 +2228,7 @@ private:
   std::size_t cycle_tier1_timeout_{0}, cycle_tier1_remaining_dnu_{0};
   std::size_t cycle_map_cancelled_tier1_{0};
   uint64_t cycle_old_revision_{0}, cycle_new_revision_{0};
+  uint64_t cycle_old_cost_revision_{0}, cycle_new_cost_revision_{0};
   std::string cycle_termination_reason_{"OTHER"};
   uint64_t path_lock_acquire_attempts_{0}, path_lock_retry_count_{0};
   uint64_t path_lock_hold_count_{0}, path_priority_yields_{0};
@@ -2179,6 +2237,7 @@ private:
   bool path_lock_waiting_{false};
   std::chrono::steady_clock::time_point path_lock_wait_started_{};
   std::chrono::steady_clock::time_point path_lock_acquired_at_{};
+  uint64_t path_lock_request_{0};
 };
 
 }  // namespace my_epuck_frontier_candidates

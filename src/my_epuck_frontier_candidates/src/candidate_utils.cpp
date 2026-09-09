@@ -205,4 +205,16 @@ bool async_request_is_current(uint64_t request_generation,uint64_t active_reques
   uint64_t request_revision,uint64_t cycle_revision,bool path_checking){
   return request_generation==active_request && request_revision==cycle_revision && path_checking;
 }
+bool candidate_cycle_revisions_match(
+  uint64_t request_map_revision, uint64_t current_map_revision,
+  uint64_t request_costmap_revision, uint64_t current_costmap_revision)
+{
+  return request_map_revision == current_map_revision &&
+         request_costmap_revision == current_costmap_revision;
+}
+bool candidate_cycle_retry_ready(
+  bool processing_active, bool cycle_idle, bool has_map, bool has_costmap)
+{
+  return processing_active && cycle_idle && has_map && has_costmap;
+}
 }

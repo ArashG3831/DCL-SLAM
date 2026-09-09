@@ -141,6 +141,27 @@ TEST(AsyncRequests,OldGenerationCannotTouchReplacement){
   EXPECT_FALSE(async_request_is_current(7,7,11,12,true));
   EXPECT_FALSE(async_request_is_current(7,7,12,12,false));
 }
+TEST(AsyncRequests,RevisionChangeInvalidatesOnlyCapturedCycle){
+  EXPECT_TRUE(candidate_cycle_revisions_match(19,19,7,7));
+  EXPECT_FALSE(candidate_cycle_revisions_match(19,20,7,7));
+  EXPECT_FALSE(candidate_cycle_revisions_match(19,19,7,8));
+}
+TEST(AsyncRequests,StaleCycleRetryRequiresReusableCompleteInputs){
+  EXPECT_TRUE(candidate_cycle_retry_ready(true, true, true, true));
+  EXPECT_FALSE(candidate_cycle_retry_ready(false, true, true, true));
+  EXPECT_FALSE(candidate_cycle_retry_ready(true, false, true, true));
+  EXPECT_FALSE(candidate_cycle_retry_ready(true, true, false, true));
+  EXPECT_FALSE(candidate_cycle_retry_ready(true, true, true, false));
+}
+TEST(AsyncRequests,RepeatedStaleCyclesCanRetryWithoutOverlappingCycles){
+  bool cycle_idle = true;
+  for (int revision = 1; revision <= 3; ++revision) {
+    ASSERT_TRUE(candidate_cycle_retry_ready(true, cycle_idle, true, true));
+    cycle_idle = false;
+    EXPECT_FALSE(candidate_cycle_retry_ready(true, cycle_idle, true, true));
+    cycle_idle = true;
+  }
+}
 TEST(FairEvaluation, SixteenStableFrontiersWithBudgetEightEventuallyAllQueried){
   std::vector<FrontierEvaluationRecord> records;
   for (uint64_t id = 1; id <= 16; ++id) {

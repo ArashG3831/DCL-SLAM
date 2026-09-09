@@ -990,6 +990,11 @@ private:
     double rx, double ry, double yaw)
   {
     TimingScope timing(this, TimingSection::START_CYCLE, now().seconds());
+    // A normal processing tick may win the race with the delayed retry timer
+    // created by a stale-revision abort.  That old timer must not remain
+    // attached to the new cycle: its later callback could cancel or suppress
+    // the new cycle's query retry timer.
+    cancel_retry_timer();
     state_ = State::EXTRACTING;
     ++cycle_sequence_;
     cycle_start_sim_time_ = now().seconds();
@@ -1632,10 +1637,7 @@ private:
     request_generation_++;
     active_request_ = 0;
     if (timeout_timer_) {timeout_timer_->cancel();}
-    if (retry_timer_) {
-      retry_timer_->cancel();
-      retry_timer_.reset();
-    }
+    cancel_retry_timer();
     release_path_lock();
     state_ = State::PUBLISHING;
     if (publish) {
@@ -1750,7 +1752,11 @@ private:
   void schedule_query_retry(std::chrono::milliseconds delay)
   {
     if (retry_timer_) {return;}
-    retry_timer_ = create_wall_timer(delay, [this] {
+    const auto callback_generation = ++retry_generation_;
+    retry_timer_ = create_wall_timer(delay, [this, callback_generation] {
+      if (!candidate_retry_callback_is_current(callback_generation, retry_generation_)) {
+        return;
+      }
       if (retry_timer_) {retry_timer_->cancel();}
       retry_timer_.reset();
       send_next();
@@ -1762,7 +1768,11 @@ private:
     if (retry_timer_) {return;}
     const auto delay_ms = static_cast<int64_t>(std::max(
       1.0, 1000.0 / std::max(0.01, processing_rate_hz_)));
-    retry_timer_ = create_wall_timer(std::chrono::milliseconds(delay_ms), [this] {
+    const auto callback_generation = ++retry_generation_;
+    retry_timer_ = create_wall_timer(std::chrono::milliseconds(delay_ms), [this, callback_generation] {
+      if (!candidate_retry_callback_is_current(callback_generation, retry_generation_)) {
+        return;
+      }
       if (retry_timer_) {
         retry_timer_->cancel();
         retry_timer_.reset();
@@ -1779,6 +1789,15 @@ private:
       }
       tick();
     });
+  }
+
+  void cancel_retry_timer()
+  {
+    ++retry_generation_;
+    if (retry_timer_) {
+      retry_timer_->cancel();
+      retry_timer_.reset();
+    }
   }
 
   bool fallback_priority_requested()
@@ -2238,6 +2257,7 @@ private:
   std::chrono::steady_clock::time_point path_lock_wait_started_{};
   std::chrono::steady_clock::time_point path_lock_acquired_at_{};
   uint64_t path_lock_request_{0};
+  uint64_t retry_generation_{0};
 };
 
 }  // namespace my_epuck_frontier_candidates

@@ -217,4 +217,9 @@ bool candidate_cycle_retry_ready(
 {
   return processing_active && cycle_idle && has_map && has_costmap;
 }
+bool candidate_retry_callback_is_current(
+  uint64_t callback_generation, uint64_t current_generation)
+{
+  return callback_generation == current_generation;
+}
 }

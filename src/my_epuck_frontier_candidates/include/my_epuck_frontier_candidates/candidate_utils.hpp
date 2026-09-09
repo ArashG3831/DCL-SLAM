@@ -72,4 +72,6 @@ bool candidate_cycle_revisions_match(
   uint64_t request_costmap_revision, uint64_t current_costmap_revision);
 bool candidate_cycle_retry_ready(
   bool processing_active, bool cycle_idle, bool has_map, bool has_costmap);
+bool candidate_retry_callback_is_current(
+  uint64_t callback_generation, uint64_t current_generation);
 }

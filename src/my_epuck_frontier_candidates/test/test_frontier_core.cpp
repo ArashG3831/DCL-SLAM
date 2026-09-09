@@ -153,6 +153,28 @@ TEST(AsyncRequests,StaleCycleRetryRequiresReusableCompleteInputs){
   EXPECT_FALSE(candidate_cycle_retry_ready(true, true, false, true));
   EXPECT_FALSE(candidate_cycle_retry_ready(true, true, true, false));
 }
+TEST(AsyncRequests,Robot1StylePendingAbortRetryCannotSuppressFreshCycle){
+  // A stale-abort retry can still be pending when the ordinary processing
+  // timer starts the fresh cycle.  Starting that cycle retires the old timer
+  // generation before the first query completes.
+  uint64_t retry_generation = 0;
+  bool retry_pending = true;
+  const auto stale_retry = retry_generation;
+  ++retry_generation;  // start_cycle() cancels the pending stale retry
+  retry_pending = false;
+
+  ++retry_generation;  // first fresh result schedules the next query retry
+  const auto current_retry = retry_generation;
+  retry_pending = true;
+
+  EXPECT_FALSE(candidate_retry_callback_is_current(stale_retry, retry_generation));
+  EXPECT_TRUE(candidate_retry_callback_is_current(current_retry, retry_generation));
+  EXPECT_TRUE(retry_pending);
+}
+TEST(AsyncRequests,LateRetryCallbackCannotTouchNewerGeneration){
+  EXPECT_FALSE(candidate_retry_callback_is_current(4, 5));
+  EXPECT_TRUE(candidate_retry_callback_is_current(5, 5));
+}
 TEST(AsyncRequests,RepeatedStaleCyclesCanRetryWithoutOverlappingCycles){
   bool cycle_idle = true;
   for (int revision = 1; revision <= 3; ++revision) {

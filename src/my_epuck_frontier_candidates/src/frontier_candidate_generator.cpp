@@ -219,6 +219,13 @@ public:
     P(bool, stop_after_handoff, false);
     P(int, occupied_threshold, 50);
     P(int, costmap_blocked_threshold, 1);
+    // Use the pinned upstream decision-map pipeline as a private frontier
+    // decision view.  These remain node parameters so the integration can be
+    // compared against the raw path without duplicating upstream filtering.
+    P(bool, frontier_map_optimization_enabled, true);
+    P(double, sigma_s, 2.0);
+    P(double, sigma_r, 30.0);
+    P(int, dilation_kernel_radius_cells, 1);
     P(int, minimum_frontier_cells, 5);
     P(double, minimum_frontier_length_m, .05);
     P(double, stable_id_quantization_m, .05);
@@ -722,7 +729,10 @@ private:
     params.global_frame = global_frame_;
     params.robot_base_frame = robot_base_frame_;
     params.frontier_marker_topic = marker_topic_;
-    params.frontier_map_optimization_enabled = false;
+    params.frontier_map_optimization_enabled = frontier_map_optimization_enabled_;
+    params.sigma_s = sigma_s_;
+    params.sigma_r = sigma_r_;
+    params.dilation_kernel_radius_cells = dilation_kernel_radius_cells_;
     const std::string configured_mrtsp_solver =
       upstream_route_ordering_enabled_ ? upstream_mrtsp_solver_ : "greedy";
     params.mrtsp_solver = configured_mrtsp_solver;
@@ -773,6 +783,11 @@ private:
       get_logger(),
       "UPSTREAM_FRONTIER_CORE_ACTIVE backend=frontier_exploration_ros2::FrontierExplorerCore dispatch=false map=%s costmap=%s",
       map_topic_.c_str(), global_costmap_topic_.c_str());
+    RCLCPP_INFO(
+      get_logger(),
+      "UPSTREAM_DECISION_MAP_CONFIG optimization=%s sigma_s=%.3f sigma_r=%.3f dilation_radius_cells=%d min_frontier_cells=%d",
+      frontier_map_optimization_enabled_ ? "true" : "false", sigma_s_, sigma_r_,
+      dilation_kernel_radius_cells_, minimum_frontier_cells_);
     RCLCPP_INFO(
       get_logger(),
       "UPSTREAM_ROUTE_CONTEXT enabled=%s solver=%s candidate_limit=%d horizon=%d",
@@ -2521,6 +2536,9 @@ private:
   double visible_gain_range_m_, visible_gain_fov_deg_, visible_gain_ray_step_deg_;
   double classification_context_radius_m_, path_context_radius_m_;
   int occupied_threshold_, costmap_blocked_threshold_, minimum_frontier_cells_;
+  bool frontier_map_optimization_enabled_{true};
+  double sigma_s_{2.0}, sigma_r_{30.0};
+  int dilation_kernel_radius_cells_{1};
   int maximum_candidates_before_path_check_, maximum_path_queries_per_cycle_;
   int maximum_suppression_records_;
   int maximum_evaluation_records_;

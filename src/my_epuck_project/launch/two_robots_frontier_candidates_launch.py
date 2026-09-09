@@ -27,6 +27,13 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'marker_topic': f'/{robot}/frontier_candidate_markers',
             'processing_rate_hz': 0.5,
             'handoff_gated': LaunchConfiguration('handoff_gated'),
+            # Pinned frontier_exploration_ros2 decision-map defaults.  This is
+            # a private frontier-decision view; the shared SLAM map and Nav2
+            # costmap topics remain unchanged.
+            'frontier_map_optimization_enabled': True,
+            'sigma_s': 2.0,
+            'sigma_r': 30.0,
+            'dilation_kernel_radius_cells': 1,
             'minimum_frontier_cells': minimum_frontier_cells,
             'minimum_frontier_length_m': 0.05,
             'stable_id_quantization_m': 0.05,

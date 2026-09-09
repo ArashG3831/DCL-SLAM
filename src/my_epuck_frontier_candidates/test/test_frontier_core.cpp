@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include "frontier_exploration_ros2/decision_map.hpp"
 #include "frontier_exploration_ros2/frontier_search.hpp"
 #include "my_epuck_frontier_candidates/candidate_utils.hpp"
 using namespace frontier_exploration_ros2; using namespace my_epuck_frontier_candidates;
@@ -13,6 +14,36 @@ static FrontierSearchResult search(const nav_msgs::msg::OccupancyGrid::SharedPtr
 TEST(MapGeometry,IdentityTranslatedRotatedRoundTrip){for(auto p:std::vector<std::tuple<double,double,double>>{{0,0,0},{-2,3,0},{1,-2,M_PI/2}}){auto m=grid(8,8,.01,std::get<0>(p),std::get<1>(p),std::get<2>(p));OccupancyGrid2d g(m);for(auto c:std::vector<std::pair<int,int>>{{0,0},{3,5},{7,7}}){auto w=g.mapToWorld(c.first,c.second);int x,y;EXPECT_TRUE(g.worldToMapNoThrow(w.first,w.second,x,y));EXPECT_EQ(x,c.first);EXPECT_EQ(y,c.second);}}}
 TEST(Frontiers,BoundaryGroupingAndMinimums){auto m=grid();free_box(m,2,2,5,5);auto f=search(m,1).frontiers;ASSERT_EQ(f.size(),1u);EXPECT_GT(f[0].size,4);EXPECT_TRUE(search(m,100).frontiers.empty());EXPECT_NEAR(f[0].centroid.first,.04,.02);}
 TEST(Frontiers,VisibleRevealUsesUpstreamRayCasting){auto m=grid();free_box(m,2,2,5,5);OccupancyGrid2d g(m),c(free_costmap(m));auto fs=search(m).frontiers;ASSERT_FALSE(fs.empty());ASSERT_TRUE(fs[0].goal_point);geometry_msgs::msg::Pose sensor;sensor.position.x=fs[0].goal_point->first;sensor.position.y=fs[0].goal_point->second;auto gain=compute_visible_reveal_gain(sensor,g,c,std::nullopt,1.,360.,2.,fs[0].visible_reveal_bounds);ASSERT_TRUE(gain);EXPECT_GT(gain->visible_reveal_cell_count,0);}
+TEST(DecisionMap,EnabledUpstreamPipelineIsDeterministicAndDoesNotMutateRawMap){
+  auto message = grid(12, 12, .03);
+  free_box(message, 4, 4, 7, 7);
+  const auto original = *message;
+  OccupancyGrid2d raw(message);
+
+  DecisionMapConfig disabled;
+  disabled.optimization_enabled = false;
+  disabled.occ_threshold = 50;
+  const auto raw_result = build_decision_map(raw, disabled);
+  const auto expected_raw = paper_image_to_occupancy_grid(
+    occupancy_grid_to_paper_image(raw, disabled.occ_threshold), *message);
+  EXPECT_EQ(raw_result.optimized_map_msg.data, expected_raw.data);
+
+  DecisionMapConfig enabled;
+  enabled.optimization_enabled = true;
+  enabled.occ_threshold = 50;
+  enabled.sigma_s = 2.0;
+  enabled.sigma_r = 30.0;
+  enabled.dilation_kernel_radius_cells = 1;
+  const auto optimized_first = build_decision_map(raw, enabled);
+  const auto optimized_second = build_decision_map(raw, enabled);
+
+  EXPECT_EQ(optimized_first.optimized_map_msg.data,
+    optimized_second.optimized_map_msg.data);
+  EXPECT_NE(optimized_first.optimized_map_msg.data, raw_result.optimized_map_msg.data);
+  EXPECT_EQ(message->header, original.header);
+  EXPECT_EQ(message->info, original.info);
+  EXPECT_EQ(message->data, original.data);
+}
 TEST(Approach,FreeAndDistance){auto m=grid();free_box(m,2,2,5,5);OccupancyGrid2d g(m);auto p=g.mapToWorld(3,3);auto goal=choose_accessible_frontier_goal(p,{{2,2},{5,5}},g,std::nullopt,.01);ASSERT_TRUE(goal);int x,y;ASSERT_TRUE(g.worldToMapNoThrow(goal->first,goal->second,x,y));EXPECT_EQ(g.getCost(x,y),0);EXPECT_GE(std::hypot(goal->first-p.first,goal->second-p.second),.01);}
 TEST(Approach,ClearanceRejectsInflationAndBounds){auto m=grid();free_box(m,1,1,6,6);m->data[3*8+4]=50;OccupancyGrid2d g(m);auto w=g.mapToWorld(3,3);EXPECT_FALSE(clearance_ok(g,w.first,w.second,.02,1));auto edge=g.mapToWorld(0,0);EXPECT_FALSE(clearance_ok(g,edge.first,edge.second,.02,1));}
 TEST(Approach,PlannerToleranceMarginUsesExclusiveBounds){auto m=grid(200,200,.01);free_box(m,0,0,199,199);OccupancyGrid2d g(m);auto inside=g.mapToWorld(100,100);auto edge=g.mapToWorld(199,100);EXPECT_TRUE(inside_with_margin(g,inside.first,inside.second,.5));EXPECT_FALSE(inside_with_margin(g,edge.first,edge.second,.5));int x,y;EXPECT_FALSE(g.worldToMapNoThrow(2.0,1.0,x,y));}

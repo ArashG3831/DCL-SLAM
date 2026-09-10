@@ -10,6 +10,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
+from launch.conditions import IfCondition
 from launch_ros.actions import Node
 
 
@@ -38,6 +39,7 @@ def _assignment_peer(robot):
         name='distributed_frontier_assignment',
         namespace=robot,
         output='screen',
+        condition=IfCondition(LaunchConfiguration('launch_allocator')),
         remappings=[('tf', '/tf'), ('tf_static', '/tf_static')],
         parameters=[{
             'robot_id': robot,
@@ -204,6 +206,8 @@ def generate_launch_description():
                               choices=['true', 'false']),
         DeclareLaunchArgument('common_start_release_required',
                               default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('launch_allocator', default_value='true',
                               choices=['true', 'false']),
         # Defaults are the production literature-backed allocator.  These
         # switches are deliberately explicit so historical weighted rounds

@@ -358,7 +358,7 @@ def launch_setup(context):
                         'global_frame': f'{robot}/map',
                         'robot_base_frame': f'{robot}/base_footprint',
                         'compute_path_action': f'/{robot}/compute_path_to_pose',
-                        'candidate_topic': f'/{robot}/local_frontier_candidates',
+                        'candidate_topic': f'/{robot}/frontier_candidates',
                         'marker_topic': f'/{robot}/local_frontier_candidate_markers',
                         'processing_rate_hz': 0.5,
                         # Use the same private decision-map configuration as
@@ -394,7 +394,7 @@ def launch_setup(context):
                     output='screen',
                     parameters=[{
                         'robot_id': robot,
-                        'candidate_topic': f'/{robot}/local_frontier_candidates',
+                        'candidate_topic': f'/{robot}/frontier_candidates',
                         'task_snapshot_topic': f'/{robot}/local_task_snapshot',
                         'maximum_tasks': 10000,
                         'validity_s': 8.0,
@@ -404,8 +404,8 @@ def launch_setup(context):
                 ),
                 Node(
                     package='my_epuck_project',
-                    executable='distributed_frontier_assignment',
-                    name='local_distributed_frontier_assignment',
+                    executable='minimal_frontier_allocator',
+                    name='minimal_frontier_allocator',
                     namespace=robot,
                     output='screen',
                     prefix=os.environ.get(
@@ -415,63 +415,20 @@ def launch_setup(context):
                     parameters=[{
                         'robot_id': robot,
                         'robot_base_frame': f'{robot}/base_footprint',
-                        'global_frame': f'{robot}/map',
-                        'map_topic': 'map',
-                        'nav2_node_prefix': 'local_',
-                        'candidate_topic': f'/{robot}/local_frontier_candidates',
-                        'task_snapshot_topic': f'/{robot}/local_task_snapshot',
-                        'local_only': True,
-                        'handoff_gated': True,
-                        'stop_after_handoff': True,
-                        # Unknown-pose two-robot local explorers must not
-                        # dispatch a unilateral head start.  Each replica
-                        # publishes its existing local-snapshot readiness and
-                        # waits for the peer's matching fact; single-robot
-                        # diagnostic launches do not use these local nodes.
-                        'initial_peer_readiness_barrier': True,
+                        'global_frame': 'shared_map',
+                        'map_topic': f'/{robot}/shared_map',
+                        'nav2_node_prefix': '',
+                        'candidate_topic': 'frontier_candidates',
                         'common_start_release_required': LaunchConfiguration(
                             'common_start_release_required'),
-                        'publish_cooperative_start_ready': False,
-                        # Local pre-handoff assignment is a single-owner
-                        # action boundary; one executor avoids four-worker
-                        # waitable/GIL contention without changing task logic.
-                        'executor_threads': 1,
-                        # Keep the declared launch switch effective for the
-                        # local pre-handoff peers as well as the known-pose
-                        # shared allocator.  The default remains true; a
-                        # diagnostic dispatch-off run can now exercise the
-                        # identical graph without Nav2 goal traffic.
-                        # Test-only traffic mode holds local navigation sends
-                        # while retaining mapping and evidence acquisition.
-                        'dispatch_enabled': (
-                            False if (
-                                synchronized_traffic_test and
-                                synchronized_traffic_hold_prehandoff_motion
-                            ) else
-                            dispatch_enabled),
-                        'prehandoff_dispatch_delay_s': LaunchConfiguration(
-                            'prehandoff_dispatch_delay_s'),
-                        'synthetic_bids': False,
-                        'maximum_tasks_per_source': 10000,
-                        'maximum_union_tasks': 10000,
-                        'maximum_path_queries': 10000,
-                        'minimum_solo_visible_gain_m': 0.05,
-                        'minimum_solo_ordering_score': 0.0,
-                        'path_cost_scale_m': 12.0,
-                        # Same authoritative RPP references used by the
-                        # candidate generator and shared Nav2 profiles.
-                        'cost_only_reference_linear_speed_mps': 0.13,
-                        'cost_only_reference_angular_speed_radps': 0.35,
-                        'bid_validity_s': 8.0,
-                        'decision_validity_s': 8.0,
-                        'peer_timeout_s': 0.0,
-                        'assignment_strategy': assignment_strategy,
+                        'publish_cooperative_start_ready': True,
                         'local_path_gate_mode': LaunchConfiguration(
                             'local_path_gate_mode'),
-                        'burgard_beta': 1.0,
-                        'traffic_scheduler_enabled': False,
-                        'terminal_small_frontier_length_m': LaunchConfiguration(
-                            'terminal_small_frontier_length_m'),
+                        'map_stability_grace_s': 5.0,
+                        'bid_validity_s': 8.0,
+                        'traffic_safe_radius_m': 0.08,
+                        'traffic_reference_speed_mps': 0.13,
+                        'traffic_eta_tie_s': 0.05,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                     }],
                 ),

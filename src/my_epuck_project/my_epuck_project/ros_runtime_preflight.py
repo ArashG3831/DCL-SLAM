@@ -63,6 +63,7 @@ CRITICAL_RUNTIME_MODULES = (
     # must be checked in the install actually visible to the ROS child; a
     # matching package prefix is not sufficient provenance.
     'my_epuck_project.distributed_frontier_assignment',
+    'my_epuck_project.minimal_frontier_allocator',
     'my_epuck_project.distributed_assignment.local_nav2',
     'my_epuck_project.round_lifecycle',
     'my_epuck_project.distributed_assignment.protocol',

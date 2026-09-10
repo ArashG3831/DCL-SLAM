@@ -345,6 +345,9 @@ class UnknownPoseSharedStackActivation(Node):
             'dispatch_enabled': 'true',
             'unknown_initial_pose': 'true',
             'phase_already_aligned': 'true',
+            # The persistent pre-handoff minimal allocator owns the single
+            # robot-local allocation process across this phase switch.
+            'launch_allocator': 'false',
             'launch_mapping': 'false',
             'local_path_gate_mode': self._parameters['local_path_gate_mode'],
             # Initial unknown-pose startup may already have launched the

@@ -69,14 +69,14 @@ NAV2_NODES = (
 )
 LOCAL_NAV2_NODES = tuple(f'local_{name}' for name in NAV2_NODES)
 GRAPH_SUFFIXES = (
-    '/robot1/distributed_frontier_assignment',
-    '/robot2/distributed_frontier_assignment',
+    '/robot1/minimal_frontier_allocator',
+    '/robot2/minimal_frontier_allocator',
     '/robot1/map_fusion',
     '/robot2/map_fusion',
 )
 LOCAL_UNKNOWN_POSE_GRAPH_SUFFIXES = (
-    '/robot1/local_distributed_frontier_assignment',
-    '/robot2/local_distributed_frontier_assignment',
+    '/robot1/minimal_frontier_allocator',
+    '/robot2/minimal_frontier_allocator',
     '/robot1/unknown_pose_frontend',
     '/robot2/unknown_pose_frontend',
 )

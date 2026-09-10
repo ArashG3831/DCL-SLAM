@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -27,7 +27,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-SCHEMA_VERSION = "publication_animation_3.0"
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from my_epuck_project.offline_timing_metrics import analyze_event_records  # noqa: E402
+
+
+SCHEMA_VERSION = "publication_animation_3.1"
 MAP_MARGIN_M = 0.45
 MAX_TIME_GAP_S = 5.0
 MAX_CONTINUOUS_STEP_M = 1.0
@@ -104,6 +110,27 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class FrontierRegion:
+    stamp_s: float
+    robot: str
+    frontier_id: str
+    centroid: tuple[float, float]
+    cells: tuple[tuple[int, int], ...]
+    bounds: Optional[tuple[float, float, float, float]] = None
+    grid_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    grid_resolution: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class FrontierRegionSnapshot:
+    stamp_s: float
+    robot: str
+    regions: tuple[FrontierRegion, ...]
+    resolution: float
+    origin: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class TaskRecord:
     stamp_s: float
     robot: str
@@ -138,6 +165,13 @@ class OverlayData:
     goal_events: dict[str, tuple[GoalEvent, ...]]
     bid_batches: dict[str, tuple[BidPathBatch, ...]]
     raw_frontier_geometry_records: int
+    event_records: tuple[dict[str, Any], ...] = ()
+    handoff_error_m: Optional[float] = None
+    handoff_error_yaw_deg: Optional[float] = None
+    distance_travelled_m: dict[str, Optional[float]] = field(default_factory=dict)
+    productive_percent: dict[str, Optional[float]] = field(default_factory=dict)
+    productivity_segments: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    frontier_regions: dict[str, tuple[FrontierRegionSnapshot, ...]] = field(default_factory=dict)
 
 
 def parse_args(argv=None):
@@ -147,11 +181,14 @@ def parse_args(argv=None):
     parser.add_argument('--width', type=int, default=1920)
     parser.add_argument('--height', type=int, default=1080)
     parser.add_argument('--fps', type=int, default=60)
+    parser.add_argument('--start-s', type=float, default=0.0,
+                        help='absolute source simulation time at video start')
     parser.add_argument('--duration-s', type=float, default=0.0,
                         help='maximum source simulation-time window')
     parser.add_argument('--speedup', type=float, default=1.0,
                         help='source simulation seconds per output second')
-    parser.add_argument('--title', default='Cooperative exploration')
+    parser.add_argument('--title', default='DCL-SLAM')
+    parser.add_argument('--policy', default='Cooperative Cost-Only')
     parser.add_argument('--style', default='thesis', choices=('thesis',))
     parser.add_argument('--stills-dir', default='')
     parser.add_argument('--still-times', default='')
@@ -485,10 +522,90 @@ def draw_dashed(view, points, color, width=2, dash=10, gap=7):
         phase = (phase + length) % period
 
 
-def _candidate_at(data: OverlayData, robot: str, stamp_s: float):
+def _candidate_batch_at(data: OverlayData, robot: str, stamp_s: float):
     batches = data.candidate_batches.get(robot, ())
     index = bisect.bisect_right([item[0] for item in batches], stamp_s) - 1
-    return batches[index][1] if index >= 0 else ()
+    return batches[index] if index >= 0 else None
+
+
+def _candidate_at(data: OverlayData, robot: str, stamp_s: float):
+    batch = _candidate_batch_at(data, robot, stamp_s)
+    return batch[1] if batch is not None else ()
+
+
+def _candidate_status(data: OverlayData, robot: str, stamp_s: float):
+    batch = _candidate_batch_at(data, robot, stamp_s)
+    if batch is None:
+        return (), None
+    source_stamp, candidates = batch
+    return candidates, max(0.0, stamp_s - source_stamp)
+
+
+def _pose_row_metric(pose: Optional[PoseSample], key: str):
+    if pose is None:
+        return None
+    try:
+        value = float(pose.row.get(key, ''))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _display_speed(pose: Optional[PoseSample], key: str):
+    value = _pose_row_metric(pose, key)
+    if value is None:
+        return None
+    return 0.0 if abs(value) < 0.0005 else value
+
+
+def _productivity_at(data: OverlayData, robot: str, stamp_s: float):
+    """Return cumulative productivity through the current rendered frame."""
+    feasible = 0.0
+    idle = 0.0
+    for item in data.productivity_segments.get(robot, ()):
+        start = float(item.get('start_s', 0.0))
+        end = min(float(item.get('end_s', 0.0)), stamp_s)
+        if end <= start or item.get('classification') != 'FEASIBLE_WORK_AVAILABLE':
+            continue
+        duration = end - start
+        feasible += duration
+        if not item.get('goal_active'):
+            idle += duration
+    if feasible <= 0.0:
+        return 100.0
+    return 100.0 * max(0.0, feasible - idle) / feasible
+
+
+def _traffic_labels(data: OverlayData, stamp_s: float):
+    """Return compact per-robot traffic state labels at a rendered frame."""
+    states = {'robot1': 'clear', 'robot2': 'clear'}
+    for event in data.event_records:
+        event_stamp = _event_time(event)
+        if event_stamp is None or event_stamp > stamp_s:
+            break
+        kind = str(event.get('event_type', ''))
+        robot = event.get('robot_id')
+        if kind in {'TRAFFIC_WAITING', 'WAITING_FOR_TRAFFIC'} and robot in states:
+            states[robot] = 'waiting'
+        elif kind == 'TRAFFIC_PRIORITY_GRANTED' and robot in states:
+            states[robot] = 'priority'
+        elif kind in {'TRAFFIC_CONFLICT_CLEARED',
+                      'TRAFFIC_RELEASED_FRESH_REALLOCATION'}:
+            states = {'robot1': 'clear', 'robot2': 'clear'}
+
+    labels = {}
+    for robot, state in states.items():
+        other = 'robot2' if robot == 'robot1' else 'robot1'
+        other_label = 'R2' if other == 'robot2' else 'R1'
+        if state == 'waiting':
+            labels[robot] = f'traffic waiting | {other_label} moving'
+        elif state == 'priority' and states[other] == 'waiting':
+            labels[robot] = f'traffic moving | {other_label} waiting'
+        elif state == 'priority':
+            labels[robot] = 'traffic priority'
+        else:
+            labels[robot] = 'traffic clear'
+    return labels
 
 
 def _task_for_goal(data: OverlayData, event: GoalEvent):
@@ -587,6 +704,17 @@ def _safe_origin(value: Any):
         return (0.0, 0.0, 0.0)
 
 
+def _centroid_from_cells(cells, resolution, origin):
+    if not cells or resolution <= 0.0:
+        return None
+    ox, oy, oyaw = origin
+    cos_yaw, sin_yaw = math.cos(oyaw), math.sin(oyaw)
+    gx = sum((cell_x + 0.5) * resolution for cell_x, _ in cells) / len(cells)
+    gy = sum((cell_y + 0.5) * resolution for _, cell_y in cells) / len(cells)
+    return (ox + cos_yaw * gx - sin_yaw * gy,
+            oy + sin_yaw * gx + cos_yaw * gy)
+
+
 def load_frontier_region_records(observer: Path):
     path = observer / 'frontier_regions.jsonl'
     records = {'robot1': [], 'robot2': []}
@@ -602,30 +730,57 @@ def load_frontier_region_records(observer: Path):
                 if robot not in records or not math.isfinite(stamp) or resolution <= 0.0:
                     continue
                 regions = {}
+                origin = _safe_origin(payload.get('origin'))
                 for region in payload.get('regions') or []:
                     if not isinstance(region, dict):
                         continue
                     key = region.get('physical_id', region.get('id'))
                     cells = _safe_cells(region.get('cells'))
-                    if key is not None and cells:
-                        regions[str(key)] = cells
-                if regions:
-                    records[robot].append((
-                        stamp, regions, resolution, _safe_origin(payload.get('origin'))))
+                    centroid = _safe_pair(region.get('centroid'))
+                    if centroid is None:
+                        centroid = _centroid_from_cells(cells, resolution, origin)
+                    if key is not None and centroid is not None:
+                        regions[str(key)] = FrontierRegion(
+                            stamp, robot, str(key), centroid, cells,
+                            _safe_bounds(region.get('bbox')), origin, resolution)
+                records[robot].append(FrontierRegionSnapshot(
+                    stamp, robot, tuple(regions.values()), resolution, origin))
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
     for robot in records:
-        records[robot].sort(key=lambda item: item[0])
+        records[robot].sort(key=lambda item: item.stamp_s)
     return records
 
 
 def frontier_region_at(records, robot: str, stamp: float, frontier_id: str):
     items = records.get(robot, ())
-    index = bisect.bisect_right([item[0] for item in items], stamp) - 1
+    index = bisect.bisect_right([item.stamp_s for item in items], stamp + 1e-6) - 1
     if index < 0:
         return (), (0.0, 0.0, 0.0), None
-    _, regions, resolution, origin = items[index]
-    return regions.get(str(frontier_id), ()), origin, resolution
+    snapshot = items[index]
+    region = next((item for item in snapshot.regions
+                   if item.frontier_id == str(frontier_id)), None)
+    return (region.cells if region else ()), snapshot.origin, snapshot.resolution
+
+
+def frontier_snapshot_at(records, robot: str, stamp: float):
+    items = records.get(robot, ())
+    index = bisect.bisect_right([item.stamp_s for item in items], stamp + 1e-6) - 1
+    return items[index] if index >= 0 else None
+
+
+def frontier_ids_seen_at(records, robot: str, stamp: float):
+    cutoff = stamp + 1e-6
+    return frozenset(region.frontier_id
+                     for item in records.get(robot, ())
+                     if item.stamp_s <= cutoff
+                     for region in item.regions)
+
+
+def frontier_counts_at(records, robot: str, stamp: float):
+    snapshot = frontier_snapshot_at(records, robot, stamp)
+    return (len(snapshot.regions) if snapshot is not None else 0,
+            len(frontier_ids_seen_at(records, robot, stamp)))
 
 
 def _event_time(event: dict[str, Any]) -> Optional[float]:
@@ -655,6 +810,93 @@ def load_event_records(observer: Path) -> list[dict[str, Any]]:
                 continue
     return sorted(records, key=lambda item: (_event_time(item) or 0.0,
                                              int(item.get('event_sequence', 0) or 0)))
+
+
+def infer_cooperative_start_time(events: list[dict[str, Any]], fallback: float) -> float:
+    """Return the simulation time at which the run enters cooperative mode.
+
+    The shared-pose/frontend handoff can happen earlier than the experiment's
+    cooperative release.  The overlay phase is about the latter, so use the
+    common START_RELEASE event when it is recorded.  A ready-state event is a
+    conservative fallback for older artifacts without START_RELEASE.
+    """
+    release_times = [stamp for event in events
+                     if event.get('event_type') == 'START_RELEASE'
+                     for stamp in [_event_time(event)] if stamp is not None]
+    if release_times:
+        return min(release_times)
+    ready_times = [stamp for event in events
+                   if event.get('event_type') == 'COOPERATIVE_START_STATE_READY'
+                   for stamp in [_event_time(event)] if stamp is not None]
+    return max(ready_times) if ready_times else fallback
+
+
+def _load_distance_travelled(observer: Path):
+    result = {}
+    for robot in ('robot1', 'robot2'):
+        path = observer / f'{robot}_timeseries.csv'
+        latest = None
+        if path.is_file():
+            for row in load_csv(path):
+                value = numeric(row, 'distance_travelled_m')
+                if value is not None:
+                    latest = value
+        result[robot] = latest
+    return result
+
+
+def _load_productivity_data(observer: Path, events: list[dict[str, Any]]):
+    result = {'robot1': None, 'robot2': None}
+    segments = {'robot1': (), 'robot2': ()}
+    summary_path = observer.parent.parent / 'fast_trial_summary.json'
+    if not summary_path.is_file():
+        return result, segments
+    try:
+        summary = json.loads(summary_path.read_text(encoding='utf-8'))
+        readiness = summary.get('nav2_readiness_telemetry') or {}
+        shared = readiness.get('shared_activation_reached_at_sim_s') or {}
+        ready_s = max((float(value) for value in shared.values()), default=0.0)
+        end_s = float(summary.get('simulation_end_time_s') or 0.0)
+        metrics = analyze_event_records(events, ready_sim=ready_s,
+                                       end_sim=end_s,
+                                       robots=('robot1', 'robot2'))
+        for robot, values in metrics.get('robots', {}).items():
+            fraction = values.get('avoidable_idle_fraction')
+            if fraction is not None and math.isfinite(float(fraction)):
+                result[robot] = 100.0 * (1.0 - float(fraction))
+            segments[robot] = tuple(values.get('segments') or ())
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return result, segments
+
+
+def _load_handoff_error(observer: Path):
+    path = observer / 'forensic/physical_gt_evaluation.json'
+    if not path.is_file():
+        return None, None
+    try:
+        error = json.loads(path.read_text(encoding='utf-8')).get('error_transform') or {}
+        tx, ty = float(error['tx']), float(error['ty'])
+        yaw_deg = float(error['yaw_deg'])
+        if not all(math.isfinite(value) for value in (tx, ty, yaw_deg)):
+            return None, None
+        return math.hypot(tx, ty), yaw_deg
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None, None
+
+
+def issue_counts_at(data: OverlayData, stamp_s: float):
+    errors = warnings = 0
+    for event in data.event_records:
+        event_stamp = _event_time(event)
+        if event_stamp is None or event_stamp > stamp_s:
+            break
+        severity = str(event.get('severity', '')).upper()
+        if severity in {'ERROR', 'FATAL'}:
+            errors += 1
+        elif severity in {'WARN', 'WARNING'}:
+            warnings += 1
+    return errors, warnings
 
 
 def load_overlay_data(observer: Path) -> OverlayData:
@@ -718,7 +960,8 @@ def load_overlay_data(observer: Path) -> OverlayData:
                 stamp, robot, 'start', str(event.get('canonical_task_id', '')),
                 str(event.get('physical_task_signature', '')), goal))
         elif kind in {'NAVIGATION_SUCCEEDED', 'NAVIGATION_FAILED',
-                      'DISTRIBUTED_TASK_FAILURE', 'NAV_GOAL_CANCELLED'}:
+                      'NAVIGATION_CANCELED', 'NAVIGATION_CANCELLED',
+                      'NAVIGATION_TIMEOUT', 'NAV_GOAL_CANCELLED'}:
             goals[robot].append(GoalEvent(
                 stamp, robot, 'stop', str(event.get('canonical_task_id', '')),
                 str(event.get('physical_task_signature', '')), None))
@@ -727,12 +970,18 @@ def load_overlay_data(observer: Path) -> OverlayData:
         tasks[robot].sort(key=lambda item: item.stamp_s)
         goals[robot].sort(key=lambda item: item.stamp_s)
         bids[robot].sort(key=lambda item: item.stamp_s)
+    handoff_error_m, handoff_error_yaw_deg = _load_handoff_error(observer)
+    productive_percent, productivity_segments = _load_productivity_data(observer, events)
     return OverlayData(
         {robot: tuple(value) for robot, value in candidates.items()},
         {robot: tuple(value) for robot, value in tasks.items()},
         {robot: tuple(value) for robot, value in goals.items()},
         {robot: tuple(value) for robot, value in bids.items()},
-        raw_geometry_records)
+        raw_geometry_records,
+        tuple(events), handoff_error_m, handoff_error_yaw_deg,
+        _load_distance_travelled(observer), productive_percent,
+        productivity_segments,
+        {robot: tuple(value) for robot, value in frontier_regions.items()})
 
 
 @lru_cache(maxsize=None)
@@ -758,65 +1007,78 @@ def add_text(canvas, items):
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
 
 
-def _status_value(row, key, default='—'):
+def _status_value(row, key, default='-'):
     if row is None:
         return default
     value = row.row.get(key, '')
     return value if value not in ('', None) else default
 
 
+def _frontier_region_polygons(region: FrontierRegion, viewport, map_rect):
+    """Return one pixel polygon per recorded cell, or a bbox fallback."""
+    if region.cells and region.grid_resolution:
+        ox, oy, oyaw = region.grid_origin
+        cos_yaw, sin_yaw = math.cos(oyaw), math.sin(oyaw)
+        polygons = []
+        for cell_x, cell_y in region.cells:
+            world = []
+            for dx, dy in ((0.0, 0.0), (1.0, 0.0),
+                           (1.0, 1.0), (0.0, 1.0)):
+                gx = (cell_x + dx) * region.grid_resolution
+                gy = (cell_y + dy) * region.grid_resolution
+                world.append((ox + cos_yaw * gx - sin_yaw * gy,
+                              oy + sin_yaw * gx + cos_yaw * gy))
+            polygons.append(_local_points(world, viewport, map_rect))
+        return polygons
+    if region.bounds:
+        xmin, ymin, xmax, ymax = region.bounds
+        xmin, xmax = min(xmin, xmax), max(xmin, xmax)
+        ymin, ymax = min(ymin, ymax), max(ymin, ymax)
+        return [_local_points(((xmin, ymin), (xmax, ymin),
+                               (xmax, ymax), (xmin, ymax)),
+                              viewport, map_rect)]
+    return []
+
+
 def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
                            show_frontiers=True, show_candidates=True,
                            selected_signatures=frozenset(),
-                           selected_frontier_ids=frozenset()):
+                           selected_frontier_ids=frozenset(),
+                           frontier_regions=()):
     if not candidates or (not show_frontiers and not show_candidates):
-        return
+        if not frontier_regions or not show_frontiers:
+            return 0
     left, top, width, height, _ = map_rect
     view = canvas[top:top + height, left:left + width]
-    # First render lightly translucent recorded candidate regions. When the
-    # opt-in frontier_regions.jsonl stream exists, its exact source grid cells
-    # are rendered; bounds remain the backward-compatible fallback.
+    marker_count = 0
     if show_frontiers:
-        overlay = view.copy()
-        for item in candidates:
-            selected = (
-                (item.robot, item.physical_signature) in selected_signatures or
-                (item.robot, item.frontier_id) in selected_frontier_ids
-            )
-            # Keep each recorded candidate region in the same hue family as
-            # its robot trajectory, pose, and planned path. Selection is
-            # indicated by the stronger outline and goal target marker.
-            color = R1_COLOR if item.robot == 'robot1' else R2_COLOR
-            if item.frontier_cells and item.grid_resolution:
-                ox, oy, oyaw = item.grid_origin
-                cos_yaw, sin_yaw = math.cos(oyaw), math.sin(oyaw)
-                for cell_x, cell_y in item.frontier_cells:
-                    local = []
-                    for dx, dy in ((0.0, 0.0), (1.0, 0.0),
-                                   (1.0, 1.0), (0.0, 1.0)):
-                        gx = (cell_x + dx) * item.grid_resolution
-                        gy = (cell_y + dy) * item.grid_resolution
-                        local.append((ox + cos_yaw * gx - sin_yaw * gy,
-                                      oy + sin_yaw * gx + cos_yaw * gy))
-                    points = _local_points(local, viewport, map_rect)
-                    cv2.fillPoly(overlay, [points], color)
-                    cv2.polylines(overlay, [points], True, color,
-                                  2 if selected else 1, cv2.LINE_AA)
-            elif item.geometry:
-                points = _local_points(item.geometry, viewport, map_rect)
-                cv2.fillPoly(overlay, [points], color)
-                cv2.polylines(overlay, [points], True, color, 2 if selected else 1,
-                              cv2.LINE_AA)
-            elif item.bounds:
-                xmin, ymin, xmax, ymax = item.bounds
-                xmin, xmax = min(xmin, xmax), max(xmin, xmax)
-                ymin, ymax = min(ymin, ymax), max(ymin, ymax)
-                p1 = _local_points(((xmin, ymin), (xmax, ymax)), viewport, map_rect)
-                cv2.rectangle(overlay, tuple(p1[0]), tuple(p1[1]), color, -1,
-                              cv2.LINE_AA)
-                cv2.rectangle(overlay, tuple(p1[0]), tuple(p1[1]), color,
-                              2 if selected else 1, cv2.LINE_AA)
-        cv2.addWeighted(overlay, 0.20, view, 0.80, 0.0, view)
+        # Render each region's recorded cells into one mask, then blend the
+        # complete footprint once.  This keeps a connected region visually
+        # coherent instead of producing opaque per-cell squares.
+        region_overlay = view.copy()
+        for region in frontier_regions:
+            polygons = _frontier_region_polygons(region, viewport, map_rect)
+            if polygons:
+                mask = np.zeros(view.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(mask, polygons, 255)
+                color = R1_COLOR if region.robot == 'robot1' else R2_COLOR
+                region_overlay[mask > 0] = color
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(region_overlay, contours, -1, color, 1,
+                                 cv2.LINE_AA)
+        if frontier_regions:
+            cv2.addWeighted(region_overlay, 0.20, view, 0.80, 0.0, view)
+        # Put one centroid marker per region on top of the translucent layer.
+        for region in frontier_regions:
+            px, py = map_to_pixel(*region.centroid, viewport, map_rect)
+            point = (px - left, py - top)
+            color = R1_COLOR if region.robot == 'robot1' else R2_COLOR
+            selected = (region.robot, region.frontier_id) in selected_frontier_ids
+            cv2.drawMarker(view, point, color, cv2.MARKER_DIAMOND,
+                           9 if selected else 7, 2 if selected else 1,
+                           cv2.LINE_AA)
+            marker_count += 1
     if show_candidates:
         for item in candidates:
             selected = (
@@ -829,6 +1091,7 @@ def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
             cv2.circle(view, (px, py), 5 if selected else 4, (248, 248, 248),
                        -1, cv2.LINE_AA)
             cv2.circle(view, (px, py), 4 if selected else 3, color, -1, cv2.LINE_AA)
+    return marker_count
 
 
 def draw_goal(canvas, goal_xy, robot, viewport, map_rect):
@@ -864,7 +1127,16 @@ def draw_robot(canvas, pose: Optional[PoseSample], label, color, viewport, map_r
 
 
 def _short(value: str):
-    return value[:8] if value else '—'
+    return value[:8] if value else '-'
+
+
+def _ascii_display(value: str):
+    return str(value).replace('\u2014', '-').replace('\u2013', '-').replace('\u00b7', '|')
+
+
+def _bounded_display(value: str, maximum: int):
+    value = _ascii_display(value)
+    return value if len(value) <= maximum else value[:maximum - 3] + '...'
 
 
 def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rect,
@@ -885,8 +1157,16 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
 
     data = overlay_data or OverlayData({}, {}, {}, {}, 0)
     all_candidates = []
+    all_frontier_regions = []
+    current_frontier_counts = {}
+    unique_frontier_counts = {}
     for robot in ('robot1', 'robot2'):
         all_candidates.extend(_candidate_at(data, robot, stamp_s))
+        snapshot = frontier_snapshot_at(data.frontier_regions, robot, stamp_s)
+        current_frontier_counts[robot], unique_frontier_counts[robot] = \
+            frontier_counts_at(data.frontier_regions, robot, stamp_s)
+        if snapshot is not None:
+            all_frontier_regions.extend(snapshot.regions)
     goals = active_goals_at(data, stamp_s)
     selected_signatures = frozenset(
         (robot, event.physical_signature)
@@ -908,7 +1188,7 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
     )
     draw_frontier_overlays(canvas, all_candidates, stamp_s, viewport, map_rect,
                            show_frontiers, show_candidates, selected_signatures,
-                           selected_frontier_ids)
+                           selected_frontier_ids, all_frontier_regions)
 
     poses = {robot: pose_at_segments(segments[robot], stamp_s)
              for robot in ('robot1', 'robot2')}
@@ -932,40 +1212,83 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
     draw_robot(canvas, poses['robot2'], 'R2', R2_COLOR, viewport, map_rect)
 
     sidebar_x = 1550
-    cv2.line(canvas, (1518, 126), (1518, 930), (220, 224, 229), 1)
+    cv2.line(canvas, (1518, 126), (1518, 1055), (220, 224, 229), 1)
     fonts = {'title': find_font(True, 32), 'subtitle': find_font(False, 18),
              'section': find_font(True, 16), 'body': find_font(False, 19),
              'small': find_font(False, 15), 'maplabel': find_font(True, 17)}
-    text = [(title, (70, 42), fonts['title'], TEXT_DARK),
-            ('Two-robot cooperative exploration  ·  Recorded frontier candidate regions',
-             (72, 82), fonts['subtitle'], TEXT_MUTED),
-            ('SIM TIME', (sidebar_x, 148), fonts['section'], TEXT_MUTED),
-            (f'{stamp_s:,.2f} s', (sidebar_x, 172), fonts['body'], TEXT_DARK),
-            ('POLICY', (sidebar_x, 226), fonts['section'], TEXT_MUTED),
-            (policy, (sidebar_x, 250), fonts['body'], TEXT_DARK),
-            ('MAP SNAPSHOT', (sidebar_x, 304), fonts['section'], TEXT_MUTED),
-            (f'{active_snapshot.stamp_s:,.2f} s' if active_snapshot else '—',
-             (sidebar_x, 328), fonts['body'], TEXT_DARK),
-            ('PHASE', (sidebar_x, 382), fonts['section'], TEXT_MUTED),
-            ('COOPERATIVE' if stamp_s >= handoff_s else 'PRE-HANDOFF',
-             (sidebar_x, 406), fonts['body'], TEXT_DARK)]
+    errors, warnings = issue_counts_at(data, stamp_s)
+    traffic = _traffic_labels(data, stamp_s)
+    phase = 'COOPERATIVE' if stamp_s >= handoff_s else 'PRE-HANDOFF'
+    phase_detail = (f'since {handoff_s:,.2f} s' if phase == 'COOPERATIVE'
+                    else f'starts at {handoff_s:,.2f} s')
+    handoff_error = ('handoff error '
+                     f'{data.handoff_error_m * 100.0:.2f} cm | '
+                     f'{data.handoff_error_yaw_deg:.3f} deg'
+                     if data.handoff_error_m is not None and
+                     data.handoff_error_yaw_deg is not None else
+                     'handoff err -')
+    text = [(_ascii_display(title), (70, 42), fonts['title'], TEXT_DARK),
+            ('Two-robot cooperative exploration', (72, 82),
+             fonts['subtitle'], TEXT_MUTED),
+            ('SIM TIME', (sidebar_x, 140), fonts['section'], TEXT_MUTED),
+            (f'{stamp_s:,.2f} s', (sidebar_x, 162), fonts['body'], TEXT_DARK),
+            ('POLICY', (sidebar_x, 198), fonts['section'], TEXT_MUTED),
+            (_bounded_display(policy, 23), (sidebar_x, 220), fonts['body'], TEXT_DARK),
+            ('MAP SNAPSHOT', (sidebar_x, 258), fonts['section'], TEXT_MUTED),
+            (f'{active_snapshot.stamp_s:,.2f} s' if active_snapshot else '-',
+             (sidebar_x, 280), fonts['body'], TEXT_DARK),
+            ('PHASE', (sidebar_x, 318), fonts['section'], TEXT_MUTED),
+            (phase, (sidebar_x, 342), fonts['body'], TEXT_DARK),
+            (phase_detail, (sidebar_x, 374), fonts['small'], TEXT_MUTED),
+            (handoff_error, (sidebar_x, 396), fonts['small'], TEXT_MUTED)]
     goals = active_goals_at(data, stamp_s)
     for index, robot in enumerate(('robot1', 'robot2')):
-        y = 474 + index * 145
+        y = 420 + index * 285
         pose = poses[robot]
         event = goals.get(robot)
         color_rgb = (232, 125, 48) if robot == 'robot1' else (42, 104, 210)
-        candidates = _candidate_at(data, robot, stamp_s)
+        candidates, candidate_age = _candidate_status(data, robot, stamp_s)
+        goal_xy = _task_for_goal(data, event) if event else None
+        candidate_age_text = '-' if candidate_age is None else f'{candidate_age:,.2f} s'
+        if candidate_age is not None and candidate_age > MAX_TIME_GAP_S:
+            candidate_age_text += ' STALE'
+        distance = _pose_row_metric(pose, 'distance_travelled_m')
+        productive = _productivity_at(data, robot, stamp_s)
+        if productive is None:
+            productive = 100.0
         text.extend([
             ('R1' if robot == 'robot1' else 'R2', (sidebar_x, y), fonts['section'], color_rgb),
-            (f'position  {pose.x:.2f}, {pose.y:.2f}' if pose else 'position  —',
+            (f'position  {pose.x:.2f}, {pose.y:.2f}' if pose else 'position  -',
              (sidebar_x, y + 28), fonts['small'], TEXT_DARK),
-            (f'heading   {math.degrees(pose.yaw):.1f}°' if pose else 'heading   —',
-             (sidebar_x, y + 51), fonts['small'], TEXT_DARK),
-            (('ACTIVE  ' + _short(event.canonical_task_id)) if event else 'NO ACTIVE GOAL',
-             (sidebar_x, y + 76), fonts['small'], TEXT_DARK),
-            (f'candidates  {len(candidates)}', (sidebar_x, y + 99), fonts['small'], TEXT_MUTED),
+            (f'heading   {math.degrees(pose.yaw):.1f}°' if pose else 'heading   -',
+             (sidebar_x, y + 45), fonts['small'], TEXT_DARK),
+            (('goal active  ' + _short(event.canonical_task_id)) if event else 'goal idle',
+             (sidebar_x, y + 66), fonts['small'], TEXT_DARK),
+            (f'goal       {goal_xy[0]:.2f}, {goal_xy[1]:.2f}' if goal_xy else 'goal       -',
+             (sidebar_x, y + 83), fonts['small'], TEXT_DARK),
+            (f'linear speed  {(_display_speed(pose, "linear_speed_mps") or 0.0):.3f} m/s'
+             if _display_speed(pose, 'linear_speed_mps') is not None else 'linear speed  -',
+             (sidebar_x, y + 103), fonts['small'], TEXT_DARK),
+            (f'turn rate     {math.degrees(_display_speed(pose, "angular_speed_radps") or 0.0):.1f} deg/s'
+             if _display_speed(pose, 'angular_speed_radps') is not None else 'turn rate     -',
+             (sidebar_x, y + 123), fonts['small'], TEXT_DARK),
+            (f'traveled   {distance:.2f} m' if distance is not None else 'traveled   -',
+             (sidebar_x, y + 143), fonts['small'], TEXT_DARK),
+            (f'productivity {productive:.1f}%' if productive is not None else 'productivity -',
+             (sidebar_x, y + 163), fonts['small'], TEXT_DARK),
+            (f'frontier regions {current_frontier_counts[robot]}',
+             (sidebar_x, y + 183), fonts['small'], TEXT_DARK),
+            (f'unique IDs seen {unique_frontier_counts[robot]}',
+             (sidebar_x, y + 203), fonts['small'], TEXT_DARK),
+            (traffic[robot], (sidebar_x, y + 223), fonts['small'], TEXT_DARK),
+            (f'reachable candidates {len(candidates)}', (sidebar_x, y + 243), fonts['small'], TEXT_MUTED),
+            (f'batch age  {candidate_age_text}', (sidebar_x, y + 263), fonts['small'], TEXT_MUTED),
         ])
+    text.extend([
+        ('ISSUES', (sidebar_x, 1000), fonts['section'], TEXT_MUTED),
+        (f'errors     {errors}', (sidebar_x, 1024), fonts['small'], TEXT_DARK),
+        (f'warnings   {warnings}', (sidebar_x, 1047), fonts['small'], TEXT_MUTED),
+    ])
     for robot in ('robot1', 'robot2'):
         pose = poses[robot]
         if pose is None:
@@ -1011,8 +1334,8 @@ def geometry_validation(viewport, map_rect, segments, snapshots, duration_s, han
         'fixed_for_all_frames': True,
         'duration_s': duration_s,
         'overlay_capability': {
-            'frontier_representation': ('raw_geometry' if overlay_data.raw_frontier_geometry_records
-                                         else 'reachable_candidate_bounds_centroids_approaches'),
+            'frontier_representation': 'current_upstream_frontier_region_centroids',
+            'frontier_region_source': 'frontier_regions.jsonl.region.centroid (cell centroid fallback only when absent)',
             'raw_frontier_geometry_records': overlay_data.raw_frontier_geometry_records,
             'selected_goal_source': 'NAV_GOAL_SENT physical_signature joined to DISTRIBUTED_TASK_SNAPSHOT approach',
             'planned_path_source': 'DISTRIBUTED_BID_ARRAY.path_samples when available',
@@ -1123,6 +1446,8 @@ def parse_still_times(value):
 def render(args):
     if args.width <= 0 or args.height <= 0 or args.fps <= 0:
         raise RuntimeError('width, height, and fps must be positive')
+    if not math.isfinite(args.start_s) or args.start_s < 0.0:
+        raise RuntimeError('start-s must be a finite non-negative number')
     if not math.isfinite(args.speedup) or args.speedup <= 0.0:
         raise RuntimeError('speedup must be a finite positive number')
     campaign = Path(args.campaign).expanduser().resolve()
@@ -1131,6 +1456,7 @@ def render(args):
     poses = {robot: load_pose_records(observer / f'{robot}_timeseries.csv')
              for robot in ('robot1', 'robot2')}
     artifact_data_end = _source_end(poses, snapshots)
+    source_start = args.start_s
     source_end = artifact_data_end
     if args.duration_s > 0.0:
         # The requested window is authoritative for the video timeline.  If
@@ -1139,22 +1465,24 @@ def render(args):
         # silently shortening the deliverable.  No unsaved state is invented;
         # the provenance records the held tail explicitly.
         source_end = args.duration_s
-    if source_end <= 0.0:
+    if source_end <= source_start:
+        raise RuntimeError('source end must be after source start')
         raise RuntimeError('artifacts contain no positive simulation time')
     viewport = compute_fixed_viewport(snapshots, final_map_extent(observer, snapshots))
     map_rect = compute_map_rect(args.width, args.height, viewport)
+    events = load_event_records(observer)
     handoff_s = infer_handoff_time(observer, snapshots[0].stamp_s)
+    cooperative_start_s = infer_cooperative_start_time(events, handoff_s)
     transforms = {robot: load_shared_odom_transforms(observer / 'forensic/transforms.csv', robot)
                   for robot in ('robot1', 'robot2')}
     segments = {robot: split_shared_pose_segments(poses[robot], transforms[robot], handoff_s)
                 for robot in ('robot1', 'robot2')}
     overlay_data = load_overlay_data(observer)
-    title = args.title
-    policy = ('Cost-only' if 'cost_only' in title.lower() else
-              'MRTSP' if 'mrtsp' in title.lower() else title)
-    timing = timing_metadata(0.0, source_end, args.speedup, args.fps)
+    title = _ascii_display(args.title)
+    policy = _ascii_display(args.policy)
+    timing = timing_metadata(source_start, source_end, args.speedup, args.fps)
     geometry = geometry_validation(viewport, map_rect, segments, snapshots,
-                                   source_end, handoff_s, overlay_data)
+                                   source_end - source_start, handoff_s, overlay_data)
     snapshot_cache = {}
     stills = parse_still_times(args.still_times)
     still_paths = []
@@ -1165,13 +1493,13 @@ def render(args):
                      750.0: 'frame_t0750.png', 1200.0: 'frame_t1200.png',
                      1500.0: 'frame_t1500.png'}
         for stamp in stills:
-            bounded = min(max(0.0, stamp), source_end)
+            bounded = min(max(source_start, stamp), source_end)
             frame = render_frame(bounded, snapshots, snapshot_cache, segments, viewport,
-                                 map_rect, args.width, args.height, title, handoff_s, policy,
+                                 map_rect, args.width, args.height, title, cooperative_start_s, policy,
                                  overlay_data, args.show_frontiers, args.show_goals,
                                  args.show_candidates, args.show_planned_path)
             name = next((value for key, value in canonical.items() if abs(stamp - key) < 1e-6),
-                        'frame_post_handoff.png' if abs(stamp - handoff_s) < 2.0 else
+                        'frame_post_cooperative.png' if abs(stamp - cooperative_start_s) < 2.0 else
                         f"frame_t{stamp:07.2f}".replace('.', '_') + '.png')
             output_path = still_dir / name
             cv2.imwrite(str(output_path), frame)
@@ -1186,10 +1514,11 @@ def render(args):
         encoder_mode = sink.mode
         try:
             for frame_index in range(timing['expected_frame_count']):
-                stamp = min(source_end, frame_index * args.speedup / float(args.fps))
+                stamp = min(source_end, source_start +
+                            frame_index * args.speedup / float(args.fps))
                 sink.write(render_frame(
                     stamp, snapshots, snapshot_cache, segments, viewport, map_rect,
-                    args.width, args.height, title, handoff_s, policy, overlay_data,
+                    args.width, args.height, title, cooperative_start_s, policy, overlay_data,
                     args.show_frontiers, args.show_goals, args.show_candidates,
                     args.show_planned_path))
         finally:
@@ -1206,12 +1535,16 @@ def render(args):
               'fixed_viewport_m': {'xmin': viewport[0], 'xmax': viewport[1],
                                    'ymin': viewport[2], 'ymax': viewport[3]},
               'map_rect_px': dict(zip(('left', 'top', 'width', 'height', 'pixels_per_m'), map_rect)),
-              'handoff_s': handoff_s, 'map_snapshots': len(snapshots),
+              'handoff_s': handoff_s,
+              'cooperative_start_s': cooperative_start_s,
+              'map_snapshots': len(snapshots),
               'trajectory_segments': {robot: len(segments[robot]) for robot in ('robot1', 'robot2')},
               'font_family': 'Liberation Sans' if Path('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf').is_file() else 'DejaVu Sans',
               'encoder_mode': encoder_mode, 'video_probe': video_probe,
               'geometry_validation': geometry,
               'overlay_counts': {
+                  'frontier_region_snapshots_robot1': len(overlay_data.frontier_regions['robot1']),
+                  'frontier_region_snapshots_robot2': len(overlay_data.frontier_regions['robot2']),
                   'candidate_batches_robot1': len(overlay_data.candidate_batches['robot1']),
                   'candidate_batches_robot2': len(overlay_data.candidate_batches['robot2']),
                   'task_snapshots_robot1': len(overlay_data.task_records['robot1']),

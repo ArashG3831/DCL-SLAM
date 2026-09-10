@@ -3235,26 +3235,38 @@ class DistributedFrontierAssignment(Node):
                     robot1_task_count=len(round_work.snapshots[0].tasks),
                     robot2_task_count=len(round_work.snapshots[1].tasks),
                 )
+        if not continuation_active:
+            first_batch = self._bid_batches['robot1'].value
+            second_batch = self._bid_batches['robot2'].value
+        hard_failed_task_ids = self._hard_failed_task_ids(round_work.union)
+        completed_task_ids = frozenset(
+            self._completed_shared_canonical_ids)
+        peer_reservation_task_ids = frozenset(
+            self._temporary_peer_reservation_ids(now))
+        hard_ids = (
+            hard_failed_task_ids |
+            completed_task_ids |
+            peer_reservation_task_ids
+        )
+        selector_fingerprint, selector_inputs = (
+            self._selector_feasibility_identity(
+                round_work.union, hard_failed_task_ids,
+                completed_task_ids, peer_reservation_task_ids,
+            )
+        )
+
+        # Selector suppression is independent of task/bid semantics.  Check
+        # it before the decision branch as well as while creating a decision:
+        # completion or reservation evidence may arrive after a pre-dispatch
+        # decision was published.  In that case the old decision must not be
+        # left in WAITING_FOR_MATCHING_DECISION indefinitely.  The helper is
+        # still restricted to an uncommitted round, so committed/navigation-
+        # active semantics remain strict and unchanged.
+        self._selector_decision_requires_recompute(
+            round_work, selector_fingerprint, selector_inputs,
+        )
+
         if round_work.decision is None:
-            if not continuation_active:
-                first_batch = self._bid_batches['robot1'].value
-                second_batch = self._bid_batches['robot2'].value
-            hard_failed_task_ids = self._hard_failed_task_ids(round_work.union)
-            completed_task_ids = frozenset(
-                self._completed_shared_canonical_ids)
-            peer_reservation_task_ids = frozenset(
-                self._temporary_peer_reservation_ids(now))
-            hard_ids = (
-                hard_failed_task_ids |
-                completed_task_ids |
-                peer_reservation_task_ids
-            )
-            selector_fingerprint, selector_inputs = (
-                self._selector_feasibility_identity(
-                    round_work.union, hard_failed_task_ids,
-                    completed_task_ids, peer_reservation_task_ids,
-                )
-            )
             fixed_kwargs = {}
             if continuation_active:
                 if continuation.busy_robot_id == 'robot1':
@@ -3270,14 +3282,6 @@ class DistributedFrontierAssignment(Node):
                 selection_bucket,
                 candidate_count=len(first_batch.bids) + len(second_batch.bids),
                 candidate_pairs_input=len(first_batch.bids) * len(second_batch.bids),
-            )
-
-            # Completion, hard-failure, or reservation state is a real
-            # selector input.  Recompute only the local decision while
-            # retaining the semantic round and its valid bid evidence;
-            # epoch-only updates still leave the fingerprint unchanged.
-            self._selector_decision_requires_recompute(
-                round_work, selector_fingerprint, selector_inputs,
             )
 
             def traffic_compatible(first_id, first_bid, second_id, second_bid):

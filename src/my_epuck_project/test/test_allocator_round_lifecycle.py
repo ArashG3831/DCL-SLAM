@@ -263,6 +263,93 @@ def test_provenance_only_update_preserves_active_normal_round():
     ) is False
 
 
+def test_selector_completion_change_rebases_published_predecision_context():
+    """A completion update cannot strand a published, uncommitted decision."""
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._committed = SimpleNamespace(decision=None)
+    node._peer_decision = object()
+    node.events = []
+    node._emit_event = lambda *args, **_kwargs: node.events.append(args)
+    round_work = SimpleNamespace(
+        decision=SimpleNamespace(
+            diagnostics=SimpleNamespace(
+                selector_feasibility_fingerprint='old',
+            ),
+            decision_published=True,
+        ),
+        traffic=object(),
+    )
+
+    assert DistributedFrontierAssignment._selector_decision_requires_recompute(
+        node, round_work, 'old', {
+            'completed': ('task-a',),
+            'hard_failed': (),
+            'peer_reservations': (),
+        },
+    ) is False
+    assert round_work.decision is not None
+
+    # This is the 494 s topology: completion evidence changes after the local
+    # pair decision was published but before it was committed/dispatched.
+    assert DistributedFrontierAssignment._selector_decision_requires_recompute(
+        node, round_work, 'new', {
+            'completed': ('task-a', 'task-b'),
+            'hard_failed': (),
+            'peer_reservations': (),
+        },
+    ) is True
+    assert round_work.decision is None
+    assert round_work.decision_published is False
+    assert round_work.traffic is None
+    assert node._peer_decision is None
+    assert node.events[-1][0] == 'SELECTOR_FEASIBILITY_CHANGED_RECOMPUTE'
+
+
+def test_selector_completion_change_does_not_rebase_committed_context():
+    """Committed/navigation-active semantics remain protected by the guard."""
+    node = DistributedFrontierAssignment.__new__(DistributedFrontierAssignment)
+    node._committed = SimpleNamespace(decision=object())
+    node._peer_decision = object()
+    node.events = []
+    node._emit_event = lambda *args, **_kwargs: node.events.append(args)
+    round_work = SimpleNamespace(
+        decision=SimpleNamespace(
+            diagnostics=SimpleNamespace(
+                selector_feasibility_fingerprint='old',
+            ),
+            decision_published=True,
+        ),
+        traffic=object(),
+    )
+
+    assert DistributedFrontierAssignment._selector_decision_requires_recompute(
+        node, round_work, 'new', {
+            'completed': ('task-a', 'task-b'),
+            'hard_failed': (),
+            'peer_reservations': (),
+        },
+    ) is False
+    assert round_work.decision is not None
+    assert node._peer_decision is not None
+    assert not node.events
+
+
+def test_tick_checks_selector_changes_before_matching_published_decision():
+    """The invalidation check must run before the decision branch can wait."""
+    source = SOURCE.read_text(encoding='utf-8')
+    tick = source[
+        source.index('    def _tick_impl'):
+        source.index('    def _cost_only_certificate_blocker_diagnostics')
+    ]
+    selector_check = tick.index(
+        'self._selector_decision_requires_recompute(\n'
+        '            round_work, selector_fingerprint, selector_inputs,',
+    )
+    decision_branch = tick.index('        if round_work.decision is None:')
+    assert selector_check < decision_branch
+    assert '_matching_peer_decision' in source
+
+
 def test_continuation_round_skips_normal_replacement_gate():
     """Canonical replacement must not kill an active continuation round."""
     source = SOURCE.read_text(encoding='utf-8')

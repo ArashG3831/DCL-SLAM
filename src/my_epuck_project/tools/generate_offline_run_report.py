@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -1459,6 +1460,25 @@ def copy_reports_to_desktop(output_json, output_md, artifact, desktop_root=None,
     return {"status": "copied", "directory": str(handoff), "files": copied}
 
 
+def open_handoff_folder(directory):
+    """Open a completed Desktop handoff folder in Windows Explorer."""
+    directory = Path(directory).resolve()
+    try:
+        converted = subprocess.run(
+            ["wslpath", "-w", str(directory)], check=True,
+            capture_output=True, text=True)
+        windows_path = converted.stdout.strip()
+        if not windows_path:
+            raise RuntimeError("wslpath returned an empty Windows path")
+        subprocess.Popen(
+            ["explorer.exe", windows_path], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        return {"status": "opened", "windows_path": windows_path}
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        return {"status": "not_opened", "error": str(exc)}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, required=True)
@@ -1489,6 +1509,7 @@ def main(argv=None):
                                                "error": str(exc)}},
                          sort_keys=True), file=sys.stderr)
         raise SystemExit(2) from exc
+    handoff["explorer"] = open_handoff_folder(handoff["directory"])
     print(json.dumps({"artifact": str(args.artifact),
                       "output_json": str(args.output_json),
                       "output_md": str(args.output_md),

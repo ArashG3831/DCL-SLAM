@@ -745,6 +745,8 @@ post-horizon finalization callbacks are excluded. It is standalone reporting
 only and is not invoked automatically by the experiment runner. After each
 successful invocation it also creates a new uniquely named folder on the
 accessible Windows Desktop and copies only the generated JSON and Markdown
-reports into it. Set `CODEX_WINDOWS_DESKTOP` or pass `--desktop-root` when the
-Desktop is mounted at a nonstandard WSL path; an unavailable Desktop is a
-visible command failure, not a silent skip.
+reports into it, then opens that folder in Windows Explorer. Set
+`CODEX_WINDOWS_DESKTOP` or pass `--desktop-root` when the Desktop is mounted at
+a nonstandard WSL path; an unavailable Desktop is a visible command failure,
+not a silent skip. If Explorer cannot be launched, the reports remain copied
+and the command reports the handoff/open status explicitly.

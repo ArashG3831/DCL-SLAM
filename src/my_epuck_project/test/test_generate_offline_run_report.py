@@ -168,3 +168,38 @@ def test_desktop_handoff_reports_unavailable_desktop(tmp_path):
         REPORT.copy_reports_to_desktop(
             output_json, output_md, "fast_trial_demo",
             desktop_root=tmp_path / "missing-desktop")
+
+
+def test_handoff_folder_opens_in_windows_explorer(monkeypatch, tmp_path):
+    calls = []
+
+    class Completed:
+        stdout = r"C:\Users\Asus\Desktop\handoff"
+
+    def run(command, **kwargs):
+        calls.append(("run", command, kwargs))
+        return Completed()
+
+    def popen(command, **kwargs):
+        calls.append(("popen", command, kwargs))
+        return object()
+
+    monkeypatch.setattr(REPORT.subprocess, "run", run)
+    monkeypatch.setattr(REPORT.subprocess, "Popen", popen)
+    result = REPORT.open_handoff_folder(tmp_path)
+    assert result == {
+        "status": "opened",
+        "windows_path": r"C:\Users\Asus\Desktop\handoff",
+    }
+    assert calls[0][1][:2] == ["wslpath", "-w"]
+    assert calls[1][1] == ["explorer.exe", r"C:\Users\Asus\Desktop\handoff"]
+
+
+def test_handoff_folder_reports_explorer_failure(monkeypatch, tmp_path):
+    def run(*args, **kwargs):
+        raise FileNotFoundError("wslpath")
+
+    monkeypatch.setattr(REPORT.subprocess, "run", run)
+    result = REPORT.open_handoff_folder(tmp_path)
+    assert result["status"] == "not_opened"
+    assert "wslpath" in result["error"]

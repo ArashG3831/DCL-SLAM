@@ -77,6 +77,10 @@ class MinimalFrontierAllocator:
         self._local_batch = None
         self._peer_batch = None
         self._peer_active_goal: str | None = None
+        self._peer_status_union_hash: str | None = None
+        self._peer_status_state: int | None = None
+        self._peer_terminal = False
+        self._peer_terminal_reason = ''
         self._active_goal_id: str | None = None
         self._goal_token = 0
         self._state = self.IDLE
@@ -224,10 +228,19 @@ class MinimalFrontierAllocator:
         }
         message.state = states[self._state]
         message.union_hash = self._union.union_hash if self._union else ''
+        message.round_id = message.union_hash
         message.terminal = self._terminal_reason is not None
         message.terminal_reason = self._terminal_reason or ''
         message.reason = self._state
         self._status_publisher.publish(message)
+
+    def _invalidate_pending_goal(self) -> None:
+        if self._state != self.GOAL_PENDING:
+            return
+        self._goal_token += 1
+        self._active_goal_id = None
+        self._traffic_decision = None
+        self._state = self.EVALUATING if self._released else self.IDLE
 
     def _local_batch_for(self, union):
         current_ids = {task.canonical_id for task in union.tasks}
@@ -285,8 +298,11 @@ class MinimalFrontierAllocator:
         source = str(message.source_robot_id)
         if source not in self._candidates:
             return
+        evidence = self._make_evidence(message)
+        if evidence != self._evidence[source]:
+            self._stable_since_s = self._now_s()
         self._candidates[source] = message
-        self._evidence[source] = self._make_evidence(message)
+        self._evidence[source] = evidence
         first = self._candidates['robot1']
         second = self._candidates['robot2']
         if first is None or second is None:
@@ -295,19 +311,31 @@ class MinimalFrontierAllocator:
 
         union = frontier_sets.build_union(first, second)
         if union is None:
+            self._invalidate_pending_goal()
             self._union = None
             self._local_batch = None
             self._peer_batch = None
+            self._peer_active_goal = None
+            self._peer_status_union_hash = None
+            self._peer_status_state = None
+            self._peer_terminal = False
+            self._peer_terminal_reason = ''
             self._terminal_reason = None
             if self._active_goal_id is None:
-                self._state = self.IDLE
+                self._state = self.EVALUATING if self._released else self.IDLE
             self._publish_status()
             return
 
         changed = self._union is None or union.union_hash != self._union.union_hash
         if changed:
+            self._invalidate_pending_goal()
             self._stable_since_s = self._now_s()
             self._peer_batch = None
+            self._peer_active_goal = None
+            self._peer_status_union_hash = None
+            self._peer_status_state = None
+            self._peer_terminal = False
+            self._peer_terminal_reason = ''
             self._terminal_reason = None
         self._union = union
         self._local_batch = self._local_batch_for(union)
@@ -340,15 +368,30 @@ class MinimalFrontierAllocator:
         if self._union is None or batch.union_hash != self._union.union_hash:
             return
         self._peer_batch = batch
+        self._publish_completion_events()
         self._try_allocate()
 
     def on_peer_status(self, message: DistributedExplorationStatus) -> None:
         if message.source_robot_id != self._peer_id:
             return
+        if self._union is None:
+            return
+        if (str(message.union_hash) != self._union.union_hash or
+                str(message.round_id) != self._union.union_hash):
+            return
+        current_ids = {task.canonical_id for task in self._union.tasks}
         if message.local_nav_goal_active:
-            self._peer_active_goal = str(message.active_canonical_task_id) or None
+            task_id = str(message.active_canonical_task_id)
+            if task_id not in current_ids:
+                return
+            self._peer_active_goal = task_id
         else:
             self._peer_active_goal = None
+        self._peer_status_union_hash = self._union.union_hash
+        self._peer_status_state = int(message.state)
+        self._peer_terminal = bool(message.terminal)
+        self._peer_terminal_reason = str(message.terminal_reason)
+        self._maybe_terminal()
         self._try_allocate()
 
     def on_peer_event(self, message: DistributedExplorationEvent) -> None:
@@ -389,6 +432,8 @@ class MinimalFrontierAllocator:
     def _try_allocate(self) -> None:
         if not self._released:
             return
+        if self._terminal_reason is not None:
+            return
         if self._union is None or self._local_batch is None:
             return
         if self._peer_batch is None or self._active_goal_id is not None:
@@ -428,6 +473,7 @@ class MinimalFrontierAllocator:
         )
         if assignment is None:
             self._state = self.IDLE
+            self._publish_status()
             return
 
         if self._robot_id == 'robot1':
@@ -436,6 +482,7 @@ class MinimalFrontierAllocator:
             local_id = assignment[1]
         if not local_id or local_id in self._completed_ids:
             self._state = self.IDLE
+            self._publish_status()
             self._maybe_terminal()
             return
         if local_id == peer_active:
@@ -483,6 +530,8 @@ class MinimalFrontierAllocator:
         if self._nav is None or self._active_goal_id is not None:
             return
         task = navigation.to_physical_task(candidate, self._robot_id)
+        pending_union_hash = self._union.union_hash if self._union else ''
+        pending_task_id = str(candidate.frontier_id)
         self._goal_token += 1
         token = self._goal_token
         self._active_goal_id = str(candidate.frontier_id)
@@ -493,6 +542,11 @@ class MinimalFrontierAllocator:
         def precondition_result(result: DispatchPreconditions) -> None:
             nonlocal send_started
             if token != self._goal_token or self._state != self.GOAL_PENDING:
+                return
+            if (self._union is None or
+                    self._union.union_hash != pending_union_hash or
+                    self._active_goal_id != pending_task_id):
+                self._clear_goal(token)
                 return
             if not result.ready or send_started:
                 self._clear_goal(token)
@@ -533,7 +587,7 @@ class MinimalFrontierAllocator:
         self._goal_token += 1
         self._active_goal_id = None
         self._traffic_decision = None
-        self._state = self.EVALUATING if self._released and self._union else self.IDLE
+        self._state = self.EVALUATING if self._released else self.IDLE
         if self._union is not None and self._candidates[self._robot_id] is not None:
             self._local_batch = self._local_batch_for(self._union)
             self._publish_batch()
@@ -545,22 +599,46 @@ class MinimalFrontierAllocator:
         return navigation.cancel(self._nav)
 
     def _maybe_terminal(self) -> None:
-        if self._active_goal_id is not None:
-            return
-        if self._state in (self.GOAL_PENDING, self.WAITING_TRAFFIC):
-            return
-        if self._union is None:
-            return
-        if self._candidates['robot1'] is None or self._candidates['robot2'] is None:
-            return
-        reason = termination.classify(
-            self._evidence['robot1'],
-            self._evidence['robot2'],
-            stable_for_s=max(0.0, self._now_s() - self._stable_since_s),
-            stability_grace_s=self._stability_grace_s,
+        reason = None
+        if (self._active_goal_id is None and
+                self._state not in (self.GOAL_PENDING, self.WAITING_TRAFFIC) and
+                self._union is not None and
+                self._candidates['robot1'] is not None and
+                self._candidates['robot2'] is not None and
+                self._peer_status_union_hash == self._union.union_hash and
+                self._peer_active_goal is None and
+                self._peer_state_allows_terminal() and
+                self._local_and_peer_batches_complete()):
+            classified = termination.classify(
+                self._evidence['robot1'],
+                self._evidence['robot2'],
+                stable_for_s=max(0.0, self._now_s() - self._stable_since_s),
+                stability_grace_s=self._stability_grace_s,
+            )
+            if classified is not None:
+                local_reason = str(getattr(classified, 'value', classified))
+                reason = termination.matching(
+                    True, local_reason, self._peer_terminal,
+                    self._peer_terminal_reason,
+                )
+        if reason != self._terminal_reason:
+            self._terminal_reason = reason
+            self._publish_status()
+
+    def _peer_state_allows_terminal(self) -> bool:
+        return self._peer_status_state in (
+            DistributedExplorationStatus.WAITING_FOR_INPUTS,
+            DistributedExplorationStatus.COMPLETE,
         )
-        self._terminal_reason = (
-            None if reason is None else str(getattr(reason, 'value', reason)))
+
+    def _local_and_peer_batches_complete(self) -> bool:
+        if self._local_batch is None or self._peer_batch is None:
+            return False
+        if self._robot_id == 'robot1':
+            robot1_batch, robot2_batch = self._local_batch, self._peer_batch
+        else:
+            robot1_batch, robot2_batch = self._peer_batch, self._local_batch
+        return protocol.complete_pair(self._union, robot1_batch, robot2_batch)
 
     def _tick(self) -> None:
         self._maybe_terminal()

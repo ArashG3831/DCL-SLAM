@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 import math
+from pathlib import Path
 
 import pytest
 from geometry_msgs.msg import Point
@@ -62,6 +63,28 @@ def test_compatible_context_accepts_matching_context_with_different_raw_metadata
     union = build_union(robot1, robot2)
     assert union is not None
     assert _task_ids(union) == ('2', '10', '30')
+
+
+def test_cost_only_wire_uses_shared_content_identity_not_local_counter():
+    source = (Path(__file__).parents[3] /
+              'src/my_epuck_frontier_candidates/src/frontier_candidate_generator.cpp').read_text(
+                  encoding='utf-8')
+    assert 'selection_policy_ == "frontier_cost_only"' in source
+    assert 'map_checksum(*cycle_map_)' in source
+
+
+def test_shared_content_identity_accepts_local_metadata_skew():
+    robot1 = _array('robot1', (1,), map_revision=0x1234,
+                    costmap_revision=3, generation=11)
+    robot2 = _array('robot2', (2,), map_revision=0x1234,
+                    costmap_revision=9, generation=27)
+    robot1.header.stamp.sec = 10
+    robot2.header.stamp.sec = 11
+    robot1.map_stamp.sec = 20
+    robot2.map_stamp.sec = 21
+
+    assert compatible_context(robot1, robot2)
+    assert _task_ids(build_union(robot1, robot2)) == ('1', '2')
 
 
 @pytest.mark.parametrize(

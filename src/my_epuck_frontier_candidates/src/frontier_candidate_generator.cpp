@@ -2377,7 +2377,10 @@ private:
     message.header.frame_id = global_frame_;
     message.header.stamp = now();
     message.source_robot_id = robot_id_;
-    message.map_revision = cycle_revision_;
+    // Cost-only minimal coordination needs a shared map-content identity;
+    // retain the ordered counter for the legacy route-aware mode.
+    message.map_revision = selection_policy_ == "frontier_cost_only" ?
+      map_checksum(*cycle_map_) : cycle_revision_;
     message.costmap_revision = cycle_cost_revision_;
     message.map_stamp = cycle_map_->header.stamp;
     message.lower_bound_context_fingerprint = lower_bound_context_fingerprint();

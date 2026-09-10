@@ -409,10 +409,15 @@ class MinimalFrontierAllocator:
         peer_active = self._peer_active_goal
         if peer_active not in known_ids:
             peer_active = ''
+        peer_active_is_valid = any(
+            bid.canonical_task_id == peer_active and bid.path_valid
+            for bid in self._peer_batch.bids
+        )
+        selector_peer_active = peer_active if peer_active_is_valid else ''
         if self._robot_id == 'robot1':
-            active1, active2 = '', peer_active
+            active1, active2 = '', selector_peer_active
         else:
-            active1, active2 = peer_active, ''
+            active1, active2 = selector_peer_active, ''
         self._state = self.EVALUATING
         assignment = selection.choose_assignment(
             self._union,
@@ -432,6 +437,10 @@ class MinimalFrontierAllocator:
         if not local_id or local_id in self._completed_ids:
             self._state = self.IDLE
             self._maybe_terminal()
+            return
+        if local_id == peer_active:
+            self._state = self.IDLE
+            self._publish_status()
             return
 
         path1 = self._bid_path(robot1_batch, assignment[0])

@@ -236,6 +236,31 @@ def test_one_busy_robot_leaves_only_idle_robot_for_new_assignment():
     assert second._active_goal_id and second._active_goal_id != '1'
 
 
+def test_busy_peer_missing_current_bid_does_not_crash_or_duplicate():
+    first, second = _allocator('robot1'), _allocator('robot2')
+    first._active_goal_id, first._state = '1', first.NAVIGATING
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2), map_revision=1),
+        _array('robot2', (1, 2), map_revision=1),
+    )
+    status = DistributedExplorationStatus()
+    status.source_robot_id = 'robot1'
+    status.local_nav_goal_active = True
+    status.active_canonical_task_id = '1'
+    second.on_peer_status(status)
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2), map_revision=2),
+        _array('robot2', (2,), map_revision=2),
+    )
+    _exchange(first, second)
+    assert first._active_goal_id == '1'
+    assert not first._nav.send_calls
+
+
 def test_both_busy_robots_receive_no_new_assignment():
     first, second = _allocator('robot1'), _allocator('robot2')
     first._active_goal_id, first._state = '1', first.NAVIGATING

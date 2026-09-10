@@ -1611,6 +1611,78 @@ def test_candidate_generation_mismatch_defers_then_matching_snapshot_rechecks():
     assert reason == 'UNQUERIED_OPTION_CAN_BEAT_EVALUATED_ASSIGNMENT'
 
 
+def test_certificate_joins_retained_snapshot_to_exact_bound_history():
+    """A newer latest record cannot erase a safe matching older context."""
+    node, decision, first, second, round_work = (
+        _certificate_node_with_provenance(candidate_generation_id=8,
+                                           task_generation_id=7)
+    )
+    node._unqueried_cost_bounds = {'robot1': (), 'robot2': ()}
+    node._candidate_source_local_evidence = {
+        'robot1': CandidateEvidence(), 'robot2': CandidateEvidence(),
+    }
+    node._candidate_lower_bound_metadata['robot1'].update({
+        'bound_entry_count': 0,
+        'detected_not_queried_count': 0,
+    })
+    snapshot = round_work.snapshots[0]
+    matching_metadata = dict(node._candidate_lower_bound_metadata['robot1'])
+    matching_metadata.update({
+        'candidate_generation_id': snapshot.candidate_generation_id,
+        'fingerprint': snapshot.lower_bound_context_fingerprint,
+        'map_revision': snapshot.map_revision,
+        'costmap_revision': snapshot.costmap_revision,
+        'bound_entry_count': 0,
+        'detected_not_queried_count': 0,
+    })
+    emitted = []
+    node._emit_event = lambda event_type, message, **_kwargs: emitted.append(
+        (event_type, json.loads(message)))
+
+    # Reproduce the old failure before the exact-context history is available.
+    node._candidate_lower_bound_history = {}
+    certified, _blocking, _optimistic, reason = (
+        node._cost_only_dispatch_certificate(
+            round_work, decision, first, second,
+        )
+    )
+    assert not certified
+    assert reason == 'MISSING_UNQUERIED_LOWER_BOUNDS'
+    assert emitted[-1][1]['evidence_reason'] == (
+        'TASK_CANDIDATE_GENERATION_MISMATCH')
+
+    node._candidate_lower_bound_history = {
+        'robot1': {
+            (snapshot.map_revision,
+             snapshot.lower_bound_context_fingerprint,
+             snapshot.costmap_revision,
+             snapshot.candidate_generation_id): {
+                'bounds': (),
+                'provenance': (
+                    snapshot.map_revision,
+                    snapshot.lower_bound_context_fingerprint,
+                    snapshot.candidate_generation_id,
+                ),
+                'metadata': matching_metadata,
+            },
+        },
+        'robot2': {},
+    }
+
+    certified, _blocking, _optimistic, reason = (
+        node._cost_only_dispatch_certificate(
+            round_work, decision, first, second,
+        )
+    )
+
+    assert certified
+    assert reason == 'NO_UNQUERIED_OPTIONS'
+    payload = emitted[-1][1]
+    assert payload['provenance_comparison']['robot1']['context_source'] == (
+        'matching_history')
+    assert payload['evidence_reason'] == 'OK'
+
+
 def test_missing_candidate_generation_id_blocks_conservatively():
     meta, snapshot = _bound_diag_fixture(
         candidate_generation_id=0,

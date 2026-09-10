@@ -453,6 +453,130 @@ def test_continuation_free_epoch_update_keeps_active_round_generation():
     assert node._round_replaced_count == replaced
 
 
+def test_continuation_refreshes_predecision_context_only_with_matching_bounds():
+    """A retained semantic round adopts one exact newer snapshot/bound pair."""
+    node, _, _, _, _ = _fake_node()
+    context = node._continuation_context(NOW)
+    assert context is not None
+    assert node._activate_continuation_round(context)
+    active_round = node._round
+    old_generation = node._round_lifecycle.generation
+
+    refreshed_free = replace(
+        context.free_snapshot,
+        epoch=context.free_snapshot.epoch + 1,
+        map_revision=context.free_snapshot.map_revision + 1,
+        map_fingerprint='fresh-map',
+        lower_bound_context_fingerprint='fresh-bounds',
+        candidate_generation_id=2,
+    )
+    node._snapshots[context.free_robot_id] = receive(
+        refreshed_free, 10.0, NOW,
+    )
+    node._candidate_lower_bound_history = {
+        context.free_robot_id: {
+            (refreshed_free.map_revision,
+             refreshed_free.lower_bound_context_fingerprint,
+             refreshed_free.costmap_revision,
+             refreshed_free.candidate_generation_id): {
+                'bounds': (),
+                'provenance': (
+                    refreshed_free.map_revision,
+                    refreshed_free.lower_bound_context_fingerprint,
+                    refreshed_free.candidate_generation_id,
+                ),
+                'metadata': {
+                    'fingerprint': refreshed_free.lower_bound_context_fingerprint,
+                    'map_revision': refreshed_free.map_revision,
+                    'costmap_revision': refreshed_free.costmap_revision,
+                    'candidate_generation_id': refreshed_free.candidate_generation_id,
+                    'bound_entry_count': 0,
+                    'detected_not_queried_count': 0,
+                    'all_bounds_finite': True,
+                    'bound_state': 'OK',
+                },
+            },
+        },
+    }
+    node._bid_batches = {'old-peer': object()}
+
+    refreshed_context = node._continuation_context(NOW)
+    assert refreshed_context is not None
+    assert node._activate_continuation_round(refreshed_context)
+
+    assert node._round is active_round
+    assert node._round.round_id == active_round.round_id
+    assert node._round_lifecycle.generation > old_generation
+    assert next(
+        snapshot for snapshot in node._round.snapshots
+        if snapshot.source_robot_id == context.free_robot_id
+    ) == refreshed_free
+    assert node._bid_batches == {}
+    assert node._round.local_batch is None
+    assert any(event[0] == 'CONTINUATION_CONTEXT_REFRESHED'
+               for event in node._events)
+
+
+def test_committed_continuation_context_is_not_rebased_on_new_evidence():
+    """A committed continuation keeps its action-bound provenance fixed."""
+    node, _, _, _, _ = _fake_node()
+    context = node._continuation_context(NOW)
+    assert context is not None
+    assert node._activate_continuation_round(context)
+    active_round = node._round
+    active_generation = node._round_lifecycle.generation
+    active_round.decision = SimpleNamespace()
+    node._committed = SimpleNamespace(decision=SimpleNamespace())
+
+    refreshed_free = replace(
+        context.free_snapshot,
+        epoch=context.free_snapshot.epoch + 1,
+        map_revision=context.free_snapshot.map_revision + 1,
+        map_fingerprint='fresh-map',
+        lower_bound_context_fingerprint='fresh-bounds',
+        candidate_generation_id=2,
+    )
+    node._snapshots[context.free_robot_id] = receive(
+        refreshed_free, 10.0, NOW,
+    )
+    node._candidate_lower_bound_history = {
+        context.free_robot_id: {
+            (refreshed_free.map_revision,
+             refreshed_free.lower_bound_context_fingerprint,
+             refreshed_free.costmap_revision,
+             refreshed_free.candidate_generation_id): {
+                'bounds': (),
+                'provenance': (
+                    refreshed_free.map_revision,
+                    refreshed_free.lower_bound_context_fingerprint,
+                    refreshed_free.candidate_generation_id,
+                ),
+                'metadata': {
+                    'fingerprint': refreshed_free.lower_bound_context_fingerprint,
+                    'map_revision': refreshed_free.map_revision,
+                    'costmap_revision': refreshed_free.costmap_revision,
+                    'candidate_generation_id': refreshed_free.candidate_generation_id,
+                    'bound_entry_count': 0,
+                    'detected_not_queried_count': 0,
+                    'all_bounds_finite': True,
+                    'bound_state': 'OK',
+                },
+            },
+        },
+    }
+
+    refreshed_context = node._continuation_context(NOW)
+    assert refreshed_context is not None
+    assert node._activate_continuation_round(refreshed_context)
+
+    assert node._round is active_round
+    assert node._round_lifecycle.generation == active_generation
+    assert next(
+        snapshot for snapshot in node._round.snapshots
+        if snapshot.source_robot_id == context.free_robot_id
+    ) == context.free_snapshot
+
+
 def test_canonical_continuation_canonical_oscillation_keeps_round_on_stale_context():
     """Temporary context loss must not clear continuation auction evidence."""
     node, context, _ = _continuation_setup()

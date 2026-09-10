@@ -197,6 +197,14 @@ CERTIFICATE_EVIDENCE_REASONS = frozenset({
 LOCAL_PATH_EVALUATION_CACHE_MAX_ENTRIES = 32
 
 
+# Candidate arrays and task snapshots arrive on independent subscriptions.
+# Keep a small exact-context history so a certificate can join a retained
+# snapshot to the matching candidate evidence without ever mixing contexts.
+# This is not a retry/cache policy: entries are usable only for the exact
+# map/fingerprint/costmap/generation tuple requested by the snapshot.
+CANDIDATE_BOUND_CONTEXT_HISTORY_MAX_ENTRIES = 32
+
+
 def classify_lower_bound_evidence(
         candidate_meta: Optional[dict], snapshot: Optional[TaskSnapshot],
         raw_bounds: Optional[tuple[float, ...]],
@@ -993,6 +1001,8 @@ class DistributedFrontierAssignment(Node):
         # diagnostics and to bind terminal completion evidence to the same
         # source generation/map/costmap as the fresh task snapshot.
         self._candidate_lower_bound_metadata: dict[str, dict] = {}
+        self._candidate_lower_bound_history: dict[str, dict[tuple, dict]] = {
+            robot: {} for robot in ('robot1', 'robot2')}
         self._candidate_evidence_seen = set()
         self._last_cost_only_certificate_key = None
         # Certificate blocker history is diagnostic-only.  It is deliberately
@@ -1582,7 +1592,7 @@ class DistributedFrontierAssignment(Node):
                                  int(getattr(header_stamp.stamp, 'nanosec', 0)))
         if not hasattr(self, '_candidate_lower_bound_metadata'):
             self._candidate_lower_bound_metadata = {}
-        self._candidate_lower_bound_metadata[message.source_robot_id] = {
+        candidate_metadata = {
             'fingerprint': str(getattr(
                 message, 'lower_bound_context_fingerprint', '') or ''),
             'map_revision': int(getattr(message, 'map_revision', 0)),
@@ -1602,6 +1612,8 @@ class DistributedFrontierAssignment(Node):
                     float(value) >= 0.0 for value in bound_values)),
             'bound_state': bound_state,
         }
+        self._candidate_lower_bound_metadata[message.source_robot_id] = (
+            candidate_metadata)
         # A generator may omit diagnostic region JSON.  In that case an empty
         # tuple must not be mistaken for proof that no unqueried options
         # exist; the certificate is conservative until their bounds arrive.
@@ -1619,6 +1631,30 @@ class DistributedFrontierAssignment(Node):
             str(getattr(message, 'lower_bound_context_fingerprint', '') or ''),
             int(getattr(message, 'candidate_generation_id', 0) or 0),
         )
+        candidate_generation_id = int(getattr(
+            message, 'candidate_generation_id', 0) or 0)
+        candidate_fingerprint = str(getattr(
+            message, 'lower_bound_context_fingerprint', '') or '')
+        candidate_map_revision = int(getattr(message, 'map_revision', 0) or 0)
+        candidate_costmap_revision = int(getattr(
+            message, 'costmap_revision', 0) or 0)
+        if candidate_generation_id > 0 and candidate_fingerprint:
+            if not hasattr(self, '_candidate_lower_bound_history'):
+                self._candidate_lower_bound_history = {}
+            history = self._candidate_lower_bound_history.setdefault(
+                message.source_robot_id, {})
+            history[(candidate_map_revision, candidate_fingerprint,
+                     candidate_costmap_revision,
+                     candidate_generation_id)] = {
+                'bounds': self._unqueried_cost_bounds[
+                    message.source_robot_id],
+                'provenance': self._unqueried_cost_bound_provenance[
+                    message.source_robot_id],
+                'metadata': dict(candidate_metadata),
+            }
+            while (len(history) >
+                   CANDIDATE_BOUND_CONTEXT_HISTORY_MAX_ENTRIES):
+                history.pop(next(iter(history)))
         self._unqueried_cost_bounds_received[
             message.source_robot_id] = time.monotonic()
         if regions:
@@ -1637,6 +1673,84 @@ class DistributedFrontierAssignment(Node):
                 self._candidate_evidence['robot2'] = CandidateEvidence()
                 return
         self._candidate_evidence[message.source_robot_id] = fallback
+
+    @staticmethod
+    def _candidate_bound_context_key(snapshot: TaskSnapshot) -> tuple:
+        """Return the complete source context used by certificate evidence."""
+        return (
+            int(getattr(snapshot, 'map_revision', 0) or 0),
+            str(getattr(snapshot, 'lower_bound_context_fingerprint', '') or ''),
+            int(getattr(snapshot, 'costmap_revision', 0) or 0),
+            int(getattr(snapshot, 'candidate_generation_id', 0) or 0),
+        )
+
+    def _candidate_bound_record_for_snapshot(
+            self, robot_id: str, snapshot: Optional[TaskSnapshot]) -> Optional[dict]:
+        """Return only candidate bounds proven coherent with ``snapshot``.
+
+        Candidate and snapshot subscriptions are asynchronous.  The latest
+        candidate record can be one generation ahead of a retained round, but
+        an exact older record may still be valid for that round.  Selecting
+        that record is a provenance-preserving join; it never authorizes a
+        cross-generation bound.
+        """
+        if snapshot is None:
+            return None
+        metadata = getattr(self, '_candidate_lower_bound_metadata', {}).get(
+            robot_id)
+        bounds = getattr(self, '_unqueried_cost_bounds', {}).get(robot_id)
+        provenance = getattr(
+            self, '_unqueried_cost_bound_provenance', {}).get(robot_id)
+        current_evidence = getattr(
+            self, '_candidate_source_local_evidence',
+            getattr(self, '_candidate_evidence', {}),
+        ).get(robot_id, CandidateEvidence())
+        expected_count = int(getattr(
+            current_evidence, 'detected_not_queried', 0) or 0)
+
+        def usable(item_metadata, item_bounds, item_provenance, source):
+            if not lower_bound_context_matches(item_provenance, snapshot):
+                return None
+            item_costmap = item_metadata.get('costmap_revision')
+            if (item_costmap is None or
+                    int(item_costmap) != int(getattr(
+                        snapshot, 'costmap_revision', 0) or 0)):
+                return None
+            item_expected = int(item_metadata.get(
+                'detected_not_queried_count', expected_count) or 0)
+            reason, _comparison = classify_lower_bound_evidence(
+                item_metadata, snapshot, item_bounds, item_expected,
+            )
+            # No bound values are required when this exact source context
+            # reports zero unqueried options.  Preserve the existing
+            # diagnostic distinction for empty/omitted summaries.
+            if reason not in (
+                    'OK', 'EMPTY_BOUND_SUMMARY',
+                    'NO_CANDIDATE_BOUND_SUMMARY'):
+                return None
+            if item_expected > 0 and item_bounds is None:
+                return None
+            return {
+                'bounds': item_bounds,
+                'provenance': item_provenance,
+                'metadata': item_metadata,
+                'source': source,
+                'expected_count': item_expected,
+            }
+
+        if metadata is not None:
+            current = usable(metadata, bounds, provenance, 'latest')
+            if current is not None:
+                return current
+        history = getattr(self, '_candidate_lower_bound_history', {}).get(
+            robot_id, {})
+        item = history.get(self._candidate_bound_context_key(snapshot))
+        if item is None:
+            return None
+        return usable(
+            item.get('metadata', {}), item.get('bounds'),
+            item.get('provenance'), 'matching_history',
+        )
 
     @staticmethod
     def _decode_frontier_regions(
@@ -2523,6 +2637,60 @@ class DistributedFrontierAssignment(Node):
         if (current is not None and current.mode == 'continuation' and
                 current.round_id == round_id and
                 current.continuation_commitment_id == commitment.commitment_id):
+            # A semantic continuation round may span source heartbeat epochs,
+            # but its certificate context must still be a coherent snapshot /
+            # bound pair.  Refresh the retained pre-decision context only when
+            # the newer free snapshot already has matching candidate evidence.
+            # Replacing the tuple as one value and advancing the lifecycle
+            # generation makes callbacks from the previous context stale.
+            committed = getattr(self, '_committed', None)
+            if (current.decision is None and
+                    getattr(committed, 'decision', None) is None):
+                old_snapshot = next(
+                    (snapshot for snapshot in current.snapshots
+                     if snapshot.source_robot_id == context.free_robot_id),
+                    None,
+                )
+                matching = self._candidate_bound_record_for_snapshot(
+                    context.free_robot_id, context.free_snapshot,
+                )
+                if (old_snapshot != context.free_snapshot and
+                        matching is not None):
+                    current.snapshots = snapshots
+                    current.query_tasks = context.free_tasks
+                    current.bids = ()
+                    current.local_path_evaluations.clear()
+                    current.local_batch = None
+                    current.query_index = 0
+                    current.decision = None
+                    current.traffic = None
+                    current.decision_published = False
+                    self._round_lifecycle.activate(current.round_id)
+                    self._bid_batches.clear()
+                    self._peer_decision = None
+                    self._committed = CommittedRound()
+                    self._transition(
+                        CoordinatorState.BIDDING,
+                        'refresh continuation certificate context',
+                    )
+                    self._log_round_lifecycle(
+                        'CONTINUATION_CONTEXT_REFRESHED', current,
+                        self._round_lifecycle.generation,
+                        'new coherent snapshot and candidate-bound provenance',
+                    )
+                    self._emit_event(
+                        'CONTINUATION_CONTEXT_REFRESHED',
+                        json.dumps({
+                            'round_id': current.round_id,
+                            'robot_id': context.free_robot_id,
+                            'old_candidate_generation_id': int(getattr(
+                                old_snapshot, 'candidate_generation_id', 0) or 0),
+                            'new_candidate_generation_id': int(getattr(
+                                context.free_snapshot,
+                                'candidate_generation_id', 0) or 0),
+                            'bound_context_source': matching['source'],
+                        }, sort_keys=True, separators=(',', ':')),
+                    )
             return True
         new_round = RoundWork(
             round_id=round_id,
@@ -3724,24 +3892,45 @@ class DistributedFrontierAssignment(Node):
                 self, '_candidate_source_local_evidence',
                 self._candidate_evidence,
             ).get(robot_id)
-            raw_bounds = self._unqueried_cost_bounds.get(robot_id)
             snapshot = snapshots_by_robot.get(robot_id)
-            provenance = self._unqueried_cost_bound_provenance.get(robot_id)
-            matching_context = bool(
-                snapshot is not None and
-                lower_bound_context_matches(provenance, snapshot)
+            candidate_record = self._candidate_bound_record_for_snapshot(
+                robot_id, snapshot,
             )
+            if candidate_record is not None:
+                raw_bounds = candidate_record['bounds']
+                provenance = candidate_record['provenance']
+                candidate_metadata = candidate_record['metadata']
+                matching_context = True
+                expected_count = int(candidate_record['expected_count'])
+                context_source = candidate_record['source']
+            else:
+                raw_bounds = getattr(
+                    self, '_unqueried_cost_bounds', {},
+                ).get(robot_id)
+                provenance = getattr(
+                    self, '_unqueried_cost_bound_provenance', {},
+                ).get(robot_id)
+                candidate_metadata = getattr(
+                    self, '_candidate_lower_bound_metadata', {},
+                ).get(robot_id)
+                matching_context = bool(
+                    snapshot is not None and
+                    lower_bound_context_matches(provenance, snapshot)
+                )
+                expected_count = int(getattr(
+                    evidence, 'detected_not_queried', 0) or 0)
+                context_source = 'latest_unmatched'
             bound_diagnostics[robot_id] = {
                 'required_for_certificate': robot_id in required_robots,
             }
             _evidence_reason, comparison = classify_lower_bound_evidence(
-                getattr(self, '_candidate_lower_bound_metadata', {}).get(robot_id),
-                snapshot,
+                candidate_metadata, snapshot,
                 raw_bounds,
-                int(evidence.detected_not_queried if evidence is not None else 0),
+                expected_count,
             )
             bound_diagnostics[robot_id].update(comparison)
-            if (evidence is not None and evidence.detected_not_queried == 0 and
+            bound_diagnostics[robot_id]['context_source'] = context_source
+            if (expected_count == 0 and
                     raw_bounds is None):
                 bounds[robot_id] = ()
             elif raw_bounds is not None and matching_context:
@@ -3793,11 +3982,10 @@ class DistributedFrontierAssignment(Node):
             if source_bounds is not None:
                 dnu += len(source_bounds)
             else:
-                dnu += int(getattr(
-                    self, '_candidate_source_local_evidence',
-                    self._candidate_evidence,
-                ).get(
-                    robot_id, CandidateEvidence()).detected_not_queried)
+                comparison = bound_diagnostics.get(robot_id, {})
+                candidate = comparison.get('candidate', {})
+                dnu += int(candidate.get(
+                    'expected_bound_entry_count', 0) or 0)
         key = (round_work.round_id, len(first_batch.bids), len(second_batch.bids),
                dnu, blocking, round(float(decision.score.total), 9),
                round(float(optimistic_score), 9), certified, reason,

@@ -82,6 +82,7 @@ class MinimalFrontierAllocator:
         self._peer_terminal = False
         self._peer_terminal_reason = ''
         self._active_goal_id: str | None = None
+        self._active_goal_union_hash: str | None = None
         self._goal_token = 0
         self._state = self.IDLE
         self._completed_ids: set[str] = set()
@@ -277,11 +278,14 @@ class MinimalFrontierAllocator:
             self._bid_publisher.publish(protocol.to_msg(self._local_batch, stamp))
         self._publish_completion_events()
 
-    def _publish_completion_events(self) -> None:
+    def _publish_completion_events(
+            self, task_ids: tuple[str, ...] | None = None,
+            union_hash: str | None = None) -> None:
         if self._event_publisher is None or self._union is None:
             return
-        union_hash = self._union.union_hash
-        for task_id in sorted(self._local_completed_ids):
+        union_hash = union_hash or self._union.union_hash
+        task_ids = task_ids or tuple(sorted(self._local_completed_ids))
+        for task_id in task_ids:
             event = DistributedExplorationEvent()
             event.header.stamp = self._node.get_clock().now().to_msg()
             event.header.frame_id = 'shared_map'
@@ -535,6 +539,7 @@ class MinimalFrontierAllocator:
         self._goal_token += 1
         token = self._goal_token
         self._active_goal_id = str(candidate.frontier_id)
+        self._active_goal_union_hash = pending_union_hash
         self._state = self.GOAL_PENDING
         self._publish_status()
         send_started = False
@@ -577,8 +582,12 @@ class MinimalFrontierAllocator:
         if token != self._goal_token or self._active_goal_id is None:
             return
         if outcome.accepted and outcome.status == GoalStatus.STATUS_SUCCEEDED:
-            self._completed_ids.add(self._active_goal_id)
-            self._local_completed_ids.add(self._active_goal_id)
+            completed_id = self._active_goal_id
+            self._completed_ids.add(completed_id)
+            self._local_completed_ids.add(completed_id)
+            self._publish_completion_events(
+                (completed_id,), self._active_goal_union_hash,
+            )
         self._clear_goal(token)
 
     def _clear_goal(self, token: int) -> None:
@@ -586,6 +595,7 @@ class MinimalFrontierAllocator:
             return
         self._goal_token += 1
         self._active_goal_id = None
+        self._active_goal_union_hash = None
         self._traffic_decision = None
         self._state = self.EVALUATING if self._released else self.IDLE
         if self._union is not None and self._candidates[self._robot_id] is not None:

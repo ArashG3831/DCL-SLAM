@@ -455,6 +455,31 @@ def test_success_suppresses_delayed_stale_candidate():
     assert winner._active_goal_id is None
 
 
+def test_success_is_published_before_active_frontier_is_retired():
+    first, second, _, _ = _ready_pair(ids=(1, 2))
+    winner = first if first._active_goal_id else second
+    completed = winner._active_goal_id
+    old_union_hash = winner._union.union_hash
+    remaining = (2,) if completed == '1' else (1,)
+
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', remaining, map_revision=2),
+        _array('robot2', remaining, map_revision=2),
+    )
+    assert winner._union.union_hash != old_union_hash
+    assert completed not in {task.canonical_id for task in winner._union.tasks}
+
+    winner.on_navigation_outcome(winner._goal_token, _success())
+
+    assert any(
+        event.canonical_task_id == completed and
+        event.union_hash == old_union_hash
+        for event in winner._event_publisher.messages
+    )
+
+
 def test_success_without_current_union_is_advertised_on_next_current_union():
     first, second, _, _ = _ready_pair(ids=(1,))
     winner = first if first._active_goal_id else second

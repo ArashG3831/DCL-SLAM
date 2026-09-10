@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
 import statistics
 import sys
 import time
@@ -1399,12 +1402,73 @@ def _md(report):
     return "\n".join(lines) + "\n"
 
 
+def _desktop_root(explicit=None):
+    """Return an accessible Windows Desktop mounted in the WSL filesystem."""
+    requested = explicit or os.environ.get("CODEX_WINDOWS_DESKTOP")
+    candidates = [Path(requested)] if requested else []
+    users = Path("/mnt/c/Users")
+    if not requested and users.is_dir():
+        for user_dir in sorted(users.iterdir()):
+            if not user_dir.is_dir() or user_dir.name.lower() in {
+                    "all users", "default", "default user", "public"}:
+                continue
+            candidates.extend((user_dir / "Desktop", user_dir / "OneDrive" / "Desktop"))
+    checked = []
+    for candidate in candidates:
+        candidate = candidate.expanduser().resolve()
+        checked.append(str(candidate))
+        if candidate.is_dir() and os.access(candidate, os.W_OK):
+            return candidate
+    detail = ", ".join(checked) if checked else "/mnt/c/Users/*/Desktop"
+    raise RuntimeError(
+        "Windows Desktop handoff failed: no accessible Desktop directory; "
+        f"checked {detail}. Set CODEX_WINDOWS_DESKTOP to an accessible path.")
+
+
+def copy_reports_to_desktop(output_json, output_md, artifact, desktop_root=None,
+                            now=None):
+    """Copy only the generated report files into a new Desktop handoff folder."""
+    output_json = Path(output_json).resolve()
+    output_md = Path(output_md).resolve()
+    for source in (output_json, output_md):
+        if not source.is_file():
+            raise RuntimeError(
+                f"Windows Desktop handoff failed: generated report is missing: {source}")
+    desktop = _desktop_root(desktop_root)
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    artifact_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(artifact).name)
+    base = f"codex_handoff_{artifact_name}_{stamp}"
+    handoff = None
+    for suffix in range(1, 1000):
+        candidate = desktop / (base if suffix == 1 else f"{base}_{suffix}")
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        handoff = candidate
+        break
+    if handoff is None:
+        raise RuntimeError(
+            "Windows Desktop handoff failed: could not allocate a unique folder "
+            f"under {desktop}")
+    copied = []
+    for source in (output_json, output_md):
+        destination = handoff / source.name
+        shutil.copy2(source, destination)
+        copied.append(str(destination))
+    return {"status": "copied", "directory": str(handoff), "files": copied}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-md", type=Path, required=True)
+    parser.add_argument(
+        "--desktop-root", type=Path,
+        help="Windows Desktop root for the automatic report handoff; "
+             "defaults to an accessible /mnt/c/Users/*/Desktop")
     args = parser.parse_args(argv)
     started = time.perf_counter()
     report = build_report(args.artifact, args.baseline)
@@ -1414,9 +1478,21 @@ def main(argv=None):
     args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
                                 encoding="utf-8")
     args.output_md.write_text(_md(report), encoding="utf-8")
+    try:
+        handoff = copy_reports_to_desktop(
+            args.output_json, args.output_md, args.artifact, args.desktop_root)
+    except RuntimeError as exc:
+        print(json.dumps({"artifact": str(args.artifact),
+                          "output_json": str(args.output_json),
+                          "output_md": str(args.output_md),
+                          "desktop_handoff": {"status": "failed",
+                                               "error": str(exc)}},
+                         sort_keys=True), file=sys.stderr)
+        raise SystemExit(2) from exc
     print(json.dumps({"artifact": str(args.artifact),
                       "output_json": str(args.output_json),
                       "output_md": str(args.output_md),
+                      "desktop_handoff": handoff,
                       "generation_seconds": round(generation_seconds, 6)},
                      sort_keys=True))
 

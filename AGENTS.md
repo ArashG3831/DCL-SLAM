@@ -742,4 +742,9 @@ Add `--baseline <other-fast-trial>` for the deterministic scalar comparison
 table. Use the finalized artifact directory, not a raw live-run directory; the
 tool treats the fast-trial simulation end as the measurement cutoff so
 post-horizon finalization callbacks are excluded. It is standalone reporting
-only and is not invoked automatically by the experiment runner.
+only and is not invoked automatically by the experiment runner. After each
+successful invocation it also creates a new uniquely named folder on the
+accessible Windows Desktop and copies only the generated JSON and Markdown
+reports into it. Set `CODEX_WINDOWS_DESKTOP` or pass `--desktop-root` when the
+Desktop is mounted at a nonstandard WSL path; an unavailable Desktop is a
+visible command failure, not a silent skip.

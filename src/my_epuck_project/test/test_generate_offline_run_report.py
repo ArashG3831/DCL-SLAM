@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,51 @@ def test_d2_artifact_report_is_deterministic_when_available():
     assert first["provenance"]["simulation_end_s"] == 180.08
     assert first["path_queries"]["combined"]["submissions"] == 199
     assert first["validation"]["all_timing_invariants_pass"]
+
+
+def test_desktop_handoff_copies_only_generated_reports(tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    output_json = tmp_path / "offline_metrics.json"
+    output_md = tmp_path / "offline_report.md"
+    output_json.write_text('{"ok": true}\n', encoding="utf-8")
+    output_md.write_text("# report\n", encoding="utf-8")
+    result = REPORT.copy_reports_to_desktop(
+        output_json, output_md, "fast_trial_demo",
+        desktop_root=desktop,
+        now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    handoff = Path(result["directory"])
+    assert result["status"] == "copied"
+    assert (handoff / "offline_metrics.json").read_text() == '{"ok": true}\n'
+    assert (handoff / "offline_report.md").read_text() == "# report\n"
+    assert sorted(path.name for path in handoff.iterdir()) == [
+        "offline_metrics.json", "offline_report.md"]
+
+
+def test_desktop_handoff_allocates_a_new_folder_every_time(tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    output_json = tmp_path / "offline_metrics.json"
+    output_md = tmp_path / "offline_report.md"
+    output_json.write_text("{}\n", encoding="utf-8")
+    output_md.write_text("# report\n", encoding="utf-8")
+    timestamp = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    first = REPORT.copy_reports_to_desktop(
+        output_json, output_md, "fast_trial_demo", desktop_root=desktop,
+        now=timestamp)
+    second = REPORT.copy_reports_to_desktop(
+        output_json, output_md, "fast_trial_demo", desktop_root=desktop,
+        now=timestamp)
+    assert first["directory"] != second["directory"]
+    assert Path(second["directory"]).name.endswith("_2")
+
+
+def test_desktop_handoff_reports_unavailable_desktop(tmp_path):
+    output_json = tmp_path / "offline_metrics.json"
+    output_md = tmp_path / "offline_report.md"
+    output_json.write_text("{}\n", encoding="utf-8")
+    output_md.write_text("# report\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="no accessible Desktop"):
+        REPORT.copy_reports_to_desktop(
+            output_json, output_md, "fast_trial_demo",
+            desktop_root=tmp_path / "missing-desktop")

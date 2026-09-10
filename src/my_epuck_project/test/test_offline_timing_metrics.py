@@ -25,11 +25,10 @@ def test_exact_idle_state_machine_preserves_interval_semantics():
                                    robots=('robot1',))
     metrics = result['robots']['robot1']
     assert metrics['feasible_work_seconds'] == 7.0
-    # This is the established legacy state-machine behavior: adjacent
-    # FEASIBLE_WORK_AVAILABLE segments merge even when goal_active changes.
-    assert metrics['avoidable_idle_seconds'] == 7.0
-    assert metrics['productive_engagement_seconds'] == 0.0
-    assert metrics['longest_avoidable_idle_s'] == 7.0
+    # Goal-state changes must split otherwise-adjacent feasible intervals.
+    assert metrics['avoidable_idle_seconds'] == 5.0
+    assert metrics['productive_engagement_seconds'] == 2.0
+    assert metrics['longest_avoidable_idle_s'] == 3.0
     assert metrics['feasible_terminal_to_next_useful_dispatch_s']['count'] == 0
 
 

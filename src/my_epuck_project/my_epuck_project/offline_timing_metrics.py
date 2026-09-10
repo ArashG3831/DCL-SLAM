@@ -105,13 +105,13 @@ def _merge_intervals(intervals):
     merged = []
     for item in intervals:
         if (merged and merged[-1]['classification'] == item['classification']
+                and merged[-1]['goal_active'] == item['goal_active']
                 and abs(merged[-1]['end_s'] - item['start_s']) <= 1.0e-6):
             merged[-1]['end_s'] = item['end_s']
             merged[-1]['duration_s'] = (
                 merged[-1]['end_s'] - merged[-1]['start_s'])
             merged[-1]['candidate_count'] = max(
                 merged[-1]['candidate_count'], item['candidate_count'])
-            merged[-1]['goal_active'] = item['goal_active']
         else:
             merged.append(dict(item))
     return merged

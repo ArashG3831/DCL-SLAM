@@ -643,3 +643,103 @@ implementations.
 14. The final goal is the same scientific observer capability and outputs,
     less mission-time work, no silent feature loss, and no duplicate
     implementations.
+
+## Offline DCL-SLAM renderer
+
+The renderer is:
+
+`src/my_epuck_project/tools/render_cooperative_animation.py`
+
+It is an offline-only visualization tool. It does not launch ROS, Webots, or
+the observer. Given a finalized experiment campaign, it renders the shared
+map, robot trajectories, recorded frontier regions, candidate/goal overlays,
+planned paths, phase and handoff information, and per-robot telemetry. The
+sidebar can show position, heading, current goal, linear speed, turn rate,
+distance travelled, productivity, traffic state, reachable-candidate count,
+candidate-batch age, and issue counts. It also writes a provenance JSON and
+optional still frames.
+
+### Input
+
+Pass the finalized `fast_trial` directory with `--campaign`. The renderer
+locates the nested observer directory and reads the recorded pose/timeseries,
+events, candidate batches, task snapshots, goals, paths, map snapshots, and
+frontier geometry. Frontier geometry is taken from
+`observer/frontier_regions.jsonl` when present. If that raw geometry is absent,
+the renderer falls back to recorded candidate bounds, centroids, and approach
+points; it cannot reconstruct raw frontier polygons from event metadata alone.
+
+### Canonical 1x render
+
+From the workspace root:
+
+```bash
+python3 src/my_epuck_project/tools/render_cooperative_animation.py \
+  --campaign results/thesis_condition_C_180s_20260908T222732Z/fast_trial_20260908T222737Z \
+  --output results/thesis_condition_C_180s_20260908T222737Z/render_1x/condition_C_180s_DCL_SLAM_1x.mp4 \
+  --start-s 22.04 --duration-s 180 --speedup 1 \
+  --title "DCL-SLAM" --policy "Cooperative Cost-Only" \
+  --provenance-output results/thesis_condition_C_180s_20260908T222737Z/render_1x/condition_C_180s_DCL_SLAM_1x.provenance.json \
+  --stills-dir results/thesis_condition_C_180s_20260908T222737Z/render_1x/stills \
+  --still-times 0,30,90,150
+```
+
+`--start-s` is the absolute source simulation timestamp at the first frame.
+`--duration-s` is the absolute source end timestamp in the current renderer
+workflow, so the example covers source time 22.04 through 180 s. `--speedup`
+is source simulation seconds per output second: use `1` for real-time video
+and `10` for a 10x accelerated presentation. For example, the same source
+window at `--speedup 10` is approximately one tenth as long.
+
+Useful presentation options are `--stills-only`, `--hide-frontiers`,
+`--hide-goals`, `--hide-candidates`, `--hide-planned-path`, `--width`,
+`--height`, `--fps`, and `--still-times`.
+
+### Map snapshot timing
+
+The `MAP SNAPSHOT` value is the timestamp of the latest recorded forensic map
+image at or before the current video frame. The renderer does not lazily skip
+available data. Raw map receipts can be frequent, but full occupancy-map image
+snapshots are recorded less often and are deduplicated in the forensic map
+directory. Consequently the displayed map timestamp can advance in roughly
+5–15 second jumps. Smoother map animation requires recording more full map
+images; receipt metadata alone is not enough to reconstruct the occupancy
+image offline.
+
+### Validation
+
+Run the renderer's focused tests with:
+
+```bash
+PYTHONPATH=src/my_epuck_project python3 -m pytest -q \
+  src/my_epuck_project/test/test_render_cooperative_animation.py
+```
+
+The renderer is presentation-only: changing its labels, speedup, frame range,
+or visibility options does not change the experiment artifact or scientific
+metrics.
+
+## Reusable offline run report
+
+For a finalized `fast_trial` artifact, use
+`src/my_epuck_project/tools/generate_offline_run_report.py` to collect the
+standard observer, timing, frontier, candidate, query, certificate, allocator,
+navigation, map/TF, coverage, cooperation, mission, provenance, and
+finalization metrics without ROS or Webots. It reuses
+`offline_timing_metrics.analyze_event_records` for the authoritative
+feasible/productive/avoidable-idle definition, keeps raw lifecycle records
+separate from request-level joins, and emits `null` when a metric is not
+recorded rather than guessing.
+
+```bash
+python3 src/my_epuck_project/tools/generate_offline_run_report.py \
+  --artifact results/.../fast_trial_... \
+  --output-json results/.../offline_metrics.json \
+  --output-md results/.../offline_report.md
+```
+
+Add `--baseline <other-fast-trial>` for the deterministic scalar comparison
+table. Use the finalized artifact directory, not a raw live-run directory; the
+tool treats the fast-trial simulation end as the measurement cutoff so
+post-horizon finalization callbacks are excluded. It is standalone reporting
+only and is not invoked automatically by the experiment runner.

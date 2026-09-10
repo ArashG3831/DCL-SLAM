@@ -125,6 +125,8 @@ def test_canonical_runner_always_records_frontier_geometry():
     assert command[-2:] == ['--diagnostic-frontier-capture', 'true']
 
 
+
+
 def test_effective_configuration_records_runtime_module_provenance(tmp_path):
     result_root = tmp_path / 'results' / 'run'
     module = 'my_epuck_project.distributed_frontier_assignment'

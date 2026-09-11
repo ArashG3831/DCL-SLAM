@@ -1200,7 +1200,20 @@ private:
       if (work_context_matches_snapshot(work, map, costmap)) {
         valid.push_back(work);
       } else {
-        reject_stale_work(work, cycle_revision_, map_revision, cycle_cost_revision_, costmap_revision);
+        const auto cache = evaluation_cache_.find(work.id);
+        const int64_t accepted_ns = cache == evaluation_cache_.end() ? 0 :
+          cache->second.last_query_ns;
+        const int64_t current_ns = now().nanoseconds();
+        const int64_t accepted_age_ns = current_ns - accepted_ns;
+        const bool accepted_recently = accepted_ns > 0 && accepted_age_ns >= 0 &&
+          std::chrono::duration<double>(std::chrono::nanoseconds(accepted_age_ns)) <=
+          kLocalContextTolerance;
+        if (accepted_recently) {
+          valid.push_back(work);
+        } else {
+          reject_stale_work(
+            work, cycle_revision_, map_revision, cycle_cost_revision_, costmap_revision);
+        }
       }
     }
     reachable_.swap(valid);

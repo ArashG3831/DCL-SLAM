@@ -1,129 +1,114 @@
 # Repository instructions
 
-## Scope and workspace
+## Workspaces and provenance
 
-- This is the only authorized validation workspace:
-  `/home/arash/webots_ws_clean_validation_20260823`.
-- Never source, build, launch, or accept runtime packages from the stale
-  workspace prefix `/home/arash/webots_ws/install`.
-- The older checkout `/home/arash/webots_ws` is dirty and is not a runtime
-  workspace for this repository.
-- Inspect the existing implementation before editing. Prefer a small,
-  isolated, semantics-preserving change over a new custom layer.
-- Do not claim runtime validation from source inspection alone. Runtime claims
-  require the appropriate artifact, live evidence, or experiment result.
+- **Main analysis workspace:** `/home/arash/webots_ws_clean_validation_20260823`.
+  It may contain legitimate dirty source, tests, reports, and experiments. It
+  is not automatically a runtime source.
+- **Persistent clean validation worktree:** the reusable worktree selected by
+  `git worktree list`. The latest canonical run used
+  `/home/arash/webots_peer_lifecycle_validation_20260912`. Verify this pointer
+  before a run; intentionally rotate it only when necessary and record the new
+  path in the run provenance.
+- Do not create a new worktree for every patch or run. Do not reconstruct the
+  validation environment from scratch for every run.
+- Do not run a canonical experiment from a tracked-dirty worktree. The
+  launcher’s clean-tree gate is mandatory and must not be bypassed.
+- Record source path, commit, changed files, install prefixes, command, world,
+  profile, domain, port, and termination reason in the artifact.
 
-## Canonical experiments and preflight
+## Normal patch → run workflow
 
-- Use the canonical launcher for thesis experiments:
+1. Bring only the authorized source change into the existing validation
+   worktree; preserve unrelated analysis-workspace changes.
+2. Review `git status`, changed files, and `git diff --check`, then commit the
+   intended validation change in that worktree so the canonical clean-tree gate
+   passes.
+3. Rebuild only the affected package(s), preserving the existing isolated
+   `--symlink-install` layout. Never use `--merge-install` for canonical runs.
+4. Source ROS Jazzy, the approved dependency overlay, and that worktree’s
+   existing install; do not manually substitute another install prefix.
+5. Verify the changed package, executable, or Python import resolves from the
+   validation worktree/install.
+6. Run the canonical launcher:
 
-  ```bash
-  python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 180
-  python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 600
-  python3 src/my_epuck_project/tools/run_thesis_experiment.py --condition C --horizon 1200
-  ```
+   ```bash
+   python3 src/my_epuck_project/tools/run_thesis_experiment.py \
+     --condition C --horizon <N>
+   ```
 
-- Do not manually reconstruct the launcher environment, overlays, ports,
-  domains, result paths, NAT settings, or preflight checks. Do not bypass a
-  dirty-tree, provenance, or readiness gate.
-- Before any ROS/Webots launch, read:
+The established layout is:
+
+```text
+<validation-worktree>/build_canonical_thesis_20260907_symlink
+<validation-worktree>/install_canonical_thesis_20260907_symlink
+<validation-worktree>/dependency_overlay_rclcpp_action_2798_20260909
+```
+
+For Python-only `my_epuck_project` changes, rebuild/install only
+`my_epuck_project`; do not rebuild seven unrelated packages. Build additional
+packages only when an actual dependency or interface change requires them.
+If a launcher failure occurs before ROS/Webots starts (missing package,
+executable, import, or provenance), repair the existing validation
+worktree/build/install in place; do not create another worktree.
+
+## Canonical safety and runtime setup
+
+- Never source, build, launch, or accept packages from
+  `/home/arash/webots_ws/install`.
+- Use the canonical launcher and all of its clean-environment, provenance,
+  readiness, resource, and termination gates. Do not manually reconstruct or
+  bypass them.
+- Before ROS/Webots, read
   `docs/HOST_SAFETY_INCIDENT_2026-08-24.md` and
   `docs/HOST_RESOURCE_STOP_POLICY.md`.
-- Use a clean `env -i`-style runtime environment. Source ROS Jazzy, the
-  approved external driver prefix, and this checkout's fresh install only.
-  Verify package prefixes and executable/library provenance before launch.
-- Use `rmw_cyclonedds_cpp` with the approved WSL loopback profile:
-  `config/cyclonedds/wsl_loopback.xml`. Validate `ROS_DOMAIN_ID` against the
-  active profile; the approved range is `0..230`. Never silently fall back to
-  Fast DDS.
-- The selected install must resolve project packages, including interfaces,
-  frontier candidates, cooperative exploration, and the SLAM wrapper. No
-  effective environment, command, cache, RPATH/RUNPATH, or process may contain
-  `/home/arash/webots_ws/install`.
-- For WSL NAT, set `MY_EPUCK_WEBOTS_NETWORK_MODE=nat`, resolve and record the
-  Windows Webots controller endpoint, and never use `127.0.0.1` as the Windows
-  host endpoint from WSL NAT. The approved external driver prefix is
-  `/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver`.
-- Record the selected domain, port, world/profile, install prefixes, command,
-  termination reason, and runtime provenance in every experiment artifact.
-- Respect the host resource stop policy. The 1200-second wall watchdog is an
-  emergency ceiling; the scientific horizon is independent. For the final
-  thesis horizon use 1200 simulated seconds, cut metrics at the verified
-  horizon, and report active RTF using live clock and monotonic-wall boundaries.
-
-## Canonical thesis setup
-
-- Default profile:
-  `large_unknown_pose_close_start_20ms_scan_matching`.
-- Default world:
-  `src/my_epuck_project/worlds/epuck_d500_two_world_unknown_pose_close_start_dynamic_low_slip_20ms_finite.wbt`.
-- Preserve the canonical world, sensors, physics, map resolution, and
-  symmetric close-start geometry. Use another world only when explicitly
-  requested.
-- Both robots must pass readiness and the common simulation-time
-  `START_RELEASE` barrier before exploration dispatch or intentional motion.
-  Record both ready times, the release time, first goals, and first motion.
-- There is no PC/RViz central coordinator or brain. Robot decisions remain
-  decentralized; PC/RViz is visualization/evaluation only.
-- The main thesis scope is ABC. Preserve the synchronized start and current
-  scientific experiment definitions.
-
-## Protected subsystems
-
-Preserve these absent direct contradictory evidence from the active runtime:
-
-- SLAM and unknown-pose registration;
-- source-aware map fusion and shared-map semantics;
-- frontier generator and decision-map semantics;
-- Nav2 core, lifecycle, path/goal validity, and success authority;
-- traffic conflict geometry, deterministic winner/loser semantics, and safety;
-- canonical world, sensors, physics, and experiment launcher/provenance;
-- evaluator, observer, artifact schemas, and scientific metric definitions;
-- validated action ownership and stale-callback behavior.
-
-Before changing a protected subsystem, identify the active source path, the
-contradicted invariant, and the smallest semantics-preserving correction.
-Focused tests or historical artifacts alone do not authorize a redesign.
+- Use ROS Jazzy with `rmw_cyclonedds_cpp` and the worktree’s
+  `config/cyclonedds/wsl_loopback.xml`; never silently fall back to Fast DDS.
+  Use WSL NAT (`MY_EPUCK_WEBOTS_NETWORK_MODE=nat`), let the launcher resolve
+  the Windows endpoint, and never use a WSL-NAT loopback endpoint.
+- Use the approved external prefixes already selected by the launcher:
+  `webots_ros2_driver` at
+  `/home/arash/webots_ws_close_validation_2eb/install/webots_ros2_driver` and
+  the validated `rclcpp_action` dependency overlay in the worktree.
+- Preserve the default profile
+  `large_unknown_pose_close_start_20ms_scan_matching`, canonical world,
+  synchronized `START_RELEASE`, sensors, physics, maps, and experiment
+  definitions unless explicitly authorized otherwise.
 
 ## Minimal decentralized coordinator
 
-- Before implementing or auditing the new isolated minimal coordinator, read
-  `MINIMAL_COORDINATOR_SPEC.md`. That authoritative spec does not exist yet
-  and must be created before implementation.
-- The minimal coordinator is a narrowly scoped exception to legacy allocator
-  lifecycle assumptions. It must not inherit the legacy allocator's rounds,
-  continuation, certificate/lower-bound/history, commitment-journal,
-  restart-recovery, source-session-recovery, or hard-failure lifecycle.
-- This exception applies only to the new minimal-coordinator files. The
-  existing allocator remains untouched unless separately authorized.
-- Frontier generation, SLAM, fusion, Nav2 core behavior, traffic semantics,
-  launcher safety, and evaluation remain protected for the minimal copy too.
-- Do not change ROS messages, launch/configuration, or runtime behavior as
-  part of design-only work. Use established pure project/framework functions
-  instead of duplicating them.
+- `MINIMAL_COORDINATOR_SPEC.md` exists and is authoritative; read it before
+  minimal-coordinator work. The minimal allocator is implemented and active.
+- There is no PC/RViz coordinator. Preserve decentralized robot-local
+  decisions, existing messages, traffic, completion, termination, and Nav2
+  boundaries. Do not add protocols, ACKs, certificates, histories, or custom
+  messages without explicit authorization.
+- **Invariant:** current frontier-union membership controls task
+  selectability, not active-goal ownership. A local or peer active navigation
+  goal survives frontier disappearance/union churn until authoritative
+  terminal, inactive, supersession, or expiry lifecycle evidence.
+- Preserve continuous frontier/map/TF processing, committed active goals,
+  existing Nav2 internal replanning, and event-driven alternative-frontier
+  costing only when a robot needs a new goal.
 
-## Observer and reports
+## Protected scope and change discipline
 
-- The authoritative observer/evaluation completion requirements are in
-  `OBSERVER_EVALUATION_COMPLETION_SPEC.md`.
-- Reuse existing observer, offline analyzer, replay, and metric definitions.
-  Do not create a second scientific evaluator whose semantics can drift.
-- For a finalized `fast_trial`, use
-  `src/my_epuck_project/tools/generate_offline_run_report.py` for standard
-  offline metrics. It does not run ROS or Webots.
-- After a task creates report/output artifacts, create a new uniquely named
-  folder on the accessible Windows Desktop, copy only those artifacts, and
-  open the folder in Explorer. Preserve source files; do not copy raw logs,
-  build/install trees, or temporary directories. If Desktop handoff or
-  Explorer opening fails, report the exact status.
+- Treat SLAM/fusion, frontier detection/clustering, costing, Nav2 core,
+  traffic safety, launch/configuration, evaluator semantics, observer schemas,
+  and experiment provenance as protected. Before changing one, identify the
+  contradicted invariant and smallest semantics-preserving correction.
+- Keep diffs focused; preserve unrelated dirty changes. Do not claim runtime
+  validation from source inspection or offline tests alone. Do not launch ROS,
+  Webots, or another experiment unless explicitly requested and all gates pass.
 
-## Change discipline
+## Offline reports and video
 
-- Do not modify production, tests, messages, launch/configuration, or runtime
-  files unless the user explicitly authorizes that scope.
-- Keep changes reviewable and focused. Do not repair one custom layer by
-  adding another custom layer without proving the underlying requirement.
-- Run only checks proportionate to the task and use authoritative repository
-  commands. Keep unrelated dirty-worktree changes intact.
-- Point to detailed safety, host, observer, launcher, and subsystem documents
-  instead of duplicating their procedures here.
+- For a finalized `fast_trial`, use the standard offline-only generator:
+  `src/my_epuck_project/tools/generate_offline_run_report.py`.
+- Render with
+  `src/my_epuck_project/tools/render_cooperative_animation.py --campaign
+  <fast_trial>`. Use documented renderer options; serial OpenCV is the
+  fallback, while `--workers 4` requires external FFmpeg with `libx264`.
+- After creating report/video outputs, copy only those outputs to a new
+  uniquely named accessible Windows Desktop folder and open it in Explorer.
+  Do not copy raw logs, build/install trees, or temporary directories.

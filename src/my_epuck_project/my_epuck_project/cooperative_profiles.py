@@ -212,7 +212,7 @@ PROFILE_SETTINGS = {
         'fusion_resolution': 0.03,
         'global_costmap_resolution': 0.03,
         'local_costmap_resolution': 0.02,
-        'minimum_frontier_cells': 2,
+        'minimum_frontier_cells': 5,
         'minimum_known_cell_gain_for_activity': 1,
         'coverage_attribution_resolution': 0.03,
         'map_comparison_shift_window': 1,

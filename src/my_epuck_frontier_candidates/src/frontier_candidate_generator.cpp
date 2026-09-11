@@ -45,7 +45,7 @@ namespace my_epuck_frontier_candidates {
 class Generator : public rclcpp::Node {
   using Action = nav2_msgs::action::ComputePathToPose;
   using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
-  static constexpr std::chrono::duration<double> kLocalContextTolerance{0.200};
+  static constexpr std::chrono::duration<double> kLocalContextTolerance{0.500};
 
   enum class TimingSection {
     START_CYCLE,

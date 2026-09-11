@@ -485,9 +485,7 @@ class MinimalFrontierAllocator:
         current_ids = {task.canonical_id for task in self._union.tasks}
         if message.local_nav_goal_active:
             task_id = str(message.active_canonical_task_id)
-            if task_id not in current_ids:
-                return
-            self._peer_active_goal = task_id
+            self._peer_active_goal = task_id if task_id in current_ids else None
         else:
             self._peer_active_goal = None
         self._peer_status_union_hash = self._union.union_hash

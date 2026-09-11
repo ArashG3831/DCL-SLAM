@@ -332,6 +332,13 @@ class MinimalFrontierAllocator:
         )
         return replace(batch, bids=unavailable)
 
+    def _costing_pending(self) -> bool:
+        local = self._candidates[self._robot_id]
+        if self._is_geometry_only(local):
+            return True
+        peer = self._candidates[self._peer_id]
+        return self._peer_active_goal is None and self._is_geometry_only(peer)
+
     def _publish_batch(self) -> None:
         if self._local_batch is None:
             return
@@ -558,6 +565,9 @@ class MinimalFrontierAllocator:
             robot1_batch = self._peer_batch
             robot2_batch = self._local_batch
         if not protocol.complete_pair(self._union, robot1_batch, robot2_batch):
+            return
+        if self._costing_pending():
+            self._state = self.EVALUATING
             return
 
         known_ids = {task.canonical_id for task in self._union.tasks}

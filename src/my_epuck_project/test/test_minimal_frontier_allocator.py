@@ -267,6 +267,59 @@ def test_revision_skew_does_not_create_a_nonretrying_idle_dead_state():
     assert second._state == second.EVALUATING
 
 
+def test_geometry_only_evidence_keeps_costing_epoch_pending():
+    first, second = _allocator('robot1'), _allocator('robot2')
+    first._status_publisher = _Publisher()
+    second._status_publisher = _Publisher()
+    geometry1 = _array(
+        'robot1', (1,), candidates=[_candidate(1, reachable=False)],
+        detected_not_queried=1,
+    )
+    geometry2 = _array(
+        'robot2', (1,), candidates=[_candidate(1, reachable=False)],
+        detected_not_queried=1,
+    )
+    _feed_pair(first, second, geometry1, geometry2)
+    _exchange(first, second)
+
+    assert first._state == first.EVALUATING
+    assert second._state == second.EVALUATING
+    assert not first._nav.send_calls
+    assert not second._nav.send_calls
+    for instance in (first, second):
+        assert any(
+            status.state == DistributedExplorationStatus.BIDDING
+            for status in instance._status_publisher.messages
+        )
+        assert not any(
+            status.state == DistributedExplorationStatus.WAITING_FOR_INPUTS
+            for status in instance._status_publisher.messages
+        )
+
+
+def test_eventual_path_valid_candidates_leave_pending_costing_for_selection():
+    first, second = _allocator('robot1'), _allocator('robot2')
+    geometry1 = _array(
+        'robot1', (1,), candidates=[_candidate(1, reachable=False)],
+        detected_not_queried=1,
+    )
+    geometry2 = _array(
+        'robot2', (1,), candidates=[_candidate(1, reachable=False)],
+        detected_not_queried=1,
+    )
+    _feed_pair(first, second, geometry1, geometry2)
+    _exchange(first, second)
+    assert first._state == first.EVALUATING
+    assert second._state == second.EVALUATING
+
+    valid1 = _array('robot1', (1,), candidates=[_candidate(1)])
+    valid2 = _array('robot2', (1,), candidates=[_candidate(1)])
+    _feed_pair(first, second, valid1, valid2)
+    _exchange(first, second)
+
+    assert first._nav.send_calls or second._nav.send_calls
+
+
 def test_map_churn_does_not_cancel_accepted_navigation():
     first, second, _, _ = _ready_pair()
     active = first if first._active_goal_id else second

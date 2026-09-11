@@ -388,7 +388,6 @@ class MinimalFrontierAllocator:
             self._union = None
             self._local_batch = None
             self._peer_batch = None
-            self._peer_active_goal = None
             self._peer_status_union_hash = None
             self._peer_status_state = None
             self._peer_status_current = False
@@ -405,7 +404,6 @@ class MinimalFrontierAllocator:
             self._invalidate_pending_goal()
             self._stable_since_s = self._now_s()
             self._peer_batch = None
-            self._peer_active_goal = None
             self._peer_status_union_hash = None
             self._peer_status_state = None
             self._peer_status_current = False
@@ -482,10 +480,9 @@ class MinimalFrontierAllocator:
         if (str(message.union_hash) != self._union.union_hash or
                 str(message.round_id) != self._union.union_hash):
             return
-        current_ids = {task.canonical_id for task in self._union.tasks}
-        if message.local_nav_goal_active:
+        if message.local_nav_goal_active and not message.terminal:
             task_id = str(message.active_canonical_task_id)
-            self._peer_active_goal = task_id if task_id in current_ids else None
+            self._peer_active_goal = task_id or None
         else:
             self._peer_active_goal = None
         self._peer_status_union_hash = self._union.union_hash
@@ -570,13 +567,14 @@ class MinimalFrontierAllocator:
 
         known_ids = {task.canonical_id for task in self._union.tasks}
         peer_active = self._peer_active_goal
-        if peer_active not in known_ids:
+        peer_active_in_union = peer_active in known_ids
+        if not peer_active_in_union:
             peer_active = ''
         peer_active_is_valid = any(
             bid.canonical_task_id == peer_active and bid.path_valid
             for bid in self._peer_batch.bids
         )
-        if self._peer_active_goal and not peer_active_is_valid:
+        if peer_active_in_union and not peer_active_is_valid:
             return
         selector_peer_active = peer_active if peer_active_is_valid else ''
         if self._robot_id == 'robot1':

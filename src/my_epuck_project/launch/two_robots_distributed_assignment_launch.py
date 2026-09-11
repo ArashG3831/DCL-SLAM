@@ -145,6 +145,7 @@ def generate_launch_description():
             'phase_already_aligned': LaunchConfiguration(
                 'phase_already_aligned'),
             'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+            'event_driven_costing': LaunchConfiguration('event_driven_costing'),
         }.items(),
     )
     return LaunchDescription([
@@ -192,6 +193,8 @@ def generate_launch_description():
         DeclareLaunchArgument('launch_shared_fusion', default_value='true',
                               choices=['true', 'false']),
         DeclareLaunchArgument('phase_already_aligned', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('event_driven_costing', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('handoff_gated', default_value='false',
                               choices=['true', 'false']),

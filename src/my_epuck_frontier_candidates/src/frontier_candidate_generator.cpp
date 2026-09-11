@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <my_epuck_interfaces/msg/distributed_exploration_status.hpp>
 #include <my_epuck_interfaces/msg/frontier_candidate.hpp>
 #include <my_epuck_interfaces/msg/frontier_candidate_array.hpp>
 #include <my_epuck_interfaces/msg/relative_pose_hypothesis.hpp>
@@ -217,6 +218,7 @@ public:
     P(double, processing_rate_hz, .5);
     P(bool, handoff_gated, false);
     P(bool, stop_after_handoff, false);
+    P(bool, event_driven_costing, false);
     P(int, occupied_threshold, 50);
     P(int, costmap_blocked_threshold, 1);
     // Use the pinned upstream decision-map pipeline as a private frontier
@@ -324,6 +326,16 @@ public:
       marker_topic_, rclcpp::QoS(1).reliable());
     initialize_upstream_core();
     planner_ = rclcpp_action::create_client<Action>(this, compute_path_action_);
+    if (event_driven_costing_) {
+      auto status_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+      status_qos.reliable().transient_local();
+      coordinator_status_subscription_ =
+        create_subscription<my_epuck_interfaces::msg::DistributedExplorationStatus>(
+        "/" + robot_id_ + "/distributed_status", status_qos,
+        [this](my_epuck_interfaces::msg::DistributedExplorationStatus::ConstSharedPtr message) {
+          coordinator_status_cb(message);
+        });
+    }
     if (handoff_gated_ || stop_after_handoff_) {
       handoff_subscription_ = create_subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>(
         "/cslam/relative_pose/hypotheses", rclcpp::QoS(1).reliable(),
@@ -933,6 +945,117 @@ private:
       transform.transform.translation.x, transform.transform.translation.y, yaw);
   }
 
+  bool costing_open() const
+  {
+    return !event_driven_costing_ || costing_epoch_open_.load();
+  }
+
+  static const char * coordinator_state_name(uint8_t state)
+  {
+    using Status = my_epuck_interfaces::msg::DistributedExplorationStatus;
+    switch (state) {
+      case Status::BIDDING: return "BIDDING";
+      case Status::NAVIGATING: return "NAVIGATING";
+      case Status::WAITING_FOR_TRAFFIC: return "WAITING_TRAFFIC";
+      case Status::WAITING_FOR_INPUTS: return "IDLE";
+      default: return "OTHER";
+    }
+  }
+
+  void coordinator_status_cb(
+    my_epuck_interfaces::msg::DistributedExplorationStatus::ConstSharedPtr message)
+  {
+    if (!message || message->source_robot_id != robot_id_) {
+      return;
+    }
+    last_coordinator_state_ = message->state;
+    if (message->state == my_epuck_interfaces::msg::DistributedExplorationStatus::NAVIGATING) {
+      RCLCPP_INFO(
+        get_logger(),
+        "FRONTIER_COSTING_GATE event=RECEIVED_NAVIGATING epoch_id=%lu sim_time=%.6f "
+        "last_alternative_request_time=%.6f active_request=%lu",
+        costing_epoch_id_, now().seconds(), last_alternative_request_time_s_,
+        active_request_.load());
+    }
+    const bool request_costing =
+      !message->terminal &&
+      !message->local_nav_goal_active &&
+      message->state == my_epuck_interfaces::msg::DistributedExplorationStatus::BIDDING;
+    const bool same_gate_state =
+      status_gate_seen_ && request_costing == last_costing_request_;
+    if (!request_costing && same_gate_state) {
+      return;
+    }
+    if (request_costing && same_gate_state && costing_epoch_open_.load()) {
+      // A changed current digest is ordinary decision-epoch churn.  Keep the
+      // costing epoch open and let its next cycle consume the newest geometry.
+      last_costing_union_hash_ = message->union_hash;
+      return;
+    }
+    if (request_costing && same_gate_state && !costing_epoch_open_.load() &&
+      message->union_hash == last_costing_union_hash_)
+    {
+      return;
+    }
+    status_gate_seen_ = true;
+    last_costing_request_ = request_costing;
+    last_costing_union_hash_ = message->union_hash;
+    if (request_costing) {
+      const std::string reason = message->reason.empty() ?
+        "idle transition" : message->reason;
+      if (costing_epoch_open_.load()) {
+        ++request_generation_;
+        active_request_ = 0;
+        cancel_query_timeout();
+        cancel_retry_timer();
+        if (active_) {
+          planner_->async_cancel_goal(active_);
+          active_.reset();
+        }
+        release_path_lock();
+        works_.clear();
+        reachable_.clear();
+      }
+      costing_epoch_open_.store(true);
+      evaluation_cache_.clear();
+      works_.clear();
+      reachable_.clear();
+      ++costing_epoch_id_;
+      last_alternative_request_time_s_ = -1.0;
+      RCLCPP_INFO(
+        get_logger(),
+        "FRONTIER_COSTING_EPOCH event=OPEN epoch_id=%lu sim_time=%.6f reason=%s",
+        costing_epoch_id_, now().seconds(), reason.c_str());
+    } else {
+      if (costing_epoch_open_.load()) {
+        const std::string reason = message->reason.empty() ?
+          (message->local_nav_goal_active ? "goal active" : "idle transition") :
+          message->reason;
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_COSTING_EPOCH event=CLOSE epoch_id=%lu sim_time=%.6f reason=%s "
+          "last_alternative_request_time=%.6f active_request=%lu",
+          costing_epoch_id_, now().seconds(), reason.c_str(),
+          last_alternative_request_time_s_, active_request_.load());
+      }
+      costing_epoch_open_.store(false);
+      ++request_generation_;
+      active_request_ = 0;
+      cancel_query_timeout();
+      cancel_retry_timer();
+      if (active_) {
+        planner_->async_cancel_goal(active_);
+        active_.reset();
+      }
+      release_path_lock();
+      works_.clear();
+      reachable_.clear();
+      if (state_ == State::PATH_CHECKING) {
+        state_ = State::IDLE;
+      }
+    }
+  }
+
   Work make_work(
     const frontier_exploration_ros2::FrontierCandidate & region,
     uint64_t id, const frontier_exploration_ros2::OccupancyGrid2d & map,
@@ -1298,6 +1421,9 @@ private:
         suppress(id, map_revision, true);
         continue;
       }
+      if (!costing_open()) {
+        continue;
+      }
       const bool never_queried = cache.query_count == 0;
       const bool transient_failure = cache.classification == "PLANNER_FAILED";
       const bool map_context_changed =
@@ -1386,6 +1512,17 @@ private:
       std::chrono::duration<double>(
         std::chrono::steady_clock::now() - filtering_started).count());
 
+    if (!costing_open()) {
+      cycle_termination_reason_ = "COSTING_PAUSED";
+      publish_batch(true);
+      state_ = State::IDLE;
+      works_.clear();
+      reachable_.clear();
+      cycle_map_.reset();
+      cycle_cost_.reset();
+      return;
+    }
+
     normalize_coarse(pending_work);
     tier1_pending_count_ = static_cast<std::size_t>(std::count_if(
       schedule_records.begin(), schedule_records.end(),
@@ -1446,6 +1583,13 @@ private:
     log_query_boundary("SEND_NEXT_ENTER");
     QueryBoundaryScope boundary(this, "SEND_NEXT_EXIT");
     TimingScope timing(this, TimingSection::QUERY_RESULT_PROCESSING, now().seconds());
+    if (!costing_open()) {
+      RCLCPP_INFO(
+        get_logger(),
+        "FRONTIER_QUERY_SUPPRESSED reason=COSTING_CLOSED epoch_id=%lu sim_time=%.6f",
+        costing_epoch_id_, now().seconds());
+      return;
+    }
     if (queries_ >= static_cast<std::size_t>(maximum_path_queries_per_cycle_)) {
       cycle_termination_reason_ = "QUERY_LIMIT_REACHED";
       finish();
@@ -1528,6 +1672,13 @@ private:
       stamp_seconds(cycle_cost_->header.stamp), candidate.pose.pose.position.x,
       candidate.pose.pose.position.y, orientation_yaw(candidate.pose.pose.orientation),
       candidate.pose.header.frame_id.c_str());
+    last_alternative_request_time_s_ = now().seconds();
+    RCLCPP_INFO(
+      get_logger(),
+      "FRONTIER_ALTERNATIVE_PATH_REQUEST request_id=%lu frontier_id=%lu epoch_id=%lu "
+      "sim_time=%.6f coordinator_state=%s",
+      request, candidate.id, costing_epoch_id_, last_alternative_request_time_s_,
+      coordinator_state_name(last_coordinator_state_));
     const auto request_started = std::chrono::steady_clock::now();
     Action::Goal goal;
     goal.goal = candidate.pose;
@@ -1882,6 +2033,18 @@ private:
         region_diagnostics_.begin(), region_diagnostics_.end(),
         [](const auto & diagnostic) {return diagnostic.status == "DETECTED_NOT_QUERIED";}));
     }
+    if (event_driven_costing_) {
+      if (costing_epoch_open_.exchange(false)) {
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_COSTING_EPOCH event=CLOSE epoch_id=%lu sim_time=%.6f reason=%s "
+          "last_alternative_request_time=%.6f active_request=%lu",
+          costing_epoch_id_, now().seconds(),
+          query_termination_name(cycle_termination_reason_),
+          last_alternative_request_time_s_, active_request_.load());
+      }
+      retry_latest_cycle = false;
+    }
     cycle_cache_before_ = evaluation_cache_.size();
     prune_evaluation_cache();
     RCLCPP_WARN(
@@ -2063,6 +2226,13 @@ private:
       if (!candidate_retry_callback_is_current(callback_generation, retry_generation_)) {
         return;
       }
+      if (!costing_open()) {
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_SUPPRESSED reason=RETRY_COSTING_CLOSED epoch_id=%lu sim_time=%.6f",
+          costing_epoch_id_, now().seconds());
+        return;
+      }
       if (retry_timer_) {retry_timer_->cancel();}
       retry_timer_.reset();
       send_next();
@@ -2091,6 +2261,13 @@ private:
       }
       if (!candidate_cycle_retry_ready(
           processing_active_, state_ == State::IDLE, has_map, has_costmap)) {
+        return;
+      }
+      if (!costing_open()) {
+        RCLCPP_INFO(
+          get_logger(),
+          "FRONTIER_QUERY_SUPPRESSED reason=CYCLE_RETRY_COSTING_CLOSED epoch_id=%lu sim_time=%.6f",
+          costing_epoch_id_, now().seconds());
         return;
       }
       tick();
@@ -2356,7 +2533,7 @@ private:
     return output.str();
   }
 
-  void publish_batch()
+  void publish_batch(bool geometry_only = false)
   {
     TimingScope timing(this, TimingSection::PUBLISH_BATCH, now().seconds());
     // Planner callbacks complete asynchronously. Recompute the aggregate
@@ -2397,6 +2574,7 @@ private:
     message.terminal_frontier_regions_json = terminal_frontier_regions_json();
     visualization_msgs::msg::MarkerArray markers;
     int marker_id = 0;
+    if (!geometry_only) {
     for (const auto & work : reachable_) {
       my_epuck_interfaces::msg::FrontierCandidate candidate;
       candidate.frontier_id = work.id;
@@ -2436,10 +2614,49 @@ private:
       marker.color.a = .9;
       message.candidates.push_back(std::move(candidate));
     }
+    } else if (cycle_map_) {
+      frontier_exploration_ros2::OccupancyGrid2d grid(cycle_map_);
+      for (const auto & diagnostic : region_diagnostics_) {
+        const auto bounds = frontier_world_bounds(diagnostic.region, grid);
+        my_epuck_interfaces::msg::FrontierCandidate candidate;
+        candidate.frontier_id = diagnostic.id;
+        candidate.physical_frontier_id = diagnostic.id;
+        candidate.centroid.x = diagnostic.region.centroid.first;
+        candidate.centroid.y = diagnostic.region.centroid.second;
+        candidate.bounding_box_min.x = bounds[0];
+        candidate.bounding_box_min.y = bounds[1];
+        candidate.bounding_box_max.x = bounds[2];
+        candidate.bounding_box_max.y = bounds[3];
+        if (diagnostic.has_approach) {
+          candidate.approach_pose.header.frame_id = global_frame_;
+          candidate.approach_pose.header.stamp = message.header.stamp;
+          candidate.approach_pose.pose.position.x = diagnostic.approach_x;
+          candidate.approach_pose.pose.position.y = diagnostic.approach_y;
+          const double approach_yaw = std::atan2(
+            diagnostic.region.centroid.second - diagnostic.approach_y,
+            diagnostic.region.centroid.first - diagnostic.approach_x);
+          candidate.approach_pose.pose.orientation.z = std::sin(approach_yaw / 2.0);
+          candidate.approach_pose.pose.orientation.w = std::cos(approach_yaw / 2.0);
+          candidate.euclidean_distance_m = std::hypot(
+            diagnostic.approach_x - rx_, diagnostic.approach_y - ry_);
+        }
+        candidate.cell_count = diagnostic.region.size;
+        candidate.frontier_length_m =
+          static_cast<float>(diagnostic.region.size * grid.map().info.resolution);
+        candidate.information_gain = diagnostic.visible_reveal_gain;
+        candidate.reachability_state = candidate.UNKNOWN;
+        candidate.path_length_m = 0.0F;
+        candidate.heading_change_rad = 0.0F;
+        candidate.score = 0.0F;
+        candidate.local_path_length_m = 0.0F;
+        message.candidates.push_back(std::move(candidate));
+      }
+    }
     pub_->publish(message);
     marker_pub_->publish(markers);
     record_cycle(
-      cycle_map_ ? cycle_map_->data.size() : 0, detected_frontier_count_, reachable_.size());
+      cycle_map_ ? cycle_map_->data.size() : 0, detected_frontier_count_,
+      message.candidates.size());
     RCLCPP_INFO(
       get_logger(),
       "CANDIDATE_METRICS source=FRONTIER_REACHABILITY revision=%lu costmap_revision=%lu detected=%u reachable=%zu queries=%zu cache_hits=%lu cache_misses=%lu detected_not_queried=%u small=%u out_of_range=%u unreachable=%u planner_failures=%u tier1_pending=%zu tier2_pending=%zu tier1_queries=%zu tier2_queries=%zu",
@@ -2513,6 +2730,8 @@ private:
   std::mutex timeout_timer_mu_;
   std::atomic<uint64_t> timeout_timer_request_{0};
   rclcpp::Subscription<my_epuck_interfaces::msg::RelativePoseHypothesis>::SharedPtr handoff_subscription_;
+  rclcpp::Subscription<my_epuck_interfaces::msg::DistributedExplorationStatus>::SharedPtr
+    coordinator_status_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_, cost_sub_;
   rclcpp::Publisher<my_epuck_interfaces::msg::FrontierCandidateArray>::SharedPtr pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
@@ -2526,7 +2745,15 @@ private:
   double processing_rate_hz_, minimum_frontier_length_m_, stable_id_quantization_m_;
   bool handoff_gated_{false};
   bool stop_after_handoff_{false};
+  bool event_driven_costing_{false};
   bool processing_active_{false};
+  bool status_gate_seen_{false};
+  bool last_costing_request_{false};
+  std::string last_costing_union_hash_;
+  std::atomic_bool costing_epoch_open_{false};
+  uint64_t costing_epoch_id_{0};
+  double last_alternative_request_time_s_{-1.0};
+  uint8_t last_coordinator_state_{0};
   double approach_clearance_m_, planner_tolerance_m_, minimum_robot_distance_m_;
   double path_query_timeout_s_, gain_weight_, distance_weight_;
   double path_weight_, heading_weight_, unreachable_suppression_s_, goal_tolerance_m_;

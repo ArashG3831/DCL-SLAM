@@ -1,6 +1,7 @@
 """Offline behavior tests for the composed minimal coordinator."""
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -136,6 +137,21 @@ def _feed_pair(first, second, array1, array2):
 
 
 def _exchange(first, second):
+    for instance, peer in ((first, second), (second, first)):
+        peer_active = bool(peer._active_goal_id)
+        peer_state = (
+            DistributedExplorationStatus.NAVIGATING
+            if peer_active else DistributedExplorationStatus.BIDDING
+        )
+        instance.on_peer_status(
+            _status(
+                peer._robot_id,
+                instance,
+                active=peer_active,
+                task_id=peer._active_goal_id or '',
+                state=peer_state,
+            )
+        )
     first.on_peer_bid(to_msg(second._local_batch, SimpleNamespace(sec=0, nanosec=0)))
     second.on_peer_bid(to_msg(first._local_batch, SimpleNamespace(sec=0, nanosec=0)))
 
@@ -237,7 +253,9 @@ def test_revision_skew_does_not_create_a_nonretrying_idle_dead_state():
         _array('robot1', (1,), map_revision=1),
         _array('robot2', (1,), map_revision=2),
     )
-    assert first._union is None and second._union is None
+    assert first._union is not None and second._union is not None
+    assert tuple(task.canonical_id for task in first._union.tasks) == ('1',)
+    assert tuple(task.canonical_id for task in second._union.tasks) == ('1',)
     assert first._state == first.EVALUATING
     assert second._state == second.EVALUATING
 
@@ -483,11 +501,10 @@ def test_success_is_published_before_active_frontier_is_retired():
 def test_success_without_current_union_is_advertised_on_next_current_union():
     first, second, _, _ = _ready_pair(ids=(1,))
     winner = first if first._active_goal_id else second
-    _feed_pair(
-        first, second,
-        _array('robot1', (1,), map_revision=2),
-        _array('robot2', (1,), map_revision=3),
-    )
+    incompatible1 = _array('robot1', (1,), map_revision=2)
+    incompatible2 = _array('robot2', (1,), map_revision=3)
+    incompatible2.header.frame_id = 'incompatible_map'
+    _feed_pair(first, second, incompatible1, incompatible2)
     assert winner._union is None
     winner.on_navigation_outcome(winner._goal_token, _success())
     assert '1' in winner._local_completed_ids
@@ -616,6 +633,208 @@ def test_stale_navigation_callback_cannot_clear_newer_goal():
     newer = winner._active_goal_id
     winner.on_navigation_outcome(old_token, _success())
     assert winner._active_goal_id == newer
+
+
+def test_active_goal_publishes_only_committed_bid_as_passive_peer_evidence():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    for instance in (first, second):
+        assert instance._active_goal_id
+        valid_ids = {
+            bid.canonical_task_id
+            for bid in instance._local_batch.bids
+            if bid.path_valid
+        }
+        assert valid_ids == {instance._active_goal_id}
+
+
+def test_terminal_waits_for_peer_status_before_new_allocation_epoch():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    finished = first if first._active_goal_id else second
+    peer = second if finished is first else first
+    peer_task = peer._active_goal_id
+    before = len(finished._nav.send_calls)
+
+    finished.on_navigation_outcome(finished._goal_token, _success())
+    finished._tick()
+    assert len(finished._nav.send_calls) == before
+
+    finished.on_peer_status(
+        _status(
+            peer._robot_id,
+            finished,
+            active=True,
+            task_id=peer_task,
+            state=DistributedExplorationStatus.NAVIGATING,
+        )
+    )
+    finished.on_peer_bid(to_msg(peer._local_batch, SimpleNamespace(sec=0, nanosec=0)))
+    assert all(
+        str(call[0].local_frontier_id) != peer_task
+        for call in finished._nav.send_calls[before:]
+    )
+
+
+def test_exact_simultaneous_terminal_events_do_not_duplicate_physical_tasks():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    first_before = len(first._nav.send_calls)
+    second_before = len(second._nav.send_calls)
+
+    first.on_navigation_outcome(first._goal_token, _success())
+    second.on_navigation_outcome(second._goal_token, _success())
+    current1 = _array('robot1', (1, 2, 3), map_revision=2)
+    current2 = _array('robot2', (1, 2, 3), map_revision=2)
+    _feed_pair(first, second, current1, current2)
+    _exchange(first, second)
+
+    new_ids = [
+        str(call[0].local_frontier_id)
+        for call in first._nav.send_calls[first_before:]
+    ] + [
+        str(call[0].local_frontier_id)
+        for call in second._nav.send_calls[second_before:]
+    ]
+    assert len(new_ids) == len(set(new_ids))
+
+
+def test_r1_first_terminal_does_not_duplicate_peer_active_task():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    finished = first if first._active_goal_id else second
+    peer = second if finished is first else first
+    peer_task = peer._active_goal_id
+    before = len(finished._nav.send_calls)
+
+    finished.on_navigation_outcome(finished._goal_token, _success())
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2, 3), map_revision=2),
+        _array('robot2', (1, 2, 3), map_revision=2),
+    )
+    _exchange(first, second)
+
+    assert all(
+        str(call[0].local_frontier_id) != peer_task
+        for call in finished._nav.send_calls[before:]
+    )
+
+
+def test_r2_first_terminal_does_not_duplicate_peer_active_task():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    finished = second
+    peer = first
+    peer_task = peer._active_goal_id
+    before = len(finished._nav.send_calls)
+
+    finished.on_navigation_outcome(finished._goal_token, _success())
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2, 3), map_revision=2),
+        _array('robot2', (1, 2, 3), map_revision=2),
+    )
+    _exchange(first, second)
+
+    assert all(
+        str(call[0].local_frontier_id) != peer_task
+        for call in finished._nav.send_calls[before:]
+    )
+
+
+def test_terminal_with_delayed_peer_status_does_not_start_dual_solo_allocation():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    finished = first if first._active_goal_id else second
+    peer = second if finished is first else first
+    before = len(finished._nav.send_calls)
+
+    finished.on_navigation_outcome(finished._goal_token, _success())
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2, 3), map_revision=2),
+        _array('robot2', (1, 2, 3), map_revision=2),
+    )
+    finished.on_peer_bid(to_msg(peer._local_batch, SimpleNamespace(sec=0, nanosec=0)))
+
+    assert len(finished._nav.send_calls) == before
+    assert finished._active_goal_id is None
+
+
+def test_stale_idle_status_cannot_reassign_peer_committed_task():
+    first, second, _, _ = _ready_pair(ids=(1, 2, 3))
+    finished = first if first._active_goal_id else second
+    peer = second if finished is first else first
+    peer_task = peer._active_goal_id
+    before = len(finished._nav.send_calls)
+
+    finished._node.clock.seconds = 10.0
+    finished.on_navigation_outcome(finished._goal_token, _success())
+    finished.on_peer_status(
+        _status(
+            peer._robot_id,
+            finished,
+            active=False,
+            state=DistributedExplorationStatus.WAITING_FOR_INPUTS,
+        )
+    )
+    finished.on_peer_bid(
+        to_msg(peer._local_batch, SimpleNamespace(sec=9, nanosec=0))
+    )
+    _feed_pair(
+        first,
+        second,
+        _array('robot1', (1, 2, 3), map_revision=2),
+        _array('robot2', (1, 2, 3), map_revision=2),
+    )
+    assert all(
+        str(call[0].local_frontier_id) != peer_task
+        for call in finished._nav.send_calls[before:]
+    )
+    assert not finished._peer_status_current
+
+
+def test_pending_send_is_cleared_when_peer_claims_same_task():
+    nav = _Nav(automatic_preconditions=False)
+    first, second, _, _ = _ready_pair(nav1=nav)
+    pending = first if first._state == first.GOAL_PENDING else second
+    before = len(nav.send_calls)
+    pending.on_peer_status(
+        _status(
+            'robot2' if pending._robot_id == 'robot1' else 'robot1',
+            pending,
+            active=True,
+            task_id=pending._active_goal_id,
+            state=DistributedExplorationStatus.NAVIGATING,
+        )
+    )
+    nav.release_preconditions()
+    assert len(nav.send_calls) == before
+    assert pending._active_goal_id is None
+
+
+def test_peer_active_status_with_unavailable_bid_blocks_selection():
+    first, second = _allocator('robot1'), _allocator('robot2')
+    first._active_goal_id, first._state = '1', first.NAVIGATING
+    _feed_pair(first, second, _array('robot1', (1, 2, 3)), _array('robot2', (1, 2, 3)))
+    second._local_batch = second._local_batch_for(second._union)
+    second._local_batch = replace(
+        second._local_batch,
+        bids=tuple(
+            replace(bid, path_valid=False, path=())
+            if bid.canonical_task_id == '1' else bid
+            for bid in second._local_batch.bids
+        ),
+    )
+    first.on_peer_status(
+        _status(
+            first._peer_id,
+            second,
+            active=True,
+            task_id='1',
+            state=DistributedExplorationStatus.NAVIGATING,
+        )
+    )
+    first.on_peer_bid(to_msg(second._local_batch, SimpleNamespace(sec=0, nanosec=0)))
+    assert not first._nav.send_calls
 
 
 def test_reachable_work_does_not_terminate_and_unresolved_work_blocks():

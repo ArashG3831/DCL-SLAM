@@ -29,6 +29,7 @@ def generator(robot, minimum_frontier_cells, approach_clearance,
             'candidate_topic': f'/{robot}/frontier_candidates',
             'marker_topic': f'/{robot}/frontier_candidate_markers',
             'processing_rate_hz': 0.5,
+            'event_driven_costing': LaunchConfiguration('event_driven_costing'),
             'handoff_gated': LaunchConfiguration('handoff_gated'),
             # Pinned upstream decision-map settings shared with the
             # pre-handoff generator path.  This is a private frontier-
@@ -194,6 +195,8 @@ def generate_launch_description():
         DeclareLaunchArgument('phase_already_aligned', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument('handoff_gated', default_value='false',
+                              choices=['true', 'false']),
+        DeclareLaunchArgument('event_driven_costing', default_value='false',
                               choices=['true', 'false']),
         DeclareLaunchArgument(
             'assignment_strategy', default_value='frontier_mrtsp',

@@ -382,6 +382,7 @@ def launch_setup(context):
                         'occupied_threshold': 50,
                         'visible_gain_range_m': 11.98,
                         'selection_policy': assignment_strategy,
+                        'event_driven_costing': True,
                         'stop_after_handoff': True,
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                     }],
@@ -513,6 +514,7 @@ def launch_setup(context):
                     'fusion_rebuild_period_s'),
                 'controller_variant': LaunchConfiguration('controller_variant'),
                 'assignment_strategy': LaunchConfiguration('assignment_strategy'),
+                'event_driven_costing': True,
                 'local_path_gate_mode': LaunchConfiguration(
                     'local_path_gate_mode'),
                 'common_start_release_required': LaunchConfiguration(

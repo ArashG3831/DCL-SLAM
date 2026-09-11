@@ -57,6 +57,7 @@ class UnknownPoseSharedStackActivation(Node):
             'prelaunch_shared_nav2',
             'enable_mission_timeout',
             'common_start_release_required',
+            'event_driven_costing',
         }
         parameter_defaults = (
                 ('world_profile', 'large_unknown_pose_16m'),
@@ -93,6 +94,7 @@ class UnknownPoseSharedStackActivation(Node):
                 # The normal profile launches this graph at accepted handoff.
                 ('prelaunch_shared_nav2', False),
                 ('common_start_release_required', False),
+                ('event_driven_costing', False),
                 ('enable_mission_timeout', False),
                 ('mission_timeout_s', 600.0),
                 ('terminal_small_frontier_length_m', 0.20),

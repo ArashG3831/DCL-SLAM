@@ -17,8 +17,11 @@ from typing import Mapping
 from my_epuck_interfaces.msg import FrontierCandidateArray
 from .distributed_assignment.models import Bid, Bounds, CanonicalTask, CanonicalUnion, PhysicalTask
 def compatible_context(r1: FrontierCandidateArray, r2: FrontierCandidateArray) -> bool:
-    """Return whether the ordered candidate pair has a shared context."""
-    return (r1.source_robot_id, r2.source_robot_id) == ('robot1', 'robot2') and r1.map_revision == r2.map_revision and r1.header.frame_id == r2.header.frame_id
+    """Return whether the ordered arrays can form one current ID union."""
+    return (
+        (r1.source_robot_id, r2.source_robot_id) == ('robot1', 'robot2')
+        and r1.header.frame_id == r2.header.frame_id
+    )
 def build_union(r1: FrontierCandidateArray, r2: FrontierCandidateArray) -> CanonicalUnion | None:
     """Build the ID union and its exact specification-defined digest."""
     if not compatible_context(r1, r2):

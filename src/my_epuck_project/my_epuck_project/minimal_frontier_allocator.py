@@ -75,12 +75,16 @@ class MinimalFrontierAllocator:
         }
         self._union = None
         self._local_batch = None
+        self._local_batch_from_costing = False
         self._peer_batch = None
         self._peer_active_goal: str | None = None
         self._peer_status_union_hash: str | None = None
         self._peer_status_state: int | None = None
+        self._peer_status_current = False
+        self._peer_bid_after_terminal = True
         self._peer_terminal = False
         self._peer_terminal_reason = ''
+        self._peer_status_after_terminal = True
         self._active_goal_id: str | None = None
         self._active_goal_union_hash: str | None = None
         self._goal_token = 0
@@ -89,6 +93,7 @@ class MinimalFrontierAllocator:
         self._local_completed_ids: set[str] = set()
         self._traffic_decision = None
         self._terminal_reason: str | None = None
+        self._allocation_reason = 'initial allocation'
         self._stable_since_s = self._now_s()
         self._released = True
         self._start_release_required = False
@@ -188,6 +193,18 @@ class MinimalFrontierAllocator:
     def _now_s(self) -> float:
         return self._node.get_clock().now().nanoseconds / 1e9
 
+    def _log_info(self, message: str) -> None:
+        get_logger = getattr(self._node, 'get_logger', None)
+        if get_logger is None:
+            return
+        logger = get_logger()
+        logger.info(message)
+
+    @staticmethod
+    def _message_stamp_ns(message) -> int:
+        stamp = message.header.stamp
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
     def _make_evidence(self, message: FrontierCandidateArray) -> CandidateEvidence:
         reachable = sum(
             candidate.reachability_state == candidate.REACHABLE
@@ -232,8 +249,9 @@ class MinimalFrontierAllocator:
         message.round_id = message.union_hash
         message.terminal = self._terminal_reason is not None
         message.terminal_reason = self._terminal_reason or ''
-        message.reason = self._state
+        message.reason = self._allocation_reason or self._state
         self._status_publisher.publish(message)
+        self._allocation_reason = ''
 
     def _invalidate_pending_goal(self) -> None:
         if self._state != self.GOAL_PENDING:
@@ -269,6 +287,50 @@ class MinimalFrontierAllocator:
             bids,
             self._bid_validity_s,
         )
+
+    @staticmethod
+    def _has_cost_evidence(message) -> bool:
+        return any(
+            candidate.reachability_state == candidate.REACHABLE
+            for candidate in message.candidates
+        )
+
+    @staticmethod
+    def _is_geometry_only(message) -> bool:
+        return (
+            bool(message.candidates) and
+            not MinimalFrontierAllocator._has_cost_evidence(message) and
+            bool(message.detected_not_queried_count)
+        )
+
+    def _passive_batch_for(self, union):
+        previous = {
+            bid.canonical_task_id: bid
+            for bid in (self._local_batch.bids if self._local_batch else ())
+        }
+        batch = self._local_batch_for(union)
+        active_id = self._active_goal_id
+        active_bid = previous.get(active_id)
+        if not active_id:
+            return batch
+        if active_bid is None:
+            active_bid = next(
+                (bid for bid in batch.bids if bid.canonical_task_id == active_id),
+                None,
+            )
+        unavailable = tuple(
+            replace(
+                bid,
+                path_valid=False,
+                path_length_m=0.0,
+                estimated_travel_cost=0.0,
+                heading_cost=0.0,
+                path=(),
+            )
+            if bid.canonical_task_id != active_id or active_bid is None else active_bid
+            for bid in batch.bids
+        )
+        return replace(batch, bids=unavailable)
 
     def _publish_batch(self) -> None:
         if self._local_batch is None:
@@ -322,6 +384,7 @@ class MinimalFrontierAllocator:
             self._peer_active_goal = None
             self._peer_status_union_hash = None
             self._peer_status_state = None
+            self._peer_status_current = False
             self._peer_terminal = False
             self._peer_terminal_reason = ''
             self._terminal_reason = None
@@ -338,12 +401,32 @@ class MinimalFrontierAllocator:
             self._peer_active_goal = None
             self._peer_status_union_hash = None
             self._peer_status_state = None
+            self._peer_status_current = False
             self._peer_terminal = False
             self._peer_terminal_reason = ''
             self._terminal_reason = None
         self._union = union
-        self._local_batch = self._local_batch_for(union)
-        self._publish_batch()
+        if self._active_goal_id is not None:
+            if changed or self._local_batch is None:
+                self._local_batch = self._passive_batch_for(union)
+            self._publish_batch()
+            self._publish_status()
+            return
+        geometry_only = self._is_geometry_only(message)
+        same_batch_union = (
+            self._local_batch is not None and
+            self._local_batch.union_hash == union.union_hash
+        )
+        keep_cost_batch = (
+            geometry_only and same_batch_union and
+            self._local_batch_from_costing
+        )
+        if not keep_cost_batch:
+            self._local_batch = self._local_batch_for(union)
+            self._local_batch_from_costing = not geometry_only
+            self._publish_batch()
+        else:
+            self._publish_completion_events()
         if self._active_goal_id is None and self._state != self.GOAL_PENDING:
             self._state = self.EVALUATING if self._released else self.IDLE
         self._publish_status()
@@ -363,6 +446,10 @@ class MinimalFrontierAllocator:
         self._start_ready_published = True
 
     def on_peer_bid(self, message: TaskBidArray) -> None:
+        if (not self._peer_bid_after_terminal and
+                self._message_stamp_ns(message) <
+                int(self._stable_since_s * 1e9)):
+            return
         try:
             batch = protocol.from_msg(message)
         except (TypeError, ValueError):
@@ -372,11 +459,16 @@ class MinimalFrontierAllocator:
         if self._union is None or batch.union_hash != self._union.union_hash:
             return
         self._peer_batch = batch
+        self._peer_bid_after_terminal = True
         self._publish_completion_events()
         self._try_allocate()
 
     def on_peer_status(self, message: DistributedExplorationStatus) -> None:
         if message.source_robot_id != self._peer_id:
+            return
+        if (not self._peer_status_after_terminal and
+                self._message_stamp_ns(message) <
+                int(self._stable_since_s * 1e9)):
             return
         if self._union is None:
             return
@@ -395,6 +487,8 @@ class MinimalFrontierAllocator:
         self._peer_status_state = int(message.state)
         self._peer_terminal = bool(message.terminal)
         self._peer_terminal_reason = str(message.terminal_reason)
+        self._peer_status_after_terminal = True
+        self._peer_status_current = True
         self._maybe_terminal()
         self._try_allocate()
 
@@ -410,7 +504,13 @@ class MinimalFrontierAllocator:
         if task_id not in current_ids:
             return
         self._completed_ids.add(task_id)
-        self._local_batch = self._local_batch_for(self._union)
+        if self._active_goal_id is not None:
+            self._local_batch = self._passive_batch_for(self._union)
+        else:
+            self._local_batch = self._local_batch_for(self._union)
+            self._local_batch_from_costing = self._has_cost_evidence(
+                self._candidates[self._robot_id]
+            )
         self._publish_batch()
         self._publish_status()
         self._try_allocate()
@@ -442,6 +542,12 @@ class MinimalFrontierAllocator:
             return
         if self._peer_batch is None or self._active_goal_id is not None:
             return
+        if not self._peer_status_after_terminal:
+            return
+        if not self._peer_status_current:
+            return
+        if not self._peer_bid_after_terminal:
+            return
         if self._state == self.GOAL_PENDING:
             return
 
@@ -462,6 +568,8 @@ class MinimalFrontierAllocator:
             bid.canonical_task_id == peer_active and bid.path_valid
             for bid in self._peer_batch.bids
         )
+        if self._peer_active_goal and not peer_active_is_valid:
+            return
         selector_peer_active = peer_active if peer_active_is_valid else ''
         if self._robot_id == 'robot1':
             active1, active2 = '', selector_peer_active
@@ -541,6 +649,8 @@ class MinimalFrontierAllocator:
         self._active_goal_id = str(candidate.frontier_id)
         self._active_goal_union_hash = pending_union_hash
         self._state = self.GOAL_PENDING
+        self._local_batch = self._passive_batch_for(self._union)
+        self._publish_batch()
         self._publish_status()
         send_started = False
 
@@ -551,6 +661,9 @@ class MinimalFrontierAllocator:
             if (self._union is None or
                     self._union.union_hash != pending_union_hash or
                     self._active_goal_id != pending_task_id):
+                self._clear_goal(token)
+                return
+            if self._peer_active_goal == pending_task_id:
                 self._clear_goal(token)
                 return
             if not result.ready or send_started:
@@ -565,6 +678,12 @@ class MinimalFrontierAllocator:
                 lambda outcome: self.on_navigation_outcome(token, outcome),
                 tuple(path),
             )
+            if sent:
+                self._log_info(
+                    'MINIMAL_ALLOCATOR_NAVIGATION_DISPATCH '
+                    f'robot={self._robot_id} task_id={pending_task_id} '
+                    f'union_hash={pending_union_hash} sim_time={self._now_s():.6f}'
+                )
             if not sent:
                 self._clear_goal(token)
 
@@ -588,6 +707,21 @@ class MinimalFrontierAllocator:
             self._publish_completion_events(
                 (completed_id,), self._active_goal_union_hash,
             )
+        if outcome.status == GoalStatus.STATUS_SUCCEEDED:
+            self._allocation_reason = 'goal success'
+        elif outcome.status == GoalStatus.STATUS_CANCELED:
+            self._allocation_reason = 'goal cancel/watchdog'
+        else:
+            self._allocation_reason = 'goal failure'
+        self._log_info(
+            'MINIMAL_ALLOCATOR_NAVIGATION_TERMINAL '
+            f'robot={self._robot_id} status={outcome.status} '
+            f'sim_time={self._now_s():.6f}'
+        )
+        self._peer_status_after_terminal = False
+        self._peer_status_current = False
+        self._peer_bid_after_terminal = False
+        self._stable_since_s = self._now_s()
         self._clear_goal(token)
 
     def _clear_goal(self, token: int) -> None:
@@ -598,9 +732,8 @@ class MinimalFrontierAllocator:
         self._active_goal_union_hash = None
         self._traffic_decision = None
         self._state = self.EVALUATING if self._released else self.IDLE
-        if self._union is not None and self._candidates[self._robot_id] is not None:
-            self._local_batch = self._local_batch_for(self._union)
-            self._publish_batch()
+        self._local_batch = None
+        self._local_batch_from_costing = False
         self._publish_status()
 
     def cancel_active(self) -> bool:

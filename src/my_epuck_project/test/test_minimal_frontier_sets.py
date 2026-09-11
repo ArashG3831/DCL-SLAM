@@ -87,20 +87,35 @@ def test_shared_content_identity_accepts_local_metadata_skew():
     assert _task_ids(build_union(robot1, robot2)) == ('1', '2')
 
 
-@pytest.mark.parametrize(
-    ('robot1_changes', 'robot2_changes'),
-    [
-        ({'frame': 'map_a'}, {'frame': 'map_b'}),
-        ({'map_revision': 7}, {'map_revision': 8}),
-    ],
-)
-def test_incompatible_frame_or_map_context_is_rejected(
-        robot1_changes, robot2_changes):
+def test_incompatible_frame_context_is_rejected():
+    robot1_changes = {'frame': 'map_a'}
+    robot2_changes = {'frame': 'map_b'}
     robot1 = _array('robot1', (1,), **robot1_changes)
     robot2 = _array('robot2', (2,), **robot2_changes)
 
     assert not compatible_context(robot1, robot2)
     assert build_union(robot1, robot2) is None
+
+
+def test_source_local_revision_skew_still_builds_the_union():
+    robot1 = _array('robot1', (1, 3), map_revision=101)
+    robot2 = _array('robot2', (2, 3), map_revision=202)
+
+    union = build_union(robot1, robot2)
+
+    assert compatible_context(robot1, robot2)
+    assert union is not None
+    assert _task_ids(union) == ('1', '2', '3')
+
+
+def test_same_frontier_geometry_with_different_revisions_is_not_invalidated():
+    robot1 = _array('robot1', (7,), map_revision=303)
+    robot2 = _array('robot2', (7,), map_revision=404)
+
+    union = build_union(robot1, robot2)
+
+    assert union is not None
+    assert _task_ids(union) == ('7',)
 
 
 def test_union_contains_all_ids_and_uses_specified_order_and_digest():

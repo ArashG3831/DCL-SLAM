@@ -45,6 +45,7 @@ namespace my_epuck_frontier_candidates {
 class Generator : public rclcpp::Node {
   using Action = nav2_msgs::action::ComputePathToPose;
   using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
+  static constexpr std::chrono::duration<double> kLocalContextTolerance{0.200};
 
   enum class TimingSection {
     START_CYCLE,
@@ -1708,7 +1709,8 @@ private:
           current_map = revision_;
           current_costmap = cost_revision_;
         }
-        if (!work_context_matches_latest(candidate)) {
+        const auto query_age = std::chrono::steady_clock::now() - request_started;
+        if (!work_context_matches_latest(candidate) && query_age > kLocalContextTolerance) {
           cycle_termination_reason_ = "MAP_REVISION_CHANGED";
           cycle_old_revision_ = revision;
           cycle_new_revision_ = current_map;
@@ -1778,7 +1780,8 @@ private:
           current_map = revision_;
           current_costmap = cost_revision_;
         }
-        if (!work_context_matches_latest(candidate)) {
+        const auto query_age = std::chrono::steady_clock::now() - request_started;
+        if (!work_context_matches_latest(candidate) && query_age > kLocalContextTolerance) {
           cycle_termination_reason_ = "MAP_REVISION_CHANGED";
           cycle_old_revision_ = revision;
           cycle_new_revision_ = current_map;

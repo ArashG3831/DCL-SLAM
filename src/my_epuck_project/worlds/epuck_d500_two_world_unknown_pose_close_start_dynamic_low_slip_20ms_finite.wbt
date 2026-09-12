@@ -28,7 +28,7 @@ WorldInfo {
 }
 Viewpoint {
   orientation 0.5746971500083895 -0.5786851607455481 -0.5786593734703811 4.19225516864112
-  position 17.45565441667572 -0.22531973761896562 9.57453365756047
+  position 17.21012719699986 -0.0795030645198815 14.48812203548256
 }
 TexturedBackground {
 }
@@ -356,7 +356,7 @@ SolidBox {
 }
 E-puck {
   translation 19.5 -0.5 0.001
-  rotation 0 0 1 1.5707963267948966
+  rotation 0 0 1 2.0944
   name "robot1"
   controller "<extern>"
   window "<none>"
@@ -416,7 +416,7 @@ E-puck {
 }
 E-puck {
   translation 19.5 0 0
-  rotation 0 0 1 1.5707963267948966
+  rotation 0 0 -1 -0.523595307179586
   name "robot2"
   controller "<extern>"
   window "<none>"

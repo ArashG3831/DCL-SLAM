@@ -14,11 +14,13 @@ import csv
 from dataclasses import dataclass, field
 import json
 import math
+import multiprocessing
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -30,13 +32,20 @@ from PIL import Image, ImageDraw, ImageFont
 PROJECT_SRC = Path(__file__).resolve().parents[1]
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
-from my_epuck_project.offline_timing_metrics import analyze_event_records  # noqa: E402
+from my_epuck_project.offline_timing_metrics import (  # noqa: E402
+    analyze_event_records,
+    analyze_physical_activity,
+    derive_minimal_assignment_events,
+    merge_native_timing_events,
+    _simulation_time_for_bag_timestamp,
+)
 
 
 SCHEMA_VERSION = "publication_animation_3.1"
 MAP_MARGIN_M = 0.45
 MAX_TIME_GAP_S = 5.0
 MAX_CONTINUOUS_STEP_M = 1.0
+NATIVE_GOAL_STATUS_JOIN_TOLERANCE_S = 1.0
 ARROW_LENGTH_M = 0.80
 
 # OpenCV uses BGR.  These are intentionally distinct in every layer.
@@ -131,6 +140,14 @@ class FrontierRegionSnapshot:
 
 
 @dataclass(frozen=True)
+class FrontierLayer:
+    """Cached pixel layer for one current frontier snapshot pair."""
+
+    colors: np.ndarray
+    coverage: np.ndarray
+
+
+@dataclass(frozen=True)
 class TaskRecord:
     stamp_s: float
     robot: str
@@ -184,9 +201,11 @@ def parse_args(argv=None):
     parser.add_argument('--start-s', type=float, default=0.0,
                         help='absolute source simulation time at video start')
     parser.add_argument('--duration-s', type=float, default=0.0,
-                        help='maximum source simulation-time window')
+                        help='source simulation seconds to render (0 = through artifact end)')
     parser.add_argument('--speedup', type=float, default=1.0,
                         help='source simulation seconds per output second')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='parallel render/encode workers (1 = serial; requires external ffmpeg/libx264)')
     parser.add_argument('--title', default='DCL-SLAM')
     parser.add_argument('--policy', default='Cooperative Cost-Only')
     parser.add_argument('--style', default='thesis', choices=('thesis',))
@@ -387,6 +406,12 @@ def timing_metadata(source_start: float, source_end: float, speedup: float,
             'expected_frame_count': frames}
 
 
+def resolve_source_end(source_start: float, artifact_data_end: float,
+                       duration_s: float) -> float:
+    """Resolve a requested source duration relative to the requested start."""
+    return source_start + duration_s if duration_s > 0.0 else artifact_data_end
+
+
 def map_to_pixel(x: float, y: float, viewport, map_rect):
     xmin, _, ymin, _ = viewport
     left, top, _, height, scale = map_rect
@@ -559,21 +584,22 @@ def _display_speed(pose: Optional[PoseSample], key: str):
 
 
 def _productivity_at(data: OverlayData, robot: str, stamp_s: float):
-    """Return cumulative productivity through the current rendered frame."""
+    """Return cumulative physical productivity through the current frame."""
     feasible = 0.0
-    idle = 0.0
+    productive = 0.0
     for item in data.productivity_segments.get(robot, ()):
         start = float(item.get('start_s', 0.0))
         end = min(float(item.get('end_s', 0.0)), stamp_s)
-        if end <= start or item.get('classification') != 'FEASIBLE_WORK_AVAILABLE':
+        if end <= start or item.get('classification') not in (
+                'TRANSLATING', 'ROTATING_ONLY', 'STATIONARY'):
             continue
         duration = end - start
         feasible += duration
-        if not item.get('goal_active'):
-            idle += duration
+        if item.get('classification') in ('TRANSLATING', 'ROTATING_ONLY'):
+            productive += duration
     if feasible <= 0.0:
-        return 100.0
-    return 100.0 * max(0.0, feasible - idle) / feasible
+        return None
+    return 100.0 * productive / feasible
 
 
 def _traffic_labels(data: OverlayData, stamp_s: float):
@@ -617,11 +643,99 @@ def _task_for_goal(data: OverlayData, event: GoalEvent):
     # dispatching robot did not originate that snapshot.
     choices = [item for robot in ('robot1', 'robot2')
                for item in data.task_records.get(robot, ())
-               if item.physical_signature == event.physical_signature]
+               if ((event.canonical_task_id and
+                    item.local_frontier_id == event.canonical_task_id) or
+                   (event.physical_signature and
+                    item.physical_signature == event.physical_signature))]
     if not choices:
         return None
     choices.sort(key=lambda item: abs(item.stamp_s - event.stamp_s))
     return choices[0].approach or choices[0].centroid
+
+
+def _native_navigation_goal_events(observer: Path, events, task_records):
+    """Reconstruct minimal-coordinator goal lifecycle from retained evidence.
+
+    The action replay proves that a NavigateToPose goal existed; the nearby
+    minimal ``DISTRIBUTED_STATUS`` row supplies its canonical task ID.  Task
+    snapshots then supply coordinates when available.  No start is inferred
+    from a completion event alone.
+    """
+    replay_path = observer / 'navigation_action_replay.json'
+    if not replay_path.is_file():
+        return []
+    try:
+        replay = json.loads(replay_path.read_text(encoding='utf-8'))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if (not replay.get('complete') or
+            replay.get('missing_required_status_topics')):
+        return []
+    clock_samples = _load_clock_samples(observer)
+    if not clock_samples:
+        return []
+    status_by_robot = {'robot1': [], 'robot2': []}
+    for event in events or ():
+        if (event.get('event_type') == 'DISTRIBUTED_STATUS' and
+                event.get('robot_id') in status_by_robot and
+                event.get('local_nav_goal_active') and
+                event.get('active_canonical_task_id')):
+            status_by_robot[event['robot_id']].append(event)
+    for robot in status_by_robot:
+        status_by_robot[robot].sort(key=lambda item: _event_time(item) or 0.0)
+
+    def task_at(robot, canonical_id, stamp):
+        choices = [item for owner in ('robot1', 'robot2')
+                   for item in task_records.get(owner, ())
+                   if item.local_frontier_id == canonical_id]
+        if not choices:
+            return None
+        return min(choices, key=lambda item: abs(item.stamp_s - stamp))
+
+    def status_at(robot, stamp):
+        choices = [item for item in status_by_robot[robot]
+                   if abs((_event_time(item) or 0.0) - stamp) <=
+                   NATIVE_GOAL_STATUS_JOIN_TOLERANCE_S]
+        if not choices:
+            return None
+        return min(choices, key=lambda item: abs(
+            (_event_time(item) or 0.0) - stamp))
+
+    native = []
+    starts = {}
+    terminal_statuses = {'SUCCEEDED', 'ABORTED', 'CANCELED', 'CANCELLED'}
+    for transition in replay.get('status_transitions') or ():
+        if (transition.get('action') != 'NAVIGATE_TO_POSE' or
+                transition.get('status_name') not in
+                {'EXECUTING', *terminal_statuses}):
+            continue
+        robot = transition.get('robot_id')
+        if robot not in status_by_robot:
+            continue
+        stamp = _simulation_time_for_bag_timestamp(
+            transition.get('bag_timestamp_ns'), clock_samples)
+        if stamp is None:
+            continue
+        uuid = str(transition.get('goal_uuid', ''))
+        if transition.get('status_name') == 'EXECUTING':
+            status = status_at(robot, stamp)
+            canonical_id = (str(status.get('active_canonical_task_id'))
+                            if status else '')
+            if not canonical_id:
+                continue
+            task = task_at(robot, canonical_id, stamp)
+            event = GoalEvent(
+                stamp, robot, 'start', canonical_id,
+                task.physical_signature if task else '',
+                ((task.approach or task.centroid) if task else None))
+            starts[uuid] = event
+            native.append(event)
+        elif uuid in starts:
+            start = starts[uuid]
+            native.append(GoalEvent(
+                stamp, robot, 'stop', start.canonical_task_id,
+                start.physical_signature, None))
+    return native
 
 
 def active_goals_at(data: OverlayData, stamp_s: float):
@@ -634,9 +748,18 @@ def active_goals_at(data: OverlayData, stamp_s: float):
                 result[robot] = event
             elif event.action == 'stop':
                 current = result.get(robot)
-                if (current is None or not event.physical_signature or
-                        current.physical_signature == event.physical_signature or
-                        current.canonical_task_id == event.canonical_task_id):
+                if current is None:
+                    continue
+                signature_matches = (not event.physical_signature or
+                                      current.physical_signature ==
+                                      event.physical_signature)
+                task_matches = (not event.canonical_task_id or
+                                current.canonical_task_id ==
+                                event.canonical_task_id)
+                # Legacy terminal records may have neither identifier.  A
+                # populated identifier must match the active commitment so a
+                # delayed completion cannot clear a newer native goal.
+                if signature_matches and task_matches:
                     result.pop(robot, None)
     return result
 
@@ -845,9 +968,51 @@ def _load_distance_travelled(observer: Path):
     return result
 
 
+def _load_clock_samples(observer: Path):
+    path = observer / 'passive_rosbag_export.jsonl'
+    if not path.is_file():
+        return []
+    samples = []
+    with path.open(encoding='utf-8', errors='replace') as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+                if row.get('topic') != '/clock':
+                    continue
+                samples.append((int(row['bag_time_ns']), float(row['clock_s'])))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+    return samples
+
+
 def _load_productivity_data(observer: Path, events: list[dict[str, Any]]):
     result = {'robot1': None, 'robot2': None}
     segments = {'robot1': (), 'robot2': ()}
+    canonical_path = observer.parent.parent / 'offline_metrics.json'
+    if canonical_path.is_file():
+        try:
+            canonical = json.loads(canonical_path.read_text(encoding='utf-8'))
+            timing = canonical.get('timing') or {}
+            found = False
+            for robot in ('robot1', 'robot2'):
+                values = timing.get(robot) or {}
+                fraction = values.get('physical_productivity_percent')
+                if fraction is not None:
+                    fraction = float(fraction)
+                    if math.isfinite(fraction):
+                        result[robot] = fraction
+                        found = True
+                raw_segments = values.get('physical_segments')
+                if raw_segments is None:
+                    raw_segments = values.get('segments')
+                if isinstance(raw_segments, list):
+                    segments[robot] = tuple(
+                        item for item in raw_segments if isinstance(item, dict))
+                    found = found or bool(segments[robot])
+            if found:
+                return result, segments
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
     summary_path = observer.parent.parent / 'fast_trial_summary.json'
     if not summary_path.is_file():
         return result, segments
@@ -856,14 +1021,28 @@ def _load_productivity_data(observer: Path, events: list[dict[str, Any]]):
         readiness = summary.get('nav2_readiness_telemetry') or {}
         shared = readiness.get('shared_activation_reached_at_sim_s') or {}
         ready_s = max((float(value) for value in shared.values()), default=0.0)
-        end_s = float(summary.get('simulation_end_time_s') or 0.0)
-        metrics = analyze_event_records(events, ready_sim=ready_s,
-                                       end_sim=end_s,
-                                       robots=('robot1', 'robot2'))
+        end_s = float(summary.get('simulation_horizon_s') or
+                      summary.get('simulation_end_time_s') or 0.0)
+        replay_path = observer / 'navigation_action_replay.json'
+        replay = json.loads(replay_path.read_text(encoding='utf-8')) \
+            if replay_path.is_file() else {}
+        timing_events = merge_native_timing_events(
+            derive_minimal_assignment_events(events), replay,
+            _load_clock_samples(observer))
+        timing = analyze_event_records(
+            timing_events, ready_sim=ready_s, end_sim=end_s,
+            robots=('robot1', 'robot2'))
+        odometry = {}
+        for robot in ('robot1', 'robot2'):
+            path = observer / 'forensic' / f'{robot}_odom.csv'
+            odometry[robot] = load_csv(path) if path.is_file() else []
+        metrics = analyze_physical_activity(
+            timing, odometry, ready_sim=ready_s, end_sim=end_s,
+            robots=('robot1', 'robot2'))
         for robot, values in metrics.get('robots', {}).items():
-            fraction = values.get('avoidable_idle_fraction')
+            fraction = values.get('physical_productivity_percent')
             if fraction is not None and math.isfinite(float(fraction)):
-                result[robot] = 100.0 * (1.0 - float(fraction))
+                result[robot] = float(fraction)
             segments[robot] = tuple(values.get('segments') or ())
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         pass
@@ -965,10 +1144,22 @@ def load_overlay_data(observer: Path) -> OverlayData:
             goals[robot].append(GoalEvent(
                 stamp, robot, 'stop', str(event.get('canonical_task_id', '')),
                 str(event.get('physical_task_signature', '')), None))
+    for event in _native_navigation_goal_events(observer, events, tasks):
+        robot = event.robot
+        # Keep the legacy event path authoritative where it already recorded
+        # the same dispatch; native evidence fills the minimal-allocator gap.
+        duplicate = any(
+            existing.action == event.action and
+            existing.canonical_task_id == event.canonical_task_id and
+            abs(existing.stamp_s - event.stamp_s) <= 1.0e-3
+            for existing in goals[robot])
+        if not duplicate:
+            goals[robot].append(event)
     for robot in candidates:
         candidates[robot].sort(key=lambda item: item[0])
         tasks[robot].sort(key=lambda item: item.stamp_s)
-        goals[robot].sort(key=lambda item: item.stamp_s)
+        goals[robot].sort(key=lambda item: (
+            item.stamp_s, 0 if item.action == 'start' else 1))
         bids[robot].sort(key=lambda item: item.stamp_s)
     handoff_error_m, handoff_error_yaw_deg = _load_handoff_error(observer)
     productive_percent, productivity_segments = _load_productivity_data(observer, events)
@@ -997,6 +1188,13 @@ def find_font(bold=False, size=20):
         if Path(name).is_file():
             return ImageFont.truetype(name, size=size)
     return ImageFont.load_default()
+
+
+def _right_aligned_item(value, y, font, fill, right_x):
+    value = str(value)
+    bbox = font.getbbox(value)
+    width = bbox[2] - bbox[0]
+    return value, (right_x - width, y), font, fill
 
 
 def add_text(canvas, items):
@@ -1040,11 +1238,51 @@ def _frontier_region_polygons(region: FrontierRegion, viewport, map_rect):
     return []
 
 
+def _build_frontier_layer(frontier_regions, viewport, map_rect):
+    """Rasterize one frontier snapshot into a reusable translucent layer."""
+    width, height = map_rect[2], map_rect[3]
+    colors = np.zeros((height, width, 3), dtype=np.uint8)
+    coverage = np.zeros((height, width), dtype=np.uint8)
+    for region in frontier_regions:
+        polygons = _frontier_region_polygons(region, viewport, map_rect)
+        if not polygons:
+            continue
+        region_mask = np.zeros(coverage.shape, dtype=np.uint8)
+        cv2.fillPoly(region_mask, polygons, 255)
+        color = R1_COLOR if region.robot == 'robot1' else R2_COLOR
+        colors[region_mask > 0] = color
+        coverage[region_mask > 0] = 255
+        contours, _ = cv2.findContours(
+            region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(colors, contours, -1, color, 1, cv2.LINE_AA)
+        cv2.drawContours(coverage, contours, -1, 255, 1, cv2.LINE_AA)
+    return FrontierLayer(colors, coverage)
+
+
+def _cached_frontier_layer(frontier_regions, cache_key, viewport, map_rect, cache):
+    """Keep only the current frontier layer so cache memory stays bounded."""
+    if cache is None:
+        return _build_frontier_layer(frontier_regions, viewport, map_rect)
+    layer = cache.get(cache_key)
+    if layer is None:
+        cache.clear()
+        layer = _build_frontier_layer(frontier_regions, viewport, map_rect)
+        cache[cache_key] = layer
+    return layer
+
+
+def _blend_frontier_layer(view, layer: FrontierLayer):
+    if layer is None:
+        return
+    blended = cv2.addWeighted(layer.colors, 0.20, view, 0.80, 0.0)
+    view[layer.coverage > 0] = blended[layer.coverage > 0]
+
+
 def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
                            show_frontiers=True, show_candidates=True,
                            selected_signatures=frozenset(),
                            selected_frontier_ids=frozenset(),
-                           frontier_regions=()):
+                           frontier_regions=(), frontier_layer=None):
     if not candidates or (not show_frontiers and not show_candidates):
         if not frontier_regions or not show_frontiers:
             return 0
@@ -1052,23 +1290,10 @@ def draw_frontier_overlays(canvas, candidates, stamp_s, viewport, map_rect,
     view = canvas[top:top + height, left:left + width]
     marker_count = 0
     if show_frontiers:
-        # Render each region's recorded cells into one mask, then blend the
-        # complete footprint once.  This keeps a connected region visually
-        # coherent instead of producing opaque per-cell squares.
-        region_overlay = view.copy()
-        for region in frontier_regions:
-            polygons = _frontier_region_polygons(region, viewport, map_rect)
-            if polygons:
-                mask = np.zeros(view.shape[:2], dtype=np.uint8)
-                cv2.fillPoly(mask, polygons, 255)
-                color = R1_COLOR if region.robot == 'robot1' else R2_COLOR
-                region_overlay[mask > 0] = color
-                contours, _ = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(region_overlay, contours, -1, color, 1,
-                                 cv2.LINE_AA)
         if frontier_regions:
-            cv2.addWeighted(region_overlay, 0.20, view, 0.80, 0.0, view)
+            frontier_layer = frontier_layer or _build_frontier_layer(
+                frontier_regions, viewport, map_rect)
+            _blend_frontier_layer(view, frontier_layer)
         # Put one centroid marker per region on top of the translucent layer.
         for region in frontier_regions:
             px, py = map_to_pixel(*region.centroid, viewport, map_rect)
@@ -1142,7 +1367,7 @@ def _bounded_display(value: str, maximum: int):
 def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rect,
                  width, height, title, handoff_s, policy, overlay_data=None,
                  show_frontiers=True, show_goals=True, show_candidates=True,
-                 show_planned_path=True):
+                 show_planned_path=True, frontier_layer_cache=None):
     canvas = np.full((height, width, 3), (248, 249, 251), dtype=np.uint8)
     map_index = bisect.bisect_right([item.stamp_s for item in snapshots], stamp_s) - 1
     active_snapshot = snapshots[map_index] if map_index >= 0 else None
@@ -1158,6 +1383,7 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
     data = overlay_data or OverlayData({}, {}, {}, {}, 0)
     all_candidates = []
     all_frontier_regions = []
+    frontier_snapshot_keys = []
     current_frontier_counts = {}
     unique_frontier_counts = {}
     for robot in ('robot1', 'robot2'):
@@ -1165,6 +1391,8 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
         snapshot = frontier_snapshot_at(data.frontier_regions, robot, stamp_s)
         current_frontier_counts[robot], unique_frontier_counts[robot] = \
             frontier_counts_at(data.frontier_regions, robot, stamp_s)
+        frontier_snapshot_keys.append(
+            None if snapshot is None else (robot, id(snapshot)))
         if snapshot is not None:
             all_frontier_regions.extend(snapshot.regions)
     goals = active_goals_at(data, stamp_s)
@@ -1186,9 +1414,15 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
             key=lambda item: abs(item.stamp_s - event.stamp_s),
         )[:1]
     )
-    draw_frontier_overlays(canvas, all_candidates, stamp_s, viewport, map_rect,
-                           show_frontiers, show_candidates, selected_signatures,
-                           selected_frontier_ids, all_frontier_regions)
+    frontier_layer = None
+    if show_frontiers and all_frontier_regions:
+        frontier_layer = _cached_frontier_layer(
+            tuple(all_frontier_regions), tuple(frontier_snapshot_keys),
+            viewport, map_rect, frontier_layer_cache)
+    draw_frontier_overlays(
+        canvas, all_candidates, stamp_s, viewport, map_rect,
+        show_frontiers, show_candidates, selected_signatures,
+        selected_frontier_ids, all_frontier_regions, frontier_layer)
 
     poses = {robot: pose_at_segments(segments[robot], stamp_s)
              for robot in ('robot1', 'robot2')}
@@ -1227,20 +1461,28 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
                      if data.handoff_error_m is not None and
                      data.handoff_error_yaw_deg is not None else
                      'handoff err -')
+    sidebar_right = width - 40
     text = [(_ascii_display(title), (70, 42), fonts['title'], TEXT_DARK),
             ('Two-robot cooperative exploration', (72, 82),
              fonts['subtitle'], TEXT_MUTED),
             ('SIM TIME', (sidebar_x, 140), fonts['section'], TEXT_MUTED),
-            (f'{stamp_s:,.2f} s', (sidebar_x, 162), fonts['body'], TEXT_DARK),
+            _right_aligned_item(f'{stamp_s:,.2f} s', 162, fonts['body'],
+                                TEXT_DARK, sidebar_right),
             ('POLICY', (sidebar_x, 198), fonts['section'], TEXT_MUTED),
-            (_bounded_display(policy, 23), (sidebar_x, 220), fonts['body'], TEXT_DARK),
+            _right_aligned_item(_bounded_display(policy, 23), 220,
+                                fonts['body'], TEXT_DARK, sidebar_right),
             ('MAP SNAPSHOT', (sidebar_x, 258), fonts['section'], TEXT_MUTED),
-            (f'{active_snapshot.stamp_s:,.2f} s' if active_snapshot else '-',
-             (sidebar_x, 280), fonts['body'], TEXT_DARK),
+            _right_aligned_item(
+                f'{active_snapshot.stamp_s:,.2f} s' if active_snapshot else '-',
+                280, fonts['body'], TEXT_DARK, sidebar_right),
             ('PHASE', (sidebar_x, 318), fonts['section'], TEXT_MUTED),
-            (phase, (sidebar_x, 342), fonts['body'], TEXT_DARK),
-            (phase_detail, (sidebar_x, 374), fonts['small'], TEXT_MUTED),
-            (handoff_error, (sidebar_x, 396), fonts['small'], TEXT_MUTED)]
+            _right_aligned_item(phase, 342, fonts['body'], TEXT_DARK,
+                                sidebar_right),
+            _right_aligned_item(phase_detail, 374, fonts['small'], TEXT_MUTED,
+                                sidebar_right),
+            ('handoff error', (sidebar_x, 396), fonts['small'], TEXT_MUTED),
+            _right_aligned_item(handoff_error.removeprefix('handoff error '),
+                                396, fonts['small'], TEXT_MUTED, sidebar_right)]
     goals = active_goals_at(data, stamp_s)
     for index, robot in enumerate(('robot1', 'robot2')):
         y = 420 + index * 285
@@ -1253,41 +1495,69 @@ def render_frame(stamp_s, snapshots, snapshot_cache, segments, viewport, map_rec
         if candidate_age is not None and candidate_age > MAX_TIME_GAP_S:
             candidate_age_text += ' STALE'
         distance = _pose_row_metric(pose, 'distance_travelled_m')
+        linear_speed = _display_speed(pose, 'linear_speed_mps')
+        angular_speed = _display_speed(pose, 'angular_speed_radps')
         productive = _productivity_at(data, robot, stamp_s)
-        if productive is None:
-            productive = 100.0
+        productivity_text = (f'{productive:.1f}%'
+                             if productive is not None else 'N/R')
         text.extend([
             ('R1' if robot == 'robot1' else 'R2', (sidebar_x, y), fonts['section'], color_rgb),
-            (f'position  {pose.x:.2f}, {pose.y:.2f}' if pose else 'position  -',
-             (sidebar_x, y + 28), fonts['small'], TEXT_DARK),
-            (f'heading   {math.degrees(pose.yaw):.1f}°' if pose else 'heading   -',
-             (sidebar_x, y + 45), fonts['small'], TEXT_DARK),
-            (('goal active  ' + _short(event.canonical_task_id)) if event else 'goal idle',
-             (sidebar_x, y + 66), fonts['small'], TEXT_DARK),
-            (f'goal       {goal_xy[0]:.2f}, {goal_xy[1]:.2f}' if goal_xy else 'goal       -',
-             (sidebar_x, y + 83), fonts['small'], TEXT_DARK),
-            (f'linear speed  {(_display_speed(pose, "linear_speed_mps") or 0.0):.3f} m/s'
-             if _display_speed(pose, 'linear_speed_mps') is not None else 'linear speed  -',
-             (sidebar_x, y + 103), fonts['small'], TEXT_DARK),
-            (f'turn rate     {math.degrees(_display_speed(pose, "angular_speed_radps") or 0.0):.1f} deg/s'
-             if _display_speed(pose, 'angular_speed_radps') is not None else 'turn rate     -',
-             (sidebar_x, y + 123), fonts['small'], TEXT_DARK),
-            (f'traveled   {distance:.2f} m' if distance is not None else 'traveled   -',
-             (sidebar_x, y + 143), fonts['small'], TEXT_DARK),
-            (f'productivity {productive:.1f}%' if productive is not None else 'productivity -',
-             (sidebar_x, y + 163), fonts['small'], TEXT_DARK),
-            (f'frontier regions {current_frontier_counts[robot]}',
-             (sidebar_x, y + 183), fonts['small'], TEXT_DARK),
-            (f'unique IDs seen {unique_frontier_counts[robot]}',
-             (sidebar_x, y + 203), fonts['small'], TEXT_DARK),
-            (traffic[robot], (sidebar_x, y + 223), fonts['small'], TEXT_DARK),
-            (f'reachable candidates {len(candidates)}', (sidebar_x, y + 243), fonts['small'], TEXT_MUTED),
-            (f'batch age  {candidate_age_text}', (sidebar_x, y + 263), fonts['small'], TEXT_MUTED),
+            ('position', (sidebar_x, y + 28), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{pose.x:.2f}, {pose.y:.2f}' if pose else '-',
+                y + 28, fonts['small'], TEXT_DARK, sidebar_right),
+            ('heading', (sidebar_x, y + 45), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{math.degrees(pose.yaw):.1f}°' if pose else '-',
+                y + 45, fonts['small'], TEXT_DARK, sidebar_right),
+            ('goal active', (sidebar_x, y + 66), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                _short(event.canonical_task_id) if event else 'idle',
+                y + 66, fonts['small'], TEXT_DARK, sidebar_right),
+            ('goal', (sidebar_x, y + 83), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{goal_xy[0]:.2f}, {goal_xy[1]:.2f}' if goal_xy else '-',
+                y + 83, fonts['small'], TEXT_DARK, sidebar_right),
+            ('linear speed', (sidebar_x, y + 103), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{linear_speed * 100.0:.1f} cm/s' if linear_speed is not None else '-',
+                y + 103, fonts['small'], TEXT_DARK, sidebar_right),
+            ('turn rate', (sidebar_x, y + 123), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{math.degrees(angular_speed or 0.0):.1f} deg/s'
+                if angular_speed is not None else '-',
+                y + 123, fonts['small'], TEXT_DARK, sidebar_right),
+            ('traveled', (sidebar_x, y + 143), fonts['small'], TEXT_DARK),
+            _right_aligned_item(
+                f'{distance:.2f} m' if distance is not None else '-',
+                y + 143, fonts['small'], TEXT_DARK, sidebar_right),
+            ('physical productivity', (sidebar_x, y + 163), fonts['small'], TEXT_DARK),
+            _right_aligned_item(productivity_text, y + 163, fonts['small'],
+                                TEXT_DARK, sidebar_right),
+            ('frontier regions', (sidebar_x, y + 183), fonts['small'], TEXT_DARK),
+            _right_aligned_item(current_frontier_counts[robot], y + 183,
+                                fonts['small'], TEXT_DARK, sidebar_right),
+            ('unique IDs seen', (sidebar_x, y + 203), fonts['small'], TEXT_DARK),
+            _right_aligned_item(unique_frontier_counts[robot], y + 203,
+                                fonts['small'], TEXT_DARK, sidebar_right),
+            ('traffic', (sidebar_x, y + 223), fonts['small'], TEXT_DARK),
+            _right_aligned_item(traffic[robot], y + 223, fonts['small'],
+                                TEXT_DARK, sidebar_right),
+            ('reachable candidates', (sidebar_x, y + 243), fonts['small'], TEXT_MUTED),
+            _right_aligned_item(len(candidates), y + 243, fonts['small'],
+                                TEXT_MUTED, sidebar_right),
+            ('batch age', (sidebar_x, y + 263), fonts['small'], TEXT_MUTED),
+            _right_aligned_item(candidate_age_text, y + 263, fonts['small'],
+                                TEXT_MUTED, sidebar_right),
         ])
     text.extend([
         ('ISSUES', (sidebar_x, 1000), fonts['section'], TEXT_MUTED),
-        (f'errors     {errors}', (sidebar_x, 1024), fonts['small'], TEXT_DARK),
-        (f'warnings   {warnings}', (sidebar_x, 1047), fonts['small'], TEXT_MUTED),
+        ('errors', (sidebar_x, 1024), fonts['small'], TEXT_DARK),
+        _right_aligned_item(errors, 1024, fonts['small'], TEXT_DARK,
+                            sidebar_right),
+        ('warnings', (sidebar_x, 1047), fonts['small'], TEXT_MUTED),
+        _right_aligned_item(warnings, 1047, fonts['small'], TEXT_MUTED,
+                            sidebar_right),
     ])
     for robot in ('robot1', 'robot2'):
         pose = poses[robot]
@@ -1337,7 +1607,7 @@ def geometry_validation(viewport, map_rect, segments, snapshots, duration_s, han
             'frontier_representation': 'current_upstream_frontier_region_centroids',
             'frontier_region_source': 'frontier_regions.jsonl.region.centroid (cell centroid fallback only when absent)',
             'raw_frontier_geometry_records': overlay_data.raw_frontier_geometry_records,
-            'selected_goal_source': 'NAV_GOAL_SENT physical_signature joined to DISTRIBUTED_TASK_SNAPSHOT approach',
+            'selected_goal_source': 'legacy NAV_GOAL_SENT or native NavigateToPose EXECUTING joined to DISTRIBUTED_STATUS.active_canonical_task_id and task snapshot approach',
             'planned_path_source': 'DISTRIBUTED_BID_ARRAY.path_samples when available',
             'candidate_source': 'CANDIDATE_BATCH_RECEIVED.candidates',
             'frame_id_note': 'candidate/task overlay records do not serialize frame_id; rendered in their recorded artifact coordinate frame',
@@ -1357,6 +1627,103 @@ def _ffmpeg_libx264():
     except (OSError, subprocess.SubprocessError):
         pass
     return None
+
+
+def _chunk_ranges(frame_count: int, worker_count: int):
+    """Return contiguous, non-empty frame ranges in output order."""
+    if frame_count <= 0 or worker_count <= 0:
+        return ()
+    count = min(frame_count, worker_count)
+    base, remainder = divmod(frame_count, count)
+    ranges = []
+    start = 0
+    for index in range(count):
+        end = start + base + (1 if index < remainder else 0)
+        ranges.append((start, end))
+        start = end
+    return tuple(ranges)
+
+
+_PARALLEL_RENDER_CONTEXT = None
+
+
+def _render_encode_chunk(task):
+    """Render one contiguous frame chunk in a forked worker."""
+    index, start, end, chunk_path = task
+    context = _PARALLEL_RENDER_CONTEXT
+    if context is None:
+        raise RuntimeError('parallel renderer context was not initialized')
+    snapshot_cache = {}
+    frontier_layer_cache = {}
+    sink = FrameSink(chunk_path, context['width'], context['height'], context['fps'])
+    try:
+        for frame_index in range(start, end):
+            stamp = min(
+                context['source_end'],
+                context['source_start'] + frame_index * context['speedup'] /
+                float(context['fps']))
+            sink.write(render_frame(
+                stamp, context['snapshots'], snapshot_cache, context['segments'],
+                context['viewport'], context['map_rect'], context['width'],
+                context['height'], context['title'], context['cooperative_start_s'],
+                context['policy'], context['overlay_data'], context['show_frontiers'],
+                context['show_goals'], context['show_candidates'],
+                context['show_planned_path'], frontier_layer_cache))
+    finally:
+        sink.close()
+    return index, str(chunk_path), end - start
+
+
+def _concat_encoded_chunks(ffmpeg: str, chunks, output: Path):
+    """Concatenate same-format MP4 chunks without decoding/re-encoding."""
+    manifest = output.parent / f'.{output.name}.concat.txt'
+    lines = []
+    for chunk in chunks:
+        # TemporaryDirectory paths normally contain no quotes; retain valid
+        # concat-demuxer quoting for unusual caller-selected output parents.
+        escaped = str(chunk).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    manifest.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    try:
+        result = subprocess.run(
+            [ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', str(manifest),
+             '-c', 'copy', '-movflags', '+faststart', str(output)],
+            capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f'ffmpeg chunk concatenation failed ({result.returncode}): '
+                f'{result.stderr[-1000:]}')
+    finally:
+        manifest.unlink(missing_ok=True)
+
+
+def _render_parallel_chunks(output: Path, timing, context, worker_count: int):
+    """Render and encode ordered chunks, then stream-copy them together."""
+    ffmpeg = _ffmpeg_libx264()
+    if not ffmpeg:
+        raise RuntimeError(
+            'parallel chunk encoding requires an external ffmpeg with libx264; '
+            'use --workers 1 with the available OpenCV writer')
+    ranges = _chunk_ranges(timing['expected_frame_count'], worker_count)
+    if len(ranges) <= 1:
+        raise RuntimeError('parallel chunk encoding needs at least two frame chunks')
+    global _PARALLEL_RENDER_CONTEXT
+    _PARALLEL_RENDER_CONTEXT = context
+    try:
+        with tempfile.TemporaryDirectory(prefix='cooperative_render_chunks_') as temporary:
+            temporary_path = Path(temporary)
+            tasks = [
+                (index, start, end, temporary_path / f'chunk_{index:04d}.mp4')
+                for index, (start, end) in enumerate(ranges)
+            ]
+            process_context = multiprocessing.get_context('fork')
+            with process_context.Pool(processes=len(tasks)) as pool:
+                results = pool.map(_render_encode_chunk, tasks)
+            results.sort(key=lambda item: item[0])
+            _concat_encoded_chunks(ffmpeg, [Path(item[1]) for item in results], output)
+    finally:
+        _PARALLEL_RENDER_CONTEXT = None
+    return 'ffmpeg_libx264_chunked'
 
 
 class FrameSink:
@@ -1446,8 +1813,12 @@ def parse_still_times(value):
 def render(args):
     if args.width <= 0 or args.height <= 0 or args.fps <= 0:
         raise RuntimeError('width, height, and fps must be positive')
+    if args.workers <= 0:
+        raise RuntimeError('workers must be positive')
     if not math.isfinite(args.start_s) or args.start_s < 0.0:
         raise RuntimeError('start-s must be a finite non-negative number')
+    if not math.isfinite(args.duration_s) or args.duration_s < 0.0:
+        raise RuntimeError('duration-s must be finite and non-negative')
     if not math.isfinite(args.speedup) or args.speedup <= 0.0:
         raise RuntimeError('speedup must be a finite positive number')
     campaign = Path(args.campaign).expanduser().resolve()
@@ -1457,14 +1828,13 @@ def render(args):
              for robot in ('robot1', 'robot2')}
     artifact_data_end = _source_end(poses, snapshots)
     source_start = args.start_s
-    source_end = artifact_data_end
-    if args.duration_s > 0.0:
-        # The requested window is authoritative for the video timeline.  If
-        # observer sampling ended a little before the requested boundary,
-        # render the last valid saved state through the boundary rather than
-        # silently shortening the deliverable.  No unsaved state is invented;
-        # the provenance records the held tail explicitly.
-        source_end = args.duration_s
+    # The requested window is authoritative for the video timeline.  If
+    # observer sampling ended a little before the requested boundary, render
+    # the last valid saved state through the boundary rather than silently
+    # shortening the deliverable.  No unsaved state is invented; the
+    # provenance records the held tail explicitly.
+    source_end = resolve_source_end(
+        source_start, artifact_data_end, args.duration_s)
     if source_end <= source_start:
         raise RuntimeError('source end must be after source start')
         raise RuntimeError('artifacts contain no positive simulation time')
@@ -1484,6 +1854,7 @@ def render(args):
     geometry = geometry_validation(viewport, map_rect, segments, snapshots,
                                    source_end - source_start, handoff_s, overlay_data)
     snapshot_cache = {}
+    frontier_layer_cache = {}
     stills = parse_still_times(args.still_times)
     still_paths = []
     if args.stills_dir and stills:
@@ -1497,7 +1868,8 @@ def render(args):
             frame = render_frame(bounded, snapshots, snapshot_cache, segments, viewport,
                                  map_rect, args.width, args.height, title, cooperative_start_s, policy,
                                  overlay_data, args.show_frontiers, args.show_goals,
-                                 args.show_candidates, args.show_planned_path)
+                                 args.show_candidates, args.show_planned_path,
+                                 frontier_layer_cache)
             name = next((value for key, value in canonical.items() if abs(stamp - key) < 1e-6),
                         'frame_post_cooperative.png' if abs(stamp - cooperative_start_s) < 2.0 else
                         f"frame_t{stamp:07.2f}".replace('.', '_') + '.png')
@@ -1510,19 +1882,43 @@ def render(args):
     video_probe = None
     encoder_mode = None
     if not args.stills_only:
-        sink = FrameSink(output, args.width, args.height, args.fps)
-        encoder_mode = sink.mode
-        try:
-            for frame_index in range(timing['expected_frame_count']):
-                stamp = min(source_end, source_start +
-                            frame_index * args.speedup / float(args.fps))
-                sink.write(render_frame(
-                    stamp, snapshots, snapshot_cache, segments, viewport, map_rect,
-                    args.width, args.height, title, cooperative_start_s, policy, overlay_data,
-                    args.show_frontiers, args.show_goals, args.show_candidates,
-                    args.show_planned_path))
-        finally:
-            sink.close()
+        if args.workers == 1:
+            sink = FrameSink(output, args.width, args.height, args.fps)
+            encoder_mode = sink.mode
+            try:
+                for frame_index in range(timing['expected_frame_count']):
+                    stamp = min(source_end, source_start +
+                                frame_index * args.speedup / float(args.fps))
+                    sink.write(render_frame(
+                        stamp, snapshots, snapshot_cache, segments, viewport, map_rect,
+                        args.width, args.height, title, cooperative_start_s, policy, overlay_data,
+                        args.show_frontiers, args.show_goals, args.show_candidates,
+                        args.show_planned_path, frontier_layer_cache))
+            finally:
+                sink.close()
+        else:
+            parallel_context = {
+                'source_start': source_start,
+                'source_end': source_end,
+                'speedup': args.speedup,
+                'fps': args.fps,
+                'width': args.width,
+                'height': args.height,
+                'snapshots': snapshots,
+                'segments': segments,
+                'viewport': viewport,
+                'map_rect': map_rect,
+                'title': title,
+                'cooperative_start_s': cooperative_start_s,
+                'policy': policy,
+                'overlay_data': overlay_data,
+                'show_frontiers': args.show_frontiers,
+                'show_goals': args.show_goals,
+                'show_candidates': args.show_candidates,
+                'show_planned_path': args.show_planned_path,
+            }
+            encoder_mode = _render_parallel_chunks(
+                output, timing, parallel_context, args.workers)
         if not output.is_file() or output.stat().st_size == 0:
             raise RuntimeError('renderer produced no output')
         video_probe = probe_video(output, args.width, args.height, args.fps,
@@ -1537,6 +1933,7 @@ def render(args):
               'map_rect_px': dict(zip(('left', 'top', 'width', 'height', 'pixels_per_m'), map_rect)),
               'handoff_s': handoff_s,
               'cooperative_start_s': cooperative_start_s,
+              'render_workers': args.workers,
               'map_snapshots': len(snapshots),
               'trajectory_segments': {robot: len(segments[robot]) for robot in ('robot1', 'robot2')},
               'font_family': 'Liberation Sans' if Path('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf').is_file() else 'DejaVu Sans',

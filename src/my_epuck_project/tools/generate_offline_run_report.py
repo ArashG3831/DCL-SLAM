@@ -32,7 +32,13 @@ PACKAGE_ROOT = HERE.parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from my_epuck_project.offline_timing_metrics import analyze_event_records
+from my_epuck_project.offline_timing_metrics import (
+    analyze_event_records,
+    analyze_physical_activity,
+    derive_minimal_assignment_events,
+    merge_native_timing_events,
+    _simulation_time_for_bag_timestamp,
+)
 
 
 SCHEMA_VERSION = "offline_run_metrics_1.0"
@@ -167,6 +173,14 @@ def _load_run(artifact):
     mission_result = _json(observer / "mission_result.json", {}) or {}
     finalization = _json(observer / "raw_evidence_finalization.json", {}) or {}
     artifact_finalization = _json(observer / "artifact_finalization.json", {}) or {}
+    passive_rows = _jsonl(observer / "passive_rosbag_export.jsonl")
+    clock_samples = [
+        (_int(row.get("bag_time_ns")), _num(row.get("clock_s")))
+        for row in passive_rows
+        if row.get("topic") == "/clock"
+        and _num(row.get("bag_time_ns")) is not None
+        and _num(row.get("clock_s")) is not None
+    ]
     return {
         "artifact": artifact, "observer": observer, "events": events,
         "rosout": rosout, "frontier": frontier, "map_receipts": map_receipts,
@@ -175,15 +189,24 @@ def _load_run(artifact):
         "topic_health_rows": _csv(observer / "topic_health.csv"),
         "timeseries": {robot: _csv(observer / f"{robot}_timeseries.csv")
                         for robot in ROBOTS},
+        "odometry": {robot: _csv(observer / "forensic" /
+                                  f"{robot}_odom.csv")
+                     for robot in ROBOTS},
         "fast_summary": fast_summary, "summary": summary,
         "manifest": manifest, "mission_result": mission_result,
         "finalization": finalization,
         "artifact_finalization": artifact_finalization,
+        "navigation_action_replay": _json(
+            observer / "navigation_action_replay.json", {}) or {},
+        "clock_samples": clock_samples,
     }
 
 
 def _end_sim(run):
     fast = run["fast_summary"]
+    horizon = _num(fast.get("simulation_horizon_s"))
+    if horizon is not None:
+        return horizon
     # The fast-trial summary is the authoritative measurement cutoff. The
     # mission-result duration and observer records can include finalization
     # callbacks after the simulation horizon; counting those would make a
@@ -679,7 +702,8 @@ def _idle_attribution(run, timing):
     """
     result = {}
     for robot in ROBOTS:
-        idle_segments = [segment for segment in timing[robot]["segments"]
+        idle_segments = [segment for segment in timing[robot].get(
+            "action_engagement_segments", timing[robot]["segments"])
                          if segment["classification"] == "FEASIBLE_WORK_AVAILABLE"
                          and not segment["goal_active"]]
         events = sorted([row for row in run["events"] if row.get("robot_id") == robot],
@@ -732,7 +756,8 @@ def _idle_attribution(run, timing):
             "ledger": ledger,
             "definition_source": "condition_C_600s_idle_attribution_20260909.md event-boundary semantics",
         }
-        if abs(idle_seconds - timing[robot]["avoidable_idle_seconds"]) > 0.12:
+        if abs(idle_seconds - timing[robot][
+                "action_engagement_avoidable_idle_seconds"]) > 0.12:
             result[robot]["validation_warning"] = "attribution categories do not cover aggregate idle within tolerance"
     result["combined"] = {
         "categories": {key: round(sum(result[robot]["categories"].get(key, 0.0)
@@ -857,14 +882,43 @@ def _traffic_metrics(run):
                 end = _time(row)
                 waits.append(max(0.0, end - start))
                 start = None
+        status_rows = [row for row in rows
+                       if row.get("event_type") == "DISTRIBUTED_STATUS"]
+        status_intervals = []
+        traffic_start = None
+        closed_status_waits = 0
+        for row in status_rows:
+            state = row.get("state")
+            waiting = state == 7 or row.get("message") == "WAITING_TRAFFIC"
+            current = _time(row)
+            if current is None:
+                continue
+            if waiting and traffic_start is None:
+                traffic_start = current
+            elif not waiting and traffic_start is not None:
+                status_intervals.append((traffic_start, current))
+                closed_status_waits += 1
+                traffic_start = None
+        if traffic_start is not None:
+            status_intervals.append((traffic_start, run["end_sim"]))
+        if status_intervals:
+            waits = [max(0.0, end - start)
+                     for start, end in status_intervals]
+            wait_events = len(status_intervals)
+            clear_events = closed_status_waits
+            source = "DistributedExplorationStatus state=WAITING_FOR_TRAFFIC"
+        else:
+            source = "legacy traffic events"
         result[robot] = {
             "conflicts_detected": sum(row.get("event_type") == "TRAFFIC_WAITING" for row in rows),
-            "wait_events": sum(row.get("event_type") == "TRAFFIC_WAITING" for row in rows),
-            "clear_events": sum(row.get("event_type") == "TRAFFIC_CONFLICT_CLEARED" for row in rows),
+            "wait_events": wait_events if status_intervals else sum(row.get("event_type") == "TRAFFIC_WAITING" for row in rows),
+            "clear_events": clear_events if status_intervals else sum(row.get("event_type") == "TRAFFIC_CONFLICT_CLEARED" for row in rows),
             "traffic_wait_seconds": sum(waits), "longest_traffic_wait_seconds": max(waits, default=None),
             "fresh_reallocation_releases": sum(row.get("event_type") == "TRAFFIC_RELEASED_FRESH_REALLOCATION" for row in rows),
             "unsafe_simultaneous_dispatch_events": sum("unsafe" in str(row.get("message", "")).lower() for row in rows),
             "wait_intervals": waits,
+            "wait_interval_bounds": status_intervals,
+            "evidence_source": source,
         }
     result["combined"] = {
         "conflicts_detected": sum(result[robot]["conflicts_detected"] for robot in ROBOTS),
@@ -886,6 +940,62 @@ def _navigation_metrics(run):
                                and row.get("event_type") in event_types],
                               key=lambda row: _time(row) or 0.0)
                 for robot in ROBOTS}
+
+    def native_rows(robot):
+        replay = run.get("navigation_action_replay") or {}
+        transitions = replay.get("status_transitions") or []
+        rows = []
+        for transition in transitions:
+            if (transition.get("robot_id") != robot or
+                    transition.get("action") != "NAVIGATE_TO_POSE"):
+                continue
+            stamp = _simulation_time_for_bag_timestamp(
+                transition.get("bag_timestamp_ns"), run.get("clock_samples"))
+            if stamp is None:
+                continue
+            if stamp > run["end_sim"] + 1.0e-7:
+                continue
+            rows.append({
+                "goal_uuid": str(transition.get("goal_uuid", "")),
+                "status_name": str(transition.get("status_name", "")),
+                "time": stamp,
+            })
+        return sorted(rows, key=lambda row: (row["time"], row["status_name"]))
+
+    def native_goals(robot):
+        goals = []
+        by_uuid = {}
+        terminal_names = {
+            "SUCCEEDED": "NAVIGATION_SUCCEEDED",
+            "ABORTED": "NAVIGATION_FAILED",
+            "CANCELED": "NAVIGATION_CANCELED",
+            "CANCELLED": "NAVIGATION_CANCELLED",
+        }
+        for row in native_rows(robot):
+            uuid = row["goal_uuid"]
+            if row["status_name"] == "EXECUTING":
+                goal = {
+                    "task_id": None,
+                    "physical_signature": None,
+                    "dispatch_time": row["time"],
+                    "terminal_time": None,
+                    "dispatch_to_terminal_duration": None,
+                    "nav2_reported_navigation_time": None,
+                    "terminal_type": "ACTIVE_AT_HORIZON",
+                    "failure_class": None,
+                    "nav2_error_code": None,
+                    "nav2_error_message": None,
+                    "evidence_source": "native NavigateToPose action status",
+                }
+                goals.append(goal)
+                by_uuid[uuid] = goal
+            elif row["status_name"] in terminal_names and uuid in by_uuid:
+                goal = by_uuid[uuid]
+                goal["terminal_time"] = row["time"]
+                goal["dispatch_to_terminal_duration"] = (
+                    row["time"] - goal["dispatch_time"])
+                goal["terminal_type"] = terminal_names[row["status_name"]]
+        return goals
 
     def one(robot):
         rows = by_robot[robot]
@@ -918,9 +1028,20 @@ def _navigation_metrics(run):
             following = [dispatch for dispatch in dispatches if (_time(dispatch) or 0) > (_time(terminal) or 0)]
             if following:
                 terminal_to_dispatch.append((_time(following[0]) or 0) - (_time(terminal) or 0))
+        if not dispatches:
+            native = native_goals(robot)
+            if native:
+                goals = native
+                dispatch_count = len(goals)
+                accepted_count = len(goals)
+            else:
+                dispatch_count = accepted_count = 0
+        else:
+            dispatch_count = len(dispatches)
+            accepted_count = sum(row.get("event_type") == "NAV_GOAL_ACCEPTED" for row in rows)
         return {
-            "dispatched": len(dispatches),
-            "accepted": sum(row.get("event_type") == "NAV_GOAL_ACCEPTED" for row in rows),
+            "dispatched": dispatch_count,
+            "accepted": accepted_count,
             "succeeded": sum(goal["terminal_type"] == "NAVIGATION_SUCCEEDED" for goal in goals),
             "failed": sum(goal["terminal_type"] == "NAVIGATION_FAILED" for goal in goals),
             "cancelled": sum(goal["terminal_type"] in ("NAVIGATION_CANCELED", "NAVIGATION_CANCELLED") for goal in goals),
@@ -1098,16 +1219,38 @@ def _provenance(run):
 def _mission(run):
     summary = run["summary"].get("mission", {})
     result = run["mission_result"]
+    minimal_evidence = any(
+        row.get("event_type") == "DISTRIBUTED_BID_ARRAY" and
+        row.get("union_hash") for row in run["events"])
+    if minimal_evidence:
+        remaining = {
+            "remaining_frontier_count": None,
+            "remaining_actionable_reachable_count": None,
+            "remaining_detected_not_queried_count": None,
+            "remaining_unreachable_count": None,
+            "remaining_small_frontier_count": None,
+            "remaining_counts_availability_reason": (
+                "not exported by minimal coordinator / unsupported legacy "
+                "observer field"),
+        }
+    else:
+        remaining = {
+            "remaining_frontier_count": result.get("remaining_frontier_count"),
+            "remaining_actionable_reachable_count": result.get(
+                "actionable_reachable_count"),
+            "remaining_detected_not_queried_count": result.get(
+                "detected_not_queried_count"),
+            "remaining_unreachable_count": result.get("remaining_unreachable_count"),
+            "remaining_small_frontier_count": result.get(
+                "remaining_small_frontier_count"),
+            "remaining_counts_availability_reason": None,
+        }
     return {
         "terminal": summary.get("terminal", result.get("mission_status") == "COMPLETE"),
         "status": result.get("mission_status", "INCOMPLETE" if not summary.get("terminal") else "COMPLETE"),
         "terminal_reason": result.get("terminal_reason", summary.get("terminal_reason")),
         "terminal_time_s": result.get("terminal_time_s", run["summary"].get("mission_completion_time_s")),
-        "remaining_frontier_count": result.get("remaining_frontier_count"),
-        "remaining_actionable_reachable_count": result.get("actionable_reachable_count"),
-        "remaining_detected_not_queried_count": result.get("detected_not_queried_count"),
-        "remaining_unreachable_count": result.get("remaining_unreachable_count"),
-        "remaining_small_frontier_count": result.get("remaining_small_frontier_count"),
+        **remaining,
         "allocator_final_states": run["summary"].get("robot_terminal_state"),
         "no_premature_completion_event": not any(
             "MISSION_COMPLETE" in str(row.get("message", ""))
@@ -1158,43 +1301,176 @@ def _finalization(run):
 
 
 def _timing_metrics(run):
-    timing = analyze_event_records(run["events"], ready_sim=run["ready_sim"],
-                                   end_sim=run["end_sim"], robots=ROBOTS,
-                                   run_label=str(run.get("artifact", "<offline-artifact>")))
+    timing = analyze_event_records(
+        run.get("timing_events", run["events"]),
+        ready_sim=run["ready_sim"],
+        end_sim=run["end_sim"],
+        robots=ROBOTS,
+        run_label=str(run.get("artifact", "<offline-artifact>")),
+    )
+    physical = analyze_physical_activity(
+        timing,
+        run.get("odometry", {}),
+        ready_sim=run["ready_sim"],
+        end_sim=run["end_sim"],
+        robots=ROBOTS,
+        run_label=str(run.get("artifact", "<offline-artifact>")),
+    )
     result = {}
     for robot in ROBOTS:
-        row = timing["robots"][robot]
-        feasible = row["feasible_work_seconds"]
-        productive = row["productive_engagement_seconds"]
-        idle = row["avoidable_idle_seconds"]
-        post_ready = max(0.0, run["end_sim"] - run["ready_sim"])
+        action = timing["robots"][robot]
+        motion = physical["robots"][robot]
+        post_ready = motion["post_readiness_seconds"]
+        feasible = motion["physical_feasible_work_seconds"]
+        productive = motion["physically_productive_seconds"]
+        idle = motion["avoidable_physical_idle_seconds"]
+        action_feasible = action["feasible_work_seconds"]
+        action_productive = action["productive_engagement_seconds"]
+        action_idle = action["avoidable_idle_seconds"]
         result[robot] = {
             "total_analyzed_time": post_ready,
             "readiness_excluded_time": run["ready_sim"],
             "post_readiness_horizon_seconds": post_ready,
             "feasible_work_seconds": feasible,
+            "physical_feasible_work_seconds": feasible,
             "productive_time_seconds": productive,
             "avoidable_idle_seconds": idle,
-            "work_unavailable_seconds": row["work_unavailable_seconds"],
-            "productivity_percent": productive / feasible * 100.0 if feasible else None,
-            "avoidable_idle_percent_of_feasible": row["avoidable_idle_fraction"] * 100.0 if row["avoidable_idle_fraction"] is not None else None,
-            "work_unavailable_percent_of_post_readiness": row["work_unavailable_seconds"] / post_ready * 100.0 if post_ready else None,
-            "longest_avoidable_idle_interval_seconds": row["longest_avoidable_idle_s"],
-            "segments": row["segments"],
+            "legitimate_traffic_wait_seconds": motion[
+                "legitimate_traffic_wait_seconds"],
+            "no_task_or_peer_assigned_seconds": motion[
+                "no_local_task_or_peer_assigned_seconds"],
+            "no_local_task_or_peer_assigned_seconds": motion[
+                "no_local_task_or_peer_assigned_seconds"],
+            "other_work_unavailable_seconds": motion[
+                "true_infrastructure_unavailable_seconds"],
+            "work_unavailable_seconds": (
+                motion["legitimate_traffic_wait_seconds"] +
+                motion["no_local_task_or_peer_assigned_seconds"] +
+                motion["true_infrastructure_unavailable_seconds"]),
+            "productivity_percent": motion["physical_productivity_percent"],
+            "physical_productivity_percent": motion[
+                "physical_productivity_percent"],
+            "avoidable_idle_percent_of_feasible": (
+                idle / feasible * 100.0 if feasible else None),
+            "work_unavailable_percent_of_post_readiness": (
+                (motion["legitimate_traffic_wait_seconds"] +
+                 motion["no_local_task_or_peer_assigned_seconds"] +
+                 motion["true_infrastructure_unavailable_seconds"]) /
+                post_ready * 100.0 if post_ready else None),
+            "longest_avoidable_idle_interval_seconds": max(
+                (item["duration_s"] for item in motion["segments"]
+                 if item["classification"] in (
+                     "STATIONARY_ACTIVE_GOAL", "STATIONARY_PRE_DISPATCH")),
+                default=0.0),
+            "segments": motion["segments"],
+            "physical_segments": motion["segments"],
+            "action_engagement_segments": action["segments"],
+            "action_engagement_feasible_work_seconds": action_feasible,
+            "action_engagement_productive_seconds": action_productive,
+            "action_engagement_avoidable_idle_seconds": action_idle,
+            "action_engagement_productivity_percent": (
+                action_productive / action_feasible * 100.0
+                if action_feasible else None),
+            "productive_engagement_seconds": action_productive,
+            "productive_engagement_fraction": (
+                action_productive / action_feasible if action_feasible else None),
+            "avoidable_idle_fraction": (
+                action_idle / action_feasible if action_feasible else None),
+            "navigation_action_active_seconds": motion[
+                "navigation_action_active_seconds"],
+            "physically_productive_seconds": motion[
+                "physically_productive_seconds"],
+            "translating_seconds": motion["translating_seconds"],
+            "rotating_only_seconds": motion["rotating_only_seconds"],
+            "stationary_feasible_seconds": motion[
+                "stationary_feasible_seconds"],
+            "stationary_active_goal_seconds": motion[
+                "stationary_active_goal_seconds"],
+            "stationary_pre_dispatch_seconds": motion[
+                "stationary_pre_dispatch_seconds"],
+            "avoidable_physical_idle_seconds": motion[
+                "avoidable_physical_idle_seconds"],
+            "true_infrastructure_unavailable_seconds": motion[
+                "true_infrastructure_unavailable_seconds"],
+            "physical_motion_evidence_unavailable_seconds": motion[
+                "physical_motion_evidence_unavailable_seconds"],
+            "pose_twist_disagreement_seconds": motion[
+                "pose_twist_disagreement_seconds"],
             "validation": {
-                "feasible_equals_productive_plus_idle": math.isclose(feasible, productive + idle, abs_tol=.12),
-                "post_readiness_equals_feasible_plus_unavailable": math.isclose(
-                    post_ready, feasible + row["work_unavailable_seconds"], abs_tol=.12),
+                **motion["validation"],
+                "feasible_equals_productive_plus_idle": (
+                    motion["validation"][
+                        "physical_feasible_equals_productive_plus_idle"]),
+                "post_readiness_equals_feasible_plus_unavailable": (
+                    motion["validation"][
+                        "post_readiness_equals_feasible_plus_excluded"]),
+                "action_feasible_equals_action_productive_plus_idle": (
+                    math.isclose(action_feasible,
+                                 action_productive + action_idle,
+                                 abs_tol=.12)),
             },
         }
     result["combined"] = {
-        "feasible_work_seconds": sum(result[robot]["feasible_work_seconds"] for robot in ROBOTS),
-        "productive_time_seconds": sum(result[robot]["productive_time_seconds"] for robot in ROBOTS),
-        "avoidable_idle_seconds": sum(result[robot]["avoidable_idle_seconds"] for robot in ROBOTS),
+        "feasible_work_seconds": sum(result[robot]["feasible_work_seconds"]
+                                      for robot in ROBOTS),
+        "physical_feasible_work_seconds": sum(
+            result[robot]["physical_feasible_work_seconds"]
+            for robot in ROBOTS),
+        "productive_time_seconds": sum(result[robot]["productive_time_seconds"]
+                                        for robot in ROBOTS),
+        "avoidable_idle_seconds": sum(result[robot]["avoidable_idle_seconds"]
+                                       for robot in ROBOTS),
+        "legitimate_traffic_wait_seconds": sum(
+            result[robot]["legitimate_traffic_wait_seconds"] for robot in ROBOTS),
+        "no_task_or_peer_assigned_seconds": sum(
+            result[robot]["no_task_or_peer_assigned_seconds"] for robot in ROBOTS),
+        "other_work_unavailable_seconds": sum(
+            result[robot]["other_work_unavailable_seconds"] for robot in ROBOTS),
         "work_unavailable_seconds": sum(result[robot]["work_unavailable_seconds"] for robot in ROBOTS),
     }
+    for key in (
+            "translating_seconds", "rotating_only_seconds",
+            "stationary_feasible_seconds", "stationary_active_goal_seconds",
+            "stationary_pre_dispatch_seconds",
+            "avoidable_physical_idle_seconds",
+            "true_infrastructure_unavailable_seconds",
+            "physical_motion_evidence_unavailable_seconds",
+            "pose_twist_disagreement_seconds"):
+        result["combined"][key] = sum(
+            result[robot][key] for robot in ROBOTS)
     feasible = result["combined"]["feasible_work_seconds"]
-    result["combined"]["productivity_percent"] = result["combined"]["productive_time_seconds"] / feasible * 100.0 if feasible else None
+    result["combined"]["productivity_percent"] = (
+        result["combined"]["productive_time_seconds"] / feasible * 100.0
+        if feasible else None)
+    result["combined"]["physical_productivity_percent"] = result[
+        "combined"]["productivity_percent"]
+    result["combined"]["physically_productive_seconds"] = result[
+        "combined"]["productive_time_seconds"]
+    result["combined"]["avoidable_physical_idle_seconds"] = result[
+        "combined"]["avoidable_idle_seconds"]
+    result["combined"]["navigation_action_active_seconds"] = sum(
+        result[robot]["navigation_action_active_seconds"] for robot in ROBOTS)
+    result["combined"]["action_engagement_feasible_work_seconds"] = sum(
+        result[robot]["action_engagement_feasible_work_seconds"]
+        for robot in ROBOTS)
+    result["combined"]["action_engagement_productive_seconds"] = sum(
+        result[robot]["action_engagement_productive_seconds"]
+        for robot in ROBOTS)
+    action_feasible = result["combined"][
+        "action_engagement_feasible_work_seconds"]
+    result["combined"]["action_engagement_productivity_percent"] = (
+        result["combined"]["action_engagement_productive_seconds"] /
+        action_feasible * 100.0 if action_feasible else None)
+    result["combined"]["action_engagement_avoidable_idle_seconds"] = sum(
+        result[robot]["action_engagement_avoidable_idle_seconds"]
+        for robot in ROBOTS)
+    result["combined"]["productive_engagement_seconds"] = result[
+        "combined"]["action_engagement_productive_seconds"]
+    result["combined"]["physical_validation"] = physical["combined"][
+        "validation"]
+    result["combined"]["post_readiness_horizon_seconds"] = sum(
+        result[robot]["post_readiness_horizon_seconds"] for robot in ROBOTS)
+    result["physical_motion_method"] = physical["method"]
     result["combined"]["avoidable_idle_percent_of_feasible"] = result["combined"]["avoidable_idle_seconds"] / feasible * 100.0 if feasible else None
     return result
 
@@ -1250,6 +1526,10 @@ def build_report(artifact, baseline=None):
         run["ready_sim"] = _readiness(run)
         for key in ("events", "rosout", "frontier", "map_receipts", "nav2"):
             run[key] = _cut(run[key], run["end_sim"])
+        run["timing_events"] = derive_minimal_assignment_events(run["events"])
+        run["timing_events"] = merge_native_timing_events(
+            run["timing_events"], run["navigation_action_replay"],
+            run["clock_samples"])
         run["timing"] = _timing_metrics(run)
         return run
 
@@ -1336,8 +1616,12 @@ def _md(report):
         "",
         "| Metric | R1 | R2 | Combined |",
         "|---|---:|---:|---:|",
-        f"| Productivity | {_fmt(t['robot1'].get('productivity_percent'), '%')} | {_fmt(t['robot2'].get('productivity_percent'), '%')} | {_fmt(t['combined'].get('productivity_percent'), '%')} |",
-        f"| Avoidable idle | {_fmt(t['robot1'].get('avoidable_idle_seconds'), ' s')} | {_fmt(t['robot2'].get('avoidable_idle_seconds'), ' s')} | {_fmt(t['combined'].get('avoidable_idle_seconds'), ' s')} |",
+        f"| Physical productivity (headline) | {_fmt(t['robot1'].get('physical_productivity_percent'), '%')} | {_fmt(t['robot2'].get('physical_productivity_percent'), '%')} | {_fmt(t['combined'].get('physical_productivity_percent'), '%')} |",
+        f"| Action-engagement productivity | {_fmt(t['robot1'].get('action_engagement_productivity_percent'), '%')} | {_fmt(t['robot2'].get('action_engagement_productivity_percent'), '%')} | {_fmt(t['combined'].get('action_engagement_productivity_percent'), '%')} |",
+        f"| Avoidable physical idle | {_fmt(t['robot1'].get('avoidable_physical_idle_seconds'), ' s')} | {_fmt(t['robot2'].get('avoidable_physical_idle_seconds'), ' s')} | {_fmt(t['combined'].get('avoidable_physical_idle_seconds'), ' s')} |",
+        f"| Legitimate traffic wait | {_fmt(t['robot1'].get('legitimate_traffic_wait_seconds'), ' s')} | {_fmt(t['robot2'].get('legitimate_traffic_wait_seconds'), ' s')} | {_fmt(t['combined'].get('legitimate_traffic_wait_seconds'), ' s')} |",
+        f"| No local task / peer assigned | {_fmt(t['robot1'].get('no_task_or_peer_assigned_seconds'), ' s')} | {_fmt(t['robot2'].get('no_task_or_peer_assigned_seconds'), ' s')} | {_fmt(t['combined'].get('no_task_or_peer_assigned_seconds'), ' s')} |",
+        f"| Other work unavailable | {_fmt(t['robot1'].get('other_work_unavailable_seconds'), ' s')} | {_fmt(t['robot2'].get('other_work_unavailable_seconds'), ' s')} | {_fmt(t['combined'].get('other_work_unavailable_seconds'), ' s')} |",
         f"| Work unavailable | {_fmt(t['robot1'].get('work_unavailable_seconds'), ' s')} | {_fmt(t['robot2'].get('work_unavailable_seconds'), ' s')} | {_fmt(t['combined'].get('work_unavailable_seconds'), ' s')} |",
         f"| Frontier mean/median/p90/max | {_fmt(f['robot1'].get('mean_regions'))}/{_fmt(f['robot1'].get('median_regions'))}/{_fmt(f['robot1'].get('p90_regions'))}/{_fmt(f['robot1'].get('max_regions'))} | {_fmt(f['robot2'].get('mean_regions'))}/{_fmt(f['robot2'].get('median_regions'))}/{_fmt(f['robot2'].get('p90_regions'))}/{_fmt(f['robot2'].get('max_regions'))} | — |",
         f"| Tiny regions (2–3 cells) | {_fmt((f['robot1']['size_bin_shares'].get('2_3_cells') or 0.0) * 100.0, '%')} | {_fmt((f['robot2']['size_bin_shares'].get('2_3_cells') or 0.0) * 100.0, '%')} | — |",
@@ -1353,14 +1637,24 @@ def _md(report):
         "",
         "## Timing and idle attribution",
         "",
-        "Productivity uses the existing `offline_timing_metrics.analyze_event_records` definition. Feasible work is productive time plus avoidable idle; work-unavailable is outside that feasible denominator.",
+        "Physical productivity uses odometry pose deltas (translation ≥ 0.01 m/s or rotation ≥ 0.02 rad/s) within physical feasible work. NavigateToPose action engagement is retained separately and is not the physical headline.",
         "",
-        "| Robot | Feasible | Productive | Avoidable idle | Unavailable | Longest idle |",
+        "| Robot | Physical feasible | Physically productive | Physical idle | Action active | Unavailable |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for robot in ROBOTS:
         row = t[robot]
-        lines.append(f"| {robot} | {_fmt(row['feasible_work_seconds'], ' s')} | {_fmt(row['productive_time_seconds'], ' s')} | {_fmt(row['avoidable_idle_seconds'], ' s')} | {_fmt(row['work_unavailable_seconds'], ' s')} | {_fmt(row['longest_avoidable_idle_interval_seconds'], ' s')} |")
+        lines.append(f"| {robot} | {_fmt(row['physical_feasible_work_seconds'], ' s')} | {_fmt(row['physically_productive_seconds'], ' s')} | {_fmt(row['avoidable_physical_idle_seconds'], ' s')} | {_fmt(row['navigation_action_active_seconds'], ' s')} | {_fmt(row['work_unavailable_seconds'], ' s')} |")
+    lines += [
+        "",
+        "| Motion/idle detail | R1 | R2 | Combined |",
+        "|---|---:|---:|---:|",
+        f"| Translating | {_fmt(t['robot1'].get('translating_seconds'), ' s')} | {_fmt(t['robot2'].get('translating_seconds'), ' s')} | {_fmt(t['combined'].get('translating_seconds'), ' s')} |",
+        f"| Rotating only | {_fmt(t['robot1'].get('rotating_only_seconds'), ' s')} | {_fmt(t['robot2'].get('rotating_only_seconds'), ' s')} | {_fmt(t['combined'].get('rotating_only_seconds'), ' s')} |",
+        f"| Stationary with active goal | {_fmt(t['robot1'].get('stationary_active_goal_seconds'), ' s')} | {_fmt(t['robot2'].get('stationary_active_goal_seconds'), ' s')} | {_fmt(t['combined'].get('stationary_active_goal_seconds'), ' s')} |",
+        f"| Stationary pre-dispatch | {_fmt(t['robot1'].get('stationary_pre_dispatch_seconds'), ' s')} | {_fmt(t['robot2'].get('stationary_pre_dispatch_seconds'), ' s')} | {_fmt(t['combined'].get('stationary_pre_dispatch_seconds'), ' s')} |",
+        f"| Pose/twist disagreement | {_fmt(t['robot1'].get('pose_twist_disagreement_seconds'), ' s')} | {_fmt(t['robot2'].get('pose_twist_disagreement_seconds'), ' s')} | {_fmt(t['combined'].get('pose_twist_disagreement_seconds'), ' s')} |",
+    ]
     lines += [
         "",
         "Idle categories reuse the established event-boundary semantics from `condition_C_600s_idle_attribution_20260909.md`; aggregate feasible/idle timing is sourced from the reusable timing analyzer.",
@@ -1387,6 +1681,7 @@ def _md(report):
         f"Shared-map max age: R1 `{_fmt(report['maps_tf']['robot1']['shared_map'].get('max_age_seconds'), ' s')}`, R2 `{_fmt(report['maps_tf']['robot2']['shared_map'].get('max_age_seconds'), ' s')}`. Freshness republish profiles: R1 `{report['maps_tf']['robot1'].get('fusion_profiles', {}).get('FRESHNESS_REPUBLISH', 0)}`, R2 `{report['maps_tf']['robot2'].get('fusion_profiles', {}).get('FRESHNESS_REPUBLISH', 0)}`.",
         f"Coverage source: `{cov.get('source')}`; final known cells `{cov.get('final_known_cells')}`, known area `{_fmt(cov.get('known_area_m2'), ' m²')}`, duplicated-known fraction `{_fmt(cov.get('duplicated_known_fraction'))}`.",
         f"Finalization: artifact `{report['finalization'].get('artifact_finalization_complete')}`, observer `{report['finalization'].get('observer_finalization_complete')}`, SIM_TIME_COMPLETE `{report['finalization'].get('sim_time_complete')}`, launcher rc `{report['finalization'].get('launcher_return_code')}`.",
+        f"Mission remaining counters: `{report['mission'].get('remaining_counts_availability_reason') or 'available'}`; values are not inferred from unsupported minimal status defaults.",
         "",
     ]
     if report.get("comparison"):
